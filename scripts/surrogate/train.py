@@ -25,7 +25,7 @@ from hydra.utils import instantiate
 from neural_surrogates.training.data_utils import build_loader
 from omegaconf import DictConfig, OmegaConf
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from tasks import TASKS  # noqa: E402
 

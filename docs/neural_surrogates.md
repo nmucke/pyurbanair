@@ -589,7 +589,7 @@ It is a plain argparse CLI (not Hydra) — run with `--help` to see every flag.
 | `BaseTraining` (shared machinery) | [libs/neural-surrogates/src/neural_surrogates/training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
 | `Trainer` (full-grid train/val loop) | [libs/neural-surrogates/src/neural_surrogates/training/standard.py](../libs/neural-surrogates/src/neural_surrogates/training/standard.py) |
 | `TransitionDataset` | [libs/neural-surrogates/src/neural_surrogates/datasets/transition.py](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py) |
-| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: stepper`, built in [tasks.py](../scripts/surrogate/tasks.py)) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: stepper`, built in [tasks.py](../scripts/utils/tasks.py)) |
 | Config | [configs/surrogate/train_stepper.yaml](../configs/surrogate/train_stepper.yaml) + [training.yaml](../configs/surrogate/training.yaml) |
 
 All architectures share the contract

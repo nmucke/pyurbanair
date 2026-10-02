@@ -60,7 +60,7 @@ VALID: dict[str, list[str]] = {
 
 @pytest.mark.parametrize("workflow", ["forward", *VALID])  # type: ignore[misc]
 def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) -> None:
-    check = load_script("scripts/inconsistency_check.py").check_config
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
     name = "forward" if workflow == "forward" else "assimilation"
     check(compose(name, *VALID.get(workflow, []), root=tmp_path), workflow)
 
@@ -76,6 +76,6 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
 def test_check_config_rejects(
     workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
 ) -> None:
-    check = load_script("scripts/inconsistency_check.py").check_config
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
     with pytest.raises(ValueError, match=message):
         check(compose("assimilation", *overrides, root=tmp_path), workflow)

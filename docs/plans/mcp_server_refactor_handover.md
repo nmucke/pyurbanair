@@ -2,7 +2,7 @@
 
 **For:** the agent doing this work. **Branch:** create one from
 `feat/simplified-configs-and-scripts` and open the PR back into that branch
-(not into `main`). Read `CLAUDE.md` first; its workflow rules apply.
+(not into `main`). Read `AGENTS.md` first; its workflow rules apply.
 
 ## Why
 
@@ -20,7 +20,7 @@ port. Its test modules are skipped with the reason "MCP port pending".
 - **Reuse, don't reinvent.** Use the existing scripts and workflows:
   - `scripts/run_forward.py` for the run;
   - `scripts/visualize_forward.py` where its figures fit;
-  - `scripts/inconsistency_check.py` for config checks;
+  - `scripts/utils/inconsistency_check.py` for config checks;
   - `workflows/forward_workflow.sh` as the reference for what a forward run
     plus post-processing is.
 
@@ -64,7 +64,7 @@ The setup the server must use:
 | `configs/forward.yaml` | forward entry config (`forward.ensemble`, `forward.rollout_steps`, `forward.initial_state`), plus `common.yaml` and the `case/`, `model/` and `params/` groups |
 | `scripts/run_forward.py` | `run(cfg)`: runs `1 + forward.rollout_steps` windows; writes `config.yaml`, `state.nc` and `params.nc` into `paths.results_dir` |
 | `scripts/visualize_forward.py` | `run(run_dir)`: the matplotlib figures of a forward run |
-| `scripts/inconsistency_check.py` | `check_config(cfg, "forward")`: fast config validation |
+| `scripts/utils/inconsistency_check.py` | `check_config(cfg, "forward")`: fast config validation |
 | `workflows/forward_workflow.sh` | run, then visualize, from the same overrides |
 | `docs/config_setup_spec.md` | old to new config mapping (e.g. `run.rollout_steps` → `forward.rollout_steps`) |
 
@@ -90,12 +90,33 @@ Couplings to the archived setup to remove:
     - the `{path, member, time_index}` initial state. `configs/forward.yaml`
       already promises it, but `run_forward._initial_state` only takes a path;
     - an index/record of what ran.
-  - Add only those, in `run_forward.py`'s style. `CLAUDE.md`'s "no-op when
+  - Add only those, in `run_forward.py`'s style. `AGENTS.md`'s "no-op when
     absent" rule applies: a plain `run_forward.py` run must stay unchanged.
   - `visualization/data.py` already reads a plain `state.nc` when there is no
     `artifact_index.json`, so prefer dropping the index if nothing else needs it.
 - **Old engine:** delete `src/pyurbanair/workflows/forward.py` once nothing
   uses it. Its only other user, the old `run_forward_model.py`, is archived.
+  Remove the then-empty `src/pyurbanair/workflows/` package as well, so it no
+  longer clashes in name with the top-level `workflows/` (shell pipelines).
+- **One config validator:** `src/pyurbanair/config/run_record.py`
+  (`validate_run_config`, `write_run_record`, `append_constructor_override`;
+  ~250 lines) validates the old `conf/` keys and duplicates
+  `scripts/utils/inconsistency_check.py`. Only `workflows/forward.py` and
+  `jobs/preparation.py` use it, plus one test
+  (`tests/pyudales/test_udales_discrepancy_wiring.py`). Use `check_config`
+  instead and delete `run_record.py`. Then delete the functions in
+  `src/pyurbanair/config/discrepancy.py` that nothing uses any more:
+  `validate_sgs_discrepancy_inference`, `augment_sgs_discrepancy_prior` and
+  `validate_parameter_selection`. Keep `SGS_BIAS_PARAMETER_NAMES` and
+  `validate_sgs_discrepancy_settings`; the scripts use them.
+- **Unused config keys:** nothing in `configs/` or `scripts/` reads `run.name`,
+  `run.skip_viz` (both in `configs/common.yaml`) or `paths.base_results_dir`.
+  The last exists only for `resolve_output_dir` in
+  `src/pyurbanair/config/hydra_helpers.py`, which only the old engine and
+  `job_scripts/` call. If the port doesn't need them, remove the keys and
+  their documentation (`configs/README.md`). Also remove `resolve_output_dir`
+  if the job-scripts PR has dropped its last caller by then; otherwise leave
+  it to that PR.
 - **Composition:** compose `configs/forward.yaml`.
   - Option lists come from `configs/{case,model,params}`.
   - Trusted `_target_`s come from `configs/**`.
@@ -124,8 +145,9 @@ Couplings to the archived setup to remove:
 - **What moves:** `src/pyurbanair/visualization/` (the renderer, 3D renderer,
   data reader, asset server and `web/` assets). Ship the `web/` files as
   package data.
-- **What stays:** matplotlib-only code like `src/pyurbanair/animation.py` and
-  the `scripts/visualize_*.py` figures.
+- **What stays:** matplotlib-only code: `src/pyurbanair/utils/animation_utils.py`
+  (where the old `animation.py` was merged) and the `scripts/visualize_*.py`
+  figures.
 - **Dependencies:** the lib must not depend on `mcp-server`. MCP depends on it.
 - **Optional 3D:** keep PyVista/VTK optional (the `rendering` env).
 
@@ -143,7 +165,7 @@ Couplings to the archived setup to remove:
   - `scripts/start_mcp`'s `python -m`;
   - `[project.scripts]`;
   - `.github/workflows/tests-mcp.yml` (its `paths:` list `libs/mcp_server/**`);
-  - `docs/mcp.md`, `docs/codebase_guide.md` and `CLAUDE.md`'s doc table.
+  - `docs/mcp.md`, `docs/codebase_guide.md` and `AGENTS.md`'s doc table.
 - **Server name:** keep the registered server name `pyurbanair`, so existing
   client registrations keep working.
 
@@ -172,9 +194,14 @@ Couplings to the archived setup to remove:
   tests pass. `test_local_jobs.py` and `test_forward_visualization*.py` still
   pass and are not skipped.
 - **Moving tests:** move tests with their code.
-  - Jobs tests go to `tests/mcp/`.
+  - Jobs tests go to `tests/mcp/`: `test_forward_preparation*.py`,
+    `test_forward_plan_identity.py`, `test_forward_input_safety.py` and
+    `test_local_jobs.py`, from `tests/pyurbanair/`.
   - Visualization tests go to a new `tests/visualization/`, with a CI workflow
-    copied from one of `.github/workflows/tests-*.yml`.
+    copied from one of `.github/workflows/tests-*.yml`:
+    `test_forward_visualization*.py`, from `tests/pyurbanair/`.
+  - Afterwards `tests/pyurbanair/` holds only the tests of what stays in
+    `src/pyurbanair` (base classes, samplers).
   - Update the path filters of every workflow you touch.
 - **Port to the current configs:** these tests came from the old suite and use
   the legacy fixtures and configs in `tests/legacy/`. Port the ones you touch
@@ -210,7 +237,7 @@ Couplings to the archived setup to remove:
 
 ## Constraints and gotchas
 
-- **Repo rules (see `CLAUDE.md`):**
+- **Repo rules (see `AGENTS.md`):**
   - pixi `dev` env;
   - run `pixi run -e dev pre-commit` before committing;
   - parallel ensembles use `forkserver`;
@@ -238,8 +265,9 @@ Couplings to the archived setup to remove:
   prepare and launch a forward run on `configs/`, poll it, inspect results,
   render the HTML view, and cancel a run.
 - [ ] The MCP worker runs `scripts/run_forward.py`. No MCP, jobs or
-  visualization code touches `archive/`, and `src/pyurbanair/workflows/forward.py`
-  is gone. Any new script or workflow is justified in the PR.
+  visualization code touches `archive/`. `src/pyurbanair/workflows/` and
+  `config/run_record.py` are gone, and `check_config` is the only config
+  validator. Any new script or workflow is justified in the PR.
 - [ ] `libs/visualization` and `libs/mcp-server` exist with the conventions
   above. `src/pyurbanair/jobs/` and `src/pyurbanair/visualization/` are gone,
   and no reference to `libs/mcp_server` / `pyurbanair_mcp` remains.
@@ -248,7 +276,7 @@ Couplings to the archived setup to remove:
 - [ ] No "MCP port pending" skips remain. All new and moved tests are in
   `tests/` and pass, with their CI workflows. Pre-commit passes.
 - [ ] `docs/mcp.md`, `docs/forward_visualization.md` (or a new
-  `docs/visualization.md`), `docs/codebase_guide.md`, `CLAUDE.md`'s doc table
+  `docs/visualization.md`), `docs/codebase_guide.md`, `AGENTS.md`'s doc table
   and `tests/README.md` are updated.
 - [ ] The PR description lists behaviour changes, what `run_forward.py` gained
   and why, and anything not run (e.g. integration tests on backends

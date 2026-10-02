@@ -107,7 +107,7 @@ Instead of patching the old scripts, new ones were written against
 appends its workflow name to `paths.results_dir`), with post-processing in
 `scripts/compute_metrics.py`, `scripts/visualize_forward.py` and
 `scripts/visualize_assimilation.py`, and config checks in
-`scripts/inconsistency_check.py`. Components are built with
+`scripts/utils/inconsistency_check.py`. Components are built with
 `instantiate(cfg.smoothing.smoother, num_time_points=...)`,
 `instantiate(cfg.filtering, observation_operator=..., forward_model=..., C_D=...)`
 and `instantiate(cfg.observation.error)` (the `ObservationErrorSpec` field is

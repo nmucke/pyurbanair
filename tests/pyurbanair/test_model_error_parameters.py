@@ -203,7 +203,7 @@ def test_udales_sgs_setting_prefers_smagorinsky_when_both_true(
 def test_udales_sgs_setting_absent_param_is_byte_identical(
     tmp_path: pathlib.Path,
 ) -> None:
-    """No ``sgs_constant`` -> namoptions is not even rewritten (CLAUDE.md no-op)."""
+    """No ``sgs_constant`` -> namoptions is not even rewritten (AGENTS.md no-op)."""
     path = _write_namoptions(
         tmp_path, "lsmagorinsky = .false.\nlvreman      = .true.\n"
     )

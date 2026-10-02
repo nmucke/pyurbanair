@@ -2,7 +2,7 @@
 
 **For:** the agent doing this work. **Branch:** create one from
 `feat/simplified-configs-and-scripts` and open the PR back into that branch
-(not into `main`). Read `CLAUDE.md` first; its workflow rules apply.
+(not into `main`). Read `AGENTS.md` first; its workflow rules apply.
 
 ## Why
 
@@ -113,7 +113,7 @@ The excluded paths are the archive and the vendored solver sources (their own
 - **Other:** `.gitignore` (lines ~35–43); `pyproject.toml` (the
   `benchmark_geometry` feature, if it names a path);
   `job_scripts/delftblue/pypalm/{m0_capture,m1_direct_run}.py`.
-- **Docs:** `README.md` (layout section), `CLAUDE.md` / `AGENTS.md` if they
+- **Docs:** `README.md` (layout section), `AGENTS.md` / `AGENTS.md` if they
   mention it, `docs/codebase_guide.md`, the backend docs, and the moved
   `geometries/` README.
 
@@ -130,7 +130,7 @@ so whichever merges second rebases easily.
 
 ## Constraints and gotchas
 
-- **Repo rules (see `CLAUDE.md`):**
+- **Repo rules (see `AGENTS.md`):**
   - pixi `dev` env;
   - run `pixi run -e dev pre-commit` before committing;
   - backends stay byte-identical on default runs;

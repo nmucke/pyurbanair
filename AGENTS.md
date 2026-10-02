@@ -93,8 +93,9 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
   don't want to satisfy.
 - **Match the surrounding code** — comment density, naming, idioms. New scripts
   follow the `def run(cfg)` + thin `@hydra.main` wrapper shape so they stay
-  testable, call `check_config(cfg, ...)` (`scripts/inconsistency_check.py`)
-  first, and write under `cfg.paths.results_dir`.
+  testable, call `check_config(cfg, ...)` (`scripts/utils/inconsistency_check.py`)
+  first, and write under `cfg.paths.results_dir`. `scripts/` holds only
+  scripts you run; shared helpers go in `scripts/utils/`.
 - **No-op when a param/field is absent.** Backends must stay byte-identical on
   single-model / default runs when you add a new parameter or knob — read it,
   and skip the write site if it isn't present (see the "adding a new parameter"

@@ -36,12 +36,11 @@ import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
-import xarray
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from tqdm import tqdm
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     StridedOperator,
@@ -50,13 +49,13 @@ from helper_functions import (  # noqa: E402
     flatten_obs,
     make_ensemble_model,
     make_observation_operator,
+    make_run_dir,
     make_truth,
+    parameter_names,
     save_obs,
     save_yaml,
 )
 from inconsistency_check import check_config  # noqa: E402
-
-from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES  # noqa: E402
 
 
 def run(cfg: DictConfig) -> None:
@@ -69,10 +68,7 @@ def run(cfg: DictConfig) -> None:
     cycle_seconds = stride * float(cfg.time.output_frequency)
     rng_key = jax.random.PRNGKey(da.seed)
 
-    out_dir = pathlib.Path(cfg.paths.results_dir) / "filtering"
-    windows_dir = out_dir / "windows"
-    windows_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, out_dir / "config.yaml", resolve=True)
+    out_dir, windows_dir = make_run_dir(cfg, "filtering")
 
     # --- Truth and one observation per cycle ---------------------------------------
     # A cycle covers `stride` truth frames and assimilates the last one.
@@ -91,10 +87,7 @@ def run(cfg: DictConfig) -> None:
     params = instantiate(cfg.prior_params).sample(ensemble_size)
 
     operator = make_observation_operator(cfg, cfg.assim_model.solver_name)
-    selected = da.params_to_estimate
-    discrepancy = OmegaConf.select(
-        cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
-    )
+    selected, global_names = parameter_names(cfg, params)
     rng_key, key = jax.random.split(rng_key)
     enkf = instantiate(
         cfg.filtering,
@@ -104,11 +97,8 @@ def run(cfg: DictConfig) -> None:
         forward_model=ensemble_model,
         C_D=jnp.asarray(observations[0][2].covariance_diag),
         rng_key=key,
-        parameter_names_to_estimate=None if selected is None else list(selected),
-        # SGS-discrepancy coefficients are global: never localized.
-        global_parameter_names=[
-            n for n in SGS_BIAS_PARAMETER_NAMES if discrepancy and n in params
-        ],
+        parameter_names_to_estimate=selected,
+        global_parameter_names=global_names,
     )
     enkf.collect_pred_obs = True
     enkf.collect_forecast_frames = bool(da.save_forecast_history)
@@ -118,7 +108,7 @@ def run(cfg: DictConfig) -> None:
 
     # --- Window loop ------------------------------------------------------------------
     state = None  # cycle 0 cold-starts
-    window_seconds = []
+    seconds_per_window = []
     for w in tqdm(range(num_windows), desc="windows"):
         start = time.perf_counter()
         cycles = observations[w * cycles_per_window : (w + 1) * cycles_per_window]
@@ -160,7 +150,7 @@ def run(cfg: DictConfig) -> None:
         )
 
         state, params = result.state, result.params
-        window_seconds.append(time.perf_counter() - start)
+        seconds_per_window.append(time.perf_counter() - start)
 
     if on_disk:
         shutil.rmtree(states_dir, ignore_errors=True)
@@ -169,14 +159,14 @@ def run(cfg: DictConfig) -> None:
             "filter": type(enkf).__name__,
             "mode": str(cfg.filtering.mode),
             "num_windows": num_windows,
-            "window_seconds": sim_time,
+            "window_length_seconds": sim_time,
             "cycles_per_window": cycles_per_window,
             "cycle_seconds": cycle_seconds,
             "ensemble_size": ensemble_size,
             "truth_dir": da.truth_dir,
             "truth_start_time": da.truth_start_time,
             "observation_error_model": observations[0][2].provenance,
-            "seconds_per_window": [float(s) for s in window_seconds],
+            "seconds_per_window": [float(s) for s in seconds_per_window],
         },
         out_dir / "run_info.yaml",
     )

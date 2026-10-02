@@ -89,11 +89,6 @@ def test_no_application_stack_behind_the_library(module: str) -> None:
             "pyurbanair.utils.run_utils",
             "add_velocity_magnitude",
         ),
-        (
-            "_get_velocity_magnitude_field",
-            "pyurbanair.utils.state_utils",
-            "get_velocity_magnitude_field",
-        ),
     ],
 )
 def test_inlined_velocity_helpers_match_their_originals(

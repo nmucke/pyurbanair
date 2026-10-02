@@ -38,7 +38,7 @@ from matplotlib import animation
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
     device,

@@ -58,7 +58,7 @@ from omegaconf import DictConfig, OmegaConf  # noqa: E402
 from pyurbanair.utils.animation_utils import animate_rollout_state  # noqa: E402
 from pyurbanair.utils.run_utils import add_velocity_magnitude  # noqa: E402
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     concat_windows,

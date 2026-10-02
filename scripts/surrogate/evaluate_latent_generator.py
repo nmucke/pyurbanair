@@ -44,7 +44,7 @@ from matplotlib import pyplot as plt
 from neural_surrogates import generator_evaluation as ge
 from omegaconf import DictConfig
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
     device,

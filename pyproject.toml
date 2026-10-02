@@ -12,7 +12,6 @@ dependencies = [
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
   "psutil>=6,<8",
-  "vape4d>=0.2.0,<0.3.0",
   "hydra-core>=1.3,<2", "manifold3d>=3.5.2,<4",
 ]
 name = "pyurbanair"
@@ -194,9 +193,6 @@ markers = [
 [tool.pixi.feature.dev.dependencies]
 pytest= ">=8.3.5,<8.4"
 pre-commit = {version="~=4.1.0", channel="conda-forge"}
-black = {version="~=24.1.0", channel="conda-forge"}
-isort = {version="~=6.0.0", channel="conda-forge"}
-mypy = {version="~=1.15.0", channel="conda-forge"}
 
 
 # Workaround for a file/directory clash between two transitive deps in the
@@ -215,9 +211,6 @@ setup-dev = { cmd = "bash scripts/setup_dev_env.sh", description = "Bootstrap de
 test-integration = { cmd = "python -m pytest tests -m integration --exitfirst --durations=20", description = "Run the small real-solver integration suite" }
 test-all = { cmd = "python -m pytest tests -m '' --exitfirst --durations=20", description = "Run all unit and solver integration tests" }
 pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }
-format = { cmd = "black src", description = "Format code" }
-type-check = { cmd = "mypy src", description = "Type check code" }
-sort-imports = { cmd = "isort src", description = "Sort imports" }
 
 [tool.pixi.feature.benchmark_geometry.dependencies]
 numpy = "*"

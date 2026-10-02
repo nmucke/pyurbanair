@@ -41,7 +41,7 @@ from evaluation.sensors import window_sampling_std, window_statistics
 from evaluation.turbulence import streaming_state_rmse
 from omegaconf import DictConfig, OmegaConf
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     concat_windows,

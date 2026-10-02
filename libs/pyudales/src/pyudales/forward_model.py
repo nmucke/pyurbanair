@@ -1267,7 +1267,7 @@ class ForwardModel(BaseForwardModel):
             ):
                 # Guarded: with the knob off nothing reads the clock, and the
                 # disabled path must not drop a file into the experiment dir
-                # (CLAUDE.md strict no-op rule).
+                # (AGENTS.md strict no-op rule).
                 write_elapsed_time(self.dirs, self._elapsed_time)
             return result
         finally:

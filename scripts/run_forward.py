@@ -24,15 +24,15 @@ import sys
 
 import hydra
 import jax
-import jax.numpy as jnp
 import numpy as np
 import xarray
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
+from helper_functions import next_window_params  # noqa: E402
 from inconsistency_check import check_config  # noqa: E402
 
 from pyurbanair.config.hydra_helpers import clean_outputs  # noqa: E402
@@ -63,11 +63,8 @@ def run(cfg: DictConfig) -> None:
     states, all_params = [], []
     for w in tqdm(range(num_windows), desc="windows"):
         if w > 0 and "time" in params.dims:
-            knot_times = np.asarray(sampler.time_coords)
             rng_key, key = jax.random.split(rng_key)
-            params = sampler.extrapolate(
-                params, jnp.asarray(knot_times) + sim_time, key
-            ).assign_coords(time=knot_times)
+            params = next_window_params(sampler, params, sim_time, key)
         if is_ensemble:
             out = model.run_ensemble(params=params, state=state, sim_name="state")
             out = model.get_states() if out is None else out

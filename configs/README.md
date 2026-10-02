@@ -108,7 +108,8 @@ python scripts/surrogate/evaluate_latent_generator.py
 ```
 
 `train.py` builds the model and datasets for the config's `task` from
-`tasks.py`; the evaluation scripts share `eval_common.py`.
+`scripts/utils/tasks.py`; the evaluation scripts share
+`scripts/utils/eval_common.py`.
 
 Hydra treats `surrogate/` as a config group, so every file there starts with
 `# @package _global_` (keys stay at the top level, not under `surrogate.`) and

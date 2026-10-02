@@ -141,7 +141,7 @@ libs/neural-surrogates/src/neural_surrogates/   # Learned one-step CFD surrogate
   training/                        # base.py (BaseTraining), standard.py (Trainer), patch.py (PatchTrainer)
   decomposition.py, dd_loss.py, geometry.py      # DD operators, Eq-9 loss, STL→voxel channel
 
-scripts/                           # All top-level executables run from here.
+scripts/                           # Scripts you run; their shared helpers are in utils/.
                                    # Hydra scripts expose `def run(cfg)` + a thin `@hydra.main` wrapper.
   run_forward.py                   # Forward sim — single/ensemble (forward.ensemble), extra
                                    #   windows (forward.rollout_steps), static or time-varying params.
@@ -150,10 +150,12 @@ scripts/                           # All top-level executables run from here.
   run_hybrid.py                    # Per window: ESMDA params, then filter state
   compute_metrics.py               # metrics.yaml from a finished DA run dir (plain CLI)
   visualize_forward.py, visualize_assimilation.py   # Figures from a run dir (plain CLI)
-  inconsistency_check.py           # check_config(cfg, workflow): called first in every run_*.py
-  helper_functions.py              # Truth, observation pieces, ensemble model, I/O helpers
-  surrogate/                       # generate_data.py, train.py (+ tasks.py), evaluate_*.py,
-                                   #   eval_common.py — see docs/neural_surrogates.md
+  surrogate/                       # generate_data.py, train.py, evaluate_*.py
+                                   #   — see docs/neural_surrogates.md
+  utils/                           # Helpers only, nothing to run:
+                                   #   inconsistency_check.py (check_config, called first in every run_*.py),
+                                   #   helper_functions.py (truth, observations, ensemble model, I/O),
+                                   #   tasks.py (train.py's per-task setup), eval_common.py (evaluate_*.py)
   tools/                           # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
   setup_dev_env.sh, start_mcp      # `pixi run setup-dev`; MCP launcher
 
@@ -276,7 +278,7 @@ key; [docs/scripts_and_configs.md](scripts_and_configs.md) is the reference.
 - `surrogate/` holds the neural-surrogate configs (`--config-name surrogate/<name>`).
 
 Runners keep `run(cfg)` plus a thin `@hydra.main` wrapper. They call
-`check_config(cfg, workflow)` from `scripts/inconsistency_check.py` before any
+`check_config(cfg, workflow)` from `scripts/utils/inconsistency_check.py` before any
 side effect, so a bad combination fails in seconds, then instantiate the
 selected components explicitly. Dynamic smoother knot counts are supplied from
 sampled data, not editable YAML values.
@@ -305,7 +307,7 @@ parallel ensembles.
   **coordinate-based** (`obs_*`, interpolated). The `case/<name>/obs.yaml`
   configs use coordinate-based: `observation.operator` in
   `configs/assimilation.yaml` reads the case's `obs.*` points and
-  `scripts/helper_functions.py::make_observation_operator` instantiates it.
+  `scripts/utils/helper_functions.py::make_observation_operator` instantiates it.
 - Variable→dim mapping handles each backend's staggered grids.
 - `TemporalObservationOperator` wraps it and applies it per output frame,
   returning a time-resolved labelled xarray. Interval aggregation lives in
@@ -474,7 +476,7 @@ utilities are in `archive/scripts/adjust_simulations/`.)
 ### Validation sensors
 A case's `obs` block may define a held-out sensor set via
 `validation_{x,y,z}_points`. These are **scored but never assimilated** —
-`scripts/helper_functions.py::sensor_sets` adds them as the `validation` set,
+`scripts/utils/helper_functions.py::sensor_sets` adds them as the `validation` set,
 and `compute_metrics.py` / `visualize_assimilation.py` score and plot them as
 an out-of-sample check alongside the assimilated sensors.
 
@@ -742,7 +744,7 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   No new script is needed — [scripts/run_smoother.py](../scripts/run_smoother.py)
   instantiates whatever `cfg.smoothing.smoother` resolves to, and you select it
   with `'smoothing.smoother=${smoother.<name>}'`. Teach
-  `scripts/inconsistency_check.py` which priors it pairs with.
+  `scripts/utils/inconsistency_check.py` which priors it pairs with.
 
 ### Add a new localization strategy
 - Subclass `BaseLocalization` in
@@ -767,10 +769,10 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - Place under [scripts/](../scripts/), mirror an existing one. The
   shape is `def run(cfg)` + a thin `@hydra.main(config_path="../configs", ...)`
   `main`; post-processing scripts are plain CLIs taking a run dir.
-- Call `check_config(cfg, "<workflow>")` from `inconsistency_check.py` first
+- Call `check_config(cfg, "<workflow>")` from `scripts/utils/inconsistency_check.py` first
   (add the workflow's rules there).
 - Use `hydra.utils.instantiate(cfg.model.forward_model, ...)` for backend
-  construction; share only what several scripts need via `helper_functions.py`.
+  construction; share only what several scripts need via `scripts/utils/helper_functions.py`.
 - Write under `cfg.paths.results_dir` and save the composed `config.yaml`
   there.
 - Add a test under `tests/scripts/` that composes the entry point with a
@@ -835,13 +837,13 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 | How sensors map to grid points | [libs/data-assimilation/src/data_assimilation/observation_operator.py](../libs/data-assimilation/src/data_assimilation/observation_operator.py) |
 | Per-window rollout logic | the window loops of `run_smoother.py` / `run_filtering.py` / `run_hybrid.py`; `run_forward.py`'s `forward.rollout_steps` loop |
 | Parameter samplers (static + dynamic) | [src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/), [src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/), [configs/params/](../configs/params/) |
-| Truth source / spin-up skip | `assimilation.truth_dir` + `assimilation.truth_start_time` in [assimilation.yaml](../configs/assimilation.yaml); `scripts/helper_functions.py` (`make_truth`, `open_truth`) |
+| Truth source / spin-up skip | `assimilation.truth_dir` + `assimilation.truth_start_time` in [assimilation.yaml](../configs/assimilation.yaml); `scripts/utils/helper_functions.py` (`make_truth`, `open_truth`) |
 | Localization (correlation/distance/none) / grid-block grouping | [localization/](../libs/data-assimilation/src/data_assimilation/localization/) (`correlation.py`, `distance.py`), [configs/assimilation_settings/localization.yaml](../configs/assimilation_settings/localization.yaml) (`block_grouping`, state-only) |
 | Reduced SVD/KL state update / final trajectory smoothing | [reduction.py](../libs/data-assimilation/src/data_assimilation/reduction.py), [configs/assimilation_settings/state_reduction.yaml](../configs/assimilation_settings/state_reduction.yaml), [docs/reduced_state_da.md](temp/reduced_state_da.md) |
 | Neural-surrogate architectures (UPT etc.) | [architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/), [configs/surrogate/architectures.yaml](../configs/surrogate/architectures.yaml) |
 | uDALES instability / dt-collapse handling | [libs/pyudales/src/pyudales/utils/run_monitor.py](../libs/pyudales/src/pyudales/utils/run_monitor.py) (`instability_check`) |
 | DA metrics + diagnostic plots (RMSE/CRPS, sensor series) | [libs/evaluation/src/evaluation/scores.py](../libs/evaluation/src/evaluation/scores.py) (`compute_parameter_metrics`, `compute_sensor_metrics`) + [figures.py](../libs/evaluation/src/evaluation/figures.py) (`plot_parameter_error`, `plot_sensor_timeseries`) |
-| Validation (held-out) sensors | `obs.validation_{x,y,z}_points` in [configs/case/](../configs/case/) + `helper_functions.py::sensor_sets` |
+| Validation (held-out) sensors | `obs.validation_{x,y,z}_points` in [configs/case/](../configs/case/) + `scripts/utils/helper_functions.py::sensor_sets` |
 | Test fixture composition | [tests/conftest.py](../tests/conftest.py) (`compose` + `tests/configs/` overlays; legacy `compose_test_cfg` / `compose_module_cfg`) |
 | Dynamic multi-window ESMDA theory / config | [docs/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Benchmark / scaling findings | [docs/ensemble_scaling.md](temp/ensemble_scaling.md) (the one-off benchmark scripts were removed; recover from git history to re-run) |

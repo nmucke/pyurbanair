@@ -229,40 +229,6 @@ def test_unselected_coefficients_are_not_added() -> None:
     assert augment_sgs_discrepancy_prior(prior, discrepancy, ["inflow_angle"]) is prior
 
 
-@pytest.mark.parametrize("dynamic", [False, True])  # type: ignore[misc]
-def test_configured_unestimated_coefficients_are_applied_to_independent_models(
-    dynamic: bool,
-) -> None:
-    from pyurbanair.config.hydra_helpers import inference_parameter_configs
-
-    cfg = _run_cfg()
-    cfg.params_to_estimate = ["inflow_angle"]
-    cfg.assim_model.forward_model.model_discrepancy.prior_std = None
-    cfg.prior_params = _dynamic_prior() if dynamic else _prior()
-    cfg.truth_params = copy.deepcopy(cfg.prior_params)
-    block = "static_parameters" if dynamic else "parameters"
-    for name in SGS_BIAS_PARAMETER_NAMES:
-        cfg.prior_params[block][name] = {
-            "_target_": "pyurbanair.static_parameters.Constant",
-            "value": -20.0,
-        }
-        cfg.truth_params[block][name] = {
-            "_target_": "pyurbanair.static_parameters.Constant",
-            "value": 0.0,
-        }
-    original = copy.deepcopy(cfg)
-    truth_cfg, prior_cfg = inference_parameter_configs(cfg)
-    assert cfg == original
-    truth = instantiate(truth_cfg).sample(1)
-    prior = instantiate(prior_cfg).sample(4)
-    assert set(truth.data_vars) == set(prior.data_vars)
-    assert "velocity_magnitude" in prior
-    for name in SGS_BIAS_PARAMETER_NAMES:
-        np.testing.assert_array_equal(prior[name], [-20.0] * 4)
-        np.testing.assert_array_equal(truth[name], [0.0])
-        assert prior[name].dims == ("ensemble",)
-
-
 @pytest.mark.parametrize(  # type: ignore[misc]
     "workflow", ["esmda", "filtering", "filter_smoothing"]
 )

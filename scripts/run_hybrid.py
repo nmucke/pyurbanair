@@ -41,10 +41,10 @@ import numpy as np
 import xarray
 from data_assimilation.filter_smoothing import FilterSmoothing, resolve_tempering_policy
 from hydra.utils import instantiate
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from tqdm import tqdm
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     StridedOperator,
@@ -55,13 +55,14 @@ from helper_functions import (  # noqa: E402
     make_ensemble_model,
     make_observation_error,
     make_observation_operator,
+    make_run_dir,
     make_truth,
+    next_window_params,
+    parameter_names,
     save_obs,
     save_yaml,
 )
 from inconsistency_check import check_config  # noqa: E402
-
-from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES  # noqa: E402
 
 
 def run(cfg: DictConfig) -> None:
@@ -74,10 +75,7 @@ def run(cfg: DictConfig) -> None:
     cycle_seconds = stride * float(cfg.time.output_frequency)
     rng_key = jax.random.PRNGKey(da.seed)
 
-    out_dir = pathlib.Path(cfg.paths.results_dir) / "hybrid"
-    windows_dir = out_dir / "windows"
-    windows_dir.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, out_dir / "config.yaml", resolve=True)
+    out_dir, windows_dir = make_run_dir(cfg, "hybrid")
 
     # --- Truth and one observation per cycle ----------------------------------------
     truth = make_truth(cfg, out_dir)
@@ -112,12 +110,7 @@ def run(cfg: DictConfig) -> None:
     prior_sampler = instantiate(cfg.prior_params)
     params = prior_sampler.sample(ensemble_size)
     is_dynamic = "time" in params.dims
-    selected = da.params_to_estimate
-    selected = None if selected is None else list(selected)
-    discrepancy = OmegaConf.select(
-        cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
-    )
-    global_names = [n for n in SGS_BIAS_PARAMETER_NAMES if discrepancy and n in params]
+    selected, global_names = parameter_names(cfg, params)
     operator = make_observation_operator(cfg, cfg.assim_model.solver_name)
     if stride > 1:
         operator = StridedOperator(operator, stride)
@@ -181,7 +174,7 @@ def run(cfg: DictConfig) -> None:
 
     # --- Window loop ------------------------------------------------------------------
     state = None  # cold start
-    window_seconds = []
+    seconds_per_window = []
     for w, window in enumerate(tqdm(windows, desc="windows")):
         start = time.perf_counter()
         params.to_netcdf(windows_dir / f"window_{w}_prior_params.nc")
@@ -231,14 +224,11 @@ def run(cfg: DictConfig) -> None:
         # (extrapolated if time-varying).
         state = result.state
         if is_dynamic and w < num_windows - 1:
-            knot_times = np.asarray(prior_sampler.time_coords)
             rng_key, key = jax.random.split(rng_key)
-            params = prior_sampler.extrapolate(
-                posterior_params, jnp.asarray(knot_times) + sim_time, key
-            ).assign_coords(time=knot_times)
+            params = next_window_params(prior_sampler, posterior_params, sim_time, key)
         else:
             params = posterior_params
-        window_seconds.append(time.perf_counter() - start)
+        seconds_per_window.append(time.perf_counter() - start)
 
     if on_disk:
         shutil.rmtree(states_dir, ignore_errors=True)
@@ -251,7 +241,7 @@ def run(cfg: DictConfig) -> None:
             "beta": float(policy.beta),
             "smoother_weight": float(policy.smoother_weight),
             "num_windows": num_windows,
-            "window_seconds": sim_time,
+            "window_length_seconds": sim_time,
             "cycles_per_window": cycles_per_window,
             "cycle_seconds": cycle_seconds,
             "ensemble_size": ensemble_size,
@@ -259,7 +249,7 @@ def run(cfg: DictConfig) -> None:
             "truth_dir": da.truth_dir,
             "truth_start_time": da.truth_start_time,
             "observation_error_model": observations[0][2].provenance,
-            "seconds_per_window": [float(s) for s in window_seconds],
+            "seconds_per_window": [float(s) for s in seconds_per_window],
         },
         out_dir / "run_info.yaml",
     )

@@ -218,7 +218,7 @@ def is_inlet_turbulence_enabled(config: Optional[dict]) -> bool:
     """True only when an ``inlet_turbulence`` dict explicitly enables the knob.
 
     ``None``/``{}``/``enabled: false`` are all a strict no-op — nothing is
-    written to namoptions and no driver files appear (CLAUDE.md no-op rule).
+    written to namoptions and no driver files appear (AGENTS.md no-op rule).
     """
     if not config:
         return False

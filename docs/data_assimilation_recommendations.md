@@ -29,7 +29,7 @@ These are foundations to retain, not missing features to implement.
 covariance. ESMDA adds independent noise to raw frames, then averages them while
 deliberately retaining the raw-frame variance. Thus aggregation changes the
 degree of conservatism. See [ESMDA covariance validation](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py)
-and [observation construction](../archive/scripts/esmda/run_esmda.py), lines 948–956 (archived runner; now `scripts/helper_functions.py`).
+and [observation construction](../archive/scripts/esmda/run_esmda.py), lines 948–956 (archived runner; now `scripts/utils/helper_functions.py`).
 
 **Action.** Separate instrument noise, representation error and dynamical model
 error. For linear averaging, propagate instrument covariance as

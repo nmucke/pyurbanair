@@ -14,7 +14,7 @@ from tests.conftest import TRAIN_ORDER, compose, load_script
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
 def test_train_writes_a_rebuildable_model(name: str, trained: dict[str, Any]) -> None:
-    eval_common = load_script("scripts/surrogate/eval_common.py")
+    eval_common = load_script("scripts/utils/eval_common.py")
     cfg = trained[name]
     model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
     assert (model_dir / "config.yaml").exists()

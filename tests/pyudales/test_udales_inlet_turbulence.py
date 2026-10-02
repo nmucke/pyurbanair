@@ -205,7 +205,7 @@ def test_unknown_keys_warn_but_do_not_raise(caplog: pytest.LogCaptureFixture) ->
 
 
 def test_constructor_arg_defaults_to_none() -> None:
-    """Default runs must not opt into anything (CLAUDE.md no-op rule)."""
+    """Default runs must not opt into anything (AGENTS.md no-op rule)."""
     from pyudales.forward_model import ForwardModel
 
     assert (

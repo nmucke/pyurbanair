@@ -11,6 +11,7 @@ import pathlib
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 import netCDF4
 import numpy as np
 import xarray
@@ -26,12 +27,22 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
+from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES
 from pyurbanair.config.hydra_helpers import clean_outputs
 
 
 def save_yaml(data: dict, path: pathlib.Path) -> None:
     with open(path, "w") as f:
         yaml.safe_dump(data, f, sort_keys=False)
+
+
+def make_run_dir(cfg: DictConfig, name: str) -> tuple[pathlib.Path, pathlib.Path]:
+    """`<paths.results_dir>/<name>/` and its `windows/` dir, with config.yaml saved."""
+    out_dir = pathlib.Path(cfg.paths.results_dir) / name
+    windows_dir = out_dir / "windows"
+    windows_dir.mkdir(parents=True, exist_ok=True)
+    OmegaConf.save(cfg, out_dir / "config.yaml", resolve=True)
+    return out_dir, windows_dir
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +243,41 @@ def save_obs(
             ),
         }
     ).to_netcdf(path)
+
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+
+
+def parameter_names(
+    cfg: DictConfig, params: xarray.Dataset
+) -> tuple[list[str] | None, list[str]]:
+    """The parameters to estimate (None for all) and the global ones.
+
+    SGS-discrepancy coefficients are global (never localized) when the
+    assimilation model's discrepancy is enabled.
+    """
+    selected = cfg.assimilation.params_to_estimate
+    discrepancy = OmegaConf.select(
+        cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
+    )
+    global_names = [n for n in SGS_BIAS_PARAMETER_NAMES if discrepancy and n in params]
+    return (None if selected is None else list(selected)), global_names
+
+
+def next_window_params(
+    sampler: Any, params: xarray.Dataset, sim_time: float, rng_key: jax.Array
+) -> xarray.Dataset:
+    """Time-varying parameters extrapolated one window of `sim_time` ahead.
+
+    The result sits on the sampler's own (window-local) knot times.
+    """
+    knot_times = np.asarray(sampler.time_coords)
+    extrapolated: xarray.Dataset = sampler.extrapolate(
+        params, jnp.asarray(knot_times) + sim_time, rng_key
+    )
+    return extrapolated.assign_coords(time=knot_times)
 
 
 # ---------------------------------------------------------------------------

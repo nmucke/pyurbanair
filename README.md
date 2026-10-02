@@ -69,8 +69,9 @@ Each script's docstring lists its options and outputs.
 ```text
 configs/     Hydra configs: forward.yaml, assimilation.yaml, surrogate/, and
              the case, model and params groups
-scripts/     run scripts (run_forward, run_smoother, run_filtering, run_hybrid,
-             compute_metrics, visualize_*), surrogate/ and tools/
+scripts/     the scripts you run (run_forward, run_smoother, run_filtering,
+             run_hybrid, compute_metrics, visualize_*), surrogate/ and tools/;
+             their shared helpers are in scripts/utils/
 workflows/   shell pipelines: a run followed by its post-processing
 src/         pyurbanair: the base classes every backend inherits
 libs/        pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,

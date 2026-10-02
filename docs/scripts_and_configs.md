@@ -136,7 +136,7 @@ and `instantiate(cfg.observation.operator / .error / .aggregation)`.
 
 ### 1.6 Config checks
 
-`scripts/inconsistency_check.py::check_config(cfg, workflow)` runs first in
+`scripts/utils/inconsistency_check.py::check_config(cfg, workflow)` runs first in
 every `run_*.py` and reports every problem at once. Among others it enforces:
 a time-varying prior pairs with `smoother.dynamic` / `state_and_dynamic` and a
 static one with the others; the smoother needs truth and prior both static or
@@ -198,7 +198,7 @@ Hydra scripts expose `def run(cfg)` plus a thin `@hydra.main` wrapper
 `run` calls `check_config` first and writes under `cfg.paths.results_dir`
 (saving the composed `config.yaml` there). Post-processing scripts are plain
 CLIs that take a finished run dir. Shared helpers (truth, observation pieces,
-ensemble model, I/O) live in `scripts/helper_functions.py`; each script keeps
+ensemble model, I/O) live in `scripts/utils/helper_functions.py`; each script keeps
 its own workflow logic.
 
 ### 2.1 Run scripts
@@ -240,12 +240,12 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 | Script | Config | Does |
 |---|---|---|
 | `generate_data.py` | `surrogate/generate_data` | one simulation per sample on the case geometry or random STL layouts; resumable, shardable; writes `state/` and `param/` `{train,val,test}/sample_XXXX.nc` |
-| `train.py` | `--config-name surrogate/<train_*\|finetune_stepper>` | builds datasets + model for the config's `task` (`tasks.py`: `stepper`, `autoencoder`, `latent_generator`, `dft`, `finetune_stepper`), then fits |
+| `train.py` | `--config-name surrogate/<train_*\|finetune_stepper>` | builds datasets + model for the config's `task` (`scripts/utils/tasks.py`: `stepper`, `autoencoder`, `latent_generator`, `dft`, `finetune_stepper`), then fits |
 | `evaluate_stepper.py` | `surrogate/eval` block `stepper` | rolls one or several steppers out on test trajectories; metrics + figures |
 | `evaluate_autoencoder.py` | `surrogate/eval` block `autoencoder` | reconstruction metrics + figures |
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
 
-`eval_common.py` holds the loading and slice-figure helpers shared by the
+`scripts/utils/eval_common.py` holds the loading and slice-figure helpers shared by the
 evaluation scripts. See [neural_surrogates.md](neural_surrogates.md) for the
 library side.
 

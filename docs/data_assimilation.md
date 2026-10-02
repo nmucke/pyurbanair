@@ -92,7 +92,7 @@ NumPy vector of length `num_sensors * len(obs_states)`.
 The cases use coordinate-based mode: `observation.operator` in
 [configs/assimilation.yaml](../configs/assimilation.yaml) passes the case's
 `obs.*_points` lists, and `make_observation_operator` in
-[scripts/helper_functions.py](../scripts/helper_functions.py) instantiates it.
+[scripts/utils/helper_functions.py](../scripts/utils/helper_functions.py) instantiates it.
 (`create_observation_operator` in `hydra_helpers.py` served the archived
 scripts.)
 
@@ -175,7 +175,7 @@ configured as `observation.aggregation` in `configs/assimilation.yaml`
 (`interval_seconds`, `mode`) — not in the case's `obs:` block, which carries
 only observation-operator arguments. The filter aggregates nothing
 (`run_filtering.py` ignores the block). `make_aggregation` in
-`scripts/helper_functions.py` (§11) builds it; a null `interval_seconds` or a
+`scripts/utils/helper_functions.py` (§11) builds it; a null `interval_seconds` or a
 null block means full-resolution assimilation. The likelihood is configured in
 `observation.error` of the same file.
 
@@ -1319,7 +1319,7 @@ is set inline (`null` or a `RandomWalkEvolution` block).
 
 A run uses the library as follows (very brief; see
 [scripts/run_smoother.py](../scripts/run_smoother.py),
-[scripts/helper_functions.py](../scripts/helper_functions.py),
+[scripts/utils/helper_functions.py](../scripts/utils/helper_functions.py),
 [codebase_guide.md §6](codebase_guide.md#6-data-assimilation-flow), and
 [configs/assimilation.yaml](../configs/assimilation.yaml) for the full picture):
 
@@ -1390,7 +1390,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    with `_target_` pointing at your class and wire `num_steps`, `alpha`,
    `localization` via `${smoothing.*}`. No script changes needed —
    `run_smoother.py` instantiates whatever `cfg.smoothing.smoother` resolves
-   to. Teach `scripts/inconsistency_check.py` which priors it pairs with.
+   to. Teach `scripts/utils/inconsistency_check.py` which priors it pairs with.
 
 ### Adding a new localization strategy
 
@@ -1427,7 +1427,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    [configs/assimilation_settings/analysis.yaml](../configs/assimilation_settings/analysis.yaml)
    (`<name>: {_target_: ...}`) and select it with
    `'filtering.analysis=${analysis.<name>}'`. State the localization
-   requirement in a comment there and in `scripts/inconsistency_check.py`.
+   requirement in a comment there and in `scripts/utils/inconsistency_check.py`.
    Nested settings objects are nested `_target_` blocks (recursive
    instantiation is on and `_convert_: all` propagates from the `filtering`
    block); see the `etkf_tsvd` entry.
