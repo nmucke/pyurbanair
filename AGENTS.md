@@ -24,6 +24,7 @@ configs/    Hydra configs: forward.yaml, assimilation.yaml (entry points);
 scripts/    the scripts you run (run_*, compute_metrics, visualize_*,
             surrogate/, tools/); shared helpers only in scripts/utils/
 workflows/  shell pipelines: a run followed by its post-processing
+geometries/ case inputs: one folder per case (STL, namoptions, _p3d), urbantales/
 src/        pyurbanair: base classes every backend inherits
 libs/       pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
             evaluation, visualization, mcp-server (each an editable package)

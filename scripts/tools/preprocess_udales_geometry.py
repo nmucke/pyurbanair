@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Precompute uDALES IBM geometry for a case and save it into examples/udales/<case>/.
+"""Precompute uDALES IBM geometry for a case and save it into geometries/<case>/.
 
 The expensive part of uDALES preprocessing is the STL->IBM step (solid/fluid
 point classification + facet-to-cell matching), run by the Fortran
@@ -9,9 +9,9 @@ re-run it on every model instantiation.
 
 This standalone utility runs that step once for a case's configured grid and
 saves the resulting geometry files (plus a ``geom_meta.json`` recording the grid
-and ``nfcts``) into ``examples/udales/<case>/``. A later run reuses them by
+and ``nfcts``) into ``geometries/<case>/``. A later run reuses them by
 pointing the model's ``precomputed_geom_dir`` at that folder
-(``conf/case/<case>/geometry.yaml: udales_precomputed_geom_dir``), which flips
+(``configs/case/<case>.yaml: geometry.udales_precomputed_geom_dir``), which flips
 ``gen_geom`` to ``.false.`` so preprocessing copies the files instead of
 re-running the classifier.
 
@@ -22,9 +22,9 @@ a mismatch, so regenerate (re-run this script) whenever you change
 
 Examples
 --------
-    pixi run python tools/preprocess_udales_geometry.py --case barcelona
+    pixi run -e dev python scripts/tools/preprocess_udales_geometry.py --case barcelona
     # override the grid for the generated bundle:
-    pixi run python tools/preprocess_udales_geometry.py --case barcelona \
+    pixi run -e dev python scripts/tools/preprocess_udales_geometry.py --case barcelona \
         --overrides domain.nx=300 domain.ny=300 domain.nz=64
 """
 
@@ -36,11 +36,10 @@ import sys
 
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
-
 from pyudales.forward_model import save_precomputed_geometry
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
-CONF_DIR = PROJECT_ROOT / "conf"
+CONFIGS = PROJECT_ROOT / "configs"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -48,12 +47,14 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--case", default="barcelona", help="Case name (conf/case/<case>).")
+    p.add_argument(
+        "--case", default="barcelona", help="Case name (configs/case/<case>)."
+    )
     p.add_argument(
         "--output-dir",
         type=pathlib.Path,
         default=None,
-        help="Where to save the geometry bundle (default: examples/udales/<case>).",
+        help="Where to save the geometry bundle (default: geometries/<case>).",
     )
     p.add_argument(
         "--overrides",
@@ -63,11 +64,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = p.parse_args(argv)
 
-    out_dir = args.output_dir or (PROJECT_ROOT / "examples" / "udales" / args.case)
+    out_dir = args.output_dir or (PROJECT_ROOT / "geometries" / args.case)
 
-    with initialize_config_dir(version_base=None, config_dir=str(CONF_DIR)):
+    with initialize_config_dir(version_base=None, config_dir=str(CONFIGS)):
         cfg = compose(
-            config_name="run_forward_model",
+            config_name="forward",
             overrides=[
                 "model=pyudales",
                 f"case={args.case}",
@@ -98,15 +99,17 @@ def main(argv: list[str] | None = None) -> int:
         # counts into the experiment dir.
         fm.run_preprocessing()
 
-        dest = save_precomputed_geometry(fm.dirs.experiment_dir, out_dir, namoptions_path=nm)
+        dest = save_precomputed_geometry(
+            fm.dirs.experiment_dir, out_dir, namoptions_path=nm
+        )
 
     files = sorted(q.name for q in pathlib.Path(dest).glob("*") if q.is_file())
     print(f"\nSaved {len(files)} geometry files to {dest}:")
     for name in files:
         print(f"  {name}")
     print(
-        f"\nTo reuse this bundle, set in conf/case/{args.case}/geometry.yaml:\n"
-        f"  udales_precomputed_geom_dir: examples/udales/{args.case}\n"
+        f"\nTo reuse this bundle, set in configs/case/{args.case}.yaml (geometry):\n"
+        f"  udales_precomputed_geom_dir: {out_dir}\n"
         "Subsequent uDALES runs will skip the IBM classifier and copy these files."
     )
     return 0

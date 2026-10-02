@@ -162,16 +162,17 @@ scripts/                           # Scripts you run; their shared helpers are i
                                    #   inconsistency_check.py (check_config, called first in every run_*.py),
                                    #   helper_functions.py (truth, observations, ensemble model, I/O),
                                    #   tasks.py (train.py's per-task setup), eval_common.py (evaluate_*.py)
-  tools/                           # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
+  tools/                           # Geometry CLIs (prepare_case_stl, preprocess_udales_geometry,
+                                   #   benchmark_geometry, download_urbantales_geometries, rasters_to_stl)
   setup_dev_env.sh, start_mcp      # `pixi run setup-dev`; MCP launcher
   register_claude.sh               # `pixi run -e mcp register-claude`
 
 workflows/                         # forward_workflow.sh, assimilation_workflow.sh <method>:
                                    #   run + post-processing on the same run dir
 
-examples/
-  benchmark_geometry/              # Xie & Castro 2008 geometry generator (CLI)
-  lbm/, udales/, palm/             # Per-backend experiment dirs (STL, namoptions, p3d, etc.)
+geometries/                        # Case inputs, see geometries/README.md
+  <case>/                          #   STL + namoptions.300 + _p3d (+ precomputed uDALES geometry)
+  urbantales/                      #   random-geometry templates; gitignored raw/, processed/ pools
 
 tests/                             # pytest suite, one folder per package + scripts/ (for
                                    #   scripts/, configs/, workflows/) + configs/ (tiny overlays)

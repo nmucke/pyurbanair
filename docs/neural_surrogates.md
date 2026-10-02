@@ -127,7 +127,7 @@ It declares (under `training_data:`):
 |---|---|
 | `num_train`, `num_val`, `num_test` | per-split sample counts |
 | `geometry.source` | random pool selection; fixed geometry uses `case=` |
-| `geometry.stl_dir` / `geometry.udales_case_dir` / `geometry.palm_case_dir` | pool + backend case-template dirs, derived from `source` (pool sources only) |
+| `geometry.stl_dir` / `geometry.case_dir` | STL pool + uDALES/PALM template folder (`geometries/urbantales/...`), derived from `source` (pool sources only) |
 | `geometry.resolution` / `geometry.z_size` | pool grid spacing + fixed vertical extent (§2b) |
 | `output_dir` | resolves to the configured root plus `${model.name}_${training_data.geometry.output_name}/` |
 | `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — set directly in this file (not inherited from the case) |
@@ -208,7 +208,7 @@ these differences:
   `paths.experiment_dir` (stale solver outputs from a previous grid are the
   classic uDALES fielddump trap). For pyudales the script stages a
   disposable case dir per geometry (template from
-  `geometry.udales_case_dir`, `stl_file` rewritten) and forces
+  `geometry.case_dir`, `stl_file` rewritten) and forces
   `precomputed_geom_dir=None`; pylbm recompiles per grid; for pypalm the
   turbulent-inflow `input_block_size` is clamped to 2·(nx/ncpu) when the
   PALM default (30) exceeds it (error TUI0019 otherwise).

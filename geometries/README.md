@@ -1,9 +1,54 @@
-# UrbanTALES geometries
+# Geometries
+
+Case inputs for the forward models: one folder per case, plus the templates
+and datasets for the random-geometry surrogate training data. Data only; the
+code that makes these files is in [`scripts/tools/`](../scripts/tools/).
+
+```text
+geometries/
+  xie_and_castro/   xie_castro_2008_STL.stl, namoptions.300, _p3d
+  barcelona/        buildings.stl, namoptions.300, _p3d, precomputed uDALES geometry
+                    (solid_*, fluid_boundary_*, facet_sections_*, geom_meta.json)
+  urbantales/
+    idealized/      namoptions.300, _p3d   templates for data.geometry.source=idealized
+    realistic/      namoptions.300, _p3d   templates for data.geometry.source=realistic
+    raw/            *_topo rasters + metadata.json   (gitignored)
+    processed/      *.stl + manifest.csv, the STL pool (gitignored)
+```
+
+## How a case folder is read
+
+`configs/case/<case>.yaml` points at the folder:
+
+```yaml
+geometry:
+  case_dir: geometries/<case>
+  stl_path: ${.case_dir}/<name>.stl
+  udales_precomputed_geom_dir: ${.case_dir}   # barcelona only
+```
+
+- **pylbm** and **pypalm** read the STL through `geometry.stl_path`.
+- **pyudales** copies every file of `case_dir` into its run directory and reads
+  the STL that `stl_file` in `namoptions.300` names, so that name must match the
+  STL in the folder. The precomputed IBM geometry (made by
+  `scripts/tools/preprocess_udales_geometry.py`) is grid-specific: regenerate
+  it when you change the case's `domain`.
+- **pypalm** copies only the `_p3d`/`_topo`/`_static`/`_dynamic` files of
+  `case_dir`.
+
+`tests/scripts/test_configs.py` checks that every path a case points at exists.
+
+`scripts/tools/prepare_case_stl.py` turns a raw buildings + ground export into
+a case STL (it made the Barcelona one); `scripts/tools/benchmark_geometry.py`
+generates Xie & Castro style layouts. The Barcelona files (~70 MB) are
+committed as plain files.
+
+## UrbanTALES geometries
 
 Urban building geometries harvested from the **UrbanTALES** dataset and
 converted into the domain-frame `.stl` contract that every backend in this repo
-consumes (pylbm, uDALES, PALM). Intended as multi-geometry input for neural
-surrogate training (see `docs/plans/geometry_generation_plan.md`).
+consumes (pylbm, uDALES, PALM). They are the STL pool for the random-geometry
+surrogate training data (`configs/surrogate/generate_data.yaml`).
 
 UrbanTALES is a large-eddy-simulation study of 538 urban configurations run in
 PALM. Each case ships a `*_topo` file: a 2-D building-height raster in plain-text
@@ -23,36 +68,26 @@ data is **time-averaged mean fields**, not time-resolved trajectories, so it is
 not usable as autoregressive-surrogate training data — see the evaluation notes
 for that discussion.
 
-## Layout
+`urbantales/raw/` and `urbantales/processed/` are gitignored: the data is
+bulky (~1 GB total) and fully regenerable from the two scripts below.
 
-```
-examples/geometries/
-├── download_urbantales_geometries.py   # fetch the *_topo rasters
-├── rasters_to_stl.py                   # convert rasters -> domain-frame STL
-├── raw/          {idealized,realistic}/  *_topo rasters + metadata.json   (gitignored)
-└── processed/    {idealized,realistic}/  *.stl + manifest.csv             (gitignored)
-```
-
-`raw/` and `processed/` are gitignored — the data is bulky (~1 GB total) and
-fully regenerable from the two scripts below.
-
-## Reproduce
+### Reproduce
 
 Run inside the `dev` Pixi env (both scripts need no arguments for the full set):
 
 ```bash
-# 1. download the height rasters into raw/{idealized,realistic}
-python examples/geometries/download_urbantales_geometries.py
+# 1. download the height rasters into urbantales/raw/{idealized,realistic}
+python scripts/tools/download_urbantales_geometries.py
 
-# 2. convert them into watertight STLs in processed/{idealized,realistic}
-pixi run -e dev python examples/geometries/rasters_to_stl.py
+# 2. convert them into watertight STLs in urbantales/processed/{idealized,realistic}
+pixi run -e dev python scripts/tools/rasters_to_stl.py
 ```
 
 Both are stdlib-friendly, parallel, and resumable (skip files already present;
 `--force` to overwrite). Useful flags: `--set {idealized,realistic}`,
 `--workers N`. See each script's `--help`.
 
-## Mesh contract & design notes
+### Mesh contract & design notes
 
 Each raster is meshed by greedy-decomposing every height level into rectangles,
 extruding each to a box from z=0 to its height, and **boolean-unioning** the
@@ -78,7 +113,7 @@ z_max, plan-area density λ_p, and face count. `raw/**/metadata.json` carries th
 upstream morphology (config, wind direction, height stats; city/country/lat-lon
 for realistic cases).
 
-## Provenance, license & citation
+### Provenance, license & citation
 
 - **Data platform:** <https://urbantales.vercel.app/> (files served from a
   Nextcloud instance; `/api/metadata_{ideal,rea}` are the manifests the

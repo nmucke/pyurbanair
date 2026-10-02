@@ -63,7 +63,6 @@ def create_new_forward_model(
     # Update directory paths
     new_forward_model.dirs = get_lbm_directory_paths(
         temp_dir=forward_model.dirs.temp_dir,
-        case_dir=forward_model.dirs.case_dir,
         experiment_name=experiment_name,
         experiment_base_dir=new_experiment_base_dir,
         results_dir=forward_model.dirs.results_dir,

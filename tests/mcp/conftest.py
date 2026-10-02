@@ -38,14 +38,9 @@ def checkout(tmp_path: Path) -> Path:
         relative = Path("libs") / backend / "src" / backend / "utils" / filename
         (root / relative).parent.mkdir(parents=True)
         shutil.copyfile(REPO / relative, root / relative)
-    for relative_case in (
-        "examples/udales/xie_and_castro/namoptions.300",
-        "examples/palm/xie_and_castro/_p3d",
-    ):
-        destination = root / relative_case
-        destination.parent.mkdir(parents=True)
-        shutil.copyfile(REPO / relative_case, destination)
-    geometry = root / "examples/xie_and_castro/xie_castro_2008_STL.stl"
-    geometry.parent.mkdir(parents=True)
-    geometry.write_text("solid test\nendsolid test\n")
+    case = Path("geometries/xie_and_castro")
+    (root / case).mkdir(parents=True)
+    for name in ("namoptions.300", "_p3d"):
+        shutil.copyfile(REPO / case / name, root / case / name)
+    (root / case / "xie_castro_2008_STL.stl").write_text("solid test\nendsolid test\n")
     return root

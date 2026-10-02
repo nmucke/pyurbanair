@@ -11,7 +11,7 @@ CFD backends consume (flat ground at z=0, no overhangs).
 This script pulls ONLY the ``*_topo`` geometry files (~350 MB for all 538
 cases), not the multi-TB flow fields. Output layout::
 
-    examples/geometries/raw/
+    geometries/urbantales/raw/
         idealized/     224 cases  (aligned/staggered arrays)
         realistic/     314 cases  (real OSM-derived neighbourhoods)
         <set>/metadata.json        per-case morphology (lambda_p, heights, wind, city)
@@ -24,10 +24,10 @@ Data platform: https://urbantales.vercel.app/   (files served from a Nextcloud
 instance; the two /api/metadata_* endpoints are the machine-readable manifests).
 
 Usage:
-    python download_urbantales_geometries.py                 # download everything
-    python download_urbantales_geometries.py --set idealized # one set only
-    python download_urbantales_geometries.py --workers 16    # tune concurrency
-    python download_urbantales_geometries.py --force         # re-download existing
+    python scripts/tools/download_urbantales_geometries.py                 # download everything
+    python scripts/tools/download_urbantales_geometries.py --set idealized # one set only
+    python scripts/tools/download_urbantales_geometries.py --workers 16    # tune concurrency
+    python scripts/tools/download_urbantales_geometries.py --force         # re-download existing
 
 Stdlib only -- no pip installs -- so it runs on any machine with Python 3.8+.
 """
@@ -147,8 +147,8 @@ def main() -> int:
     ap.add_argument(
         "--out",
         type=Path,
-        default=Path(__file__).resolve().parent / "raw",
-        help="output root (default: <script dir>/raw)",
+        default=Path(__file__).resolve().parents[2] / "geometries/urbantales/raw",
+        help="output root (default: geometries/urbantales/raw)",
     )
     ap.add_argument(
         "--workers", type=int, default=8, help="concurrent downloads (default: 8)"

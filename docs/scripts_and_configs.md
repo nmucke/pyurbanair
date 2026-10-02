@@ -76,9 +76,9 @@ configs/
 ### 1.2 `case/`
 
 A case is self-contained (`# @package _global_`): `case_name`, `domain`
-(`nx/ny/nz`, `bounds`), `geometry` (`stl_path`, `udales_case_dir`,
-`palm_case_dir`), `obs` (assimilation sensors `x/y/z_points`, held-out
-`validation_*_points`, `states`) and `time` (`simulation_time` per window,
+(`nx/ny/nz`, `bounds`), `geometry` (`case_dir`, the case's
+[geometries/](../geometries/) folder, and `stl_path` inside it), `obs`
+(assimilation sensors `x/y/z_points`, held-out `validation_*_points`, `states`) and `time` (`simulation_time` per window,
 `output_frequency`, `spinup_time`, `seconds_per_knot`). Keep `nx`/`ny` even
 (PALM's FFT pressure solver rejects odd cyclic dimensions). Add a case by
 copying one and adjusting.
@@ -264,8 +264,9 @@ post-processing on that dir. Run them inside the dev environment.
 
 ### 2.5 Other
 
-- `scripts/tools/` — case setup CLIs: `prepare_case_stl.py`,
-  `preprocess_udales_geometry.py`.
+- `scripts/tools/` — geometry CLIs: `prepare_case_stl.py`,
+  `preprocess_udales_geometry.py`, `benchmark_geometry.py`,
+  `download_urbantales_geometries.py`, `rasters_to_stl.py`.
 - `scripts/setup_dev_env.sh` — behind `pixi run setup-dev`.
 - `scripts/start_mcp` — MCP server launcher; the server runs `run_forward.py`
   on `configs/forward.yaml` (see [mcp.md](mcp.md)).

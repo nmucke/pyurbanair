@@ -73,6 +73,8 @@ scripts/     the scripts you run (run_forward, run_smoother, run_filtering,
              run_hybrid, compute_metrics, visualize_*), surrogate/ and tools/;
              their shared helpers are in scripts/utils/
 workflows/   shell pipelines: a run followed by its post-processing
+geometries/  case inputs, one folder per case (STL, uDALES and PALM
+             templates), plus the UrbanTALES training-geometry templates
 src/         pyurbanair: the base classes every backend inherits
 libs/        pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
              evaluation, visualization, mcp-server

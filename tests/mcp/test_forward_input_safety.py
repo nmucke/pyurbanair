@@ -49,7 +49,7 @@ def test_symlink_alias_to_store_rejected_before_fingerprint(
 
 
 def test_case_directory_symlink_loop_is_rejected(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     (case / "loop").symlink_to(case, target_is_directory=True)
     service = PreparationService(checkout, checkout.parent / "store")
     with pytest.raises(ValueError, match="case_dir contains a symlink: loop"):
@@ -58,19 +58,20 @@ def test_case_directory_symlink_loop_is_rejected(checkout: Path) -> None:
 
 
 def test_repo_file_symlink_stages_as_regular_file(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
-    geometry = checkout / "examples/xie_and_castro/xie_castro_2008_STL.stl"
-    (case / geometry.name).symlink_to(Path("../../xie_and_castro") / geometry.name)
+    case = checkout / "geometries/xie_and_castro"
+    shared = checkout / "geometries/shared.stl"
+    shared.write_text("solid shared\nendsolid shared\n")
+    (case / "linked.stl").symlink_to(Path("..") / shared.name)
     service = PreparationService(checkout, checkout.parent / "store")
     plan = service.prepare()
     staged = Path(plan["config"]["model"]["forward_model"]["case_dir"])
-    assert not (staged / geometry.name).is_symlink()
-    assert (staged / geometry.name).read_bytes() == geometry.read_bytes()
+    assert not (staged / "linked.stl").is_symlink()
+    assert (staged / "linked.stl").read_bytes() == shared.read_bytes()
     assert service.verify(plan["plan_id"])["digest"] == plan["digest"]
 
 
 def test_case_rejects_file_symlink_outside_checkout(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     outside = checkout.parent / "outside.txt"
     outside.write_text("private")
     (case / "outside.txt").symlink_to(outside)
@@ -79,7 +80,7 @@ def test_case_rejects_file_symlink_outside_checkout(checkout: Path) -> None:
 
 
 def test_case_rejects_fifo_before_copy(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     os.mkfifo(case / "pipe")
     service = PreparationService(checkout, checkout.parent / "store")
     with pytest.raises(ValueError, match="non-regular entry: pipe"):
@@ -90,7 +91,7 @@ def test_case_rejects_fifo_before_copy(checkout: Path) -> None:
 def test_replaced_subdirectory_cannot_redirect_case_copy(
     checkout: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     nested = case / "nested"
     nested.mkdir()
     (nested / "input.txt").write_text("inside")
@@ -123,7 +124,7 @@ def test_replaced_subdirectory_cannot_redirect_case_copy(
 def test_case_limits_reject_before_copy(
     checkout: Path, limit: str, amount: int
 ) -> None:
-    (checkout / "examples/udales/xie_and_castro/second.txt").write_text("second")
+    (checkout / "geometries/xie_and_castro/second.txt").write_text("second")
     service = PreparationService(checkout, checkout.parent / "store", {limit: amount})
     with pytest.raises(ValueError, match=limit):
         service.prepare()
@@ -131,7 +132,7 @@ def test_case_limits_reject_before_copy(
 
 
 def test_regular_case_stages_and_verifies(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     (case / "empty").mkdir()
     original = case / "namoptions.300"
     original.chmod(0o750)
@@ -145,9 +146,11 @@ def test_regular_case_stages_and_verifies(checkout: Path) -> None:
 
 
 def test_verify_reapplies_case_traversal_limit(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     service = PreparationService(
-        checkout, checkout.parent / "store", {"max_case_input_entries": 1}
+        checkout,
+        checkout.parent / "store",
+        {"max_case_input_entries": len(list(case.iterdir()))},
     )
     plan = service.prepare()
     (case / "added.txt").write_text("changed")
@@ -156,7 +159,7 @@ def test_verify_reapplies_case_traversal_limit(checkout: Path) -> None:
 
 
 def test_verify_rejects_symlink_added_to_case(checkout: Path) -> None:
-    case = checkout / "examples/udales/xie_and_castro"
+    case = checkout / "geometries/xie_and_castro"
     service = PreparationService(checkout, checkout.parent / "store")
     plan = service.prepare()
     (case / "loop").symlink_to(case, target_is_directory=True)

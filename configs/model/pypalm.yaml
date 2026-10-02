@@ -5,8 +5,8 @@ compile: false
 forward_model:
   _target_: pypalm.forward_model.ForwardModel
   _convert_: all
-  # Experiment dir + STL geometry follow the selected `case`.
-  case_dir: ${geometry.palm_case_dir}
+  # Case folder (_p3d) + STL geometry follow the selected `case`.
+  case_dir: ${geometry.case_dir}
   stl_path: ${geometry.stl_path}
   # Base scratch dir shared across models; pypalm nests <temp_dir>/experiment/urban_run.
   temp_dir: ${paths.experiment_dir}

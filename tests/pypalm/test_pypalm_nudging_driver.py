@@ -209,11 +209,11 @@ def test_periodic_nudging_requires_bounds_and_nz(tmp_path: pathlib.Path) -> None
 
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), case_dir / "_p3d")
+    shutil.copy2(pathlib.Path("geometries/xie_and_castro/_p3d"), case_dir / "_p3d")
 
     fm = ForwardModel(
         case_dir=case_dir,
-        stl_path="examples/xie_and_castro/xie_castro_2008_STL.stl",
+        stl_path="geometries/xie_and_castro/xie_castro_2008_STL.stl",
         boundary_condition="periodic",
         temp_dir=tmp_path / "exp",
         verbose=False,

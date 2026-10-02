@@ -120,7 +120,6 @@ class ForwardModel(BaseForwardModel):
                 if temp_dir is not None
                 else pathlib.Path(".temp")
             ),
-            case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
         )
 

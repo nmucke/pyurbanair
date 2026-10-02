@@ -26,7 +26,7 @@ from pylbm.utils.build_tree_utils import MIRROR_MANIFEST_NAME, materialize_build
 from pylbm.utils.forward_model_utils import create_new_forward_model
 from pylbm.utils.mod_dimensions_utils import ModDimensions
 
-STL_PATH = pathlib.Path("examples/xie_and_castro/xie_castro_2008_STL.stl")
+STL_PATH = pathlib.Path("geometries/xie_and_castro/xie_castro_2008_STL.stl")
 
 # LBM_PATH is Optional at the module level (it stays None when .gitmodules cannot
 # be read). Every test here needs the real submodule, so resolve it once.

@@ -13,9 +13,9 @@ domain:
   - - 0.0
     - 10.0
 geometry:
-  stl_path: examples/xie_and_castro/xie_castro_2008_STL.stl
-  udales_case_dir: examples/udales/xie_and_castro
-  palm_case_dir: examples/palm/xie_and_castro
+  stl_path: geometries/xie_and_castro/xie_castro_2008_STL.stl
+  udales_case_dir: geometries/xie_and_castro
+  palm_case_dir: geometries/xie_and_castro
 obs:
   mode: points
   x_points:

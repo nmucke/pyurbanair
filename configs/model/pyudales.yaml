@@ -4,8 +4,8 @@ solver_name: udales
 forward_model:
   _target_: pyudales.forward_model.ForwardModel
   _convert_: all
-  # Experiment dir (holds namoptions + STL) follows the selected `case`.
-  case_dir: ${geometry.udales_case_dir}
+  # Case folder (holds namoptions + STL) follows the selected `case`.
+  case_dir: ${geometry.case_dir}
   # Optional: reuse precomputed IBM geometry (solid_*/fluid_boundary_*/
   # facet_sections_*) instead of re-running the expensive STL->IBM Fortran step
   # on every prepare. Defaults to null (generate from the STL) for any case that

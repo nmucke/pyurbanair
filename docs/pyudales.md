@@ -57,7 +57,7 @@ Key constructor arguments (all wired from
 
 | Argument | Purpose |
 |---|---|
-| `case_dir` | Source of the namoptions / STL template files (from `${geometry.udales_case_dir}`) |
+| `case_dir` | Case folder whose files (namoptions, the STL its `stl_file` names) are copied into the run (from `${geometry.case_dir}`) |
 | `experiment_name` | uDALES experiment number string (default `"999"`) |
 | `ncpu` | Total MPI ranks; always decomposed as `nprocx=ncpu, nprocy=1` (x-strips only) |
 | `simulation_time` | Window length in seconds; written to `&RUN runtime` |
@@ -822,7 +822,7 @@ solver_name: udales          # selects dim_mapping in ObservationOperator
 
 forward_model:
   _target_: pyudales.forward_model.ForwardModel
-  case_dir: ${geometry.udales_case_dir}
+  case_dir: ${geometry.case_dir}
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"

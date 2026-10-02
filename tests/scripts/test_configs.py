@@ -4,11 +4,12 @@ test overlays make it tiny."""
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 from omegaconf import OmegaConf
 
-from tests.conftest import CONFIGS, TEST_CONFIGS, compose, load_script
+from tests.conftest import CONFIGS, REPO, TEST_CONFIGS, compose, load_script
 
 ENTRY_POINTS = [
     "forward",
@@ -46,6 +47,33 @@ def test_test_overlay_is_tiny(name: str, tmp_path: pathlib.Path) -> None:
     cfg = compose(name, overlay, root=tmp_path)
     assert (cfg.domain.nx, cfg.domain.ny, cfg.domain.nz) == (20, 20, 4)
     assert cfg.ensemble.ensemble_size == 2
+
+
+@pytest.mark.parametrize("case", OPTIONS["case"])  # type: ignore[misc]
+def test_case_geometry_paths_exist(case: str, tmp_path: pathlib.Path) -> None:
+    geometry = compose("forward", f"case={case}", root=tmp_path).geometry
+    case_dir = REPO / geometry.case_dir
+    assert (case_dir / "namoptions.300").is_file()
+    assert (case_dir / "_p3d").is_file()
+    assert (REPO / geometry.stl_path).is_file()
+    # uDALES reads the STL that namoptions names from its case folder.
+    name = re.escape(pathlib.Path(geometry.stl_path).name)
+    namoptions = (case_dir / "namoptions.300").read_text()
+    assert re.search(rf"^\s*stl_file\s*=\s*{name}\s*$", namoptions, re.M)
+    if geometry.get("udales_precomputed_geom_dir"):
+        assert (
+            REPO / geometry.udales_precomputed_geom_dir / "geom_meta.json"
+        ).is_file()
+
+
+@pytest.mark.parametrize("source", ["idealized", "realistic"])  # type: ignore[misc]
+def test_random_geometry_templates_exist(source: str, tmp_path: pathlib.Path) -> None:
+    cfg = compose(
+        "surrogate/generate_data", f"data.geometry.source={source}", root=tmp_path
+    )
+    case_dir = REPO / cfg.data.geometry.case_dir
+    assert (case_dir / "namoptions.300").is_file()
+    assert (case_dir / "_p3d").is_file()
 
 
 # Workflow -> overrides that make the production assimilation config valid for it.
