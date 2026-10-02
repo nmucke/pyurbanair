@@ -1,0 +1,170 @@
+# Handover: make everything run reliably on Linux and macOS
+
+**For:** the agent doing this work. **Branch:** create one from
+`feat/simplified-configs-and-scripts` and open the PR back into that branch
+(not into `main`). Read `AGENTS.md` first; its rules apply. Resolves issue #148
+(`gh issue view 148`); read it.
+
+## Goal
+
+We claim to support the platforms in `pyproject.toml`: **linux-64** and
+**osx-arm64** (Windows and other architectures are out of scope). On a fresh
+clone of either, this must work with no manual environment setup:
+
+```bash
+pixi run setup-dev
+pixi run -e dev py.test            # every test, nothing deselected for the platform
+pixi run -e dev test-integration   # real uDALES, LBM and PALM runs
+pixi install -e mcp && pixi run --locked -e mcp python -m pytest tests/mcp -m ''
+```
+
+It must also be stable: the same result on every run, and clear errors when
+something is genuinely missing. Today neither platform fully meets this, and no
+CI job builds or runs a solver.
+
+## Known problems
+
+Reproduce each one before fixing it; some may already be fixed.
+
+**From issue #148 (local Linux):**
+- **NetCDF/FFTW paths are empty.**
+  `libs/pyudales/shell_scripts/build_udales_macos.sh` passes
+  `NETCDF_DIR`, `NETCDF_FORTRAN_DIR`, `FFTW_DOUBLE_LIB` and `FFTW_FLOAT_LIB` to
+  CMake, defaulting to empty. Only the HPC activation scripts
+  (`activation_scripts/*`) set them, so on a workstation CMake fails to find
+  NetCDF-Fortran (`NETCDF_HAS_INTERFACES`) or picks up the system FFTW. The
+  libraries are in the pixi env (`$CONDA_PREFIX`).
+- **Build scripts named `*_macos.sh`** (`build_udales_macos.sh`,
+  `build_preprocessing_macos.sh`) are the only path used on Linux too.
+- **Failed builds aren't retried.** That was the old `CMakeCache.txt` check.
+  uDALES now builds into a managed cache (`libs/pyudales/src/pyudales/utils/solver_build.py`,
+  `.cache/pyudales/<hash>/`). Its `_valid_build` checks the binary, the hashes
+  and `capability.json`, so this may be fixed: verify that a failed configure
+  or compile surfaces a clear error and is retried on the next run.
+- **Workaround branch:** `origin/feat/local-forward-mcp` has a local workaround
+  (paths defaulting to `$CONDA_PREFIX`, checking for the binary). Use it as a
+  reference, not as the design.
+
+**Seen on macOS (osx-arm64) during the refactor:**
+- **LBM build:** `prepare_compile` failed (SIGABRT from the compiled binary,
+  2026-08), and the LBM build has never been confirmed working on this Mac.
+  Note: calling `.pixi/envs/dev/bin/python` directly instead of `pixi run`
+  skips activation and fails to link (`ld: library 'System' not found`); that
+  one is expected.
+- **The discrepancy kernel test**
+  (`tests/pyudales/test_udales_discrepancy_native.py::test_native_discrepancy_kernel`)
+  fails to compile its kernel with the conda gfortran (`-isysroot` +
+  `-ffpe-trap` flags). It fails on a clean checkout too.
+- **`import torch`** aborts on a duplicate OpenMP runtime unless
+  `KMP_DUPLICATE_LIB_OK=TRUE` (torch's bundled libomp vs the conda env's). That
+  setting is a workaround, not a fix.
+- **Flaky uDALES integration tests:**
+  - `test_smoother_on_udales`, the zero-coefficient MPI-rank agreement test,
+    and a different 2-rank test on each run;
+  - occasionally `test_solver[pyudales_tiny]` (one member exits non-zero).
+  - They fail on the base branch too, and sometimes pass alone.
+  - Suspects: members near the `c_vreman` stability floor (`sgs_constant`
+    0.24), `prterun --oversubscribe` under load, and tolerances too tight for
+    multi-rank runs.
+  - Two identical tiny uDALES runs also don't give byte-identical outputs, and
+    the STL→IBM preprocessing writes different `facet_sections_*`/`nfctsecs_*`
+    each time. Find out whether that's expected (MPI/float order) or a bug.
+- **Orphaned solver processes:** a cancelled or killed run once left a
+  `prterun … u-dales` process running for hours. Check that cancellation,
+  timeouts and test teardown kill the whole process tree.
+
+**Not covered anywhere:**
+- **CI is Linux-only** (`ubuntu-latest`) and runs only the default suite. No
+  solver is built or run in CI on either platform.
+- **No per-platform setup docs,** and `AGENTS.md`'s "Environment notes" only
+  list workarounds.
+
+## Scope
+
+1. **One place sets the local build environment.**
+   - Point NetCDF/FFTW (and anything else the builds need) at the pixi env on
+     both platforms. Do it either in a pixi activation script for the local
+     features, or as defaults inside the build scripts/`solver_build.py`.
+     Choose one; don't do both.
+   - The HPC (`snellius`, `delftblue`) and `cuda` activation must keep working
+     unchanged: only fill in values that are unset.
+2. **Platform-neutral build scripts.** Rename `*_macos.sh` (e.g.
+   `build_udales.sh`, `build_preprocessing.sh`) and update their callers
+   (`solver_build.py`, tests, docs). Branch on `uname` only where behaviour
+   truly differs (`sed -i ''`, Apple `ld`, the SDK).
+3. **Builds are correct and loud.**
+   - "Built" means the artifacts exist and verify.
+   - A failed configure or compile raises with the log tail, and the next run
+     retries.
+   - Apply the same to pylbm (`libs/pylbm/src/pylbm/utils/compile_utils.py`) and
+     pypalm (`libs/pypalm/shell_scripts/install_palm.sh` and its Python caller).
+4. **Fix the macOS failures above** at their cause:
+   - **LBM build:** make it work on osx-arm64.
+   - **Discrepancy kernel test:** make it compile with the conda toolchain; the
+     fix is in the test's compile command, not the vendored source.
+   - **OpenMP clash:** resolve it in the environment (e.g. a single OpenMP
+     runtime, via a pin or activation), so `KMP_DUPLICATE_LIB_OK` isn't needed.
+     If no clean fix exists, set the variable once in pixi activation for
+     osx-arm64 and explain why.
+5. **Make the uDALES integration tests deterministic.** Find the cause of the
+   flakiness:
+   - **Tiny runs:** give the test runs settings that are safely stable (e.g.
+     `sgs_constant` well above the `c_vreman` floor in the tiny overlays).
+   - **Multi-rank tolerances:** justify them from the physics/precision, not
+     by retrying.
+   - **Process cleanup:** make sure no stray solver processes survive a test.
+   - **Retries:** never add a retry or `flaky` marker to hide a failure.
+6. **CI on both platforms.**
+   - Add a `macos-14` (osx-arm64) runner alongside `ubuntu-latest` for the
+     default suite. A matrix in the shared setup is fine if it stays simple.
+   - Add one integration workflow that builds and runs the tiny uDALES, LBM and
+     PALM tests on both platforms. It's slow, so trigger it on PRs touching
+     `libs/py*`, the build scripts or `activation_scripts/`, plus nightly and
+     on demand.
+   - Use the existing setup action and pixi cache.
+7. **Docs:**
+   - per-platform setup notes in `README.md` (install) and the backend docs
+     (`docs/pyudales.md`, `docs/pylbm.md`, `docs/pypalm.md`);
+   - update `AGENTS.md` "Environment notes": remove each workaround you
+     eliminate, and keep the section short.
+
+## Constraints
+
+- **Lean and simple:** the smallest change that makes each problem go away,
+  in one obvious place. No new config knobs, wrapper layers or per-platform
+  copies of scripts.
+- **Vendored code is upstream:** `libs/pyudales/u-dales/`,
+  `libs/pypalm/palm_model_system/` and `libs/pylbm/LBM/` aren't edited. Fix
+  things in the wrappers, build scripts, activation or pixi. uDALES has a
+  sanctioned patch mechanism (`solver_extensions/`); if an upstream change is
+  truly unavoidable, ask the user first.
+- **No-op elsewhere:** HPC and GPU environments behave exactly as before, and
+  default solver numerics stay identical (check `solver_build.py`'s
+  environment identity: changing build flags invalidates cached builds, which
+  is fine but should be intentional).
+- **Testing locally:**
+  - This machine is osx-arm64; linux-64 is verified through CI.
+  - Run solver tests one at a time, and check `pgrep -fl "pytest|u-dales|boltzmann"`
+    first: other agents may be testing on this machine.
+  - Run the integration suite at least twice to show it's stable.
+- **Coordination:** the `tests/legacy/` migration PR
+  (`docs/plans/legacy_tests_migration_handover.md`) may run in parallel and
+  touches some of the same test files (`tests/pyudales/*`, `tests/pylbm/*`,
+  `tests/pypalm/*`). Keep test edits minimal; whichever merges second rebases.
+- **Untouchable files:** never edit `archive/`, or commit, stash or reset
+  `configs/*.yaml` edits you didn't make.
+
+## Done when
+
+- [ ] On osx-arm64 (locally) and linux-64 (CI), a fresh clone passes
+  `pixi run setup-dev`, `py.test`, `test-integration` and the MCP suite, twice
+  in a row, with no platform-specific deselects or workaround variables.
+- [ ] Issue #148's checklist is done (link the PR to it).
+- [ ] No `*_macos.sh` names remain. Build failures raise clearly and are
+  retried. Local NetCDF/FFTW come from the pixi env.
+- [ ] CI runs the default suite on both platforms, plus an integration workflow
+  (both platforms) that builds all three solvers.
+- [ ] `AGENTS.md`, `README.md` and the backend docs describe per-platform
+  setup, and obsolete workarounds are removed.
+- [ ] The PR lists each problem above with its root cause and fix, or why it
+  was out of reach.
