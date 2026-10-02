@@ -105,16 +105,18 @@ The excluded paths are the archive and the vendored solver sources (their own
 - **Libraries:** `libs/pylbm/src/pylbm/forward_model.py:123`; grep the other
   `libs/*/src`.
 - **Tests:** `tests/pyurbanair/test_model_error_parameters.py`,
-  `tests/pyurbanair/test_forward_preparation.py`,
-  `tests/pyurbanair/test_forward_input_safety.py`,
+  `tests/mcp/conftest.py` (its `checkout` fixture copies the case inputs by
+  path), `tests/mcp/test_forward_preparation.py`,
+  `tests/mcp/test_forward_input_safety.py`,
   `tests/pypalm/test_palm_inlet_turbulence.py`,
   `tests/pypalm/test_pypalm_nudging_driver.py`,
   `tests/pylbm/test_pylbm_build_tree.py`.
 - **Other:** `.gitignore` (lines ~35–43); `pyproject.toml` (the
   `benchmark_geometry` feature, if it names a path);
-  `job_scripts/delftblue/pypalm/{m0_capture,m1_direct_run}.py`.
-- **Docs:** `README.md` (layout section), `AGENTS.md` / `AGENTS.md` if they
-  mention it, `docs/codebase_guide.md`, the backend docs, and the moved
+  (`job_scripts/` was ported and doesn't hard-code geometry paths; check
+  anyway.)
+- **Docs:** `README.md` (layout section), `AGENTS.md` if it
+  mentions it, `docs/codebase_guide.md`, the backend docs, and the moved
   `geometries/` README.
 
 Add a guard test in `tests/scripts/test_configs.py`: for every case, every
@@ -123,10 +125,18 @@ from breaking the configs silently.
 
 ## Coordination
 
-The MCP port (`docs/plans/mcp_server_refactor_handover.md`) runs in parallel on
-another branch off the same base. Both PRs may touch `docs/codebase_guide.md`,
-`README.md` and `tests/pyurbanair/`. Keep your edits there small and focused,
-so whichever merges second rebases easily.
+The MCP port (#154) and the job-scripts refactor (#155) are already merged
+into the base branch. The docs cleanup (`docs/plans/docs_cleanup_handover.md`)
+comes after this PR. Keep your doc edits small and factual (new paths only),
+and leave restructuring the docs to that PR.
+
+**The MCP server uses these paths too.** Its job preparation
+(`libs/mcp-server/src/mcp_server/jobs/preparation.py`, `_stage_case_directory`)
+copies the uDALES/PALM case templates named by the case config into each run.
+It reads the paths from the config, so it should keep working. Verify it with
+`pixi run --locked -e mcp python -m pytest tests/mcp`, and with one MCP
+`prepare_forward_run` on `case=xie_and_castro` and `case=barcelona` (or the
+equivalent preparation test).
 
 ## Constraints and gotchas
 
@@ -145,8 +155,9 @@ so whichever merges second rebases easily.
   - LBM compilation aborts, so pylbm runs only on CI;
   - `tests/pyudales/test_udales_discrepancy_native.py` fails to compile its
     kernel.
-- **MCP tests are skipped:** some test modules carry `pytest.mark.skip("MCP
-  port pending ...")`; leave the markers, but update their paths.
+- **Verify in both envs:** run `pixi run -e dev py.test` and `pixi run
+  --locked -e mcp python -m pytest tests/mcp`. Changes to `configs/` trigger
+  the MCP workflow in CI too.
 - **Local integration runs:** uDALES works locally. Check at least
   `pixi run -e dev test-integration` for the uDALES runs on the moved case
   templates, and one uDALES forward run on `case=barcelona` (it uses the
