@@ -50,23 +50,25 @@ keeping many small files.
 
 | Doc | Notes |
 |---|---|
-| `codebase_guide.md` (849 lines) | orientation and "add a new X" recipes. Stale: `BaseRolloutForwardModel` (deleted), the `hydra_helpers` function list (most deleted), `extract_2d_slice` (deleted), links into `temp/`. |
-| `scripts_and_configs.md` (279) | current. It overlaps `configs/README.md` on config keys: make one the source of truth (suggest `configs/README.md` for keys and overrides, linked from here). There is no workflows doc yet: add `workflows/` here or as a short section. |
+| `codebase_guide.md` (857 lines) | orientation and "add a new X" recipes. Stale: `BaseRolloutForwardModel` (deleted), the `hydra_helpers` function list (most deleted), `extract_2d_slice` (deleted), links into `temp/`. |
+| `scripts_and_configs.md` (284) | current. It overlaps `configs/README.md` on config keys: make one the source of truth (suggest `configs/README.md` for keys and overrides, linked from here). There is no workflows doc yet: add `workflows/` here or as a short section. |
 | `data_assimilation.md` (1441) | Stale mentions: `create_observation_operator` (deleted), old `filtering.*` key names in §8, `conf/` paths. Consider merging in `ensemble_transform_filters.md` (161, reference material). |
-| `neural_surrogates.md` (2888) | Part A (data generation) and the CLI/config sections (§1–5, §6, §10, §11, §11b, §19, §23, §29, §32, §38, §39, Part D, §40) describe the archived `scripts/neural_surrogate/*` and `conf/neural_surrogate/*`. Rewrite them against `scripts/surrogate/*` + `configs/surrogate/*`. Keep the library reference parts. |
+| `neural_surrogates.md` (2886) | Part A (data generation, including the training-data sharding section around line 220, which still describes the old plan/simulate/finalize stages) and the CLI/config sections (§1–5, §6, §10, §11, §11b, §19, §23, §29, §32, §38, §39, Part D, §40) describe the archived `scripts/neural_surrogate/*` and `conf/neural_surrogate/*`. Rewrite them against `scripts/surrogate/*` + `configs/surrogate/*`. Keep the library reference parts. |
 | `pylbm.md` (753), `pyudales.md` (939), `pypalm.md` (661) | Mostly current. Stale: "Called by `BaseRolloutForwardModel`" (pylbm.md:171, pyudales.md:898), archived paths, `temp/` links. |
 | *(missing)* | **`evaluation`** (`libs/evaluation`) has no doc: add a short one. |
-| `mcp.md` (256), `forward_visualization.md` (208) | owned by the MCP-port PR (`plans/mcp_server_refactor_handover.md`). Don't rewrite them here; only fix links. |
-| `job_scripts.md` (610) | owned by the job-scripts PR (`plans/job_scripts_refactor_handover.md`). Don't rewrite it here. |
-| `config_setup_spec.md` (151) | the old-to-new config mapping. Done, but the MCP handover uses it: archive it after the MCP PR, or keep it until then and say so. |
+| `mcp.md` (269), `visualization.md` (213), `job_scripts.md` (108) | freshly rewritten by the merged MCP (#154) and job-scripts (#155) PRs: current. Keep them; only fix links and consistency. |
+| `geometries/README.md` (outside docs/) | written by the geometries PR (#156): current. Link it from the doc map. |
+| `config_setup_spec.md` (151) | the old-to-new config mapping. The refactor and the PRs that used it are merged → **archive/**. |
 
 **Plans, research and archive candidates:**
 
 | Doc | First guess |
 |---|---|
-| `plans/*_handover.md` (MCP, geometries, job scripts, this one) | **plans/**: open |
+| `plans/{mcp_server_refactor,job_scripts_refactor,geometries_cleanup}_handover.md` | done (#154, #155, #156 merged) → **archive/** |
+| `plans/docs_cleanup_handover.md` (this one) | stays in **plans/** while you work; move it to **archive/** as the PR's last step |
+| `plans/local_forward_mcp.md`, `plans/local_forward_visualization.md` | the original MCP/viewer plans, implemented → **archive/** |
 | other `plans/*.md` and `plans/esmda_evaluation/*` | check each: implemented → **archive/**; still open → stay. E.g. `udales_inlet_turbulence.md` says "IMPLEMENTED"; `config_structure_proposal.md` is implemented. |
-| `plans/references/forward_viewer.original.html.txt` | MCP-related; archive, or leave for the MCP PR |
+| `plans/references/forward_viewer.original.html.txt` | reference for the implemented viewer → **archive/** |
 | `neural_surrogate_plans/00–07` | 01–03 and 07 implemented → **archive/**; the open proposals (04, 05, 06) → **plans/**; `06_implementation_review.md` → research or archive |
 | `temp/*` (5 files) | the benchmarks and reviews → **research/** or **archive/**; `rank_histogram_math.md` → research (or fold into the evaluation doc) |
 | `da_review_2026-09.md` + `da_review_2026-09/` (5) | dated review → **research/** (keep as one folder) or **archive/** |
@@ -105,16 +107,12 @@ keeping many small files.
 
 ## Coordination
 
-Three other PRs run in parallel off the same base and also touch docs:
-
-- the MCP port: `mcp.md`, `forward_visualization.md`, `codebase_guide.md`;
-- `examples/` → `geometries/`: `codebase_guide.md`, backend docs, `README.md`;
-- `job_scripts/`: `job_scripts.md`, `README.md`, `AGENTS.md`.
-
-Don't rewrite the docs another PR owns; only move or link them. Keep your
-edits to shared docs (`README.md`, `AGENTS.md`, `codebase_guide.md`) focused,
-so whichever PR merges later rebases easily. Leave the open handovers in
-`plans/`.
+This is the last PR of the refactor: the MCP port (#154), the job scripts
+(#155) and `examples/` → `geometries/` (#156) are merged, so no other PR touches
+docs now and every doc is yours. The docs those PRs wrote (`mcp.md`,
+`visualization.md`, `job_scripts.md`, `geometries/README.md`, and their edits to
+`README.md`, `AGENTS.md`, `codebase_guide.md`) describe the current code:
+build on them rather than rewriting them.
 
 ## Constraints
 
