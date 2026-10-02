@@ -3,16 +3,16 @@
 **Status: actionable implementation plan (2026-07-09).** This is the merged,
 hand-off-ready successor to two documents that are both kept for the record:
 
-- [Plan 05](05_latent_space_pretraining_extensions.md) — the original
+- [Plan 05](rejected/surrogate_latent_space_pretraining_extensions.md) — the original
   literature-driven extension plan (JEPA family, masking, aux losses). Its
   research basis, citations and anti-collapse recipes are reused here; read
   its Part I–II for the *why* behind several terms below.
-- [Plan 06](06_geometry_conditioned_forecast_pretraining.md) — the critique
+- [Plan 06](rejected/surrogate_geometry_conditioned_forecast_pretraining.md) — the critique
   of plan 05 and the five reframing ideas this plan is built on.
 
 Like plan 05, this extends the **already-implemented plan-02 code**
 (`TadpoleAE`, `AutoencoderTrainer`, `SnapshotDataset`,
-`pretrain_autoencoder.yaml`) and feeds [plan 03](03_ae_to_timestepper.md).
+`pretrain_autoencoder.yaml`) and feeds [plan 03](implemented/neural_surrogates/03_ae_to_timestepper.md).
 It does not block plans 01/04.
 
 **The five design commitments** (argued in plan 06, summarized here):

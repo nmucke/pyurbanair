@@ -292,9 +292,9 @@ actionable message. Do not silently run expensive CFD or substitute untrained
 weights. Validate the configured `device: cuda` on CPU-only machines and show
 the required CPU override.
 
-The backend references are [`pylbm.md`](../pylbm.md),
-[`pyudales.md`](../pyudales.md), [`pypalm.md`](../pypalm.md) and
-[`neural_surrogates.md`](../neural_surrogates.md). Keep discovery and composition
+The backend references are [`pylbm.md`](../../pylbm.md),
+[`pyudales.md`](../../pyudales.md), [`pypalm.md`](../../pypalm.md) and
+[`neural_surrogates.md`](../../neural_surrogates.md). Keep discovery and composition
 backend-free; deeper readiness probes may import runtimes in isolated children.
 Setup should explicitly prepare missing source/binary prerequisites. Serialize
 unavoidable shared build/cache mutations with a build lock.

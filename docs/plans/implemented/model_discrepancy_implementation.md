@@ -1,7 +1,7 @@
 # Plan 4 — Strain/rotation-dependent SGS model discrepancy
 
 Status: proposed implementation; no algorithm or solver changes made.
-Implements recommendation 4 in [the review](../data_assimilation_recommendations.md).
+Implements recommendation 4 in [the review](../../research/data_assimilation_recommendations.md).
 Related plans: [observation likelihood](observation_likelihood_implementation.md)
 and [hybrid beta](hybrid_beta_tempering.md).
 

@@ -2,7 +2,7 @@
 
 > Part of the ESMDA-evaluation effort. Master plan:
 > [master_plan.md](master_plan.md). Rationale: §4.3 and the held-out
-> principle of [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md).
+> principle of [../esmda_turbulence_evaluation.md](../../../research/esmda_turbulence_evaluation.md).
 > WP3.1 is independent of phase 2 and can land anytime after WP1.3;
 > WP3.2 last (backend-touching). Slimmed 2026-08-03: two-point
 > correlations, structure functions, increment PDFs, reverse-flow stats,

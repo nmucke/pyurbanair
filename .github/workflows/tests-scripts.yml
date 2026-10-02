@@ -1,4 +1,5 @@
-# scripts/, configs/ and workflows/: they use every library.
+# scripts/, configs/ and workflows/: they use every library. Also checks the
+# relative links in the Markdown docs.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: scripts"
@@ -12,6 +13,10 @@ on:
       - "scripts/**"
       - "configs/**"
       - "workflows/**"
+      - "docs/**"
+      - "README.md"
+      - "AGENTS.md"
+      - "**/README.md"
       - "tests/configs/**"
       - "tests/scripts/**"
       - "src/**"

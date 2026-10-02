@@ -168,22 +168,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 
 #### `disable_spinup()`
 
-Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
-window 0 when `spinup_first_step_only=True`.
-
-> **One external caller drives these steps itself** (archived, not ported to
-> the current `scripts/`):
-> [`archive/scripts/esmda/run_probe_series.py`](../archive/scripts/esmda/run_probe_series.py)
-> (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
-> `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
-> → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
-> `run()` — and replaces only its *collection* step: at its 0.25 s default
-> cadence one window's snapshots run to ~100 GB per member on `case=barcelona`,
-> so each file is reduced to the probe points and unlinked instead of being
-> concatenated into one Dataset. It also keeps `spinup_time` on a warm start
-> (which `run_single` zeroes) to trim the restart's
-> transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
-> refactoring `run_single`.
+Sets `self.spinup_time = 0.0`. Its only caller is the neural surrogate's
+`disable_spinup`, which forwards to its `spinup_forward_model`; warm-start
+windows already skip spin-up inside `run_single`.
 
 ### `EnsembleForwardModel`
 
@@ -712,7 +699,7 @@ higher than the building-only measurement.
 
 `EnsembleForwardModel` concatenates all member states in memory by default.
 For ensembles of ~96 members at grid sizes ≥ 75³ cells, this exhausts DRAM.
-Fix: set `run.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
+Fix: set `assimilation.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
 model) so per-member files are written and read back individually. At 100³ the
 run remains disk-bound — the per-member file I/O becomes the bottleneck.
 

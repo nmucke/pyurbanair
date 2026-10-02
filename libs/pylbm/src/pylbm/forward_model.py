@@ -158,7 +158,7 @@ class ForwardModel(BaseForwardModel):
         profile_heights = (np.arange(nz) + 0.5) * dz
         # Cached so _apply_inflow_settings can rewrite uvel_shear.dat per member
         # when an estimated vertical_inflow_exponent (α) overrides the
-        # construction-time shear (docs/esmda_model_error_parameters.md §2.1).
+        # construction-time shear (docs/archive/esmda_model_error_parameters.md §2.1).
         self._profile_heights = profile_heights
         self._zsize = zsize
         if profile_config is not None and profile_config.get("type") not in (
@@ -515,7 +515,7 @@ class ForwardModel(BaseForwardModel):
         """
         # Model-error knobs (α shear exponent, SGS constant) apply identically to
         # the static and time-varying inflow paths, so consume them here, outside
-        # the branch (docs/esmda_model_error_parameters.md §6.2). Each is a no-op
+        # the branch (docs/archive/esmda_model_error_parameters.md §6.2). Each is a no-op
         # when its parameter is absent, keeping single-model/default runs
         # byte-identical.
         override_cfg = resolve_profile_config(params, self.profile_config)

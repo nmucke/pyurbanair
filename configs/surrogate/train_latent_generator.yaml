@@ -6,7 +6,7 @@ defaults:
   - training
   - _self_
 
-# Which model scripts_new/surrogate/train.py builds.
+# Which model scripts/surrogate/train.py builds.
 task: latent_generator
 name: latent_generator_s
 autoencoder_dir: ${paths.weights_dir}/tadpole_ae_s

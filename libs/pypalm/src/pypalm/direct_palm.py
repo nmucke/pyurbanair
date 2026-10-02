@@ -194,7 +194,7 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     # not satisfy it. Without this, combine exits on signal 9 (dyld "Library
     # not loaded: rrtmg.so"), the combined `_3d.nc` is never written, and
     # pypalm silently falls back to the zero-filled per-PE skeleton (see
-    # docs/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
+    # docs/archive/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
     rrtmg_so = rrtmg_subdir / "rrtmg.so"
     rrtmg_so_link = dst_tempdir / "rrtmg.so"
     if rrtmg_so.is_file() and not rrtmg_so_link.exists():

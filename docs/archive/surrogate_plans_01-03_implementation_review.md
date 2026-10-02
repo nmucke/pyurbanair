@@ -4,9 +4,9 @@
 
 Four independent review passes (plan 01, plan 02, plan 03, shared plumbing) were
 run over the implemented code behind
-[01_lora_finetuning.md](01_lora_finetuning.md),
-[02_autoencoder_pretraining.md](02_autoencoder_pretraining.md) and
-[03_ae_to_timestepper.md](03_ae_to_timestepper.md), checking correctness,
+[01_lora_finetuning.md](../plans/implemented/neural_surrogates/01_lora_finetuning.md),
+[02_autoencoder_pretraining.md](../plans/implemented/neural_surrogates/02_autoencoder_pretraining.md) and
+[03_ae_to_timestepper.md](../plans/implemented/neural_surrogates/03_ae_to_timestepper.md), checking correctness,
 computational optimality, and unnecessary complexity. The two highest-severity
 findings (H1, H2) plus the M1 guard gap were re-verified by direct inspection
 before this file was written.

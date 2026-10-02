@@ -3,7 +3,7 @@
 Covers the parts of ``smoothing/esmda.py`` reachable without a forward model:
 the global Kalman update, the time-varying flatten/unflatten round-trip and its
 block grouping, the constructor validation added in the code review, and the
-shared-budget ``likelihood_weight`` (docs/plans/hybrid_beta_tempering.md).
+shared-budget ``likelihood_weight`` (docs/plans/implemented/hybrid_beta_tempering.md).
 """
 
 import pathlib

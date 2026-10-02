@@ -17,7 +17,7 @@ PALM's ``nudging`` switch requires ``large_scale_forcing = .T.`` (LSF0001),
 which in turn wants an ``LSF_DATA`` file. We stage a physically **inert**
 ``LSF_DATA`` (both its surface and profile halves disable themselves via
 non-fatal paths) so the nudging term is the only large-scale forcing. See
-``write_inert_lsf_data`` and ``docs/plans/palm_nudging_driver_plan.md``.
+``write_inert_lsf_data`` and ``docs/plans/implemented/palm_nudging_driver_plan.md``.
 
 The schedule builders (``_extract_schedule``, ``_prepend_spinup_plateau``,
 ``_build_uv_profiles``) are shared with the dynamic-driver path — the two
@@ -184,7 +184,7 @@ def write_inert_lsf_data(path: pathlib.Path, end_time: float) -> None:
     and the ``# <time>`` profile marker (also beyond ``end_time``) makes the
     profile search exit before reading any rows, turning off ``lsf_vert``
     (LSF0016). The nudging term is then the only large-scale forcing. See
-    ``docs/plans/palm_nudging_driver_plan.md`` facts 5-6.
+    ``docs/plans/implemented/palm_nudging_driver_plan.md`` facts 5-6.
     """
     t_far = float(end_time) + _LSF_PAD
     path = pathlib.Path(path)

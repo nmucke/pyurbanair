@@ -28,8 +28,8 @@ These are foundations to retain, not missing features to implement.
 **Finding.** ESMDA and filtering currently require diagonal observation-error
 covariance. ESMDA adds independent noise to raw frames, then averages them while
 deliberately retaining the raw-frame variance. Thus aggregation changes the
-degree of conservatism. See [ESMDA covariance validation](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py)
-and [observation construction](../archive/scripts/esmda/run_esmda.py), lines 948–956 (archived runner; now `scripts/utils/helper_functions.py`).
+degree of conservatism. See [ESMDA covariance validation](../../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py)
+and [observation construction](../../archive/scripts/esmda/run_esmda.py), lines 948–956 (archived runner; now `scripts/utils/helper_functions.py`).
 
 **Action.** Separate instrument noise, representation error and dynamical model
 error. For linear averaging, propagate instrument covariance as
@@ -51,7 +51,7 @@ aggregation intervals. A lower assimilated RMSE alone is insufficient.
 
 ### 2. Make the hybrid's state–parameter posterior coherent — first
 
-**Finding.** [FilterSmoothing.run](../libs/data-assimilation/src/data_assimilation/filter_smoothing/base.py)
+**Finding.** [FilterSmoothing.run](../../libs/data-assimilation/src/data_assimilation/filter_smoothing/base.py)
 explicitly uses observations in parameter ESMDA and again in the subsequent
 filter (lines 564–639). This is a useful heuristic, but ordinary filtering of
 the propagated parameter posterior does not generally produce the correct joint
@@ -81,12 +81,12 @@ the current hybrid resets its joint parameter correction at each boundary.
 
 ### 3. Address periodic geometry and forcing observability — highest physics priority
 
-**Finding.** [DistanceLocalization](../libs/data-assimilation/src/data_assimilation/localization/distance.py)
+**Finding.** [DistanceLocalization](../../libs/data-assimilation/src/data_assimilation/localization/distance.py)
 uses ordinary Euclidean distance, so neighboring points across periodic faces
 are treated as distant. Dynamic parameter knots also share one localization
 block; an observation selected by one knot can be admitted for all knots
-([augmentation](../libs/data-assimilation/src/data_assimilation/augmentation.py),
-`group_ids`; [localization](../libs/data-assimilation/src/data_assimilation/localization/base.py),
+([augmentation](../../libs/data-assimilation/src/data_assimilation/augmentation.py),
+`group_ids`; [localization](../../libs/data-assimilation/src/data_assimilation/localization/base.py),
 `_group_inflation`).
 
 **Action.** Add minimum-image distances on configured periodic axes, followed
@@ -105,8 +105,8 @@ replace this with a blanket causal mask.
 Compare canopy-only sensors with a fixed-budget canopy-plus-upper-layer network.
 Use common physical controls—reference wind components/profile, reference
 height, nudging cutoff and relaxation time—across solvers. Current defaults
-even use different nudging cutoffs: 16 m in [uDALES](../configs/model/pyudales.yaml)
-and 4 m in [PALM](../configs/model/pypalm.yaml). Match them for controlled transfer
+even use different nudging cutoffs: 16 m in [uDALES](../../configs/model/pyudales.yaml)
+and 4 m in [PALM](../../configs/model/pypalm.yaml). Match them for controlled transfer
 experiments, then vary them deliberately.
 
 **Acceptance:** periodic translation invariance, identifiable forcing directions,
@@ -119,7 +119,7 @@ but the shared DA workflow has no explicit within-window dynamical discrepancy
 trajectory. Inflation maintains spread without estimating a persistent bias.
 Solver parameters are not necessarily comparable: PALM's `sgs_constant` selects
 constant diffusivity and disables its constant-flux layer, whereas other
-backends use closure coefficients. See [PALM `_apply_sgs_setting`](../libs/pypalm/src/pypalm/forward_model.py).
+backends use closure coefficients. See [PALM `_apply_sgs_setting`](../../libs/pypalm/src/pypalm/forward_model.py).
 
 **Action.** Introduce a small, regularized basis of height-dependent momentum
 tendencies, with persistent bias and stochastic variability modeled separately:
@@ -146,8 +146,8 @@ not explicitly enforce discrete divergence or wall constraints. Local updates
 and row-dependent inflation can disturb constraints that a global ensemble
 transform preserves. Restart state is also backend-dependent: uDALES carries
 unexposed SGS fields from the previous run, while other backends reconstruct or
-retain different internal fields. See [filter analysis](../libs/data-assimilation/src/data_assimilation/filtering/base.py)
-and [uDALES `run_single`](../libs/pyudales/src/pyudales/forward_model.py), lines 1019–1032.
+retain different internal fields. See [filter analysis](../../libs/data-assimilation/src/data_assimilation/filtering/base.py)
+and [uDALES `run_single`](../../libs/pyudales/src/pyudales/forward_model.py), lines 1019–1032.
 
 **Action.** Measure divergence, wall flux, momentum/energy jumps and the fraction
 of each increment lost during the next forecast. If needed, apply a
@@ -201,7 +201,7 @@ and the proposed consistent method, with component ablations at matched cost.
 Primary outcomes should be held-out velocity-vector error, proper ensemble
 scores/coverage, and assimilation-off forecasts at common lead times and
 information cutoffs. Distinguish causal filtering from retrospective smoothing.
-Extend the existing [evaluation pipeline](../scripts/compute_metrics.py)
+Extend the existing [evaluation pipeline](../../scripts/compute_metrics.py)
 with these forecast comparisons; retain mean profiles, resolved TKE, Reynolds
 stress and spectra. Score turbulence per member before ensemble reduction.
 Reapply `H` to actual analyzed states at matching analysis times: localized/reduced filter

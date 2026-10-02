@@ -92,7 +92,7 @@ and the actual selected height in labels, even when choosing the nearest cell.
 
 For 2D, use Matplotlib's noninteractive Agg backend and xarray. Existing
 [`visualize_forward_state`](../../scripts/_common.py) and
-[`animate_height_panels`](../../src/pyurbanair/utils/animation_utils.py) provide
+[`animate_height_panels`](../../../src/pyurbanair/utils/animation_utils.py) provide
 plotting precedents, but their fixed layouts, eager loading and grid assumptions
 need adaptation. Extract useful pure helpers instead of importing all script
 dependencies. Recreate the supplied movie's layout with configurable horizontal

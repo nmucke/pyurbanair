@@ -90,7 +90,7 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
     Keyed off ``model_name``: ``pressure_gradient_magnitude`` is uDALES-only.
     ``vertical_inflow_exponent`` (power-law shear exponent α) and ``sgs_constant``
     (sub-grid-scale mixing constant) are model-error compensation knobs every
-    backend can consume per-member; see docs/esmda_model_error_parameters.md.
+    backend can consume per-member; see docs/archive/esmda_model_error_parameters.md.
     """
     base = (
         "inflow_angle",

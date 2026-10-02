@@ -2,11 +2,12 @@
 
 Reference for [`configs/`](../configs/) (Hydra configs),
 [`scripts/`](../scripts/) (executable entry points) and
-[`workflows/`](../workflows/) (run + post-processing chains). The key-by-key
-table and the common overrides are in [`configs/README.md`](../configs/README.md);
-the design and the old -> new mapping are in
-[`config_setup_spec.md`](config_setup_spec.md). Every script's module
-docstring documents its usage and outputs; read it before changing a script.
+[`workflows/`](../workflows/) (run + post-processing chains). Every config key
+and the common overrides are in [`configs/README.md`](../configs/README.md),
+the single reference for keys; the design record and the old -> new mapping
+are in [`config_setup_spec.md`](plans/implemented/config_setup_spec.md). Every
+script's module docstring documents its usage and outputs; read it before
+changing a script.
 
 The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 `scripts/neural_surrogate/`, ...) is archived under `archive/` and documented in
@@ -22,11 +23,10 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Run ESMDA | `python scripts/run_smoother.py ...`, variant `'smoothing.smoother=${smoother.<name>}'` |
 | Run a sequential filter (EnKF) | `python scripts/run_filtering.py ...`, `filtering.mode=state\|parameter\|joint` |
 | Run the hybrid (ESMDA params + filter state) | `python scripts/run_hybrid.py ...` |
-| Run + metrics + figures in one go | `bash workflows/assimilation_workflow.sh <smoother\|filtering\|hybrid> ...`, `bash workflows/forward_workflow.sh ...` |
-| Add a new experiment (domain/sensors/geometry) | [`configs/case/`](../configs/case/) — one YAML per case |
+| Run + metrics + figures in one go | `bash workflows/assimilation_workflow.sh <smoother\|filtering\|hybrid> ...`, `bash workflows/forward_workflow.sh ...` (§2.4) |
+| Add a new experiment (domain/sensors/geometry) | [`configs/case/`](../configs/case/) — one YAML per case; inputs in [`geometries/`](../geometries/README.md) |
 | Switch CFD backend | `model=...` (forward) or `model@truth_model=... model@assim_model=...` (assimilation) |
-| Change run size | `ensemble.ensemble_size`, `ensemble.num_parallel_processes`, `assimilation.num_windows`, `smoothing.num_steps` |
-| Enable localization / state reduction | `'smoothing.localization=${localization.distance}'`, `'filtering.state_reduction=${state_reduction.svd}'`, ... |
+| Change a setting (run size, DA components, observations, paths) | every key and the common overrides: [`configs/README.md`](../configs/README.md) |
 | Use a saved truth | `assimilation.truth_dir=<forward run dir>` (+ `assimilation.truth_start_time`) |
 | Generate surrogate training data | `python scripts/surrogate/generate_data.py` (§2.3) |
 | Train / fine-tune a surrogate | `python scripts/surrogate/train.py --config-name surrogate/<config>` |
@@ -53,25 +53,18 @@ configs/
 
 ### 1.1 Entry points and `common.yaml`
 
-- **`forward.yaml`** — `common` + `case` + `params` + `model`, and the
-  `forward` block: `ensemble` (bool), `rollout_steps` (extra windows after the
-  first), `initial_state` (NetCDF path or `{path, member, time_index}`).
-  `paths.results_dir = ${paths.results_root}/${model.name}`.
+- **`forward.yaml`** — `common` + `case` + `params` + `model`, plus the
+  `forward` block.
 - **`assimilation.yaml`** — `common` + `case` + `model@truth_model` +
   `model@assim_model` + `params@truth_params` + `params@prior_params` + all of
-  `assimilation_settings/`. Blocks: `assimilation` (windows, seed,
-  `params_to_estimate`, truth source, saving), `observation` (`operator`,
-  `aggregation`, `error`), `smoothing`, `filtering`, `hybrid`. Each DA script
-  reads the blocks it needs and appends its workflow name (`smoother`,
-  `filtering`, `hybrid`) to `paths.results_dir`
-  (`${paths.results_root}/${truth_model.name}_to_${assim_model.name}`).
-- **`common.yaml`** — `paths` (`machine: local |
-  snellius | delftblue` picks the solver scratch dir, `results_root`,
-  `weights_dir`, `training_data_dir`; `machine` and `results_root` default to
-  `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts);
-  the one `ensemble` budget
-  (`ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`,
-  `failure.policy: raise | resample_from_successes`); Hydra's run dir.
+  `assimilation_settings/`, plus the DA blocks. Each DA script reads the blocks
+  it needs and appends its workflow name (`smoother`, `filtering`, `hybrid`) to
+  `paths.results_dir`.
+- **`common.yaml`** — `paths` (per-machine scratch), the one `ensemble` budget
+  and Hydra's run dir.
+
+Every key of these blocks, and the common overrides, are listed in
+[`configs/README.md`](../configs/README.md).
 
 ### 1.2 `case/`
 
@@ -117,24 +110,11 @@ Time-varying samplers take a value every `time.seconds_per_knot` seconds.
 
 ### 1.5 `assimilation_settings/`
 
-Each file is mounted at the top level and holds every option of one component;
-the `smoothing` / `filtering` slots point at one by interpolation (quote it so
-the shell keeps `${...}`). Tune an option where it is defined, e.g.
-`localization.distance.localization_radius=20`.
-
-| File (package) | Options | Slots |
-|---|---|---|
-| `smoother.yaml` (`smoother.*`) | `static`, `dynamic`, `state`, `state_and_parameter`, `state_and_dynamic` | `smoothing.smoother` |
-| `analysis.yaml` (`analysis.*`) | `stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd` | `filtering.analysis` |
-| `localization.yaml` (`localization.*`) | `none`, `correlation`, `distance` | `smoothing.localization`, `filtering.localization` |
-| `state_reduction.yaml` (`state_reduction.*`) | `none`, `svd`, `svd_current`, `svd_streaming` | `smoothing.state_reduction`, `filtering.state_reduction` |
-| `inflation.yaml` (`inflation.*`) | `none`, `multiplicative`, `rtps`, `rtpp` | `filtering.inflation` |
-
-`filtering.parameter_evolution` is set inline (`null`, or a
-`RandomWalkEvolution` block). The scripts build the components with
-`instantiate(cfg.smoothing.smoother, num_time_points=...)`,
-`instantiate(cfg.filtering, observation_operator=..., forward_model=..., C_D=...)`
-and `instantiate(cfg.observation.operator / .error / .aggregation)`.
+Each file is mounted at the top level and holds every option of one component
+(`smoother`, `analysis`, `localization`, `state_reduction`, `inflation`); the
+`smoothing` / `filtering` slots point at one by interpolation. The options and
+their slots are listed in [`configs/README.md`](../configs/README.md#keys); the
+classes behind them in [data_assimilation.md](data_assimilation.md).
 
 ### 1.6 Config checks
 
@@ -157,8 +137,8 @@ prior parameters; and the SGS-discrepancy rules of §1.7.
 `configs/model/pyudales.yaml` has an optional `forward_model.model_discrepancy`
 block (height band, regularization, log cap) that needs the Vreman closure.
 Its coefficients are static parameter fields `sgs_bias_b0/b1/b2` (default zero)
-set in the `params/` files (commented examples in `dynamic.yaml`; set in
-`dynamic_cosine.yaml`). Estimate them by naming them in
+set in the `params/` files (commented examples in `dynamic.yaml` and
+`dynamic_sine.yaml`; set in `dynamic_truth.yaml`). Estimate them by naming them in
 `assimilation.params_to_estimate`. The config checks require them to be static
 parameters; with discrepancy the smoother must be parameter-only and match the
 prior, the hybrid needs `filtering.mode=state` and
@@ -169,9 +149,8 @@ in [pyudales §4.1](pyudales.md#41-strainrotation-discrepancy). (The old
 
 ### 1.8 `surrogate/`
 
-Hydra treats `surrogate/` as a group, so each file starts with
-`# @package _global_` and lists root configs with a leading slash. Run with
-`--config-name surrogate/<name>`.
+Run with `--config-name surrogate/<name>` (the `@package` convention and
+example overrides are in [`configs/README.md`](../configs/README.md#neural-surrogates)).
 
 | File | Script | Purpose |
 |---|---|---|
@@ -251,16 +230,27 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 evaluation scripts. See [neural_surrogates.md](neural_surrogates.md) for the
 library side.
 
-### 2.4 `workflows/`
+### 2.4 Workflows
+
+`workflows/*.sh` chain a run with its post-processing on the same run dir.
+Hydra overrides go to the run script; the post-processing reads the dir it
+wrote.
+
+| Workflow | Args | Runs |
+|---|---|---|
+| `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` |
+| `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
 
 ```bash
-bash workflows/forward_workflow.sh [overrides...]                                  # run_forward + visualize_forward
-bash workflows/assimilation_workflow.sh <smoother|filtering|hybrid> [overrides...]  # run_<method> + compute_metrics + visualize_assimilation
+bash workflows/forward_workflow.sh model=pylbm params=static_truth
+bash workflows/assimilation_workflow.sh filtering 'filtering.analysis=${analysis.letkf}'
 ```
 
-Each resolves the run dir from the same overrides
-(`--cfg job --resolve -p paths.results_dir`), runs the script and then the
-post-processing on that dir. Run them inside the dev environment.
+Each resolves the run dir first from the same overrides
+(`--cfg job --resolve -p paths.results_dir`), runs from the repo root, stops on
+the first failing stage (`set -euo pipefail`) and prints `Done: <run dir>`. Run
+them inside the dev environment (`pixi shell -e dev`). The SLURM job scripts
+wrap them ([job_scripts.md](job_scripts.md)).
 
 ### 2.5 Other
 

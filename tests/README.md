@@ -12,7 +12,7 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers |
 | `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |
 | `visualization/` | the forward-run viewer and renderer (`libs/visualization`) |
-| `scripts/` | `scripts/`, `configs/` and `workflows/` |
+| `scripts/` | `scripts/`, `configs/` and `workflows/`; relative links in the Markdown docs |
 | `legacy/` | shared fixtures and frozen configs some library tests still use (see below) |
 
 ```bash

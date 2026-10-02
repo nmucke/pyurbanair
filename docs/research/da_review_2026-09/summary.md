@@ -3,7 +3,7 @@
 > **Status: review record, written 2026-09-04** on branch `isda_experiments`
 > at `7ab1c6d`. Read-only analysis; no code was changed. Supporting audits
 > (one per area, with `file:line` anchors) live in
-> [`docs/da_review_2026-09/`](da_review_2026-09/). This is a snapshot, not a
+> [`docs/da_review_2026-09/`](./). This is a snapshot, not a
 > maintained reference — verify against the tree before acting on a line
 > number.
 
@@ -499,11 +499,11 @@ and the 45-cell method zoo at one seed. The same compute spent on routes 1,
 
 | File | Content |
 |---|---|
-| [A_da_library_audit.md](da_review_2026-09/A_da_library_audit.md) | Module-by-module inventory of `libs/data-assimilation`, dead code, 17 correctness/quality items, proof that state reduction cannot help, gaps. |
-| [B_scripts_configs_tests_docs_audit.md](da_review_2026-09/B_scripts_configs_tests_docs_audit.md) | Every entry point, config group and option with campaign/test/doc usage; drift between the three run configs; stale tooling; test coverage; ranked deletion list. |
-| [C_metrics_and_diagnostics_audit.md](da_review_2026-09/C_metrics_and_diagnostics_audit.md) | Exact definition of every stored metric, definitional problems, computed-and-dropped diagnostics, the three missing indicators with implementation sketches, ten secondary indicators. |
-| [D_campaign_results_synthesis.md](da_review_2026-09/D_campaign_results_synthesis.md) | Setup facts, master result table with climatology baselines and skill, the periodic identifiability and turbulent floor arguments, confounds, suspicious numbers, five discriminating experiments. |
-| [E_improvement_routes.md](da_review_2026-09/E_improvement_routes.md) | Twelve routes with hypothesis, method, code touch-points, effort, expected effect per case, and success criteria; the periodic and turbulent-inflow questions worked out against the uDALES source. |
+| [A_da_library_audit.md](A_da_library_audit.md) | Module-by-module inventory of `libs/data-assimilation`, dead code, 17 correctness/quality items, proof that state reduction cannot help, gaps. |
+| [B_scripts_configs_tests_docs_audit.md](B_scripts_configs_tests_docs_audit.md) | Every entry point, config group and option with campaign/test/doc usage; drift between the three run configs; stale tooling; test coverage; ranked deletion list. |
+| [C_metrics_and_diagnostics_audit.md](C_metrics_and_diagnostics_audit.md) | Exact definition of every stored metric, definitional problems, computed-and-dropped diagnostics, the three missing indicators with implementation sketches, ten secondary indicators. |
+| [D_campaign_results_synthesis.md](D_campaign_results_synthesis.md) | Setup facts, master result table with climatology baselines and skill, the periodic identifiability and turbulent floor arguments, confounds, suspicious numbers, five discriminating experiments. |
+| [E_improvement_routes.md](E_improvement_routes.md) | Twelve routes with hypothesis, method, code touch-points, effort, expected effect per case, and success criteria; the periodic and turbulent-inflow questions worked out against the uDALES source. |
 
 Where the appendices disagree, this document gives the reconciled reading:
 the ESMDA raw-frame/aggregated noise mismatch is a defect (A) *and* the

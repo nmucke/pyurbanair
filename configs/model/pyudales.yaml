@@ -115,7 +115,7 @@ forward_model:
   # `enabled: false` (the default) is a strict no-op — namoptions stays
   # byte-identical and no driver files are written.
   # Calibrated for the `realistic` STL pool at 4 m isotropic spacing, z_size
-  # 128 m, velocity_magnitude 5-10 m/s (conf/neural_surrogate/training_data.yaml).
+  # 128 m, velocity_magnitude 5-10 m/s (configs/surrogate/generate_data.yaml).
   # The pool's building heights are bimodal: z_max median 16 m, p75 48 m, p90 50 m.
   inlet_turbulence:
     enabled: true

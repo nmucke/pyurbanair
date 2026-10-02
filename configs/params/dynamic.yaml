@@ -19,7 +19,7 @@ external_parameters:
     min: 0.1
 # Constant-in-time model-error knobs that ride in the same params Dataset and are
 # carry no `time` dim. Drawn once (window 0) and carried across windows — never
-# re-randomized (docs/temp/esmda_model_error_parameters.md §6). Only parameters
+# re-randomized (docs/archive/esmda_model_error_parameters.md §6). Only parameters
 # selected by run_esmda.yaml `params_to_estimate` receive DA updates; all entries
 # here are applied to predictions. Use Constant for prescribed values.
 static_parameters:

@@ -1,7 +1,7 @@
 # Plan 1 — Consistent observation likelihood
 
 Status: proposed implementation; no algorithm changes made.
-Implements recommendation 1 in [the review](../data_assimilation_recommendations.md).
+Implements recommendation 1 in [the review](../../research/data_assimilation_recommendations.md).
 Related plans: [model discrepancy](model_discrepancy_implementation.md) and
 [hybrid beta](hybrid_beta_tempering.md).
 

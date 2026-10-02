@@ -731,7 +731,7 @@ class ForwardModel(BaseForwardModel):
             raise ValueError("ForwardModel parameters are unexpectedly unset.")
 
         # Model-error knobs apply identically to both inflow branches, so resolve
-        # them here, outside the branch (docs/esmda_model_error_parameters.md §6.2).
+        # them here, outside the branch (docs/archive/esmda_model_error_parameters.md §6.2).
         # When ``vertical_inflow_exponent`` (α) is estimated it overrides the
         # construction-time shear; ``sgs_constant`` is written to the &NAMSUBGRID
         # key of whichever closure is active (``cs`` or ``c_vreman``).
@@ -808,7 +808,7 @@ class ForwardModel(BaseForwardModel):
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` inside the
         nudging config's ``profile_config`` so the inlet shear is per-member and
-        ESMDA-estimable (docs/esmda_model_error_parameters.md §2.1). Falls back to
+        ESMDA-estimable (docs/archive/esmda_model_error_parameters.md §2.1). Falls back to
         the construction-time config when the parameter is absent.
         """
         alpha = get_param_value(params, "vertical_inflow_exponent")
@@ -840,7 +840,7 @@ class ForwardModel(BaseForwardModel):
         not False.
 
         No-op when ``sgs_constant`` is absent, preserving the template value
-        (docs/esmda_model_error_parameters.md §2.2).
+        (docs/archive/esmda_model_error_parameters.md §2.2).
         """
         # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
         # model config's ``sgs_constant`` is the per-backend fallback; absent in

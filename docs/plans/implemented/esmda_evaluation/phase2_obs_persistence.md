@@ -2,7 +2,7 @@
 
 > Part of the ESMDA-evaluation effort. Master plan:
 > [master_plan.md](master_plan.md). Rationale: §5 of
-> [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md).
+> [../esmda_turbulence_evaluation.md](../../../research/esmda_turbulence_evaluation.md).
 > Requires WP1.1. Two PRs (WP2.1 persistence; WP2.2 diagnostic + figure).
 > Slimmed 2026-08-03: the only diagnostic built on these arrays is the
 > normalized data mismatch `O_N`; innovations, contraction-vs-achievable,

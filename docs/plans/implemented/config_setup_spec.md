@@ -10,8 +10,8 @@ Status: done. The flattened tree is `configs/`, read by the rewritten
 `scripts/` and tested by `tests/`. The old `conf/`, `scripts/` and `tests/`
 are archived under `archive/` (not run, not tested). This page is kept as the
 design record and the old -> new mapping; for the current tree see
-[configs/README.md](../configs/README.md) and
-[scripts_and_configs.md](scripts_and_configs.md).
+[configs/README.md](../../../configs/README.md) and
+[scripts_and_configs.md](../../scripts_and_configs.md).
 
 Out of scope: `visualization/`, `compare_models.yaml`, `run_probe_series.yaml`,
 named experiments. The neural-surrogate configs are covered in the last section.

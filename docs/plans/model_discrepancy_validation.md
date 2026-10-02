@@ -4,7 +4,7 @@ Status: proposed next work; no experiments or implementation are performed by
 this document. Written 2026-09-29 against commit `53ac02f` on
 `feat/sgs-discrepancy-esmda` (PR #149).
 
-This continues [the original implementation plan](model_discrepancy_implementation.md).
+This continues [the original implementation plan](implemented/model_discrepancy_implementation.md).
 That plan's opening status and some configuration restrictions are historical.
 Use the maintained [uDALES](../pyudales.md),
 [data assimilation](../data_assimilation.md), and

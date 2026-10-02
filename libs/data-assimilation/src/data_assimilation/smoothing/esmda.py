@@ -151,7 +151,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             )
 
         # Likelihood weight ``w`` (shared-budget hybrid tempering, see
-        # docs/plans/hybrid_beta_tempering.md): the MDA schedule conditions on
+        # docs/plans/implemented/hybrid_beta_tempering.md): the MDA schedule conditions on
         # ``L^w`` instead of ``L`` by running every update with the effective
         # coefficient ``alpha_base / w``, so ``sum_k 1/alpha_eff_k = w`` and the
         # remaining ``1 - w`` of the budget is left to another phase (the
@@ -1064,7 +1064,7 @@ class StateAndParameterESMDA(_BaseESMDA):
     Optionally performs the state part of the Kalman update in a reduced
     SVD/KL basis fitted ONLINE to the current forecast ensemble
     (``state_reduction``, see :class:`~data_assimilation.reduction.\
-OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
+OnlineStateReduction` and ``docs/archive/reduced_state_da.md``), and an optional
     post-loop Kalman smoothing of the full window trajectory
     (``final_time_smoothing``). Both default to off, which reproduces the
     full-space behavior exactly.
@@ -1421,7 +1421,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             used for uncertainty quantification. The rigorous alternative is to
             carry the reduced trajectory coefficients in the augmented vector
             through the MDA schedule so the trajectory is conditioned exactly
-            once (see docs/temp/da_review_math.md §1.1 / §3.10).
+            once (see docs/archive/da_review_math.md §1.1 / §3.10).
         """
         if not self.final_time_smoothing or state is None:
             return state

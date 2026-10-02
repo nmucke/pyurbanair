@@ -152,7 +152,7 @@ def _seat_floor(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     the lowest point reached ``z = 0`` -- which dragged the near-zero ground
     sheet up into an elevated plateau and made PALM's top-down height map read
     "one big building" with no open streets (see
-    docs/palm_ground_topography_issue.md).
+    docs/archive/palm_ground_topography_issue.md).
 
     Instead we drop faces lying entirely below the floor (basements, deep dips)
     and clamp the remaining straddling vertices up to ``z = 0``. The forward
@@ -288,7 +288,7 @@ def prepare(
     # floor and PALM's top-down height map reads open streets. 'min' (legacy)
     # seats the lowest point -- on meshes with building basements this lifts the
     # ground into an elevated plateau (the PALM "one big building" bug), so it is
-    # kept only for back-compat. See docs/palm_ground_topography_issue.md.
+    # kept only for back-compat. See docs/archive/palm_ground_topography_issue.md.
     if z_datum == "min":
         z0 = merged.bounds[0, 2]
     elif z_datum == "ground":

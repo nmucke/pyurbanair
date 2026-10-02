@@ -1,7 +1,7 @@
 # Plan 06 — Geometry-conditioned forecast pre-training: a critical revision of plan 05
 
 **Status: proposal (2026-07-09). Alternative to — not an extension of —
-[plan 05](05_latent_space_pretraining_extensions.md), which is kept unchanged
+[plan 05](surrogate_latent_space_pretraining_extensions.md), which is kept unchanged
 for comparison.** Builds on the same plan-02 code
 (`TadpoleAE` / `AutoencoderTrainer` / `SnapshotDataset`) and the same
 literature base; large parts of plan 05 survive here (its R0 diagnostics, R1
