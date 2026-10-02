@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from mcp_server.jobs.composition import compose_forward_config
+from mcp_server.jobs.composition import compose_forward_config, validate_resolvers
 from mcp_server.jobs.paths import bind_job_paths, ensure_private_directory
 from mcp_server.jobs.preparation import PreparationService, _artifact_architecture
 from omegaconf import OmegaConf
@@ -194,6 +194,32 @@ def test_exported_architecture_resolvers_rejected_before_resolution(
 ) -> None:
     with pytest.raises(ValueError, match="custom resolvers"):
         _artifact_architecture({"architecture": "${oc.create:bad}"}, checkout)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "value",
+    [
+        "${oc.env:PWD}/.temp",
+        "/scratch/${oc.env:USER}/${oc.env:SLURM_JOB_ID,local}",
+        "${oc.env:PYURBANAIR_MACHINE,local}",
+        "${oc.env:PYURBANAIR_RESULTS_ROOT,.temp}",
+    ],
+)
+def test_env_resolvers_in_the_allowlist_pass(value: str) -> None:
+    validate_resolvers({"value": value})
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "value",
+    [
+        "${oc.env:HOME}",
+        "${oc.env:PYURBANAIR_MACHINE_EXTRA,local}",
+        "${oc.env:PYURBANAIR_RESULTS_ROOT,${oc.env:HOME}}",
+    ],
+)
+def test_other_env_resolvers_are_rejected(value: str) -> None:
+    with pytest.raises(ValueError, match="env resolvers are permitted"):
+        validate_resolvers({"value": value})
 
 
 def test_preparation_creates_private_store(checkout: Path, tmp_path: Path) -> None:

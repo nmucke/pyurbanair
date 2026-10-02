@@ -88,6 +88,13 @@ def surrogate(session_root: pathlib.Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _no_job_script_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never run against the machine a job script's env.sh selects."""
+    monkeypatch.delenv("PYURBANAIR_MACHINE", raising=False)
+    monkeypatch.delenv("PYURBANAIR_RESULTS_ROOT", raising=False)
+
+
 @pytest.fixture(scope="session")  # type: ignore[misc]
 def session_root(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
     return pathlib.Path(tmp_path_factory.mktemp("session"))

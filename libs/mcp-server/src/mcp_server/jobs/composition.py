@@ -68,14 +68,17 @@ def validate_resolvers(config: Any) -> None:
         for match in _RESOLVER.finditer(value):
             if match.group(1) not in {"oc.env", "oc.select"}:
                 raise ValueError(f"{path}: custom resolvers are not permitted")
-            # PWD is the checkout; USER and SLURM_JOB_ID name cluster scratch.
+            # PWD is the checkout; USER and SLURM_JOB_ID name cluster scratch;
+            # PYURBANAIR_MACHINE and PYURBANAIR_RESULTS_ROOT are set by the job
+            # scripts. A default is a plain literal (no nested resolver).
             if match.group(1) == "oc.env" and not re.match(
-                r"\$\{\s*oc\.env\s*:\s*(PWD|USER|SLURM_JOB_ID(,\s*\w+)?)\s*\}",
+                r"\$\{\s*oc\.env\s*:\s*(PWD|USER|SLURM_JOB_ID|PYURBANAIR_MACHINE"
+                r"|PYURBANAIR_RESULTS_ROOT)(,\s*[^}\s$]+)?\s*\}",
                 value[match.start() :],
             ):
                 raise ValueError(
-                    f"{path}: only the PWD, USER and SLURM_JOB_ID env resolvers "
-                    "are permitted"
+                    f"{path}: only the PWD, USER, SLURM_JOB_ID, PYURBANAIR_MACHINE "
+                    "and PYURBANAIR_RESULTS_ROOT env resolvers are permitted"
                 )
 
 
