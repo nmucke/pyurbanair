@@ -5,6 +5,26 @@
 (not into `main`). Read `AGENTS.md` first; its rules apply. Resolves issue #148
 (`gh issue view 148`); read it.
 
+## Where you work
+
+You work on a **Linux (linux-64) machine**: that is your local platform. The
+macOS (osx-arm64) side is verified in two ways:
+- the macOS CI runner this PR adds (`macos-14`), which is your main macOS
+  feedback loop;
+- a final check by the user/reviewer on their Mac once the PR is ready.
+
+Another agent is meanwhile working on the user's Mac (see "Coordination"), so
+you can't run anything there yourself.
+
+Start from a fresh clone. That is part of the test, since a fresh clone is what
+must work:
+
+```bash
+git clone --recurse-submodules https://github.com/nmucke/pyurbanair.git
+cd pyurbanair && git checkout feat/simplified-configs-and-scripts
+git submodule update --init --recursive
+```
+
 ## Goal
 
 We claim to support the platforms in `pyproject.toml`: **linux-64** and
@@ -45,7 +65,10 @@ Reproduce each one before fixing it; some may already be fixed.
   (paths defaulting to `$CONDA_PREFIX`, checking for the binary). Use it as a
   reference, not as the design.
 
-**Seen on macOS (osx-arm64) during the refactor:**
+**Seen on macOS (osx-arm64) during the refactor.** You can't reproduce these
+locally. Reproduce them on the macOS CI runner: add the workflow early in the
+PR, possibly as a temporary on-demand job that runs just the failing tests, so
+you get macOS feedback while you work.
 - **LBM build:** `prepare_compile` failed (SIGABRT from the compiled binary,
   2026-08), and the LBM build has never been confirmed working on this Mac.
   Note: calling `.pixi/envs/dev/bin/python` directly instead of `pixi run`
@@ -142,21 +165,26 @@ Reproduce each one before fixing it; some may already be fixed.
   default solver numerics stay identical (check `solver_build.py`'s
   environment identity: changing build flags invalidates cached builds, which
   is fine but should be intentional).
-- **Testing locally:**
-  - This machine is osx-arm64; linux-64 is verified through CI.
-  - Run solver tests one at a time, and check `pgrep -fl "pytest|u-dales|boltzmann"`
-    first: other agents may be testing on this machine.
-  - Run the integration suite at least twice to show it's stable.
+- **Testing:**
+  - **Linux locally:** run solver tests one at a time; concurrent runs collide
+    on the shared build caches. Run the integration suite at least twice to
+    show it's stable.
+  - **macOS:** use the CI runner. Note in the PR which macOS results come from
+    CI only.
 - **Coordination:** the `tests/legacy/` migration PR
-  (`docs/plans/legacy_tests_migration_handover.md`) may run in parallel and
-  touches some of the same test files (`tests/pyudales/*`, `tests/pylbm/*`,
-  `tests/pypalm/*`). Keep test edits minimal; whichever merges second rebases.
+  (`docs/plans/legacy_tests_migration_handover.md`) is in progress in parallel,
+  on the user's Mac. It touches some of the same test files
+  (`tests/pyudales/*`, `tests/pylbm/*`, `tests/pypalm/*`, `tests/conftest.py`).
+  - Keep your test edits minimal.
+  - Fetch the base branch regularly.
+  - Expect to rebase if that PR merges first.
 - **Untouchable files:** never edit `archive/`, or commit, stash or reset
   `configs/*.yaml` edits you didn't make.
 
 ## Done when
 
-- [ ] On osx-arm64 (locally) and linux-64 (CI), a fresh clone passes
+- [ ] On linux-64 (locally, from a fresh clone, and in CI) and osx-arm64 (CI
+  runner; the reviewer re-checks on a Mac), a fresh clone passes
   `pixi run setup-dev`, `py.test`, `test-integration` and the MCP suite, twice
   in a row, with no platform-specific deselects or workaround variables.
 - [ ] Issue #148's checklist is done (link the PR to it).
