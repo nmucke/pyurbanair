@@ -72,6 +72,7 @@ model_weights/
 # job output files
 job_scripts/delftblue/out_files/*
 job_scripts/snellius/out_files/*
+!job_scripts/*/out_files/.gitkeep
 slurm-*.out
 
 # training data

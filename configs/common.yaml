@@ -5,8 +5,9 @@
 # under `results_root`.
 paths:
   # Which entry of `scratch` the solvers use: local | snellius | delftblue.
-  machine: local
-  results_root: .temp
+  # The job scripts set both through the environment (job_scripts/*/env.sh).
+  machine: ${oc.env:PYURBANAIR_MACHINE,local}
+  results_root: ${oc.env:PYURBANAIR_RESULTS_ROOT,.temp}
   # Absolute scratch dir the solvers chdir into, per machine. The cluster
   # entries get one dir per SLURM job (`local` outside a job).
   scratch:

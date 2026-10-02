@@ -67,7 +67,9 @@ configs/
   (`${paths.results_root}/${truth_model.name}_to_${assim_model.name}`).
 - **`common.yaml`** — `paths` (`machine: local |
   snellius | delftblue` picks the solver scratch dir, `results_root`,
-  `weights_dir`, `training_data_dir`); the one `ensemble` budget
+  `weights_dir`, `training_data_dir`; `machine` and `results_root` default to
+  `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts);
+  the one `ensemble` budget
   (`ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`,
   `failure.policy: raise | resample_from_successes`); Hydra's run dir.
 
@@ -269,8 +271,8 @@ post-processing on that dir. Run them inside the dev environment.
   on `configs/forward.yaml` (see [mcp.md](mcp.md)).
 - `scripts/register_claude.sh` — behind `pixi run -e mcp register-claude`:
   registers `start_mcp` with Claude Code after asking.
-- `job_scripts/` — HPC launchers; they still reference the archived setup and
-  have not been ported yet (see [job_scripts.md](job_scripts.md)).
+- `job_scripts/` — SLURM wrappers around the workflows and surrogate scripts
+  for Snellius and DelftBlue (see [job_scripts.md](job_scripts.md)).
 
 ### Not ported from the archived setup
 

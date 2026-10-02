@@ -49,6 +49,7 @@ TEST_CONFIGS = pathlib.Path(__file__).resolve().parent / "configs"
 def compose(config_name: str, *overrides: str, root: pathlib.Path) -> DictConfig:
     """A configs/ config with every output and scratch dir under `root`."""
     paths = [
+        "paths.machine=local",
         f"paths.results_root={root / 'results'}",
         f"paths.scratch.local={root / 'scratch'}",
         f"paths.weights_dir={root / 'weights'}",
@@ -85,6 +86,13 @@ def surrogate(session_root: pathlib.Path) -> list[str]:
 # ---------------------------------------------------------------------------
 # Session fixtures: synthetic training data and the surrogates trained on it
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _no_job_script_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never run against the machine a job script's env.sh selects."""
+    monkeypatch.delenv("PYURBANAIR_MACHINE", raising=False)
+    monkeypatch.delenv("PYURBANAIR_RESULTS_ROOT", raising=False)
 
 
 @pytest.fixture(scope="session")  # type: ignore[misc]

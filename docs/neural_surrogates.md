@@ -238,10 +238,8 @@ these differences:
   from the saved files. An explicit `training_data.output_dir` is required
   for every stage but `all`. Rerunning `all` or `plan` against an existing
   plan with the same config resumes it; a plan made under a different config
-  is refused rather than overwritten. DelftBlue wrapper:
-  [job_scripts/delftblue/submit_random_geometries_training_data.sh](../job_scripts/delftblue/submit_random_geometries_training_data.sh)
-  (plan → simulate array + resume rounds → finalize, chained with SLURM
-  dependencies).
+  is refused rather than overwritten. On SLURM, submit one
+  `surrogate_generate_data.slurm` per shard (see [job_scripts.md](job_scripts.md)).
 - **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
   decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
   {1, 2, 4, 8, 16} always works; the script validates this before running
