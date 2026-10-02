@@ -85,6 +85,8 @@ def test_initial_state_selects_member_and_frame(tmp_path: pathlib.Path) -> None:
     assert float(picked.u) == 3.0
     ensemble = initial_state({"path": str(source), "time_index": 1}, True)
     assert ensemble.u.values.tolist() == [1.0, 4.0]
+    with pytest.raises(ValueError, match="single run"):
+        initial_state({"path": str(source), "member": 7}, True)
 
 
 @pytest.mark.integration  # type: ignore[misc]

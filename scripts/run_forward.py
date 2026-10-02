@@ -95,12 +95,18 @@ def _initial_state(source: Any, is_ensemble: bool) -> xarray.Dataset | None:
     `source` is a path or `{path, member, time_index}`: `member` picks an
     ensemble member by its coordinate label, `time_index` a frame by position
     (default: the last). Without `member` a single run takes the file's first
-    member; an ensemble run needs the file to hold one member per ensemble member.
+    member; an ensemble run needs the file to hold one member per ensemble
+    member, so `member` is only for a single run.
     """
     if source is None:
         return None
     if isinstance(source, str):
         source = {"path": source}
+    if is_ensemble and source.get("member") is not None:
+        raise ValueError(
+            "forward.initial_state.member picks one member, for a single run; an "
+            "ensemble run needs a state with one member per ensemble member."
+        )
     state = xarray.load_dataset(source["path"])
     if source.get("member") is not None:
         state = state.sel(ensemble=source["member"])

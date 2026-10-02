@@ -162,7 +162,15 @@ class Supervisor:
                 {TOKEN_ENV: token, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"}
             )
             # The worker envs (dev, cuda, rendering) don't install mcp-server.
-            env["PYTHONPATH"] = str(self.repo_root / "libs/mcp-server/src")
+            env["PYTHONPATH"] = os.pathsep.join(
+                filter(
+                    None,
+                    [
+                        str(self.repo_root / "libs/mcp-server/src"),
+                        env.get("PYTHONPATH"),
+                    ],
+                )
+            )
             with (root / "worker.log").open("ab", buffering=0) as log:
                 process = subprocess.Popen(
                     command,
@@ -400,8 +408,6 @@ class SupervisorClient:
                 return
             except (ConnectionError, FileNotFoundError):
                 pass
-            env = dict(os.environ)
-            env["PYTHONPATH"] = str(self.repo_root / "libs/mcp-server/src")
             with (self.root / "supervisor.log").open("ab") as log:
                 subprocess.Popen(
                     [
@@ -414,7 +420,6 @@ class SupervisorClient:
                         str(self.root),
                     ],
                     cwd=self.repo_root,
-                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
