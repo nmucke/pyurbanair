@@ -319,12 +319,12 @@ def test_periodic_plus_enabled_raises(tmp_path: pathlib.Path) -> None:
 
     case_dir = tmp_path / "case"
     case_dir.mkdir()
-    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), case_dir / "_p3d")
+    shutil.copy2(pathlib.Path("geometries/xie_and_castro/_p3d"), case_dir / "_p3d")
 
     with pytest.raises(ValueError, match="inflow_outflow"):
         ForwardModel(
             case_dir=case_dir,
-            stl_path="examples/xie_and_castro/xie_castro_2008_STL.stl",
+            stl_path="geometries/xie_and_castro/xie_castro_2008_STL.stl",
             boundary_condition="periodic",
             inlet_turbulence={"enabled": True},
             temp_dir=tmp_path / "exp",
@@ -359,7 +359,7 @@ def _apply(tmp_path: pathlib.Path, block: Any, warm_start: bool = False) -> dict
     from pypalm.utils.p3d_utils import P3DFile
 
     p = tmp_path / "urban_run_p3d"
-    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), p)
+    shutil.copy2(pathlib.Path("geometries/xie_and_castro/_p3d"), p)
     # _reset_cold_init() does this on EVERY cold start, before the knob runs.
     f = P3DFile(p)
     f.set_value("runtime_parameters", "create_disturbances", True)

@@ -15,9 +15,9 @@ training_data:
   output_dir: ${paths.results_dir}/training_data
   geometry:
     source: realistic
-    stl_dir: examples/geometries/processed/${training_data.geometry.source}
-    udales_case_dir: examples/udales/${training_data.geometry.source}
-    palm_case_dir: examples/palm/${training_data.geometry.source}
+    stl_dir: geometries/urbantales/processed/${training_data.geometry.source}
+    udales_case_dir: geometries/urbantales/${training_data.geometry.source}
+    palm_case_dir: geometries/urbantales/${training_data.geometry.source}
     resolution: 4.0
     upstream_padding: 0.0
     downstream_padding: 0.0

@@ -627,18 +627,18 @@ step silently yields all-zero fields due to a dyld `rrtmg.so` load failure;
 
 ## 9. Example configs
 
-Experiment configs live in
-[examples/palm/](../examples/palm/), one directory per case:
+Case inputs live in [geometries/](../geometries/), one folder per case:
 
-- [examples/palm/xie_and_castro/](../examples/palm/xie_and_castro/) — the
+- [geometries/xie_and_castro/](../geometries/xie_and_castro/) — the
   Xie & Castro 2008 benchmark geometry.
-- [examples/palm/barcelona/](../examples/palm/barcelona/) — the Barcelona urban
+- [geometries/barcelona/](../geometries/barcelona/) — the Barcelona urban
   case. Each contains a `_p3d` namelist template that `ForwardModel.__init__`
-  copies into `INPUT/` and edits.
+  copies into `INPUT/` and edits. The folder also holds the uDALES inputs;
+  PALM copies only its `_p3d`/`_topo`/`_static`/`_dynamic` files.
 
-These are the files referenced by `case_dir: ${geometry.palm_case_dir}` in
-`pypalm.yaml`. The case bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
-`geometry.palm_case_dir` and `geometry.stl_path`.
+`pypalm.yaml` reads the folder as `case_dir: ${geometry.case_dir}`. The case
+bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
+`geometry.case_dir` and `geometry.stl_path`.
 
 ---
 

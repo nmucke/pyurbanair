@@ -459,7 +459,7 @@ def test_pypalm_sgs_setting_disables_constant_flux_layer(
     from pypalm.forward_model import ForwardModel
     from pypalm.utils.p3d_utils import P3DFile
 
-    case_p3d = pathlib.Path("examples/palm/xie_and_castro/_p3d")
+    case_p3d = pathlib.Path("geometries/xie_and_castro/_p3d")
     staged = tmp_path / "urban_run_p3d"
     shutil.copy2(case_p3d, staged)
 
@@ -587,7 +587,7 @@ def test_pypalm_sgs_model_config_default_is_used_when_params_absent(
     from pypalm.utils.p3d_utils import P3DFile
 
     staged = tmp_path / "urban_run_p3d"
-    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), staged)
+    shutil.copy2(pathlib.Path("geometries/xie_and_castro/_p3d"), staged)
 
     class _Stub:
         _param_value = staticmethod(ForwardModel._param_value)
@@ -611,7 +611,7 @@ def test_pypalm_sgs_params_overrides_model_config(tmp_path: pathlib.Path) -> Non
     from pypalm.utils.p3d_utils import P3DFile
 
     staged = tmp_path / "urban_run_p3d"
-    shutil.copy2(pathlib.Path("examples/palm/xie_and_castro/_p3d"), staged)
+    shutil.copy2(pathlib.Path("geometries/xie_and_castro/_p3d"), staged)
 
     class _Stub:
         _param_value = staticmethod(ForwardModel._param_value)

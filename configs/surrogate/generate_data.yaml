@@ -54,9 +54,10 @@ data:
     source: realistic
     # Suffix of the output folder; set to ${case_name} for mode=fixed.
     name: ${.source}
-    stl_dir: examples/geometries/processed/${.source}
-    udales_case_dir: examples/udales/${.source}
-    palm_case_dir: examples/palm/${.source}
+    # STL pool made by scripts/tools/rasters_to_stl.py, and the uDALES/PALM
+    # templates (namoptions.300, _p3d) for that source.
+    stl_dir: geometries/urbantales/processed/${.source}
+    case_dir: geometries/urbantales/${.source}
     # Grid spacing [m], free space around the buildings [m] and domain height [m].
     resolution: 4.0
     upstream_padding: 64.0

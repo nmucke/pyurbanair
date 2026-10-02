@@ -34,9 +34,9 @@ What this tool does
    chosen vertical datum -> ``z = 0`` (so all solid geometry is at ``z >= 0``),
    clipping any sub-floor geometry (building basements) flush to the floor.
 7. Writes **one** binary STL, shared by all backends, at
-   ``examples/<case>/<output-name>``. All backends reference this single file
-   through their ``stl_path`` config; nothing is written under the per-backend
-   case dirs.
+   ``geometries/<case>/<output-name>``, the case folder that also holds the
+   uDALES namoptions and the PALM _p3d. All backends reference this single
+   file (``geometry.stl_path``).
 
 It then prints the domain extents you should set in the uDALES ``namoptions``
 (``xlen``/``ylen``/``zsize``) and a reminder to regenerate the ``&WALLS`` facet
@@ -44,12 +44,12 @@ counts. This tool only produces the STL; it does not edit namoptions.
 
 Example
 -------
-    pixi run python tools/prepare_case_stl.py buildings.stl groundpatched_extrude.stl
+    pixi run -e dev python scripts/tools/prepare_case_stl.py buildings.stl groundpatched_extrude.stl
     # smaller, cheaper window centred on a point:
-    pixi run python tools/prepare_case_stl.py buildings.stl ground.stl \
+    pixi run -e dev python scripts/tools/prepare_case_stl.py buildings.stl ground.stl \
         --size 250 --center -39 -53 --output-name buildings.stl
     # rotate the buildings 30 deg relative to the (unrotated) ground:
-    pixi run python tools/prepare_case_stl.py buildings.stl ground.stl \
+    pixi run -e dev python scripts/tools/prepare_case_stl.py buildings.stl ground.stl \
         --rotate-buildings 30
 """
 
@@ -316,17 +316,17 @@ def prepare(
 def write_outputs(
     mesh: trimesh.Trimesh,
     *,
-    examples_root: pathlib.Path,
+    geometries_root: pathlib.Path,
     case: str,
     output_name: str,
     dry_run: bool,
 ) -> list[pathlib.Path]:
-    """Write the single shared domain-frame STL at ``examples/<case>/<name>``.
+    """Write the single shared domain-frame STL at ``geometries/<case>/<name>``.
 
-    Returns ``[shared_file]``. All backends reference this one file via their
-    ``stl_path`` config; nothing is written under the per-backend case dirs.
+    Returns ``[shared_file]``. All backends reference this one file via
+    ``geometry.stl_path``.
     """
-    shared = examples_root / case / output_name
+    shared = geometries_root / case / output_name
 
     if dry_run:
         print(f"[dry-run] would write {shared}")
@@ -347,16 +347,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("buildings", type=pathlib.Path, help="Buildings STL (obstacles).")
     p.add_argument("ground", type=pathlib.Path, help="Ground/terrain (extruded) STL.")
     p.add_argument(
-        "--case", default="barcelona", help="Case name -> examples/<backend>/<case>/."
+        "--case", default="barcelona", help="Case name -> geometries/<case>/."
     )
     p.add_argument(
         "--output-name", default="buildings.stl", help="Output STL filename."
     )
     p.add_argument(
-        "--examples-root",
+        "--geometries-root",
         type=pathlib.Path,
-        default=pathlib.Path("examples"),
-        help="Root of the per-backend example folders.",
+        default=pathlib.Path("geometries"),
+        help="Root of the case folders.",
     )
     p.add_argument(
         "--center",
@@ -487,7 +487,7 @@ def main(argv: list[str] | None = None) -> int:
 
     write_outputs(
         mesh,
-        examples_root=args.examples_root,
+        geometries_root=args.geometries_root,
         case=args.case,
         output_name=args.output_name,
         dry_run=args.dry_run,

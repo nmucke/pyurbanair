@@ -47,7 +47,6 @@ def _make_dirs(tmp_path: pathlib.Path) -> DirectoryPaths:
         experiment_base_dir=tmp_path,
         experiment_dir=experiment_dir,
         output_dir=output_dir,
-        case_dir=tmp_path,
         experiment_name="runcase",
         infile_path=experiment_dir / "infile.in",
         main_f90_path=tmp_path / "main.F90",

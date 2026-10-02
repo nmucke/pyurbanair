@@ -2,7 +2,7 @@
 domain:
   bounds: [[-20.0, 80.0], [0.0, 80.0], [0.0, 32.0]]
 geometry:
-  stl_path: examples/xie_and_castro/xie_castro_2008_STL.stl
+  stl_path: geometries/xie_and_castro/xie_castro_2008_STL.stl
 obs:
   x_points: [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
   y_points: [20.0, 60.0, 10.0, 50.0, 30.0, 70.0]

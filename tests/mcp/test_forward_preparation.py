@@ -133,7 +133,7 @@ def test_parallel_composition_is_serialized(checkout: Path) -> None:
 
 def test_native_staging_and_plan_integrity(checkout: Path, tmp_path: Path) -> None:
     service = PreparationService(checkout, tmp_path / "store")
-    original = checkout / "examples/udales/xie_and_castro/namoptions.300"
+    original = checkout / "geometries/xie_and_castro/namoptions.300"
     before = original.read_bytes()
     plan = service.prepare(native_overrides={"RUN": {"dtmax": 0.25}})
     assert plan["validation"]["configuration_valid"]
@@ -194,7 +194,7 @@ def test_unknown_native_field_is_not_silently_ignored(
 def test_inputs_and_code_are_verified(checkout: Path, tmp_path: Path) -> None:
     service = PreparationService(checkout, tmp_path / "store")
     plan = service.prepare()
-    original = checkout / "examples/udales/xie_and_castro/namoptions.300"
+    original = checkout / "geometries/xie_and_castro/namoptions.300"
     original.write_text(original.read_text() + "\n! changed\n")
     with pytest.raises(ValueError, match="input changed"):
         service.verify(plan["plan_id"])

@@ -13,9 +13,9 @@ domain:
   - - 0.0
     - 10.0
 geometry:
-  stl_path: examples/barcelona/buildings.stl
-  udales_case_dir: examples/udales/barcelona
-  palm_case_dir: examples/palm/barcelona
+  stl_path: geometries/barcelona/buildings.stl
+  udales_case_dir: geometries/barcelona
+  palm_case_dir: geometries/barcelona
   udales_precomputed_geom_dir: null
 obs:
   mode: points

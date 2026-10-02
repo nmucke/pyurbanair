@@ -309,7 +309,7 @@ def _make_model(cfg: DictConfig, geometry: Geometry | None, spinup: float) -> An
         if cfg.model.name == "pyudales":
             overrides["case_dir"] = str(
                 _udales_case(
-                    pathlib.Path(cfg.data.geometry.udales_case_dir),
+                    pathlib.Path(cfg.data.geometry.case_dir),
                     geometry.stl,
                     scratch,
                 )
@@ -318,7 +318,7 @@ def _make_model(cfg: DictConfig, geometry: Geometry | None, spinup: float) -> An
         else:
             overrides["stl_path"] = str(geometry.stl)
             if cfg.model.name == "pypalm":
-                overrides["case_dir"] = str(cfg.data.geometry.palm_case_dir)
+                overrides["case_dir"] = str(cfg.data.geometry.case_dir)
     model = instantiate(cfg.model.forward_model, **overrides)
     instantiate(cfg.model.prepare, forward_model=model)
     clean_outputs(cfg.model.name, model)

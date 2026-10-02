@@ -9,7 +9,7 @@ Each raster is a 2-D grid of building heights in metres at 1 m resolution
 (0 = ground / street, positive = building height). It is a top-down 2.5-D
 height map, so the mesh is built by extruding footprints straight up from
 z = 0 -- exactly the shared single-STL contract every backend consumes
-(``docs/plans/geometry_generation_plan.md`` Stage B):
+(``docs/archive/geometry_generation_plan.md`` Stage B):
 
   * geometry lives in the domain frame: it spans (0,0,0) -> (Lx, Ly, z_max) m;
   * a flat ground sheet sits at exactly z = 0 over the whole footprint;
@@ -43,9 +43,9 @@ buildings, shifting every footprint downstream and growing Lx accordingly, so
 the inflow has a fetch to develop before it hits the first obstacle.
 
 Usage:
-    pixi run -e dev python examples/geometries/rasters_to_stl.py
-    pixi run -e dev python examples/geometries/rasters_to_stl.py --set idealized
-    pixi run -e dev python examples/geometries/rasters_to_stl.py --workers 8 --force
+    pixi run -e dev python scripts/tools/rasters_to_stl.py
+    pixi run -e dev python scripts/tools/rasters_to_stl.py --set idealized
+    pixi run -e dev python scripts/tools/rasters_to_stl.py --workers 8 --force
 
 Requires numpy + trimesh (both root deps of the repo); run inside the ``dev``
 Pixi env.
@@ -61,7 +61,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-HERE = Path(__file__).resolve().parent
+URBANTALES = Path(__file__).resolve().parents[2] / "geometries" / "urbantales"
 SETS = ("idealized", "realistic")
 
 
@@ -293,8 +293,15 @@ def run_set(
     if rows:
         rows.sort(key=lambda r: r["name"])
         cols = [
-            "name", "nx", "ny", "Lx_m", "Ly_m", "inflow_margin_m",
-            "z_max_m", "lambda_p", "n_faces",
+            "name",
+            "nx",
+            "ny",
+            "Lx_m",
+            "Ly_m",
+            "inflow_margin_m",
+            "z_max_m",
+            "lambda_p",
+            "n_faces",
         ]
         with (out_dir / "manifest.csv").open("w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=cols)
@@ -313,8 +320,8 @@ def main() -> int:
     ap.add_argument(
         "--root",
         type=Path,
-        default=HERE,
-        help="geometries root holding raw/ and processed/ (default: script dir)",
+        default=URBANTALES,
+        help="geometries root holding raw/ and processed/ (default: geometries/urbantales)",
     )
     ap.add_argument(
         "--dx",
