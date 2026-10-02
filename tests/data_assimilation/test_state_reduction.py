@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import xarray
 
-from tests.legacy.config_loader import TEST_CONF_DIR
+from tests.conftest import CONFIGS
 
 
 class _DummyEnsembleModel:
@@ -754,8 +754,8 @@ def test_shipped_streaming_defaults_keep_rank_and_orthogonality_bounded() -> Non
 
     An energy criterion alone cannot bound the accumulator: it keeps absorbing
     new directions, so the retained rank (and the ``(N_s, rank)`` basis) grows
-    every cycle until it dwarfs the ensemble. The rank cap in
-    ``conf/filtering/state_reduction/svd_streaming.yaml`` is what makes the
+    every cycle until it dwarfs the ensemble. The rank cap of ``svd_streaming``
+    in ``configs/assimilation_settings/state_reduction.yaml`` is what makes the
     streaming option usable, and a single Gram-Schmidt pass would let
     orthogonality decay until the expensive re-orthogonalization branch fires
     (which cannot report a coordinate split).
@@ -767,8 +767,8 @@ def test_shipped_streaming_defaults_keep_rank_and_orthogonality_bounded() -> Non
     from omegaconf import OmegaConf
 
     shipped = OmegaConf.load(
-        TEST_CONF_DIR / "filtering/state_reduction/svd_streaming.yaml"
-    ).state_reduction
+        CONFIGS / "assimilation_settings/state_reduction.yaml"
+    ).svd_streaming
     assert shipped.max_rank is not None, "the shipped default must bound the rank"
     reduction = StreamingStateReduction(
         energy_fraction=shipped.energy_fraction,

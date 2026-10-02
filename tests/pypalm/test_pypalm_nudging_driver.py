@@ -13,11 +13,9 @@ from typing import Any, Optional, cast
 import numpy as np
 import pytest
 import xarray
-from hydra import compose, initialize_config_dir
-from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 
-from tests.legacy.config_loader import TEST_CONF_DIR
+from tests.conftest import compose
 
 _SMOKE = [
     "domain.nx=20",
@@ -28,18 +26,20 @@ _SMOKE = [
     "time.output_frequency=1.0",
     "time.spinup_time=3.0",
     "model=pypalm",
+    "model.forward_model.ncpu=1",
+    "model.forward_model.nudging_config.enabled=true",
 ]
 
 # inflow_outflow selects PALM's multigrid pressure solver, which needs uniform
-# slab subdomains — ncpu must divide the grid's x point count. conf's production
-# default (8) does not divide the smoke grid, so pin one that does.
+# slab subdomains — ncpu must divide the grid's x point count, so pin one that
+# divides the smoke grid.
 _INFLOW_OUTFLOW = [
     "model.forward_model.boundary_condition=inflow_outflow",
     "model.forward_model.ncpu=4",
 ]
 
 # The periodic cases must pin the BC too rather than inherit conf's default:
-# conf/model/pypalm.yaml's `boundary_condition` tracks whatever sweep is being
+# configs/model/pypalm.yaml's `boundary_condition` tracks whatever sweep is being
 # run, so relying on it silently re-points these tests at the other branch (a
 # periodic test that actually exercises inflow_outflow still "passes" the parts
 # that don't assert on the nudging apparatus).
@@ -58,14 +58,8 @@ NZ = 4
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
     """Compose + instantiate a pypalm smoke model staged under ``tmp_path``."""
-    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
-        cfg = compose(
-            config_name="run_forward_model",
-            overrides=[*_SMOKE, f"paths.experiment_dir={tmp_path}", *extra_overrides],
-            return_hydra_config=True,
-        )
-        HydraConfig.instance().set_config(cfg)
-        return instantiate(cfg.model.forward_model)
+    cfg = compose("forward", "+test=forward", *_SMOKE, *extra_overrides, root=tmp_path)
+    return instantiate(cfg.model.forward_model)
 
 
 def _static_params(angle: float = 30.0, speed: float = 5.0) -> xarray.Dataset:

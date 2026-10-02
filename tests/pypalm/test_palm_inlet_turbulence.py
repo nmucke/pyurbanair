@@ -14,11 +14,9 @@ from typing import Any, Optional, cast
 import numpy as np
 import pytest
 import xarray
-from hydra import compose, initialize_config_dir
-from hydra.core.hydra_config import HydraConfig
 from hydra.utils import instantiate
 
-from tests.legacy.config_loader import TEST_CONF_DIR
+from tests.conftest import compose
 
 _SMOKE = [
     "domain.nx=20",
@@ -29,6 +27,12 @@ _SMOKE = [
     "time.output_frequency=1.0",
     "time.spinup_time=3.0",
     "model=pypalm",
+    # The knob's values the tests assert on; off unless a test turns it on.
+    "model.forward_model.inlet_turbulence.enabled=false",
+    "model.forward_model.inlet_turbulence.dt_disturb=5.0",
+    "model.forward_model.inlet_turbulence.amplitude=0.25",
+    "model.forward_model.inlet_turbulence.begin=null",
+    "model.forward_model.inlet_turbulence.end=null",
 ]
 
 # inflow_outflow selects PALM's multigrid pressure solver, which needs uniform
@@ -40,10 +44,10 @@ _INFLOW_OUTFLOW = [
 
 _SEED_ON = "model.forward_model.inlet_turbulence.initial_seed=true"
 _SEED_OFF = "model.forward_model.inlet_turbulence.initial_seed=false"
-# Pin BOTH sub-switches everywhere: conf/model/pypalm.yaml tracks the active
+# Pin BOTH sub-switches everywhere: configs/model/pypalm.yaml tracks the active
 # sweep, so inheriting either one silently changes what these tests assert.
 _ON = ["model.forward_model.inlet_turbulence.enabled=true", _SEED_ON]
-# Pin the knob rather than inheriting conf/model/pypalm.yaml's value: that is a
+# Pin the knob rather than inheriting configs/model/pypalm.yaml's value: that is a
 # sweep setting, not a contract, so a test that relies on it silently flips
 # meaning when the config is re-pointed.
 _OFF = ["model.forward_model.inlet_turbulence.enabled=false", _SEED_ON]
@@ -51,14 +55,8 @@ _OFF = ["model.forward_model.inlet_turbulence.enabled=false", _SEED_ON]
 
 def _make_model(tmp_path: pathlib.Path, *extra_overrides: str) -> Any:
     """Compose + instantiate a pypalm smoke model staged under ``tmp_path``."""
-    with initialize_config_dir(version_base=None, config_dir=str(TEST_CONF_DIR)):
-        cfg = compose(
-            config_name="run_forward_model",
-            overrides=[*_SMOKE, f"paths.experiment_dir={tmp_path}", *extra_overrides],
-            return_hydra_config=True,
-        )
-        HydraConfig.instance().set_config(cfg)
-        return instantiate(cfg.model.forward_model)
+    cfg = compose("forward", "+test=forward", *_SMOKE, *extra_overrides, root=tmp_path)
+    return instantiate(cfg.model.forward_model)
 
 
 def _static_params(angle: float = 30.0, speed: float = 5.0) -> xarray.Dataset:

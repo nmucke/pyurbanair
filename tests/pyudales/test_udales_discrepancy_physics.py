@@ -2,12 +2,14 @@
 
 import json
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import cast
 
 import numpy as np
 import pytest
 import xarray as xr
 from hydra.utils import instantiate
+
+from tests.conftest import compose
 
 SETTINGS = {
     "enabled": True,
@@ -19,15 +21,15 @@ SETTINGS = {
 VELOCITY = ("u", "v", "w")
 
 
-def _forecast(
-    compose_module_cfg: Callable[..., Any], root: Path, *, ncpu: int, enabled: bool
-) -> xr.Dataset:
-    cfg = compose_module_cfg(
-        [
-            "model=pyudales",
-            f"model.forward_model.ncpu={ncpu}",
-            f"paths.experiment_dir={root}",
-        ]
+def _forecast(root: Path, *, ncpu: int, enabled: bool) -> xr.Dataset:
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
+        f"model.forward_model.ncpu={ncpu}",
+        # The tolerances below were calibrated after a 3 s spin-up.
+        "time.spinup_time=3.0",
+        root=root,
     )
     model = instantiate(
         cfg.model.forward_model,
@@ -88,21 +90,13 @@ def _diagnostics(state: xr.Dataset) -> dict[str, float]:
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_zero_coefficients_recover_stock_and_agree_across_mpi_ranks(
-    tmp_path: Path, compose_module_cfg: Callable[..., Any]
+    tmp_path: Path,
 ) -> None:
     """Compare complete finite forecasts, not just a compiled helper kernel."""
-    stock_one = _forecast(
-        compose_module_cfg, tmp_path / "stock_one", ncpu=1, enabled=False
-    )
-    stock_two = _forecast(
-        compose_module_cfg, tmp_path / "stock_two", ncpu=2, enabled=False
-    )
-    zero_one = _forecast(
-        compose_module_cfg, tmp_path / "zero_one", ncpu=1, enabled=True
-    )
-    zero_two = _forecast(
-        compose_module_cfg, tmp_path / "zero_two", ncpu=2, enabled=True
-    )
+    stock_one = _forecast(tmp_path / "stock_one", ncpu=1, enabled=False)
+    stock_two = _forecast(tmp_path / "stock_two", ncpu=2, enabled=False)
+    zero_one = _forecast(tmp_path / "zero_one", ncpu=1, enabled=True)
+    zero_two = _forecast(tmp_path / "zero_two", ncpu=2, enabled=True)
 
     for state in (stock_one, stock_two, zero_one, zero_two):
         _assert_finite_velocity(state)
@@ -159,15 +153,15 @@ def test_zero_coefficients_recover_stock_and_agree_across_mpi_ranks(
 @pytest.mark.integration  # type: ignore[misc]
 @pytest.mark.parametrize("ncpu", [1, 2])  # type: ignore[misc]
 def test_native_forecast_window_replays_cold_and_warm_state(
-    tmp_path: Path, compose_test_cfg: Callable[..., Any], ncpu: int
+    tmp_path: Path, ncpu: int
 ) -> None:
     """Replaying one window restores native carry, clocks and input settings."""
-    cfg = compose_test_cfg(
-        [
-            "model=pyudales",
-            f"model.forward_model.ncpu={ncpu}",
-            f"paths.experiment_dir={tmp_path / 'experiment'}",
-        ]
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
+        f"model.forward_model.ncpu={ncpu}",
+        root=tmp_path,
     )
     model = instantiate(cfg.model.forward_model, model_discrepancy=SETTINGS)
     model.run_preprocessing()

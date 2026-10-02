@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 import xarray as xr
@@ -124,18 +124,20 @@ def test_unsupported_discrepancy_backends_fail_early(role: str) -> None:
 @pytest.mark.integration  # type: ignore[misc]
 @pytest.mark.parametrize("ncpu", [1, 2])  # type: ignore[misc]
 def test_native_fixed_discrepancy_forecast_and_restart(
-    tmp_path: Path, compose_test_cfg: Callable[..., Any], ncpu: int
+    tmp_path: Path, ncpu: int
 ) -> None:
     """Exercise automatic compilation/preprocessing, native diagnostics and warm start."""
     import numpy as np
     from hydra.utils import instantiate
 
-    cfg = compose_test_cfg(
-        [
-            "model=pyudales",
-            f"model.forward_model.ncpu={ncpu}",
-            f"paths.experiment_dir={tmp_path / 'experiment'}",
-        ]
+    from tests.conftest import compose
+
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
+        f"model.forward_model.ncpu={ncpu}",
+        root=tmp_path,
     )
     model = instantiate(
         cfg.model.forward_model, model_discrepancy=SETTINGS, results_dir=None

@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tests.legacy.config_loader import TEST_CONF_DIR
+from tests.conftest import CONFIGS
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("p3d_surrogate")
@@ -41,11 +41,13 @@ N_PARAMS = 2
 STATE_VARS = ("u", "v", "w")
 PARAM_VARS = ("inflow_angle", "velocity_magnitude")
 
-# ``tiny``-preset sizing (mirrors conf/.../p3d/tiny.yaml); smallest upstream
-# size (S) with a small window so the suite stays runnable on CPU.
+# ``tiny``-preset sizing (mirrors ``p3d_tiny`` in
+# configs/surrogate/architectures.yaml): smallest upstream size (S) with a
+# small window so the suite stays runnable on CPU.
 TINY = dict(size="S", window_size=2, partition_size=1)
 
-PRESET_DIR = TEST_CONF_DIR / "neural_surrogate" / "architectures" / "p3d"
+# The ``p3d_<size>`` entries of the surrogate architecture registry.
+ARCHITECTURES = OmegaConf.load(CONFIGS / "surrogate" / "architectures.yaml")
 
 
 # -- helper builders --------------------------------------------------------
@@ -177,7 +179,7 @@ def test_autoregressive_rollout_stays_finite() -> None:
 
 @pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])  # type: ignore[misc]
 def test_presets_instantiate(preset: str) -> None:
-    cfg = OmegaConf.load(PRESET_DIR / f"{preset}.yaml")
+    cfg = ARCHITECTURES[f"p3d_{preset}"]
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
     assert isinstance(model, P3D)
 
@@ -185,7 +187,7 @@ def test_presets_instantiate(preset: str) -> None:
 def test_tiny_preset_forward_shape() -> None:
     """Only forward-pass the tiny preset to keep the suite fast."""
     torch.manual_seed(0)
-    cfg = OmegaConf.load(PRESET_DIR / "tiny.yaml")
+    cfg = ARCHITECTURES["p3d_tiny"]
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS).eval()
     state, params, geometry, _ = _inputs(batch=2)
     with torch.no_grad():
@@ -350,10 +352,7 @@ def test_sdf_off_forward_matches_pre_change_golden() -> None:
     with torch.no_grad():
         out = model(state, params, geometry)
     golden = np.load(
-        pathlib.Path(__file__).resolve().parents[1]
-        / "legacy"
-        / "fixtures"
-        / "p3d_sdf_off_golden.npz"
+        pathlib.Path(__file__).resolve().parent / "data" / "p3d_sdf_off_golden.npz"
     )["out"]
     torch.testing.assert_close(out, torch.from_numpy(golden), rtol=1e-5, atol=1e-5)
 
@@ -514,8 +513,7 @@ def test_sdf_shared_mask_shortcut_vs_distinct_masks() -> None:
 
 def test_sdf_preset_comment_knob_instantiates() -> None:
     """A p3d preset with sdf_features enabled builds a widened model."""
-    cfg = OmegaConf.load(PRESET_DIR / "tiny.yaml")
-    cfg.sdf_features = True
+    cfg = OmegaConf.merge(ARCHITECTURES["p3d_tiny"], {"sdf_features": True})
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
     assert model.n_geom_feature_channels == 4
 

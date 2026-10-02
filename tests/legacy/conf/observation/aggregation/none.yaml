@@ -1,4 +1,0 @@
-# @package _global_
-# Preserve each observation frame without aggregation.
-observation:
-  aggregation: null
