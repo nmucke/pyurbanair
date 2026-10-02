@@ -16,24 +16,20 @@ from typing import Any
 import pytest
 
 pytest.importorskip("mcp")
-pytest.importorskip("pyurbanair_mcp")
+pytest.importorskip("mcp_server")
 
 from mcp import Client
-from pyurbanair_mcp.server import create_server
-
-pytestmark = pytest.mark.skip(
-    reason="MCP port pending: docs/plans/mcp_server_refactor_handover.md"
-)
+from mcp_server.server import create_server
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
 
 def test_packaging_and_backend_free_discovery(tmp_path: pathlib.Path) -> None:
-    distribution = importlib.metadata.distribution("pyurbanair-mcp")
-    assert any(entry.name == "pyurbanair-mcp" for entry in distribution.entry_points)
+    distribution = importlib.metadata.distribution("mcp-server")
+    assert any(entry.name == "mcp-server" for entry in distribution.entry_points)
     code = """
 import json, sys
-from pyurbanair_mcp.tools import Tools
+from mcp_server.tools import Tools
 capabilities = Tools(sys.argv[1], sys.argv[2]).get_capabilities()
 assert not {'jax','torch','pylbm','pypalm','pyudales','neural_surrogates'} & sys.modules.keys()
 print(json.dumps(capabilities))
@@ -62,6 +58,14 @@ def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
             result = await client.call_tool("list_config_options", {"group": "model"})
             assert not result.is_error
             assert result.structured_content["total"] == 4
+            result = await client.call_tool(
+                "inspect_config",
+                {"overrides": ["model=pylbm", "forward.rollout_steps=2"]},
+            )
+            assert not result.is_error
+            config = result.structured_content["config"]
+            assert config["model"]["name"] == "pylbm"
+            assert config["forward"]["rollout_steps"] == 2
             invalid = await client.call_tool(
                 "inspect_config",
                 {"overrides": ["++model.forward_model._target_=os.system"]},
@@ -76,8 +80,8 @@ def test_real_stdio_handshake_no_stdout_contamination(
     tmp_path: pathlib.Path, entrypoint: str
 ) -> None:
     command = {
-        "module": [sys.executable, "-m", "pyurbanair_mcp"],
-        "console": [str(pathlib.Path(sys.executable).with_name("pyurbanair-mcp"))],
+        "module": [sys.executable, "-m", "mcp_server"],
+        "console": [str(pathlib.Path(sys.executable).with_name("mcp-server"))],
         "launcher": [str(REPO / "scripts/start_mcp")],
     }[entrypoint]
     environment = dict(os.environ)
@@ -159,9 +163,8 @@ def test_visualization_sdk_image_links_and_bounded_fallback(
     import base64
 
     from mcp.types import ImageContent, ResourceLink
-    from pyurbanair_mcp.schemas import MAX_METADATA_BYTES, MAX_PNG_BYTES
-
-    from pyurbanair.jobs.supervisor import SupervisorClient
+    from mcp_server.jobs.supervisor import SupervisorClient
+    from mcp_server.schemas import MAX_METADATA_BYTES, MAX_PNG_BYTES
 
     run_root = tmp_path / "render"
     bundle = run_root / "bundle"
@@ -263,7 +266,7 @@ def test_visualization_sdk_image_links_and_bounded_fallback(
 def test_launch_retry_preserves_existing_job_after_inputs_change(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pyurbanair_mcp.tools import Tools
+    from mcp_server.tools import Tools
 
     tools = Tools(REPO, tmp_path)
     job = {

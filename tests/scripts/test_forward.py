@@ -36,6 +36,7 @@ def test_single_member(
     assert "ensemble" not in state.dims
     assert {"u", "v", "w"} <= set(state.data_vars)
     assert np.isfinite(state.u.values).all()
+    assert not (run_dir / "windows").exists()  # forward.save_windows is off
     for name in FIGURES:
         assert (run_dir / "figures" / name).exists(), name
     # MP4 with ffmpeg, else the animation helper's GIF fallback.
@@ -54,6 +55,7 @@ def test_ensemble_over_several_windows(
         *surrogate(session_root),
         "forward.ensemble=true",
         "forward.rollout_steps=1",
+        "forward.save_windows=true",
         root=tmp_path,
     )
     run_dir = _run(cfg)
@@ -64,6 +66,25 @@ def test_ensemble_over_several_windows(
     times = state.time.values
     assert np.all(np.diff(times) > 0) and times[-1] == pytest.approx(6.0)
     assert params.time.values[-1] == pytest.approx(6.0)
+    # Each window on its own, on the same global clock.
+    last = xarray.load_dataset(run_dir / "windows" / "state_0001.nc")
+    assert (run_dir / "windows" / "params_0000.nc").exists()
+    xarray.testing.assert_equal(last, state.sel(time=last.time))
+
+
+def test_initial_state_selects_member_and_frame(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "state.nc"
+    xarray.Dataset(
+        {"u": (("ensemble", "time"), np.arange(6.0).reshape(2, 3))},
+        coords={"ensemble": [3, 7], "time": [0.0, 1.0, 2.0]},
+    ).to_netcdf(source)
+    initial_state = load_script("scripts/run_forward.py")._initial_state
+    # A path alone: the last frame of the first member.
+    assert float(initial_state(str(source), False).u) == 2.0
+    picked = initial_state({"path": str(source), "member": 7, "time_index": 0}, False)
+    assert float(picked.u) == 3.0
+    ensemble = initial_state({"path": str(source), "time_index": 1}, True)
+    assert ensemble.u.values.tolist() == [1.0, 4.0]
 
 
 @pytest.mark.integration  # type: ignore[misc]

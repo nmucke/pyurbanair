@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import pathlib
 from typing import Any
 
-from hydra.core.hydra_config import HydraConfig
-from omegaconf import DictConfig
 from pylbm.utils.warm_start_utils import clean_output_files as clean_lbm_output_files
 from pyudales.utils.clean_up_utils import clean_output_dir as clean_udales_output_dir
 
@@ -109,9 +106,3 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
             "sgs_bias_b2",
         )
     return base
-
-
-def resolve_output_dir(cfg: DictConfig, run_name: str) -> pathlib.Path:
-    if HydraConfig.initialized():
-        return pathlib.Path(HydraConfig.get().runtime.output_dir)
-    return pathlib.Path(cfg.paths.base_results_dir) / run_name

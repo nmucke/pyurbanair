@@ -1,28 +1,20 @@
-# The MCP server, in its own pixi environment.
+# tests/visualization.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
-name: "Tests: mcp"
+name: "Tests: visualization"
 
 on:
   push:
     branches: [main]
   pull_request:
     paths:
-      - "libs/mcp-server/**"
       - "libs/visualization/**"
-      - "tests/mcp/**"
-      - "tests/configs/**"
-      - "configs/**"
-      - "scripts/start_mcp"
-      - "scripts/run_forward.py"
-      - "scripts/utils/**"
-      - "src/**"
+      - "tests/visualization/**"
       - "pyproject.toml"
       - "pixi.lock"
       - "tests/conftest.py"
-      - "tests/legacy/**"
       - ".github/actions/setup/**"
-      - ".github/workflows/tests-mcp.yml"
+      - ".github/workflows/tests-visualization.yml"
   workflow_dispatch:
 
 concurrency:
@@ -31,7 +23,7 @@ concurrency:
 
 jobs:
   test:
-    name: tests/mcp
+    name: tests/visualization
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -39,7 +31,5 @@ jobs:
         with:
           submodules: recursive
       - uses: ./.github/actions/setup
-        with:
-          environment: mcp
       - name: Run tests
-        run: pixi run --locked -e mcp python -m pytest tests/mcp --durations=10
+        run: pixi run -e dev python -m pytest tests/visualization --durations=10

@@ -1,11 +1,13 @@
-"""Actual MCP tool adapters -> persistent supervisor -> solver -> PNG.
+"""MCP tools over the SDK -> persistent supervisor -> run_forward.py -> PNG.
 
-Uses physical settings from tests/conf, never production numerical tuning. The
-surrogate export is a generated test fixture, not a claim of predictive quality.
+Each backend runs on the tiny grid of tests/configs/test/tiny.yaml, passed as
+plain overrides of configs/forward.yaml (the server composes the real configs
+only). The surrogate export is a generated fixture, not a trained model.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import pathlib
@@ -19,20 +21,16 @@ import pytest
 from omegaconf import OmegaConf
 
 pytest.importorskip("mcp")
-pytest.importorskip("pyurbanair_mcp")
+pytest.importorskip("mcp_server")
 
-from pyurbanair_mcp.tools import Tools
+from mcp import Client
+from mcp_server.jobs.registry import TERMINAL
+from mcp_server.server import create_server
+from mcp_server.tools import Tools
 
-from pyurbanair.jobs.registry import TERMINAL
-from tests.legacy.config_loader import compose_test_config
-
-pytestmark = [
-    pytest.mark.integration,
-    pytest.mark.skip(
-        reason="MCP port pending: docs/plans/mcp_server_refactor_handover.md"
-    ),
-]
+pytestmark = pytest.mark.integration
 REPO = pathlib.Path(__file__).resolve().parents[2]
+TINY = REPO / "tests" / "configs" / "test" / "tiny.yaml"
 
 
 def _leaves(node: dict[str, Any], prefix: str = "") -> Iterator[str]:
@@ -41,50 +39,60 @@ def _leaves(node: dict[str, Any], prefix: str = "") -> Iterator[str]:
         if isinstance(value, dict):
             yield from _leaves(value, path)
         else:
-            yield f'++{path}={json.dumps(value, separators=(",", ":"))}'
+            yield f"{path}={json.dumps(value, separators=(',', ':'))}"
 
 
-def _overrides(backend: str) -> tuple[list[str], dict[str, Any]]:
-    cfg = compose_test_config([f"model={backend}", "params=static"])
-    frozen = OmegaConf.to_container(cfg, resolve=True)
-    assert isinstance(frozen, dict)
-    selected = {
-        key: frozen[key]
-        for key in ("domain", "geometry", "time", "params", "model", "ensemble", "run")
-    }
-    selected["run"].update(
-        skip_viz=True, rollout_steps=0, ensemble=backend == "pypalm", results_dir=None
+def _overrides(backend: str) -> list[str]:
+    tiny = OmegaConf.to_container(OmegaConf.load(TINY))
+    assert isinstance(tiny, dict)
+    overrides = [
+        f"model={backend}",
+        "params=static",
+        *_leaves({"domain": tiny["domain"], "time": tiny["time"]}),
+        "ensemble.ensemble_size=2",
+        "ensemble.num_parallel_processes=1",
+    ]
+    return (
+        overrides
+        + {
+            "pylbm": ["model.forward_model.cuda=false"],
+            "pyudales": ["model.forward_model.nudging_config.nnudge_meters=4.0"],
+            "pypalm": [
+                "forward.ensemble=true",
+                "domain.nz=16",
+                "time.simulation_time=4.0",
+                "time.output_frequency=2.0",
+                "params.parameters.inflow_angle.mean=12.0",
+            ],
+            "neural_surrogate": [
+                "model.forward_model.device=cpu",
+                "model.forward_model.spinup_source=training_data",
+            ],
+        }[backend]
     )
-    selected["ensemble"].update(
-        ensemble_size=2, num_parallel_processes=1, num_cpus_per_process=1
-    )
-    if backend == "pylbm":
-        selected["model"]["forward_model"]["cuda"] = False
-    if backend == "pypalm":
-        selected["domain"]["nz"] = 16
-        selected["time"].update(simulation_time=4.0, output_frequency=2.0)
-        selected["model"]["forward_model"].update(
-            nz=16, simulation_time=4.0, output_frequency=2.0
-        )
-        selected["params"]["parameters"]["inflow_angle"]["mean"] = 12.0
-    return [f"model={backend}", "params=static", *list(_leaves(selected))], selected
 
 
-def _wait(tools: Tools, run_id: str, timeout: float = 240) -> dict[str, Any]:
+async def _call(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
+    result = await client.call_tool(tool, arguments)
+    assert not result.is_error, result.content
+    assert result.structured_content is not None
+    return dict(result.structured_content)
+
+
+async def _wait(client: Client, run_id: str, timeout: float = 300) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = tools.get_run_status(run_id)
+        status = await _call(client, "get_run_status", run_id=run_id)
         if status["state"] in TERMINAL:
-            return dict(status)
-        time.sleep(0.2)
-    tools.cancel_run(run_id)
-    raise AssertionError(
-        f"Job {run_id} did not complete in {timeout}s: {tools.get_run_logs(run_id)}"
-    )
+            return status
+        await asyncio.sleep(0.5)
+    await _call(client, "cancel_run", run_id=run_id)
+    logs = await _call(client, "get_run_logs", run_id=run_id)
+    raise AssertionError(f"Job {run_id} did not finish in {timeout}s: {logs}")
 
 
-@pytest.fixture  # type: ignore[misc, unused-ignore]
-def tool_service(tmp_path: pathlib.Path) -> Iterator[Tools]:
+@pytest.fixture  # type: ignore[misc]
+def store(tmp_path: pathlib.Path) -> Iterator[pathlib.Path]:
     store = tmp_path / "jobs"
     store.mkdir(mode=0o700)
     with (tmp_path / "supervisor.log").open("wb") as log:
@@ -92,7 +100,7 @@ def tool_service(tmp_path: pathlib.Path) -> Iterator[Tools]:
             [
                 sys.executable,
                 "-m",
-                "pyurbanair.jobs.supervisor",
+                "mcp_server.jobs.supervisor",
                 "--repo-root",
                 str(REPO),
                 "--root",
@@ -113,20 +121,18 @@ def tool_service(tmp_path: pathlib.Path) -> Iterator[Tools]:
                     raise AssertionError((tmp_path / "supervisor.log").read_text())
                 time.sleep(0.05)
         try:
-            yield tools
+            yield store
         finally:
             for run in tools.list_runs()["runs"]:
                 if run["state"] not in TERMINAL:
                     tools.cancel_run(run["run_id"])
-                    _wait(tools, run["run_id"], timeout=20)
             process.terminate()
             process.wait(timeout=10)
 
 
-def _checkpoint(
-    tmp_path: pathlib.Path, settings: dict[str, Any]
-) -> tuple[pathlib.Path, pathlib.Path]:
-    # Only the worker environment needs torch or the surrogate runtime.
+def _surrogate_export(tmp_path: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    """An untrained one-frame export plus a matching initial state (dev env)."""
+    tiny = OmegaConf.to_container(OmegaConf.load(TINY), resolve=True)
     script = """
 import json, pathlib, sys
 import numpy as np
@@ -135,30 +141,31 @@ import xarray as xr
 from omegaconf import OmegaConf
 from hydra.utils import instantiate
 root = pathlib.Path(sys.argv[1])
-settings = json.loads(sys.argv[2])
-root.mkdir()
+domain = json.loads(sys.argv[2])
 training = root / 'training'
-training.mkdir()
-OmegaConf.save(OmegaConf.create({'domain': settings['domain'], 'time': {'output_frequency': 1.0}}), training / 'config.yaml')
-architecture = {'_target_': 'neural_surrogates.UNetConvNeXt', 'base_channels': 4, 'channel_mults': [1, 2], 'depths': [1, 1], 'kernel_size': 3, 'expansion': 2, 'num_history_steps': 2}
-OmegaConf.save(OmegaConf.create({'architecture': architecture, 'dataset': {'root_dir': str(training), 'state_vars': ['u','v','w'], 'param_vars': ['inflow_angle','velocity_magnitude'], 'num_history_steps': 2}}), root / 'config.yaml')
-model = instantiate(architecture, n_state_channels=3, n_params=2)
-torch.save(model.state_dict(), root / 'weights.pt')
-coords = {'time': [0., 1.]}
-for axis, bounds in zip('xyz', settings['domain']['bounds']):
-    count = settings['domain']['n' + axis]
-    coords[axis] = np.linspace(*bounds, count, endpoint=False) + (bounds[1]-bounds[0]) / (2 * count)
-shape = (2, *[settings['domain']['n'+axis] for axis in 'zyx'])
-xr.Dataset({v: (('time','z','y','x'), np.ones(shape, dtype=np.float32)) for v in ('u','v','w')}, coords=coords).to_netcdf(root / 'initial.nc')
+training.mkdir(parents=True)
+OmegaConf.save(OmegaConf.create({'domain': domain, 'time': {'output_frequency': 1.0}}), training / 'config.yaml')
+architecture = {'_target_': 'neural_surrogates.UNetConvNeXt', 'base_channels': 4, 'channel_mults': [1, 2], 'depths': [1, 1], 'kernel_size': 3, 'expansion': 2}
+params = ['inflow_angle', 'velocity_magnitude']
+OmegaConf.save(OmegaConf.create({'architecture': architecture, 'dataset': {'root_dir': str(training), 'state_vars': ['u', 'v', 'w'], 'param_vars': params, 'num_history_steps': 1}}), root / 'config.yaml')
+torch.save(instantiate(architecture, n_state_channels=3, n_params=2).state_dict(), root / 'weights.pt')
+coords = {'time': [0.0, 1.0]}
+for axis, bounds in zip('xyz', domain['bounds']):
+    count = domain['n' + axis]
+    coords[axis] = np.linspace(*bounds, count, endpoint=False) + (bounds[1] - bounds[0]) / (2 * count)
+shape = (2, *[domain['n' + axis] for axis in 'zyx'])
+fields = {v: (('time', 'z', 'y', 'x'), np.ones(shape, dtype=np.float32)) for v in ('u', 'v', 'w')}
+xr.Dataset(fields, coords=coords).to_netcdf(root / 'initial.nc')
 """
-    directory = tmp_path / "fixture_checkpoint"
+    assert isinstance(tiny, dict)
+    directory = tmp_path / "surrogate"
     subprocess.run(
         [
             str(REPO / ".pixi/envs/dev/bin/python"),
             "-c",
             script,
             str(directory),
-            json.dumps(settings),
+            json.dumps(tiny["domain"]),
         ],
         cwd=REPO,
         env={**os.environ, "OMP_NUM_THREADS": "1"},
@@ -169,77 +176,111 @@ xr.Dataset({v: (('time','z','y','x'), np.ones(shape, dtype=np.float32)) for v in
     return directory, directory / "initial.nc"
 
 
-@pytest.mark.parametrize("backend", ["pylbm", "pyudales", "pypalm", "neural_surrogate"])  # type: ignore[misc, unused-ignore]
-def test_solver_to_png_through_tools(
-    backend: str, tmp_path: pathlib.Path, tool_service: Tools
+@pytest.mark.parametrize("backend", ["pylbm", "pyudales", "pypalm", "neural_surrogate"])  # type: ignore[misc]
+def test_forward_run_to_png_over_the_protocol(
+    backend: str, tmp_path: pathlib.Path, store: pathlib.Path
 ) -> None:
-    overrides, settings = _overrides(backend)
+    overrides = _overrides(backend)
     initial_state = None
     if backend == "neural_surrogate":
-        directory, initial = _checkpoint(tmp_path, settings)
-        overrides.extend(
-            [
-                f"model.forward_model.model_dir={directory}",
-                "model.forward_model.device=cpu",
-            ]
-        )
-        initial_state = {"path": str(initial)}
-    # Source checks deliberately reject edits made between preparation and launch.
-    # Allow a bounded retry when this integration test runs alongside development.
-    for attempt in range(3):
-        plan = tool_service.prepare_forward_run(overrides, initial_state=initial_state)
-        assert plan["validation"]["configuration_valid"], plan["validation"]
-        assert plan["validation"]["prerequisites_present"], plan["validation"]
-        try:
-            launched = tool_service.launch_forward_run(
-                plan["plan_id"], f"{backend}-{attempt}"
+        directory, initial = _surrogate_export(tmp_path)
+        overrides.append(f"model.forward_model.model_dir={directory}")
+        initial_state = {"path": str(initial), "time_index": -1}
+
+    async def exercise() -> None:
+        async with Client(create_server(REPO, store), raise_exceptions=True) as client:
+            options = await _call(client, "list_config_options", group="model")
+            assert backend in {option["name"] for option in options["options"]}
+            plan = await _call(
+                client,
+                "prepare_forward_run",
+                overrides=overrides,
+                initial_state=initial_state,
             )
-        except ValueError as error:
-            if attempt < 2 and "changed" in str(error):
-                continue
-            raise
-        status = _wait(tool_service, launched["run_id"])
-        if (
-            status["state"] != "succeeded"
-            and attempt < 2
-            and "changed" in json.dumps(status)
-        ):
-            continue
-        break
-    assert status["state"] == "succeeded", (
-        status,
-        tool_service.get_run_logs(launched["run_id"]),
-    )
-    results = tool_service.inspect_run_results(launched["run_id"])
-    assert results, results
-    if backend != "neural_surrogate":
-        inputs = [
-            entry for entry in results["artifacts"] if entry["kind"] == "solver_input"
-        ]
-        assert len(inputs) == (2 if backend == "pypalm" else 1)
-        assert all(
-            entry["sha256"] and entry["source_relative_path"] for entry in inputs
-        )
-    options = {
-        "movie": False,
-        "width": 320,
-        "height": 240,
-        "max_frames": 2,
-        "stride": 2,
-        "slices": [{"axis": "z", "position": 3.0}],
-        "probes": [{"id": "center", "x": 10.0, "y": 10.0, "z": 3.0}],
-    }
-    if backend == "pypalm":
-        options["member"] = 0
-    render = tool_service.render_simulation(
-        launched["run_id"], f"{backend}-render", options
-    )
-    rendered = _wait(tool_service, render["run_id"])
-    assert rendered["state"] == "succeeded", (
-        rendered,
-        tool_service.get_run_logs(render["run_id"]),
-    )
-    metadata, png = tool_service.visualization(render["run_id"])
-    assert png is not None and png.startswith(b"\x89PNG\r\n\x1a\n")
-    assert metadata["viewer_url"].startswith("http://127.0.0.1:")
-    assert tool_service.get_run_status(launched["run_id"])["state"] == "succeeded"
+            assert plan["validation"]["configuration_valid"], plan["validation"]
+            assert plan["validation"]["prerequisites_present"], plan["validation"]
+            launched = await _call(
+                client,
+                "launch_forward_run",
+                plan_id=plan["plan_id"],
+                idempotency_key=f"{backend}-run",
+            )
+            status = await _wait(client, launched["run_id"])
+            logs = await _call(client, "get_run_logs", run_id=launched["run_id"])
+            assert status["state"] == "succeeded", (status, logs["text"][-4000:])
+            results = await _call(
+                client, "inspect_run_results", run_id=launched["run_id"]
+            )
+            paths = [entry["path"] for entry in results["artifacts"]]
+            assert {"state.nc", "params.nc", "windows/state_0000.nc"} <= set(paths)
+            state = await _call(
+                client,
+                "inspect_run_results",
+                run_id=launched["run_id"],
+                artifact_id=paths.index("state.nc"),
+            )
+            assert {"u", "v", "w"} <= set(state["variables"])
+            render_options: dict[str, Any] = {
+                "movie": False,
+                "width": 320,
+                "height": 240,
+                "max_frames": 2,
+                "stride": 2,
+                "slices": [{"axis": "z", "position": 3.0}],
+                "probes": [{"id": "center", "x": 10.0, "y": 10.0, "z": 3.0}],
+            }
+            if backend == "pypalm":
+                render_options["member"] = 0
+            render = await _call(
+                client,
+                "render_simulation",
+                run_id=launched["run_id"],
+                idempotency_key=f"{backend}-render",
+                options=render_options,
+            )
+            rendered = await _wait(client, render["run_id"])
+            assert rendered["state"] == "succeeded", rendered
+            view = await client.call_tool(
+                "get_visualization", {"visualization_id": render["run_id"]}
+            )
+            assert not view.is_error
+            assert any(item.type == "image" for item in view.content)
+            assert view.structured_content is not None
+            assert view.structured_content["viewer_url"].startswith("http://127.0.0.1:")
+
+    asyncio.run(exercise())
+
+
+def test_cancel_keeps_finished_windows(store: pathlib.Path) -> None:
+    overrides = [
+        *_overrides("pyudales"),
+        "time.simulation_time=30.0",
+        "forward.rollout_steps=3",
+    ]
+
+    async def exercise() -> None:
+        async with Client(create_server(REPO, store), raise_exceptions=True) as client:
+            plan = await _call(client, "prepare_forward_run", overrides=overrides)
+            assert plan["validation"]["configuration_valid"], plan["validation"]
+            launched = await _call(
+                client,
+                "launch_forward_run",
+                plan_id=plan["plan_id"],
+                idempotency_key="cancel-run",
+            )
+            run_id = launched["run_id"]
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                results = await _call(client, "inspect_run_results", run_id=run_id)
+                if results["artifacts"]:
+                    break
+                await asyncio.sleep(0.5)
+            cancelled = await _call(client, "cancel_run", run_id=run_id)
+            assert cancelled["state"] in {"cancelling", "cancelled"}
+            status = await _wait(client, run_id, timeout=60)
+            assert status["state"] == "cancelled", status
+            results = await _call(client, "inspect_run_results", run_id=run_id)
+            paths = {entry["path"] for entry in results["artifacts"]}
+            assert "windows/state_0000.nc" in paths and "state.nc" not in paths
+
+    asyncio.run(exercise())

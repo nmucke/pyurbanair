@@ -75,7 +75,7 @@ scripts/     the scripts you run (run_forward, run_smoother, run_filtering,
 workflows/   shell pipelines: a run followed by its post-processing
 src/         pyurbanair: the base classes every backend inherits
 libs/        pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
-             evaluation, mcp_server
+             evaluation, visualization, mcp-server
 tests/       one folder per package, plus tests of scripts/ and configs/
 docs/        reference documentation
 archive/     the previous configs, scripts and tests (not maintained)
@@ -92,7 +92,7 @@ archive/     the previous configs, scripts and tests (not maintained)
 | Backends | [pylbm](docs/pylbm.md), [pyudales](docs/pyudales.md), [pypalm](docs/pypalm.md) |
 | Tests | [tests/README.md](tests/README.md) |
 | HPC jobs | [docs/job_scripts.md](docs/job_scripts.md) (not yet ported to the current scripts) |
-| Agent interface (MCP) | [docs/mcp.md](docs/mcp.md) (being ported to the current setup) |
+| Agent interface (MCP) | [docs/mcp.md](docs/mcp.md) (`pixi run -e mcp register-claude` adds it to Claude Code) |
 
 ## Development
 

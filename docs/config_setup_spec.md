@@ -22,7 +22,7 @@ named experiments. The neural-surrogate configs are covered in the last section.
 configs/
   forward.yaml            # entry point: forward runs
   assimilation.yaml       # entry point: all three DA scripts (ESMDA, filtering, hybrid)
-  common.yaml             # run name, paths (per machine), ensemble budget, Hydra run dir
+  common.yaml             # paths (per machine), ensemble budget, Hydra run dir
   model/                  # pylbm, pyudales, pypalm, neural_surrogate
   case/                   # xie_and_castro, barcelona (incl. time.seconds_per_knot)
   params/                 # parameter samplers
@@ -62,7 +62,7 @@ configs/
 
 | File | Contents |
 |---|---|
-| `common.yaml` | `run.name`, `run.skip_viz`; `paths` (`machine`, `results_root`, per-machine `scratch`, `experiment_dir`, `base_results_dir`); `ensemble` (size, workers, CPUs, `failure`); `hydra.run.dir` |
+| `common.yaml` | `paths` (`machine`, `results_root`, per-machine `scratch`, `experiment_dir`); `ensemble` (size, workers, CPUs, `failure`); `hydra.run.dir` |
 | `case/<case>.yaml` | `domain`, `geometry`, `obs` (sensor layout), `time` (`simulation_time`, `output_frequency`, `spinup_time`, `seconds_per_knot`) |
 | `forward.yaml` | `paths.results_dir`, `forward.*` |
 | `assimilation.yaml` | models, truth and prior samplers (static by default: valid for all three scripts), `paths.results_dir`, all `assimilation_settings/` files; `assimilation.*` (incl. all save flags and `assimilate_every_n_step`); `observation.*`; `smoothing`, `filtering` and `hybrid` blocks |
