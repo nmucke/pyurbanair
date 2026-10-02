@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+# Leaf library: reads a forward run's state.nc and renders the HTML viewer.
+# Deliberately no pyurbanair, no backend, no MCP server. PyVista/VTK (3D) are
+# optional and imported lazily; they come from the `rendering` pixi env.
+dependencies = [
+    "numpy>=2.3.5,<3",
+    "xarray>=2025.12.0,<2026",
+    "netcdf4>=1.7.3,<2",
+    "matplotlib>=3.10.8,<4",
+    "pyyaml>=6.0.2,<7",
+]
+name = "visualization"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.pixi.workspace]
+preview = ["pixi-build"]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "linux-64"]
+
+[tool.pixi.package.build]
+backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
+
+# The web/ assets (index.html, viewer.js, ...) ship as package data: hatchling
+# includes every file under the package directory.
+[tool.hatch.build.targets.wheel]
+packages = ["src/visualization"]
+
+# Pixi dependencies
+[tool.pixi.dependencies]
+numpy = ">=2.3.5,<3"
+xarray = ">=2025.12.0,<2026"
+netcdf4 = ">=1.7.3,<2"
+matplotlib = ">=3.10.8,<4"
+pyyaml = ">=6.0.2,<7"
+
+[tool.pixi.pypi-dependencies]
+visualization = { path = ".", editable = true }

@@ -26,7 +26,7 @@ scripts/    the scripts you run (run_*, compute_metrics, visualize_*,
 workflows/  shell pipelines: a run followed by its post-processing
 src/        pyurbanair: base classes every backend inherits
 libs/       pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
-            evaluation, mcp_server (each an editable package)
+            evaluation, visualization, mcp-server (each an editable package)
 tests/      one folder per package; tests/scripts/ for scripts, configs, workflows
 docs/       reference docs; plans/ and other subfolders are working notes
 archive/    the retired setup: dead code, never edit, import or run it
@@ -53,7 +53,8 @@ Before editing, read the doc for the area you touch, and only that one.
 | PALM (`libs/pypalm`) | [docs/pypalm.md](docs/pypalm.md) |
 | Data assimilation (`libs/data-assimilation`) | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates (`libs/neural-surrogates`, `scripts/surrogate/`) | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
-| MCP server (`libs/mcp_server`) | [docs/mcp.md](docs/mcp.md) |
+| MCP server (`libs/mcp-server`) | [docs/mcp.md](docs/mcp.md) |
+| HTML forward-run viewer (`libs/visualization`) | [docs/visualization.md](docs/visualization.md) |
 | HPC jobs (`job_scripts/`) | [docs/job_scripts.md](docs/job_scripts.md) |
 | Tests | [tests/README.md](tests/README.md) |
 

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+# The MCP SDK is imported as `mcp`; only server.py imports it. The jobs/ package
+# (preparation, supervisor, workers) stays SDK-free so the dev/cuda/rendering
+# workers can run it without the SDK installed.
+dependencies = ["pyurbanair", "visualization", "mcp>=2,<3", "psutil>=6,<8"]
+description = "Local MCP tools for reproducible pyurbanair forward simulations"
+name = "mcp-server"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[project.scripts]
+mcp-server = "mcp_server.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_server"]

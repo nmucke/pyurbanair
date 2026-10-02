@@ -7,9 +7,10 @@ mapping from the retired `conf/` tree (now `archive/conf/`) are in
 ```
 forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
-common.yaml         # run name, paths (per machine), ensemble budget, Hydra run dir
+common.yaml         # paths (per machine), ensemble budget, Hydra run dir
 model/  case/  params/
 assimilation_settings/   # one file per component, all options inside
+visualization/      # render presets of the MCP server's HTML viewer (libs/visualization)
 ```
 
 All three DA scripts load `assimilation.yaml`; each reads the blocks it needs
@@ -54,12 +55,11 @@ observation.aggregation.interval_seconds=30
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |
 | `hybrid.*` | `likelihood_allocation` (tempering is `filtering.beta`) |
-| `forward.*` | `ensemble`, `ground_truth_dir`, `rollout_steps`, `initial_state` |
+| `forward.*` | `ensemble`, `ground_truth_dir`, `rollout_steps`, `initial_state`, `save_windows` |
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
-| `paths.*` | `results_root`, `experiment_dir`, `base_results_dir` from `common.yaml` (scratch chosen by `paths.machine`); `results_dir` from the workflow |
+| `paths.*` | `results_root`, `experiment_dir` from `common.yaml` (scratch chosen by `paths.machine`); `results_dir` from the workflow |
 | `ensemble.*` | one budget for every workflow (`common.yaml`), incl. `failure` |
-| `run.*` | `name`, `skip_viz` |
 
 ## What the scripts must do
 

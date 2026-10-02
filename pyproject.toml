@@ -298,12 +298,18 @@ torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cp
 torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
+# Forward-run HTML viewer and PNG/MP4 renderer. Leaf library: numpy, xarray,
+# matplotlib; PyVista/VTK only through the optional `visualization-3d` feature.
+[tool.pixi.feature.visualization.pypi-dependencies]
+visualization = { path = "libs/visualization", editable = true }
+
 # Optional local agent interface; workers do not require the MCP SDK.
 [tool.pixi.feature.mcp.pypi-dependencies]
-pyurbanair-mcp = { path = "libs/mcp_server", editable = true }
+mcp-server = { path = "libs/mcp-server", editable = true }
 
 [tool.pixi.feature.mcp.tasks]
-start-mcp = { cmd = "python -m pyurbanair_mcp --repo-root .", description = "Serve local forward tools over stdio" }
+start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve local forward tools over stdio" }
+register-claude = { cmd = "bash scripts/register_claude.sh", description = "Register the pyurbanair MCP server with Claude Code (asks first)" }
 
 [tool.pixi.feature.visualization-3d.dependencies]
 pyvista = ">=0.44,<0.47"
@@ -312,11 +318,11 @@ ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
-snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "dev", "py312", "cpu"] }
-rendering = { features = ["visualization-3d", "dev", "py312", "cpu"] }
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "cuda"] }
+mcp = { features = ["mcp", "visualization", "dev", "py312", "cpu"] }
+rendering = { features = ["visualization", "visualization-3d", "dev", "py312", "cpu"] }

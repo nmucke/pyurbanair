@@ -107,25 +107,18 @@ def test_rejects_incompatible_closure_before_build(tmp_path: Path) -> None:
         make_model(tmp_path, model_discrepancy=SETTINGS, closure="smagorinsky")
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
-    "role,name,error",
-    [
-        ("model", "pylbm", "requires pyudales"),
-        ("assim_model", "pyudales", "inference currently supports"),
-    ],
-)
-def test_unsupported_discrepancy_workflows_fail_early(
-    role: str, name: str, error: str
-) -> None:
+@pytest.mark.parametrize("role", ["model", "assim_model"])  # type: ignore[misc]
+def test_unsupported_discrepancy_backends_fail_early(role: str) -> None:
     from omegaconf import OmegaConf
 
-    from pyurbanair.config.run_record import validate_run_config
+    from tests.conftest import load_script
 
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
     cfg = OmegaConf.create(
-        {role: {"name": name, "forward_model": {"model_discrepancy": SETTINGS}}}
+        {role: {"name": "pylbm", "forward_model": {"model_discrepancy": SETTINGS}}}
     )
-    with pytest.raises(ValueError, match=error):
-        validate_run_config(cfg, "forward")
+    with pytest.raises(ValueError, match="needs pyudales with vreman"):
+        check_config(cfg, "forward")
 
 
 @pytest.mark.integration  # type: ignore[misc]

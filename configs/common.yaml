@@ -1,9 +1,5 @@
-# Shared by forward.yaml and assimilation.yaml: run identity, output and
-# scratch locations, ensemble budget and Hydra's run dir.
-
-run:
-  name: null
-  skip_viz: false
+# Shared by forward.yaml and assimilation.yaml: output and scratch locations,
+# ensemble budget and Hydra's run dir.
 
 # Output and scratch locations. Each entry point adds `paths.results_dir`
 # under `results_root`.
@@ -21,9 +17,6 @@ paths:
   # Neural surrogates: trained weights and generated training data.
   weights_dir: model_weights
   training_data_dir: training_data
-  # Fallback output root used by resolve_output_dir() when Hydra isn't
-  # initialized (direct run(cfg) calls from tests).
-  base_results_dir: .temp
 
 # Ensemble budget. Override per run on the CLI, e.g.
 # `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`.

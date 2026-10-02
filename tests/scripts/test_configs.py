@@ -71,6 +71,20 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
         ("filtering", [], "static prior_params"),
         ("smoother", ["params@prior_params=static"], "smoothing.smoother is"),
         ("smoother", ["assimilation.params_to_estimate=[nope]"], "does not define"),
+        (
+            "smoother",
+            ["domain.nx=30", "assim_model.forward_model.ncpu=7"],
+            "must divide nx",
+        ),
+        (
+            "smoother",
+            [
+                "model@assim_model=pypalm",
+                "assim_model.forward_model.boundary_condition=periodic",
+                "domain.nx=31",
+            ],
+            "even nx and ny",
+        ),
     ],
 )
 def test_check_config_rejects(
@@ -79,3 +93,86 @@ def test_check_config_rejects(
     check = load_script("scripts/utils/inconsistency_check.py").check_config
     with pytest.raises(ValueError, match=message):
         check(compose("assimilation", *overrides, root=tmp_path), workflow)
+
+
+# A valid smoother run estimating the SGS-discrepancy coefficients; set
+# explicitly so the test doesn't depend on configs/assimilation.yaml's tuning.
+DISCREPANCY = [
+    "assim_model.forward_model.model_discrepancy.enabled=true",
+    "params@truth_params=dynamic_sine",
+    "params@prior_params=dynamic",
+    "smoothing.smoother=${smoother.dynamic}",
+    "smoothing.localization=null",
+    "smoothing.state_reduction=null",
+    "smoothing.final_time_smoothing=false",
+    "assimilation.params_to_estimate=null",
+    "filtering.mode=state",
+    "filtering.parameter_evolution=null",
+    "ensemble.failure.policy=raise",
+]
+STATIC_COEFFICIENT_FILTER = [
+    "params@prior_params=static",
+    "filtering.mode=parameter",
+    "assimilation.params_to_estimate=[sgs_bias_b0]",
+]
+
+
+def test_check_config_accepts_discrepancy(tmp_path: pathlib.Path) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    check(compose("assimilation", *DISCREPANCY, root=tmp_path), "smoother")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("smoother", ["assim_model.name=pylbm"], "needs pyudales with vreman"),
+        (
+            "smoother",
+            ["assim_model.forward_model.closure=smagorinsky"],
+            "needs pyudales with vreman",
+        ),
+        (
+            "smoother",
+            [
+                "+prior_params.external_parameters.sgs_bias_b0="
+                "{_target_:pyurbanair.static_parameters.Normal,mean:0.0,std:0.1}"
+            ],
+            "must be static parameters",
+        ),
+        (
+            "smoother",
+            ["smoothing.smoother=${smoother.state_and_dynamic}"],
+            "smoother must be TimeVaryingParameterESMDA",
+        ),
+        ("hybrid", ["filtering.mode=joint"], "needs filtering.mode=state"),
+        (
+            "hybrid",
+            ["ensemble.failure.policy=resample_from_successes"],
+            "needs ensemble.failure.policy=raise",
+        ),
+        (
+            "filtering",
+            [
+                *STATIC_COEFFICIENT_FILTER,
+                "filtering.parameter_evolution={_target_:data_assimilation."
+                "filtering.parameter_evolution.RandomWalkEvolution,std:0.1}",
+            ],
+            "parameter_evolution=null",
+        ),
+        (
+            "filtering",
+            [
+                *STATIC_COEFFICIENT_FILTER,
+                "filtering.localization=${localization.distance}",
+            ],
+            "cannot use distance localization",
+        ),
+    ],
+)
+def test_check_config_rejects_discrepancy(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", *DISCREPANCY, *overrides, root=tmp_path)
+    with pytest.raises(ValueError, match=message):
+        check(cfg, workflow)

@@ -45,6 +45,24 @@ def check_config(cfg: DictConfig, workflow: str) -> None:
 def _models(cfg: DictConfig) -> list[str]:
     problems = []
     for role in ("model", "truth_model", "assim_model"):
+        model = cfg.get(role)
+        if model is None:
+            continue
+        fm = model.forward_model
+        if model.name == "pyudales" and fm.get("nx", 1) % fm.get("ncpu", 1):
+            problems.append(
+                f"{role}: forward_model.ncpu={fm.ncpu} must divide nx={fm.nx} "
+                "(uDALES splits x across its MPI ranks)."
+            )
+        if (
+            model.name == "pypalm"
+            and fm.get("boundary_condition") == "periodic"
+            and (fm.get("nx", 0) % 2 or fm.get("ny", 0) % 2)
+        ):
+            problems.append(
+                f"{role}: periodic PALM needs an even nx and ny (its FFT "
+                f"pressure solver), got {fm.nx} x {fm.ny}."
+            )
         discrepancy = OmegaConf.select(cfg, f"{role}.forward_model.model_discrepancy")
         if discrepancy is None or not discrepancy.get("enabled", False):
             continue

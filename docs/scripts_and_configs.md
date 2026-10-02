@@ -65,7 +65,7 @@ configs/
   reads the blocks it needs and appends its workflow name (`smoother`,
   `filtering`, `hybrid`) to `paths.results_dir`
   (`${paths.results_root}/${truth_model.name}_to_${assim_model.name}`).
-- **`common.yaml`** — `run.name`, `run.skip_viz`; `paths` (`machine: local |
+- **`common.yaml`** — `paths` (`machine: local |
   snellius | delftblue` picks the solver scratch dir, `results_root`,
   `weights_dir`, `training_data_dir`); the one `ensemble` budget
   (`ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`,
@@ -265,8 +265,10 @@ post-processing on that dir. Run them inside the dev environment.
 - `scripts/tools/` — case setup CLIs: `prepare_case_stl.py`,
   `preprocess_udales_geometry.py`.
 - `scripts/setup_dev_env.sh` — behind `pixi run setup-dev`.
-- `scripts/start_mcp` — MCP server launcher; the server still targets the
-  archived config setup until it is ported (see [mcp.md](mcp.md)).
+- `scripts/start_mcp` — MCP server launcher; the server runs `run_forward.py`
+  on `configs/forward.yaml` (see [mcp.md](mcp.md)).
+- `scripts/register_claude.sh` — behind `pixi run -e mcp register-claude`:
+  registers `start_mcp` with Claude Code after asking.
 - `job_scripts/` — HPC launchers; they still reference the archived setup and
   have not been ported yet (see [job_scripts.md](job_scripts.md)).
 

@@ -39,4 +39,4 @@ repos:
         additional_dependencies: [types-PyYAML]
         # The library tests carried over from the old test suite never passed
         # mypy; check each folder again once its tests are rewritten.
-        exclude: ^tests/(pylbm|pyudales|pypalm|data_assimilation|neural_surrogates|evaluation|pyurbanair|mcp|legacy)/
+        exclude: ^tests/(pylbm|pyudales|pypalm|data_assimilation|neural_surrogates|evaluation|pyurbanair|legacy)/

@@ -9,8 +9,9 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `data_assimilation/` | ESMDA, filters, localization, observation operator/error, state reduction |
 | `neural_surrogates/` | architectures, datasets, training, generative spin-up |
 | `evaluation/` | the `evaluation` scoring library |
-| `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers, forward preparation and visualization |
-| `mcp/` | the MCP server |
+| `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers |
+| `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |
+| `visualization/` | the forward-run viewer and renderer (`libs/visualization`) |
 | `scripts/` | `scripts/`, `configs/` and `workflows/` |
 | `legacy/` | shared fixtures and frozen configs some library tests still use (see below) |
 
@@ -19,6 +20,7 @@ pixi run -e dev py.test             # no compiled CFD solver
 pixi run -e dev test-integration    # tiny real uDALES / LBM / PALM runs
 pixi run -e dev test-all            # both
 pixi run -e dev python -m pytest tests/scripts
+pixi run --locked -e mcp python -m pytest tests/mcp   # the MCP server's own env
 ```
 
 Tests that run a compiled CFD solver are marked `integration` and are skipped
@@ -59,7 +61,7 @@ stepper, cold-started from the latent generator.
 | File | Covers |
 |---|---|
 | `test_configs.py` | every entry point and option resolves; the test overlays are tiny; `inconsistency_check` accepts and rejects |
-| `test_forward.py` | `run_forward` (single, ensemble over two windows) + `visualize_forward` |
+| `test_forward.py` | `run_forward` (single, ensemble over two saved windows, initial-state selection) + `visualize_forward` |
 | `test_assimilation.py` | smoother, filtering and hybrid + `compute_metrics` + `visualize_assimilation`; a forward run as the truth |
 | `test_surrogate.py` | every training task, the three evaluations, `generate_data` |
 | `test_workflows.py` | `workflows/*.sh` |

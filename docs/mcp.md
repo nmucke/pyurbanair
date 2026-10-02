@@ -1,15 +1,14 @@
 # Local forward simulations through MCP
 
-> **Status:** the MCP server (`libs/mcp_server`, `scripts/start_mcp`) still
-> reads the archived config tree (`archive/conf/`, formerly `conf/`) and is
-> broken until it is ported to `configs/`
-> (see `docs/plans/mcp_server_refactor_handover.md`). This page describes the
-> pre-port behaviour; `conf/...` paths below now live under `archive/conf/`.
-
-The optional `pyurbanair-mcp` library exposes local forward simulations through
-stdio. Configuration, execution, job storage and rendering live in `pyurbanair`
-and work without the MCP SDK. Workers use a selected Pixi environment; the
-protocol process never imports solver runtimes for discovery.
+The optional `mcp-server` library (`libs/mcp-server`, import `mcp_server`)
+exposes local forward simulations through stdio. A run is
+`scripts/run_forward.py` on `configs/forward.yaml`, the same as on the command
+line; assimilation is not exposed. `mcp_server/server.py` registers the tools
+with the MCP SDK (imported as `mcp`); `mcp_server.jobs` holds composition,
+preparation, the job queue and the workers and works without the SDK. Rendering
+is the `visualization` library ([docs/visualization.md](visualization.md)).
+Workers use a selected Pixi environment; the protocol process never imports
+solver runtimes for discovery.
 
 ## Install and connect
 
@@ -19,7 +18,12 @@ From an existing checkout:
 pixi run setup-dev
 pixi install --locked -e mcp
 scripts/start_mcp --check
+pixi run -e mcp register-claude     # Claude Code: asks, then registers (user scope)
 ```
+
+`register-claude` (`scripts/register_claude.sh`) does nothing if `claude` is not
+installed or a `pyurbanair` server is already registered, and only prints the
+command when there is no terminal to ask in.
 
 Prepare the selected backend using its maintained reference:
 [LBM](pylbm.md), [uDALES](pyudales.md), [PALM](pypalm.md), or
@@ -36,11 +40,11 @@ server runs in the separate `mcp` environment. Install optional 3D support with
 `pixi install --locked -e rendering`. It includes PyVista/VTK and ffmpeg.
 The root lockfile pins the tested MCP SDK v2 and renderer packages.
 
-Register an **absolute** launcher path:
+Other clients, or Claude Code by hand, register an **absolute** launcher path:
 
 ```bash
 codex mcp add pyurbanair -- /absolute/repo/scripts/start_mcp
-claude mcp add --transport stdio pyurbanair -- /absolute/repo/scripts/start_mcp
+claude mcp add --transport stdio --scope user pyurbanair -- /absolute/repo/scripts/start_mcp
 ```
 
 For Codex CLI, IDE and ChatGPT desktop on the same Codex host, the equivalent
@@ -87,14 +91,19 @@ startup does not intentionally install packages and all diagnostics use stderr.
 ## Tool workflow
 
 1. `get_capabilities` and `list_config_options` inspect available backends,
-   prerequisites, execution presets, native-setting coverage and render presets.
-2. `inspect_config` accepts ordered Hydra overrides and an optional subtree.
-   Examples include `model@model=pylbm`, `case=xie_and_castro`, `params=static`,
-   `run.ensemble=true`, additions using `+`/`++`, and deletions using `~`.
+   prerequisites, native-setting coverage and the options of `configs/case`,
+   `configs/model`, `configs/params` and `configs/visualization` (render presets).
+2. `inspect_config` composes `configs/forward.yaml` with ordered Hydra overrides
+   and an optional subtree. Examples include `model=pylbm`,
+   `case=xie_and_castro`, `params=static`, `forward.ensemble=true`,
+   `forward.rollout_steps=2`, additions using `+`/`++`, and deletions using `~`.
 3. `prepare_forward_run` returns a plan ID/digest, resolved values, source files,
    differences from defaults, resource estimates and field-specific validation.
-   Configuration validity, prerequisite presence and solver smoke testing are
-   separate. Preparation does not run or compile a solver.
+   The config check is the CLI's own, `check_config(cfg, "forward")`
+   (`scripts/utils/inconsistency_check.py`); on top come this machine's resource
+   limits and the input and backend prerequisites. Configuration validity,
+   prerequisite presence and solver smoke testing are separate. Preparation
+   does not run or compile a solver.
 4. `launch_forward_run(plan_id, idempotency_key)` queues the snapshot and returns
    a run ID promptly. Reuse the same key when retrying the same launch. Reusing
    it for different inputs is an error. Optional `post_render` settings enqueue
@@ -103,9 +112,10 @@ startup does not intentionally install packages and all diagnostics use stderr.
    Logs use byte cursors, default to 32 KiB, and accept at most 128 KiB per read.
    `cancel_run` requests teardown; poll until `cancelled` before assuming the
    resource slot has been released.
-6. `inspect_run_results` lists indexed artifacts, inspects NetCDF dimensions and
-   variables, or returns a numeric slice of at most 4096 values. Selection uses
-   dimension names and integer indices or `[start, stop, stride]` lists.
+6. `inspect_run_results` lists the run's NetCDF files (`artifact_id` is a
+   file's position in that list), inspects one's dimensions and variables, or
+   returns a numeric slice of at most 4096 values. Selection uses dimension
+   names and integer indices or `[start, stop, stride]` lists.
 7. `render_simulation` queues a separate visualization of a successful run.
    `get_visualization` returns a PNG (up to 2 MiB), bundle metadata, available
    previews and an on-demand loopback viewer URL.
@@ -115,9 +125,8 @@ confirmation when the run has already been requested.
 
 ## Configuration and artifacts
 
-Scientific configuration remains the Hydra tree. Trusted targets come from
-repository component YAML and the optional owner-maintained
-`conf/trusted_forward_targets.txt`. Requests cannot add arbitrary executable
+Scientific configuration is the `configs/` tree. Trusted `_target_`s are the
+ones declared in `configs/**`. Requests cannot add arbitrary executable
 `_target_` values, resolver expressions, Hydra plugins, sweepers or search paths.
 
 Native settings are separately classified. Wrapper-managed grid, time, inflow
@@ -128,8 +137,10 @@ patched in private staged templates using the existing backend editors and
 survive constructor/member copying. Unknown native fields are rejected clearly.
 LBM's positional input is not treated as a generic namelist.
 
-Plans snapshot selected templates and fingerprint input files, relevant source,
-backend identities and environment information. Launch refuses a changed plan,
+Plans snapshot selected templates and fingerprint input files, relevant source
+(`configs/`, `scripts/run_forward.py`, `scripts/utils/`, `src/pyurbanair`, the
+MCP server and the selected backends), backend identities and environment
+information. Launch refuses a changed plan,
 code, or input. It consumes the saved resolved configuration. Job-owned paths
 are applied last and recorded in `launch.json`; source templates remain intact.
 For uDALES, source fingerprints include the managed builder's shell scripts and
@@ -152,34 +163,34 @@ machine-local `max_case_input_bytes` and `max_case_input_entries` limits can be 
 requests may only tighten them. These limits apply to copied case templates,
 not surrogate weights or other inputs that are fingerprinted in place.
 
-An initial state is `{"path":"/path/state.nc","time_index":-1}` with optional
-`member`. The time index selects the end of the retained history. Ensemble
-states retain their member dimension. Surrogate inputs must match trained
-coordinates, variables, cadence and required history; the `training_data`
-spin-up mode requires explicit state selection. CPU hosts should set
+An initial state is a NetCDF path or `{"path": "/path/state.nc", "member": 3,
+"time_index": -1}` (the `initial_state` argument, or `forward.initial_state`).
+`member` selects an ensemble member by its coordinate label and `time_index` a
+frame by position (default: the last); `run_forward.py` starts from that one
+frame. The surrogate's `training_data` spin-up has no loader in `scripts/`, so
+under MCP it needs an explicit initial state (its CFD spin-up model is then
+dropped from the plan); `generative` spin-up needs none. CPU hosts should set
 `model.forward_model.device=cpu`. MCP preparation rejects uninitialized weights.
 
-`run.rollout_steps` counts **additional** windows. A value of 2 means three
-windows. MCP selects complete numerical persistence, independent of plotting:
+`forward.rollout_steps` counts **additional** windows. A value of 2 means three
+windows. The worker runs `run(cfg)` of `scripts/run_forward.py` with
+`paths.results_dir` bound to the run's `artifacts/` and
+`forward.save_windows=true`:
 
 ```text
 <store>/plans/<plan_id>/plan.json
 <store>/runs/<run_id>/
   job.json, launch.json, worker.log, worker_status.json, completion.json
-  run_manifest.yaml, config.yaml, config.resolved.yaml, forward_status.json, artifact_index.json
-  sampled_params.nc, state.nc, params.nc
-  windows/<window>/state_<member>.nc, params_<member>.nc
+  artifacts/config.yaml, state.nc, params.nc       # run_forward.py's outputs
+  artifacts/windows/state_<window>.nc, params_<window>.nc
   scratch/, build/, fast_io/, tmp/, cache/, work/
 ```
 
-`artifact_index.json` records every completed member/window, physical times,
-checksums and ensemble failure substitutions. It also saves bounded copies of
-the actual generated solver inputs for each completed window, with source paths
-and hashes. Solver-input artifacts support bounded text inspection. A failed or cancelled job keeps
-partial artifacts and logs. Completed numerical results survive optional plot
-failures. `run.ensemble_save_on_disk=true` is rejected: the workflow retains
-rollout history in memory and does not promise constant-memory streaming.
-Complete mode enforces `run.max_retained_bytes` (2 GiB by default).
+Each window is written as it finishes, so a failed or cancelled job keeps the
+finished windows and its logs; `state.nc` and `params.nc` appear when the run
+completes. `run_forward.py` keeps every window in memory until the end; the
+plan's `estimated_output_bytes` is checked against the machine's
+`max_output_bytes`.
 
 ## Lifecycle and isolation
 
@@ -217,8 +228,9 @@ at once, alongside matching A–C virtual-probe traces at both heights. Per-slic
 probe coordinates replace automatic samples; `probes: []` omits them. The viewer's
 2D/3D buttons and shared timeline keep every visible panel at matching physical
 time, including PNG-sequence playback when a movie is unavailable.
-Inspect `conf/visualization/` presets for examples and use
-[the visualization reference](forward_visualization.md) for scientific details.
+Inspect the `configs/visualization/` presets for examples and use
+[the visualization reference](visualization.md) for scientific details.
+Rendering reads the run's `artifacts/state.nc`.
 
 Regular and staggered components are collocated by physical coordinates before
 computing speed. Horizontal speed and full magnitude are distinct. Solids use
@@ -238,15 +250,16 @@ views usable. Serve exported bundles with a local static HTTP server; direct
 Run the core and protocol checks with local Unix/loopback sockets available:
 
 ```bash
-pixi run -e dev python -m pytest tests/pyurbanair/test_forward_preparation.py tests/pyurbanair/test_local_jobs.py tests/pyurbanair/test_forward_visualization.py
-pixi run -e mcp python -m pytest tests/mcp/test_mcp_protocol.py
-pixi run -e mcp python -m pytest tests/mcp/test_mcp_forward_integration.py -m integration
+pixi run --locked -e mcp python -m pytest tests/mcp
+pixi run --locked -e mcp python -m pytest tests/mcp/test_mcp_forward_integration.py -m integration
+pixi run --locked -e dev python -m pytest tests/visualization
 ```
 
-The integration tests use independent small test configurations. PALM's installed
-solver requires at least 14 vertical cells, so its complete-artifact fixture uses
-16. A generated compatible surrogate checkpoint tests deployment/history
-handling and makes no claim about trained predictive accuracy.
+The integration tests run each backend over the protocol on the tiny grid of
+`tests/configs/test/tiny.yaml`, passed as overrides of `configs/forward.yaml`.
+PALM's installed solver requires at least 14 vertical cells, so its run uses 16.
+A generated untrained surrogate export tests deployment and makes no claim
+about predictive accuracy.
 
 If a job fails, read its validation issues, then its bounded worker log. Missing
 compilers/binaries require backend setup; a valid YAML configuration alone is

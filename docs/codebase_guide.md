@@ -39,7 +39,7 @@ file-level detail, gotchas, and recipes this guide only summarizes:
 | Hydra configs (`configs/`), the executable scripts (`scripts/`) and `workflows/` | [docs/scripts_and_configs.md](scripts_and_configs.md) |
 | Tests (`tests/`: per-package folders, script tests, overlays) | [tests/README.md](../tests/README.md) |
 | Local MCP forward jobs, preparation and client setup | [docs/mcp.md](mcp.md) |
-| Saved forward visualization and browser bundles | [docs/forward_visualization.md](forward_visualization.md) |
+| Saved forward visualization and browser bundles (`libs/visualization`) | [docs/visualization.md](visualization.md) |
 | Running on HPC clusters (Snellius / DelftBlue / local SLURM) | [docs/job_scripts.md](job_scripts.md) |
 | Dynamic multi-window ESMDA theory/config | [docs/temp/esmda_dynamic_multiwindow.md](temp/esmda_dynamic_multiwindow.md) |
 | Model-error compensation parameters (α, sgs/km) | [docs/temp/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md) |
@@ -71,20 +71,17 @@ src/pyurbanair/                    # Top-level package: base classes + glue
     hydra_helpers.py               # Targets that Hydra `_target_` blocks instantiate
                                    #   (prepare_*, clean_outputs, create_observation_*,
                                    #    create_C_D, create_initial_state_ensemble,
-                                   #    resolve_output_dir, resolve_parameter_schema, ...)
+                                   #    resolve_parameter_schema, ...)
   utils/
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
     run_utils.py, state_utils.py, animation_utils.py
   animation.py
-  workflows/forward.py            # Shared CLI/local-worker forward execution + indexed artifacts
-  jobs/                           # Immutable plans, private paths, SQLite queue, supervisor/workers
-  visualization/                  # Saved-state normalization, rendering and local browser viewer
 
 configs/                           # Hydra config (see §5 Configuration system)
   README.md                        # Keys + common overrides
   forward.yaml                     # Entry point for run_forward.py
   assimilation.yaml                # Entry point for run_smoother/run_filtering/run_hybrid.py
-  common.yaml                      # run, paths (per machine), ensemble budget, Hydra run dir
+  common.yaml                      # paths (per machine), ensemble budget, Hydra run dir
   case/                            # Experiment bundle: domain+grid+obs+geometry+time, one self-
                                    #   contained file per case (xie_and_castro, barcelona). `case=...`.
   params/                          # Parameter samplers: static, dynamic, dynamic_sine, dynamic_cosine,
@@ -95,6 +92,7 @@ configs/                           # Hydra config (see §5 Configuration system)
   model/                           # forward + ensemble backend (mounted under model@<pkg>)
   surrogate/                       # surrogate: generate_data, train_*, finetune_stepper, eval,
                                    #   training (shared defaults), architectures
+  visualization/                   # Render presets of the MCP viewer (quicklook, flow_3d)
 
 libs/data-assimilation/src/data_assimilation/
   observation_operator.py          # ObservationOperator + TemporalObservationOperator
@@ -108,7 +106,15 @@ libs/data-assimilation/src/data_assimilation/
     esmda.py                       # Parameter/StateAndParameter/TimeVaryingParameter/
                                    #   StateAndTimeVaryingParameter ESMDA
 
-libs/mcp_server/src/pyurbanair_mcp/ # Optional MCP SDK v2 adapter; see docs/mcp.md
+libs/mcp-server/src/mcp_server/    # Optional MCP server (forward runs); see docs/mcp.md
+  server.py, tools.py              # MCP SDK v2 tool registration + thin adapters
+  jobs/                            # SDK-free: composition of configs/forward.yaml, immutable
+                                   #   plans (check_config + limits), private paths, SQLite
+                                   #   queue, supervisor, workers (run scripts/run_forward.py)
+
+libs/visualization/src/visualization/ # Saved-state normalization, PNG/MP4 rendering and the
+                                   #   local browser viewer for a run's state.nc; see
+                                   #   docs/visualization.md
 
 libs/evaluation/src/evaluation/    # Metrics + figures for DA runs. Leaf lib: no jax, no
                                    #   pyurbanair, no backends (see its __init__).
@@ -158,6 +164,7 @@ scripts/                           # Scripts you run; their shared helpers are i
                                    #   tasks.py (train.py's per-task setup), eval_common.py (evaluate_*.py)
   tools/                           # Case setup CLIs (prepare_case_stl, preprocess_udales_geometry)
   setup_dev_env.sh, start_mcp      # `pixi run setup-dev`; MCP launcher
+  register_claude.sh               # `pixi run -e mcp register-claude`
 
 workflows/                         # forward_workflow.sh, assimilation_workflow.sh <method>:
                                    #   run + post-processing on the same run dir
