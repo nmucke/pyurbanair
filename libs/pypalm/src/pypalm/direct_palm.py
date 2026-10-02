@@ -13,7 +13,7 @@ The prebuilt ``palm`` and ``combine_plot_fields.x`` are reused via symlink from
 ``palm_model_system/MAKE_DEPOSITORY_default`` (built once by ``prepare_compile``).
 
 This module is exercised standalone by
-``archive/job_scripts/delftblue/pypalm/m1_direct_run.py``. Wiring into
+``job_scripts/delftblue/pypalm/m1_direct_run.py``. Wiring into
 ``ForwardModel.run()`` lands in M2 behind ``PYPALM_USE_DIRECT_RUN``.
 """
 

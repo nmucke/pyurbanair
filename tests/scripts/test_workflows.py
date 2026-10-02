@@ -26,6 +26,7 @@ def _overrides(root: pathlib.Path, session_root: pathlib.Path) -> list[str]:
     return [
         "--config-dir",
         str(TEST_CONFIGS),
+        "paths.machine=local",
         f"paths.results_root={root}",
         f"paths.scratch.local={root / 'scratch'}",
         *surrogate(session_root),

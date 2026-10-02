@@ -7,8 +7,10 @@ import re
 import subprocess
 
 import pytest
+from hydra import compose as hydra_compose
+from hydra import initialize_config_dir
 
-from tests.conftest import REPO
+from tests.conftest import CONFIGS, REPO, compose
 
 CLUSTERS = ("snellius", "delftblue")
 # Helpers and quick login-node tools are not jobs.
@@ -51,3 +53,18 @@ def test_every_script_has_a_job(cluster: str) -> None:
 )
 def test_job_script_parses(job: pathlib.Path) -> None:
     subprocess.run(["bash", "-n", str(job)], check=True)
+
+
+def test_env_sets_machine_but_not_in_tests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    # What env.sh exports reaches the configs ...
+    monkeypatch.setenv("PYURBANAIR_MACHINE", "snellius")
+    monkeypatch.setenv("PYURBANAIR_RESULTS_ROOT", "/cluster/results")
+    with initialize_config_dir(config_dir=str(CONFIGS), version_base=None):
+        paths = hydra_compose("forward").paths
+    assert paths.experiment_dir.startswith("/scratch-shared/")
+    assert paths.results_root == "/cluster/results"
+    # ... but never a test run's scratch.
+    paths = compose("forward", root=tmp_path).paths
+    assert paths.experiment_dir == str(tmp_path / "scratch")

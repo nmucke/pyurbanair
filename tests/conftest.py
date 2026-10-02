@@ -49,6 +49,7 @@ TEST_CONFIGS = pathlib.Path(__file__).resolve().parent / "configs"
 def compose(config_name: str, *overrides: str, root: pathlib.Path) -> DictConfig:
     """A configs/ config with every output and scratch dir under `root`."""
     paths = [
+        "paths.machine=local",
         f"paths.results_root={root / 'results'}",
         f"paths.scratch.local={root / 'scratch'}",
         f"paths.weights_dir={root / 'weights'}",
