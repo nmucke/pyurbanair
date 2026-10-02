@@ -1,5 +1,11 @@
 # Local forward simulations through MCP
 
+> **Status:** the MCP server (`libs/mcp_server`, `scripts/start_mcp`) still
+> reads the archived config tree (`archive/conf/`, formerly `conf/`) and is
+> broken until it is ported to `configs/`
+> (see `docs/plans/mcp_server_refactor_handover.md`). This page describes the
+> pre-port behaviour; `conf/...` paths below now live under `archive/conf/`.
+
 The optional `pyurbanair-mcp` library exposes local forward simulations through
 stdio. Configuration, execution, job storage and rendering live in `pyurbanair`
 and work without the MCP SDK. Workers use a selected Pixi environment; the
@@ -232,10 +238,9 @@ views usable. Serve exported bundles with a local static HTTP server; direct
 Run the core and protocol checks with local Unix/loopback sockets available:
 
 ```bash
-pixi run -e dev python -m pytest tests/test_forward_preparation.py tests/test_forward_workflow.py tests/test_local_jobs.py tests/test_forward_visualization.py
-pixi run -e mcp python -m pytest tests/test_mcp_protocol.py
-pixi run -e mcp python -m pytest tests/test_mcp_forward_integration.py -m integration
-pixi run -e dev python -m pytest tests/test_forward_workflow_integration.py -m integration
+pixi run -e dev python -m pytest tests/pyurbanair/test_forward_preparation.py tests/pyurbanair/test_local_jobs.py tests/pyurbanair/test_forward_visualization.py
+pixi run -e mcp python -m pytest tests/mcp/test_mcp_protocol.py
+pixi run -e mcp python -m pytest tests/mcp/test_mcp_forward_integration.py -m integration
 ```
 
 The integration tests use independent small test configurations. PALM's installed

@@ -1,5 +1,0 @@
-# @package _global_
-# Tiny forward run (configs_new/forward.yaml) on uDALES.
-defaults:
-  - tiny
-  - override /model: pyudales_tiny

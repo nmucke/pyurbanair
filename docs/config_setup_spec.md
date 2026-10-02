@@ -2,13 +2,16 @@
 
 ## Goal
 
-Flatten `conf/`. Today a run composes ~15 groups across `esmda/`, `filtering/`,
+Flatten `conf/`. Before the refactor a run composed ~15 groups across `esmda/`, `filtering/`,
 `observation/`, `execution/` and `common/`. After the refactor a run is one
 short workflow file plus `assimilation.yaml`.
 
-Status: the new tree exists in `configs_new/` next to `conf/`. It composes for
-every workflow; the scripts are not wired to it yet. Concrete values are not
-final and will be set once the structure is done.
+Status: done. The flattened tree is `configs/`, read by the rewritten
+`scripts/` and tested by `tests/`. The old `conf/`, `scripts/` and `tests/`
+are archived under `archive/` (not run, not tested). This page is kept as the
+design record and the old -> new mapping; for the current tree see
+[configs/README.md](../configs/README.md) and
+[scripts_and_configs.md](scripts_and_configs.md).
 
 Out of scope: `visualization/`, `compare_models.yaml`, `run_probe_series.yaml`,
 named experiments. The neural-surrogate configs are covered in the last section.
@@ -16,7 +19,7 @@ named experiments. The neural-surrogate configs are covered in the last section.
 ## Layout
 
 ```
-configs_new/
+configs/
   forward.yaml            # entry point: forward runs
   assimilation.yaml       # entry point: all three DA scripts (ESMDA, filtering, hybrid)
   common.yaml             # run name, paths (per machine), ensemble budget, Hydra run dir
@@ -96,37 +99,28 @@ configs_new/
 | `filter_smoothing.likelihood_allocation` | `hybrid.likelihood_allocation` |
 | `experiment/` | removed |
 
-## Script changes needed (migration)
+## Switch-over (done)
 
-1. Point each script's `@hydra.main` at the new directory: `forward` for
-   `run_forward_model.py`, `assimilation` for the three DA scripts. Each DA
-   script appends its workflow name to `paths.results_dir`; the hybrid reads
-   its tempering from `filtering.beta`.
-2. Read the new keys (table above). Build components with
-   `instantiate(cfg.smoothing.smoother, num_time_points=...)` and
-   `instantiate(cfg.filtering, observation_operator=..., forward_model=..., C_D=...)`.
-3. Build the observation error with `instantiate(cfg.observation.error)` instead of
-   `create_observation_error(cfg)`. Rename the `ObservationErrorSpec.aggregation`
-   field to `propagation` (3 uses in `observation_error.py`, plus
-   `hydra_helpers.py` and two tests). Keep the temporal-operator check from the
-   helper as a one-line check in the runners.
-4. Update `scripts/preview_config.py`, `run_record.py` (workflow names
-   `esmda` → `smoothing`, `filter_smoothing` → `hybrid`), the
-   SGS-discrepancy validation keys, and `tests/conftest.py`.
-5. Code defaults for removed keys: always write the observation diagnostics;
-   the forward workflow no longer reads `ensemble_save_on_disk`.
-6. Add `upgrade_legacy_config(cfg)` wherever a saved `config.yaml` is reloaded
-   (`_esmda_common.py`, `compute_sweep_metrics.py`) so old runs still
-   post-process.
-7. Update `job_scripts/` (about 78 files use `esmda.` / `esmda/`).
-8. Replace `conf/` with `configs_new/`; update `conf/README.md`,
-   `docs/scripts_and_configs.md` and the commands in `CLAUDE.md`.
+Instead of patching the old scripts, new ones were written against
+`configs/`: `scripts/run_forward.py` (`forward`), `scripts/run_smoother.py`,
+`scripts/run_filtering.py`, `scripts/run_hybrid.py` (all `assimilation`; each
+appends its workflow name to `paths.results_dir`), with post-processing in
+`scripts/compute_metrics.py`, `scripts/visualize_forward.py` and
+`scripts/visualize_assimilation.py`, and config checks in
+`scripts/inconsistency_check.py`. Components are built with
+`instantiate(cfg.smoothing.smoother, num_time_points=...)`,
+`instantiate(cfg.filtering, observation_operator=..., forward_model=..., C_D=...)`
+and `instantiate(cfg.observation.error)` (the `ObservationErrorSpec` field is
+`propagation`). The old scripts (`run_forward_model.py`, `esmda/run_esmda.py`,
+`filtering/run_filtering.py`, `filter_smoothing/run_filter_smoothing.py`,
+`preview_config.py`, the sweep/metrics helpers) are in `archive/scripts/`.
+`job_scripts/` still largely targets the archived setup.
 
 ## Acceptance
 
 - Every workflow composes and fully resolves, with and without component
-  overrides (checked for `configs_new/`).
-- `pixi run -e dev py.test` passes once the scripts are switched over.
+  overrides (`tests/scripts/test_configs.py`).
+- `pixi run -e dev py.test` passes on the new scripts.
 
 ## Neural surrogates
 
@@ -144,8 +138,8 @@ configs_new/
 | per-file `trainer`, `optimizer`, `batch_sampler` + `dataloader` | shared `trainer`, `optimizer`, `batch_sampler` (the only `batch_size`), `dataloader`, `dataset` in `surrogate/training.yaml`; each `surrogate/train_*.yaml` overrides what differs and sets its `collate_fn` |
 | hard-coded weight/data paths | `paths.weights_dir`, `paths.training_data_dir` in `common.yaml` |
 
-Scripts, in `scripts_new/surrogate/` (the old ones in `scripts/neural_surrogate/`
-still read `conf/neural_surrogate/`):
+Scripts, in `scripts/surrogate/` (the old ones are archived in
+`archive/scripts/neural_surrogate/`, reading `archive/conf/neural_surrogate/`):
 
 | Old | New |
 |---|---|

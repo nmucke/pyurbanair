@@ -29,7 +29,7 @@ These are foundations to retain, not missing features to implement.
 covariance. ESMDA adds independent noise to raw frames, then averages them while
 deliberately retaining the raw-frame variance. Thus aggregation changes the
 degree of conservatism. See [ESMDA covariance validation](../libs/data-assimilation/src/data_assimilation/smoothing/esmda.py)
-and [observation construction](../scripts/esmda/run_esmda.py), lines 948–956.
+and [observation construction](../archive/scripts/esmda/run_esmda.py), lines 948–956 (archived runner; now `scripts/helper_functions.py`).
 
 **Action.** Separate instrument noise, representation error and dynamical model
 error. For linear averaging, propagate instrument covariance as
@@ -105,8 +105,8 @@ replace this with a blanket causal mask.
 Compare canopy-only sensors with a fixed-budget canopy-plus-upper-layer network.
 Use common physical controls—reference wind components/profile, reference
 height, nudging cutoff and relaxation time—across solvers. Current defaults
-even use different nudging cutoffs: 16 m in [uDALES](../conf/model/pyudales.yaml)
-and 4 m in [PALM](../conf/model/pypalm.yaml). Match them for controlled transfer
+even use different nudging cutoffs: 16 m in [uDALES](../configs/model/pyudales.yaml)
+and 4 m in [PALM](../configs/model/pypalm.yaml). Match them for controlled transfer
 experiments, then vary them deliberately.
 
 **Acceptance:** periodic translation invariance, identifiable forcing directions,
@@ -201,7 +201,7 @@ and the proposed consistent method, with component ablations at matched cost.
 Primary outcomes should be held-out velocity-vector error, proper ensemble
 scores/coverage, and assimilation-off forecasts at common lead times and
 information cutoffs. Distinguish causal filtering from retrospective smoothing.
-Extend the existing [evaluation pipeline](../scripts/esmda/compute_esmda_metrics.py)
+Extend the existing [evaluation pipeline](../scripts/compute_metrics.py)
 with these forecast comparisons; retain mean profiles, resolved TKE, Reynolds
 stress and spectra. Score turbulence per member before ensemble reduction.
 Reapply `H` to actual analyzed states at matching analysis times: localized/reduced filter

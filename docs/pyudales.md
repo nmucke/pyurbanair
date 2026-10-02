@@ -53,7 +53,7 @@ available — `&NAMSUBGRID cs` under `lsmagorinsky=.true.`, `c_vreman` under
 `ForwardModel(BaseForwardModel)`
 
 Key constructor arguments (all wired from
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml)):
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml)):
 
 | Argument | Purpose |
 |---|---|
@@ -193,7 +193,7 @@ belonging to the closure that is on (`u-dales/src/modsubgrid.f90`, subroutine
 | One-equation | `loneeqn=.true.` | `cm`/`ce1`/`ce2` — **not** in the namelist | prognostic SGS TKE |
 
 The closure itself is chosen by the `closure` constructor arg
-(`conf/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
+(`configs/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
 chosen one `.true.`, the others `.false.` — so the active closure is fully
 determined by the config rather than by whatever the case template shipped. Only
 the keys uDALES declares in the NAMSUBGRID namelist may ever be written: an
@@ -222,9 +222,9 @@ from `run.<expnr>.log`'s companion Python log.
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -237,7 +237,7 @@ value in the shared params sampler cannot be correct for all three at once.
 > **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
 > (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
 > for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
-> retune `conf/params/*.yaml` when switching a case's closure.
+> retune `configs/params/*.yaml` when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -283,8 +283,8 @@ model_discrepancy:
 Height is measured in metres from the native solver's vertical datum (`zf`);
 `canopy_height` is a fixed representative building height. The regularization is
 in s⁻¹ and the logarithmic cap is dimensionless. Coefficient priors live in
-`conf/params/static.yaml` or the `static_parameters` block of
-`conf/params/dynamic.yaml`; truth values live in the regular truth configs.
+`configs/params/static.yaml` or the `static_parameters` block of
+`configs/params/dynamic.yaml`; truth values live in the regular truth configs.
 Explicit distributions take precedence.
 `prior_std` is an optional fallback: its three positive finite scales supply
 zero-centred Gaussian priors for selected coefficients missing from a custom
@@ -434,7 +434,7 @@ Calls `u-dales/tools/write_inputs.sh` and requires `matlab_bin` to be on `PATH`.
 The Matlab path sleeps 90 s after subprocess launch to wait for MATLAB to finish.
 
 **Selector.** The `prepare._target_` in
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) points at
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) points at
 `pyurbanair.config.hydra_helpers.prepare_udales`, which receives
 `python_or_matlab: python` (the config default) and passes it to
 `forward_model.run_preprocessing(python_or_matlab=...)`.
@@ -506,7 +506,7 @@ failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.
 
 uDALES v2.2.0 has two inlet-turbulence routes. The Lund (1998) recycling
 generator is dead code (documented below, and still asserted against the Fortran
-source by `tests/test_udales_inlet_turbulence.py`). The **precursor/driver**
+source by `tests/pyudales/test_udales_inlet_turbulence.py`). The **precursor/driver**
 route — `BCxm=3` → `idriver=2`, `moddriver.f90` — is wired end to end, and that
 is what `inlet_turbulence.enabled: true` drives, fed by driver planes
 **synthesised in Python** rather than by a precursor run.
@@ -648,7 +648,7 @@ intensity * |U(z)|` with constant TI in z, the backflow rate is
 0.25** — hundreds of backflow cells per window on a 200x32 inlet plane. Keep
 `intensity` at or below ~0.15 unless you first restore that guard.
 
-**Calibrated defaults.** `conf/model/pyudales.yaml` now ships values tuned for
+**Calibrated defaults.** `configs/model/pyudales.yaml` now ships values tuned for
 the `realistic` STL pool at 4 m spacing (`intensity: 0.15`,
 `length_scale_y/z: 24`, `length_scale_x: 48`, `time_step: 0.5`). Three things
 still bias the realised turbulence below its nominal value, all of which
@@ -811,9 +811,9 @@ compensation knobs".
 
 ---
 
-## 10. Config wiring — `conf/model/pyudales.yaml`
+## 10. Config wiring — `configs/model/pyudales.yaml`
 
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) is the complete model
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) is the complete model
 config entry. Notable fields:
 
 ```yaml
@@ -933,7 +933,7 @@ ceiling on the development box is ~4–8 parallel processes (see
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |
 | Debug a silent crash | Set `verbose: true` on the forward model (or `model.forward_model.verbose=true` CLI) |
-| Tune the instability watchdog | `instability_check:` block in `conf/model/pyudales.yaml` |
+| Tune the instability watchdog | `instability_check:` block in `configs/model/pyudales.yaml` |
 | Interpolate staggered → centred | `pyudales.utils.grid_utils.interpolate_grid(ds)` |
 | Change nudging height cutoff | `nudging_config.nnudge_meters` in model config |
 | Understand ncpu → nprocx mapping | `utils/ncpu_utils.validate_and_sync_ncpu` |

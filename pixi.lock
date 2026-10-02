@@ -12939,7 +12939,7 @@ packages:
 - pypi: ./
   name: pyurbanair
   version: 0.1.0
-  sha256: 1867b525225b3e33fcf453b7c613df1384c9f40b25ecf35802dd0a8561a35c14
+  sha256: 15be624af550f5ad50d56a0c84e8a4dc30007d4fa0a90b2a16ab9b7d9b2e3a1b
   requires_dist:
   - numpy>=2.3.5,<3
   - xarray>=2025.12.0,<2026

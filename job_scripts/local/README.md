@@ -1,5 +1,13 @@
 # Local job scripts
 
+> **Not ported yet.** These job scripts still call the archived setup
+> (`scripts/esmda/run_esmda.py`, `scripts/run_forward_model.py`,
+> `scripts/neural_surrogate/*`, `scripts/figure_creation/*`, `conf/run_esmda.yaml`,
+> ...), which now lives under `archive/scripts/` and `archive/conf/`. As
+> written they are broken until they are ported to `scripts/` + `configs/`
+> (see [docs/scripts_and_configs.md](../../docs/scripts_and_configs.md)). This page describes them as they
+> are.
+
 Local (no-SLURM) siblings of `job_scripts/snellius/<backend>/rollout_esmda_from_truth.slurm`.
 They run time-varying-parameter **rollout ESMDA against a pre-simulated ground
 truth** by invoking `scripts/esmda/run_esmda.py` **directly** in this shell — no

@@ -14,12 +14,13 @@ the surrogate docs for a pure LBM change).
 | If the task touches… | Read first |
 |---|---|
 | Anything non-trivial — start here for orientation | [docs/codebase_guide.md](docs/codebase_guide.md) |
-| The LBM backend (`libs/pylbm`, `conf/model/pylbm.yaml`) | [docs/pylbm.md](docs/pylbm.md) |
+| The LBM backend (`libs/pylbm`, `configs/model/pylbm.yaml`) | [docs/pylbm.md](docs/pylbm.md) |
 | The uDALES backend (`libs/pyudales`) | [docs/pyudales.md](docs/pyudales.md) |
 | The PALM backend (`libs/pypalm`) | [docs/pypalm.md](docs/pypalm.md) |
 | ESMDA / observation operator / localization (`libs/data-assimilation`) | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates (`libs/neural-surrogates`) | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
-| Hydra configs (`conf/`) or scripts (`scripts/`) | [docs/scripts_and_configs.md](docs/scripts_and_configs.md) |
+| Hydra configs (`configs/`), scripts (`scripts/`) or `workflows/` | [docs/scripts_and_configs.md](docs/scripts_and_configs.md) |
+| Tests (`tests/`) | [tests/README.md](tests/README.md) |
 | Running jobs on HPC (Snellius / DelftBlue / local) | [docs/job_scripts.md](docs/job_scripts.md) |
 
 `docs/codebase_guide.md` is the entrypoint and has its own finer-grained
@@ -29,6 +30,10 @@ documentation map plus the "adding a new X" recipes. When in doubt, start there.
 > working notes / design records, **not** maintained references. Read them for
 > theory or history, but verify against the code before relying on them, and
 > don't update them as if they were current docs.
+>
+> `archive/` holds the retired config tree, scripts and tests (`archive/conf/`,
+> `archive/scripts/`, `archive/tests/`). It is dead code: not run, not tested,
+> don't edit or import it.
 
 ## What this repo is (one screen)
 
@@ -44,8 +49,9 @@ runs them in ensembles for parameter / state estimation.
   specific solver — polymorphism is through these base classes.
 - **`data-assimilation`** implements ESMDA in JAX.
 - All public I/O is `xarray.Dataset`; on-disk format is NetCDF.
-- Run-time config is a Hydra tree under `conf/` with workflow entry points,
-  reusable component groups, and named runs under `conf/experiment/`.
+- Run-time config is a flat Hydra tree under `configs/` with two entry
+  points, `forward.yaml` and `assimilation.yaml` (groups `case/`, `model/`,
+  `params/`, `assimilation_settings/`; surrogate configs in `surrogate/`).
 
 ## Commands
 
@@ -55,19 +61,27 @@ all backends and dev tools.
 ```bash
 pixi run setup-dev              # one-time bootstrap (handles a known bin/test clobber)
 pixi shell -e dev               # activate the dev env
-pixi run -e dev py.test         # fast suite (--exitfirst; no real CFD solves)
+pixi run -e dev py.test         # fast suite (--exitfirst; no compiled CFD solver)
 pixi run -e dev pre-commit      # black + isort + mypy on staged files
 ```
 
-- Tests compose independent configs from `tests/conf/` and call each script's
-  `run(cfg)` directly. `compose_test_cfg` isolates paths; tiny test settings
-  never inherit production tuning. Real CFD tests use the `integration` marker;
-  run `pixi run -e dev test-integration` or `test-all` explicitly.
-- Forward runs: `python scripts/run_forward_model.py model=pylbm ...`
-- Assimilation: `python scripts/esmda/run_esmda.py ...` (the single ESMDA entry point;
-  mode = `esmda/smoother` × `params@prior_params` × `esmda.num_assimilation_windows`).
-- Sequential filtering (EnKF): `python scripts/filtering/run_filtering.py ...`
-  (mode = `filtering.mode=state|parameter|joint` × the `filtering/*` groups).
+- Tests: `tests/<package>/` per package, `tests/scripts/` for scripts,
+  configs and workflows. Script tests compose the real `configs/` made tiny by
+  an overlay from `tests/configs/` (`compose("forward", "+test=forward",
+  root=tmp_path)`). Compiled-solver tests are marked `integration`: run
+  `pixi run -e dev test-integration` or `test-all`. See `tests/README.md`.
+- Forward: `python scripts/run_forward.py model=pylbm ...`
+- Assimilation (all read `configs/assimilation.yaml`):
+  `scripts/run_smoother.py` (ESMDA), `scripts/run_filtering.py` (EnKF),
+  `scripts/run_hybrid.py` (ESMDA params + filter state).
+- Post-processing takes the run dir: `scripts/compute_metrics.py`,
+  `scripts/visualize_forward.py`, `scripts/visualize_assimilation.py`.
+  `workflows/forward_workflow.sh` and
+  `workflows/assimilation_workflow.sh <smoother|filtering|hybrid>` chain a run
+  with its post-processing.
+- Surrogates: `scripts/surrogate/generate_data.py`,
+  `scripts/surrogate/train.py --config-name surrogate/train_<task>`,
+  `scripts/surrogate/evaluate_*.py`.
 
 ## Workflow rules
 
@@ -79,7 +93,8 @@ pixi run -e dev pre-commit      # black + isort + mypy on staged files
   don't want to satisfy.
 - **Match the surrounding code** — comment density, naming, idioms. New scripts
   follow the `def run(cfg)` + thin `@hydra.main` wrapper shape so they stay
-  testable; resolve output paths via `resolve_output_dir(...)`.
+  testable, call `check_config(cfg, ...)` (`scripts/inconsistency_check.py`)
+  first, and write under `cfg.paths.results_dir`.
 - **No-op when a param/field is absent.** Backends must stay byte-identical on
   single-model / default runs when you add a new parameter or knob — read it,
   and skip the write site if it isn't present (see the "adding a new parameter"

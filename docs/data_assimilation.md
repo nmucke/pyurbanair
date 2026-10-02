@@ -89,10 +89,12 @@ NumPy vector of length `num_sensors * len(obs_states)`.
 | Index-based | `obs_ids_x`, `obs_ids_y`, `obs_ids_z` | Direct `isel` with xarray vectorized indexing |
 | Coordinate-based | `obs_x`, `obs_y`, `obs_z` | Trilinear interpolation via `interpolation.py` |
 
-The case `obs.yaml` configs use coordinate-based mode; `create_observation_operator`
-in
-[hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py)
-constructs the operator from the `obs.*_points` lists.
+The cases use coordinate-based mode: `observation.operator` in
+[configs/assimilation.yaml](../configs/assimilation.yaml) passes the case's
+`obs.*_points` lists, and `make_observation_operator` in
+[scripts/helper_functions.py](../scripts/helper_functions.py) instantiates it.
+(`create_observation_operator` in `hydra_helpers.py` served the archived
+scripts.)
 
 **Staggered-grid `dim_mapping`.** Each backend uses different dimension names
 for the velocity components. The operator holds a `dim_mapping` dict that maps
@@ -168,24 +170,25 @@ operator modes) is exactly equivalent for `"mean"` — the operator is linear
 in the state — and differs slightly for `median`/`max`/`min`; `mean` is the
 default everywhere.
 
-Because aggregation is a DA choice rather than an operator argument, its two
-knobs live on the run config's algorithm node — `esmda.interval_seconds` /
-`esmda.aggregation_mode` — not in the case's `obs:` block, which carries only
-observation-operator arguments. `run_filtering.yaml` has no such keys, because
-the filter aggregates nothing. `create_aggregate_observations` (§11) reads
-them; a null `interval_seconds` means full-resolution assimilation. The
-likelihood is configured in `conf/observation/error.yaml`, mounted at the
-run-config root as `observation_error`.
+Because aggregation is a DA choice rather than an operator argument, it is
+configured as `observation.aggregation` in `configs/assimilation.yaml`
+(`interval_seconds`, `mode`) — not in the case's `obs:` block, which carries
+only observation-operator arguments. The filter aggregates nothing
+(`run_filtering.py` ignores the block). `make_aggregation` in
+`scripts/helper_functions.py` (§11) builds it; a null `interval_seconds` or a
+null block means full-resolution assimilation. The likelihood is configured in
+`observation.error` of the same file.
 
 ### Physical observation likelihood
 
-The three assimilation entry points share
-[`conf/observation/error.yaml`](../conf/observation/error.yaml). It defines the
-root-level `observation_error` block; experiment and CLI overrides use that
-same name. Its default instrument std is `0.25`, representation std is `0.0`,
-representation time model is `independent`, and aggregation is `propagate_mean`.
+The three assimilation entry points share `observation.error` in
+[`configs/assimilation.yaml`](../configs/assimilation.yaml) (an
+`ObservationErrorSpec`; it was the root-level `observation_error` block of the
+archived `conf/observation/error.yaml`). Its defaults are instrument std
+`0.25`, representation std `0.1` and `propagation: propagate_mean` (passed to
+the spec's `aggregation` field until that is renamed).
 The old algorithm-level `obs_error_std` settings and null error model have been
-removed. Migrating an old scalar to `observation_error.instrument_std` preserves
+removed. Migrating an old scalar to `observation.error.instrument_std` preserves
 its raw measurement-noise scale, but the corrected variance of a temporal mean
 is smaller than the historical full-frame variance.
 
@@ -250,8 +253,8 @@ applicable. Filter projections cover each cycle's final state only; earlier
 ride-along predictions remain explicitly labelled proxies.
 
 
-Run [`scripts/examples/observation_likelihood.py`](../scripts/examples/observation_likelihood.py)
-with the dev environment for a scalar check through both
+Run [`archive/scripts/examples/observation_likelihood.py`](../archive/scripts/examples/observation_likelihood.py)
+(archived with the old scripts, not ported) with the dev environment for a scalar check through both
 `ObservationErrorSpec.resolve()` and the production `ETKFAnalysis`. For four
 independent frames with instrument std `0.5` and representation std `0.2`, it
 resolves physical variance `0.0725` and gives posterior mean/std `1.3986/0.2600`;
@@ -320,7 +323,7 @@ makes the whole MDA loop condition on `L^w` instead of `L`: every update runs
 with `effective_alpha = alpha / w` (a read-only property), so
 `sum_i 1/effective_alpha_i = w`. It exists for the filter-smoothing hybrid's
 `shared_budget` policy (§9), which derives it — it is not a user knob and not
-in `conf/esmda/`. Validated finite `0 < w <= 1`, and the effective covariance
+in `configs/assimilation_settings/smoother.yaml`. Validated finite `0 < w <= 1`, and the effective covariance
 `effective_alpha * C_D` is checked finite in the compute dtype. The base
 `sum 1/alpha = 1` check is unchanged; explicit `alpha` arguments (including
 `_compute_kalman_update(alpha=...)`) are always base values and are divided by
@@ -441,8 +444,8 @@ a multi-window caller reads one window's entries per call. The extra
 trajectory, not a forecast, so its predicted observations are excluded); with
 `final_time_smoothing=True` the last entry is therefore pre-smoothing. Off by
 default: nothing is recorded and no extra operator evaluation happens.
-`run_esmda.py` turns it on under `esmda.save_obs_diagnostics` and persists the
-arrays per window.
+`scripts/run_smoother.py` and `run_hybrid.py` always turn it on and persist
+the arrays per window (`window_{w}_obs.nc`).
 
 ### Five variants
 
@@ -454,7 +457,8 @@ arrays per window.
 | `StateAndParameterESMDA` | `[time=0 state | static params]` | `_flatten_state` / `_unflatten_state`; strategy-aware localization via `localize_mask`; optional `state_reduction` + `final_time_smoothing` |
 | `StateAndTimeVaryingParameterESMDA` | `[time=0 state | {name}_{t} scalars]` | MRO combines both parents: state flattening from `StateAndParameterESMDA`, param flattening from `TimeVaryingParameterESMDA` |
 
-**Config names** (the `esmda/smoother` group filenames):
+**Config names** (the entries of `configs/assimilation_settings/smoother.yaml`,
+selected with `'smoothing.smoother=${smoother.<name>}'`):
 `static` → `ParameterESMDA`; `state` → `StateESMDA`;
 `dynamic` → `TimeVaryingParameterESMDA`;
 `state_and_parameter` → `StateAndParameterESMDA`;
@@ -634,7 +638,7 @@ Parameters are not part of this augmented vector; they are frozen.
 For theory and implementation notes, link: `docs/reduced_state_da.md` (does
 not yet exist as a standalone file; the reduction code and the SVD config
 comments in
-[conf/esmda/state_reduction/svd.yaml](../conf/esmda/state_reduction/svd.yaml)
+[configs/assimilation_settings/state_reduction.yaml](../configs/assimilation_settings/state_reduction.yaml)
 are the canonical references until that file is written).
 
 ---
@@ -758,7 +762,7 @@ is bitwise the untempered filter.
 
 ### Analysis schemes
 
-Selected with `filtering/analysis=<name>` (§1.8 of
+Selected with `'filtering.analysis=${analysis.<name>}'` (§1.5 of
 [scripts_and_configs.md](scripts_and_configs.md)). For a short standalone
 orientation to the deterministic family — the kernel, what separates the four
 variants, and what is not yet measured — see
@@ -993,7 +997,7 @@ must not be ranked on that value.
 
 The same label covers the analysis schemes, and the LETKF needs no new value:
 
-* global ETKF (`filtering/localization=none`, no reduction) → `exact`. The one
+* global ETKF (`filtering.localization` = `${localization.none}`, no reduction) → `exact`. The one
   global transform is applied to every augmented row, observation rows included,
   so the value really is `H` applied to the analyzed state.
 * LETKF, like the localized stochastic analysis, → `unlocalized_ride_along`:
@@ -1020,11 +1024,19 @@ The same label covers the analysis schemes, and the LETKF needs no new value:
 
 ### Run script
 
-[scripts/filtering/run_filtering.py](../scripts/filtering/run_filtering.py) (config
-[conf/run_filtering.yaml](../conf/run_filtering.yaml)) is the entry point:
-truth inline or from disk (as run_esmda.py), Hydra groups
-`filtering/analysis|localization|state_reduction|inflation|evolution`, static scalar
-parameters only (time-varying/AR(2) priors stay with the ESMDA smoothers).
+[scripts/run_filtering.py](../scripts/run_filtering.py) (config
+[configs/assimilation.yaml](../configs/assimilation.yaml), block `filtering`)
+is the entry point: truth inline or from disk (as `run_smoother.py`), slots
+`filtering.analysis|localization|state_reduction|inflation|parameter_evolution`,
+static scalar parameters only (time-varying/AR(2) priors stay with the ESMDA
+smoothers).
+
+> The rest of this subsection was written for the archived
+> `scripts/filtering/run_filtering.py`. In the current script the window count
+> is `assimilation.num_windows` (shared with the smoother) and the stride is
+> `assimilation.assimilate_every_n_step`; read `filtering.num_assimilation_windows`
+> / `esmda.num_assimilation_windows` / `filtering.assimilate_every_n_step`
+> below as those keys.
 
 The run is **windowed like an ESMDA run**, and that is the only reason windows
 exist here: `filtering.num_assimilation_windows` is configured exactly as
@@ -1144,11 +1156,10 @@ posterior alone seeds the next prior/extrapolation, and the per-window
 `window_{w}_filter_params.nc` artifact preserves what the filter had learned.
 
 Entry point:
-[scripts/filter_smoothing/run_filter_smoothing.py](../scripts/filter_smoothing/run_filter_smoothing.py)
-(config
-[conf/run_filter_smoothing.yaml](../conf/run_filter_smoothing.yaml)), which
-composes the existing `esmda/*` and `filtering/*` groups (smoother restricted
-to `static`/`dynamic`) plus a small `filter_smoothing:` node, and instantiates
+[scripts/run_hybrid.py](../scripts/run_hybrid.py)
+(config [configs/assimilation.yaml](../configs/assimilation.yaml)), which
+reads the `smoothing` and `filtering` blocks (smoother restricted to
+`static`/`dynamic`) plus the `hybrid` block, and instantiates
 **two** ensemble forward-model stacks — the smoother's with the window
 horizon, the filter's with `simulation_time` = one cycle — so each
 collaborator forecasts on its own clock. `filtering.assimilate_every_n_step`
@@ -1156,9 +1167,9 @@ works as in a pure filtering run (a cycle spans `n` observation intervals and
 assimilates only the last frame), with one hybrid-specific rule: the thinning
 applies to BOTH phases — the smoother assimilates the same strided frames,
 and both DA instances share the strided observation-operator wrapper — so the
-run keeps exactly one observation product. `filter_smoothing.beta` /
-`filter_smoothing.likelihood_allocation` configure the tempering policy above;
-the script resolves it before the truth is simulated (see
+run keeps exactly one observation product. `filtering.beta` /
+`hybrid.likelihood_allocation` configure the tempering policy above;
+`check_config` validates it before the truth is simulated (see
 [scripts_and_configs.md](scripts_and_configs.md)).
 
 > Historical note: an earlier, different filter-smoothing algorithm (an outer
@@ -1231,7 +1242,7 @@ exactly once.
 `x = theta` example with a joint filter, `shared_budget` recovers the
 once-conditioned posterior `V^-1 = P^-1 + R^-1` and `filter_only` gives
 `V^-1 = P^-1 + (1 + 1/beta) R^-1`
-(`tests/test_hybrid_tempering.py`). But with `mode="state"` the state variance
+(`tests/data_assimilation/test_hybrid_tempering.py`). But with `mode="state"` the state variance
 is right while theta keeps ESMDA's partial posterior, so the joint
 state–parameter covariance is wrong; and with forecast uncertainty the
 parameter-only ESMDA cannot update (e.g. its pinned initial condition), the
@@ -1247,84 +1258,80 @@ redesign is separate work.
 
 ## 10. Configuration
 
-All smoother configuration is via Hydra groups under
-[conf/esmda/](../conf/esmda/); the filter's equivalents live under
-[conf/filtering/](../conf/filtering/) (see §8 and
-[scripts_and_configs.md §1.8](scripts_and_configs.md)).
+Every option of each component lives in one file under
+[configs/assimilation_settings/](../configs/assimilation_settings/), mounted at
+the top level; the `smoothing` and `filtering` blocks of
+[configs/assimilation.yaml](../configs/assimilation.yaml) point their slots at
+one option by interpolation (see
+[scripts_and_configs.md §1.5](scripts_and_configs.md)). The archived
+`conf/esmda/*` and `conf/filtering/*` groups map one-to-one onto these entries
+([config_setup_spec.md](config_setup_spec.md)).
 
-### `esmda/smoother` group
+### Smoothers (`smoother.yaml`, slot `smoothing.smoother`)
 
-Five options in
-[conf/esmda/smoother/](../conf/esmda/smoother/):
-
-| File | Class | Notes |
+| Entry | Class | Notes |
 |---|---|---|
-| `static.yaml` | `ParameterESMDA` | Parameter-only, static scalars |
-| `state.yaml` | `StateESMDA` | State-only; static parameters held fixed; wires `state_reduction` / `final_time_smoothing` |
-| `dynamic.yaml` | `TimeVaryingParameterESMDA` | Parameter-only, time-varying (AR(2)) |
-| `state_and_parameter.yaml` | `StateAndParameterESMDA` | Joint state + static; wires `state_reduction` / `final_time_smoothing` |
-| `state_and_dynamic.yaml` | `StateAndTimeVaryingParameterESMDA` | Joint state + time-varying; same reduction knobs |
+| `static` | `ParameterESMDA` | Parameter-only, static scalars |
+| `state` | `StateESMDA` | State-only; static parameters held fixed; wires `state_reduction` / `final_time_smoothing` |
+| `dynamic` | `TimeVaryingParameterESMDA` | Parameter-only, time-varying (AR(2)) |
+| `state_and_parameter` | `StateAndParameterESMDA` | Joint state + static; wires `state_reduction` / `final_time_smoothing` |
+| `state_and_dynamic` | `StateAndTimeVaryingParameterESMDA` | Joint state + time-varying; same reduction knobs |
 
-Every smoother YAML wires shared fields via Hydra interpolation:
+Every entry wires shared fields via Hydra interpolation:
 ```yaml
-num_steps: ${esmda.num_steps}
-alpha: ${esmda.alpha}
-localization: ${esmda.localization}
+num_steps: ${smoothing.num_steps}
+alpha: ${smoothing.alpha}
+localization: ${smoothing.localization}
 ```
-so the `esmda:` block in `run_esmda.yaml` is the single place to change
-`num_steps` or `alpha` (which must stay equal to `num_steps` — see §5). The
-ESMDA `likelihood_weight` is deliberately absent from these files: only the
-filter-smoothing script passes it, derived from its tempering policy.
+so the `smoothing:` block is the single place to change `num_steps` or
+`alpha` (which defaults to `${.num_steps}` — see §5). The ESMDA
+`likelihood_weight` is deliberately absent: only the hybrid passes it, derived
+from its tempering policy.
 
-### `esmda/localization` group
+### Localization (`localization.yaml`, slots `smoothing.localization`, `filtering.localization`)
 
-Three options in
-[conf/esmda/localization/](../conf/esmda/localization/):
-
-| File | Class | Default key params |
+| Entry | Class | Notes |
 |---|---|---|
-| `none.yaml` | — (`esmda.localization: null`) | Global update |
-| `correlation.yaml` | `CorrelationLocalization` | `truncation_correlation=0.35`, `block_grouping=True` |
-| `distance.yaml` | `DistanceLocalization` | `localization_radius=10.0`, `block_grouping=True` |
+| `none` | — (`null`) | Global update |
+| `correlation` | `CorrelationLocalization` | `truncation_correlation`, `block_grouping` |
+| `distance` | `DistanceLocalization` | `localization_radius`, `block_grouping` |
 
-Select with `esmda/localization=correlation`, or override a field with
-`esmda.localization.localization_radius=40`. Force the global update with
-`esmda.localization=null`.
+Select with `'smoothing.localization=${localization.correlation}'`; tune an
+option where it is defined (`localization.distance.localization_radius=40`).
 
-### `esmda/state_reduction` group
+### State reduction (`state_reduction.yaml`, slots `smoothing.state_reduction`, `filtering.state_reduction`)
 
-Two options in
-[conf/esmda/state_reduction/](../conf/esmda/state_reduction/):
+Entries `none` (`null`), `svd`, `svd_current`, `svd_streaming`
+(`OnlineStateReduction` variants). Consumed by the `state`,
+`state_and_parameter` and `state_and_dynamic` smoothers and by the filter; the
+config checks reject it together with a localization.
 
-| File | Class |
-|---|---|
-| `none.yaml` | — (`state_reduction: null`) |
-| `svd.yaml` | `OnlineStateReduction` |
+### Filter components
 
-The `state_reduction` key is consumed by `state.yaml`,
-`state_and_parameter.yaml`, and `state_and_dynamic.yaml`. Selecting
-`esmda/state_reduction=svd` while using a parameter-only smoother is a no-op.
+`analysis.yaml` (`stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd`) and
+`inflation.yaml` (`none`, `multiplicative`, `rtps`, `rtpp`) feed
+`filtering.analysis` / `filtering.inflation`; `filtering.parameter_evolution`
+is set inline (`null` or a `RandomWalkEvolution` block).
 
 ---
 
 ## 11. End-to-end run
 
 A run uses the library as follows (very brief; see
-[scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py),
+[scripts/run_smoother.py](../scripts/run_smoother.py),
+[scripts/helper_functions.py](../scripts/helper_functions.py),
 [codebase_guide.md §6](codebase_guide.md#6-data-assimilation-flow), and
-[conf/run_esmda.yaml](../conf/run_esmda.yaml) for the full picture):
+[configs/assimilation.yaml](../configs/assimilation.yaml) for the full picture):
 
 ```python
-obs_op = create_observation_operator(
-    cfg.obs, cfg.assim_model.solver_name, cfg.observation.operator
-)
-aggregate = create_aggregate_observations(cfg)
-error = create_observation_error(cfg)
+obs_op = make_observation_operator(cfg, cfg.assim_model.solver_name)
+aggregate = make_aggregation(cfg)          # None -> every frame
+error = make_observation_error(cfg)        # instantiates cfg.observation.error
 # Resolve each window before ensemble forecasts, using its actual raw times.
 resolved = error.resolve(raw_truth_observations, obs_op, aggregate)
 noisy_observations = raw_truth_observations + resolved.raw_instrument_std * raw_normal_draws
 esmda = instantiate(
-    cfg.esmda.smoother, observation_operator=obs_op,
+    cfg.smoothing.smoother, observation_operator=obs_op,
     aggregate_observations=aggregate, forward_model=ensemble_model,
     C_D=resolved.covariance_diag, rng_key=rng_key,
 )
@@ -1336,14 +1343,13 @@ prior_state = posterior_state
 
 ```
 
-`create_observation_operator` builds a `TemporalObservationOperator`
-(time-resolved xarray output) wrapping an `ObservationOperator` using the
-case's `obs_x/y/z_points`; `create_aggregate_observations` builds the
-optional `AggregateObservations` from the run config's algorithm node
-(`esmda.interval_seconds` / `esmda.aggregation_mode` — aggregation is a DA
-choice, not an operator argument; `run_filtering.py` has no such keys, its
-filter assimilating every frame serially), which the script passes to the DA
-class. Each window resolves its labelled physical covariance from raw
+`make_observation_operator` instantiates `observation.operator`, a
+`TemporalObservationOperator` (time-resolved xarray output) wrapping an
+`ObservationOperator` on the case's `obs.x/y/z_points`; `make_aggregation`
+builds the optional `AggregateObservations` from `observation.aggregation`
+(aggregation is a DA choice, not an operator argument; `run_filtering.py`
+passes none, its filter assimilating single frames), which the script passes
+to the DA class. Each window resolves its labelled physical covariance from raw
 observations and exact aggregation bins. The script also constructs validation
 sensors
 (never assimilated; scored as held-out check) and handles inline vs. on-disk
@@ -1356,7 +1362,7 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 > #112–#114). Python spelled the restart filename with a 9-digit iteration
 > field while the Fortran opened a 6-digit one, so the solver silently reopened
 > its own restart from the previous window: for
-> `esmda/smoother=state`, `state_and_parameter`, and `state_and_dynamic`, **every pylbm
+> the `state`, `state_and_parameter` and `state_and_dynamic` smoothers, **every pylbm
 > rollout discarded the Kalman state update at every window boundary**.
 > Separately, the restart *template* read raised into a bare `except`, so every
 > pylbm warm start was rebuilt from a pure-equilibrium distribution, discarding
@@ -1379,14 +1385,12 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    augmented vector, call `self._compute_kalman_update(...)`, return
    `(updated_state_or_None, updated_params)`. Return `None` for state if
    the variant should not propagate the IC forward (parameter-only behavior).
-3. Add a new YAML file to
-   [conf/esmda/smoother/](../conf/esmda/smoother/) with `_target_` pointing
-   at your class and wire `num_steps`, `alpha`, `localization` via
-   `${esmda.*}`. No script changes needed — `run_esmda.py` instantiates
-   whatever `cfg.esmda.smoother` resolves to.
-4. If the variant needs the flattened field, check
-   `isinstance(esmda, StateAndParameterESMDA)` as the script already does
-   for all state-bearing branches.
+3. Add a new entry to
+   [configs/assimilation_settings/smoother.yaml](../configs/assimilation_settings/smoother.yaml)
+   with `_target_` pointing at your class and wire `num_steps`, `alpha`,
+   `localization` via `${smoothing.*}`. No script changes needed —
+   `run_smoother.py` instantiates whatever `cfg.smoothing.smoother` resolves
+   to. Teach `scripts/inconsistency_check.py` which priors it pairs with.
 
 ### Adding a new localization strategy
 
@@ -1398,13 +1402,12 @@ truth; see `codebase_guide.md §6` and the script's docstring.
 3. Set `requires_coordinates = True` if the strategy needs grid/sensor
    geometry; it will then only work with state-bearing smoothers and
    coordinate-based observations.
-4. Add a YAML file to
-   [conf/esmda/localization/](../conf/esmda/localization/)
-   (`# @package esmda`, setting `localization: {_target_: ..., ...}`).
-   Select it with `esmda/localization=<name>`. All smoothers already forward
-   `localization: ${esmda.localization}` so no smoother YAML changes are
-   needed. `esmda/localization=none` (or `esmda.localization=null`) restores
-   the global update.
+4. Add an entry to
+   [configs/assimilation_settings/localization.yaml](../configs/assimilation_settings/localization.yaml)
+   (`<name>: {_target_: ..., ...}`). Select it with
+   `'smoothing.localization=${localization.<name>}'`. All smoothers already
+   forward `localization: ${smoothing.localization}` so no smoother entry
+   changes are needed. `${localization.none}` restores the global update.
 
 ### Adding a new filter analysis scheme
 
@@ -1420,14 +1423,14 @@ truth; see `codebase_guide.md §6` and the script's docstring.
    `BaseFilter.__init__` validates it (and the spelling), so an invalid config
    fails at construction. A `forbidden` scheme should also reject a non-`None`
    `localization` in `__call__` for direct callers.
-3. Add a YAML option to
-   [conf/filtering/analysis/](../conf/filtering/analysis/)
-   (`# @package filtering`, setting `analysis: {_target_: ...}`) and select it
-   with `filtering/analysis=<name>`. State the localization requirement in the
-   file: the option name is the only place a user sees it before construction.
+3. Add an entry to
+   [configs/assimilation_settings/analysis.yaml](../configs/assimilation_settings/analysis.yaml)
+   (`<name>: {_target_: ...}`) and select it with
+   `'filtering.analysis=${analysis.<name>}'`. State the localization
+   requirement in a comment there and in `scripts/inconsistency_check.py`.
    Nested settings objects are nested `_target_` blocks (recursive
-   instantiation is on and `_convert_: all` propagates from
-   `conf/run_filtering.yaml`); see `conf/filtering/analysis/etkf_tsvd.yaml`.
+   instantiation is on and `_convert_: all` propagates from the `filtering`
+   block); see the `etkf_tsvd` entry.
 
 ### Adding a new solver to the observation operator
 

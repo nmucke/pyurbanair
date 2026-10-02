@@ -1,4 +1,4 @@
-# tests_new/pypalm.
+# tests/pypalm.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: pypalm"
@@ -9,12 +9,13 @@ on:
   pull_request:
     paths:
       - "libs/pypalm/**"
-      - "tests_new/pypalm/**"
+      - "tests/pypalm/**"
       - "src/**"
       - "pyproject.toml"
       - "pixi.lock"
-      - "tests_new/conftest.py"
-      - "tests_new/legacy/**"
+      - "tests/conftest.py"
+      - "tests/legacy/**"
+      - "scripts/setup_dev_env.sh"
       - ".github/actions/setup/**"
       - ".github/workflows/tests-pypalm.yml"
   workflow_dispatch:
@@ -25,7 +26,7 @@ concurrency:
 
 jobs:
   test:
-    name: tests_new/pypalm
+    name: tests/pypalm
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -34,4 +35,4 @@ jobs:
           submodules: recursive
       - uses: ./.github/actions/setup
       - name: Run tests
-        run: pixi run -e dev python -m pytest tests_new/pypalm --durations=10
+        run: pixi run -e dev python -m pytest tests/pypalm --durations=10

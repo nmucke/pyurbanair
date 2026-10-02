@@ -1,5 +1,13 @@
 # DA-method experiment campaigns
 
+> **Not ported yet.** These job scripts still call the archived setup
+> (`scripts/esmda/run_esmda.py`, `scripts/run_forward_model.py`,
+> `scripts/neural_surrogate/*`, `scripts/figure_creation/*`, `conf/run_esmda.yaml`,
+> ...), which now lives under `archive/scripts/` and `archive/conf/`. As
+> written they are broken until they are ported to `scripts/` + `configs/`
+> (see [docs/scripts_and_configs.md](../../../docs/scripts_and_configs.md)). This page describes them as they
+> are.
+
 Three campaign drivers — one per assimilation method — that sweep the **same
 axes** with the **same constants**, so their run dirs are directly comparable:
 
@@ -107,7 +115,7 @@ machinery behind them does not, so the mapping is per backend:
 
 The uDALES `inflow_turb` knobs (`INLET_INTENSITY`,
 `UDALES_INLET_LENGTH_SCALE_{X,Y,Z}`, `UDALES_INLET_TIME_STEP`) mirror
-`conf/model/pyudales.yaml`, and the PALM ones are matched to them. PALM's
+`conf/model/pyudales.yaml` (now `archive/conf/model/pyudales.yaml`), and the PALM ones are matched to them. PALM's
 `initial_seed` (the cold-start symmetry-breaking kick) is a *separate*
 mechanism from inlet turbulence: `inflow_turb` forces it on, the other two
 settings leave it at `PALM_INITIAL_SEED` (default off).
@@ -245,7 +253,7 @@ now contains model error as well as parameter/state error. Both mounts read the
 same `domain.*` and the same STL, so the grid and geometry still match. Things
 to know before launching one:
 
-- **PALM must be built.** `conf/model/pypalm.yaml` ships `compile: false`; the
+- **PALM must be built.** `conf/model/pypalm.yaml` (now archived) ships `compile: false`; the
   binary comes from `install_palm.sh` at install time and does *not* need
   rebuilding when the grid changes.
 - **`PALM_NCPU` must divide `domain.nx`** (40 for `xie_and_castro` → 1, 2, 4, 5,

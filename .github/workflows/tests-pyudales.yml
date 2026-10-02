@@ -1,4 +1,4 @@
-# tests_new/pyudales.
+# tests/pyudales.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: pyudales"
@@ -10,13 +10,13 @@ on:
     paths:
       - "libs/pyudales/**"
       - "libs/data-assimilation/**"
-      - "scripts/**"
-      - "tests_new/pyudales/**"
+      - "tests/pyudales/**"
       - "src/**"
       - "pyproject.toml"
       - "pixi.lock"
-      - "tests_new/conftest.py"
-      - "tests_new/legacy/**"
+      - "tests/conftest.py"
+      - "tests/legacy/**"
+      - "scripts/setup_dev_env.sh"
       - ".github/actions/setup/**"
       - ".github/workflows/tests-pyudales.yml"
   workflow_dispatch:
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   test:
-    name: tests_new/pyudales
+    name: tests/pyudales
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -36,4 +36,4 @@ jobs:
           submodules: recursive
       - uses: ./.github/actions/setup
       - name: Run tests
-        run: pixi run -e dev python -m pytest tests_new/pyudales --durations=10
+        run: pixi run -e dev python -m pytest tests/pyudales --durations=10

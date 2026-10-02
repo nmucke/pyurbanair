@@ -1,0 +1,19 @@
+# @package _global_
+# Tiny training data (configs/surrogate/generate_data.yaml): two training
+# trajectories and one each for val and test, on the case geometry.
+defaults:
+  - /test/tiny
+  - override /model: pyudales_tiny
+
+time:
+  simulation_time: 6.0
+
+data:
+  num_train: 2
+  num_val: 1
+  num_test: 1
+  adaptive_spinup:
+    enabled: false
+  geometry:
+    mode: fixed
+    name: ${case_name}

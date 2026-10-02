@@ -1,5 +1,13 @@
 # DelftBlue job scripts
 
+> **Not ported yet.** These job scripts still call the archived setup
+> (`scripts/esmda/run_esmda.py`, `scripts/run_forward_model.py`,
+> `scripts/neural_surrogate/*`, `scripts/figure_creation/*`, `conf/run_esmda.yaml`,
+> ...), which now lives under `archive/scripts/` and `archive/conf/`. As
+> written they are broken until they are ported to `scripts/` + `configs/`
+> (see [docs/scripts_and_configs.md](../../docs/scripts_and_configs.md)). This page describes them as they
+> are.
+
 Submit ESMDA runs on DelftBlue (CPU-only, `compute-p1`/`compute-p2` partitions)
 with the `submit.sh` wrapper. The `<size>` label maps to an ensemble size, from
 which the requested cores follow automatically; the run itself uses the

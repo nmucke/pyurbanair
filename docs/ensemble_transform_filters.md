@@ -7,7 +7,7 @@ compose with localization and the state reduction — is in
 implementation is
 [filtering/etkf.py](../libs/data-assimilation/src/data_assimilation/filtering/etkf.py).
 
-> **Status.** These ship *disabled by default* (`filtering/analysis=stochastic`).
+> **Status.** These ship *disabled by default* (`filtering.analysis: ${analysis.stochastic}`).
 > They are tested but **not yet benchmarked**: no accuracy, memory or speed
 > claim is made. The campaign record
 > [temp/filtering_ensemble_transform_benchmark.md](temp/filtering_ensemble_transform_benchmark.md)
@@ -72,7 +72,7 @@ for tests and a single global analysis, never a required intermediate.
 
 ## The four variants
 
-| `filtering/analysis=` | Class | Localization | What it changes |
+| `'filtering.analysis=${analysis.<name>}'` | Class | Localization | What it changes |
 |---|---|---|---|
 | `etkf` | `ETKFAnalysis` | **forbidden** | One global transform per cycle |
 | `etkf_tsvd` | `ETKFAnalysis` | **forbidden** | …plus observation-space truncation |
@@ -152,10 +152,10 @@ the resource gate in
 ```bash
 # Global deterministic update — select localization explicitly, since the
 # scheme refuses anything but `none`.
-python scripts/filtering/run_filtering.py filtering.mode=state \
-  filtering/analysis=etkf filtering/localization=none
+python scripts/run_filtering.py params@prior_params=static filtering.mode=state \
+  'filtering.analysis=${analysis.etkf}' 'filtering.localization=${localization.none}'
 
 # Localized deterministic update.
-python scripts/filtering/run_filtering.py filtering.mode=state \
-  filtering/analysis=letkf filtering/localization=distance
+python scripts/run_filtering.py params@prior_params=static filtering.mode=state \
+  'filtering.analysis=${analysis.letkf}' 'filtering.localization=${localization.distance}'
 ```

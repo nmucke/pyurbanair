@@ -102,7 +102,7 @@ Key constructor parameters:
 | `inlet_turbulence` | None | Inflow-turbulence forcing dict, e.g. `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (see §7) |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
-The default in [`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml) sets
+The default in [`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml) sets
 `cuda: auto`, `verbose: false`, and `boundary_condition: inflow_outflow`.
 
 #### `compile(compile=True)`
@@ -171,8 +171,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
 window 0 when `spinup_first_step_only=True`.
 
-> **One external caller drives these steps itself.**
-> [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py)
+> **One external caller drives these steps itself** (archived, not ported to
+> the current `scripts/`):
+> [`archive/scripts/esmda/run_probe_series.py`](../archive/scripts/esmda/run_probe_series.py)
 > (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
 > `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
 > → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
@@ -406,9 +407,9 @@ constant is dimensionless and physically distinct from pypalm's `km_constant`
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -460,7 +461,7 @@ m/s. When `params` is `None`, `C_u` defaults to 75.
 
 ## 8. Configuration
 
-[`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml):
+[`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml):
 
 ```yaml
 name: pylbm
@@ -574,7 +575,7 @@ MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1          # 999_999
 restart_file_name(iteration, prefix="restart", tile="0000")
 ```
 
-`tests/test_pylbm_restart_filenames.py` parses the width out of the Fortran
+`tests/pylbm/test_pylbm_restart_filenames.py` parses the width out of the Fortran
 sources and fails if the two ever disagree, so a submodule bump that widens the
 field is caught there rather than in a silently wrong run.
 

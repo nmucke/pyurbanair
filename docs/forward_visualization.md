@@ -68,8 +68,11 @@ values, not observations. 2D obstacle outlines come from the explicit mask.
 
 ## Options and products
 
-Discoverable presets live in `conf/visualization/quicklook.yaml` and
-`conf/visualization/flow_3d.yaml`. `RenderOptions`/`validate_options` define the
+Discoverable presets live in `archive/conf/visualization/quicklook.yaml` and
+`archive/conf/visualization/flow_3d.yaml` (archived with the old `conf/` tree;
+they have no `configs/` equivalent yet and are read by the MCP server, which
+is pending a port). For `scripts/run_forward.py` output,
+`scripts/visualize_forward.py <run dir>` draws the standard figures. `RenderOptions`/`validate_options` define the
 supported settings; arbitrary callbacks, Python expressions and encoder command
 arguments are not accepted.
 
@@ -196,9 +199,9 @@ retrieve/register again after server expiry. The supervisor should own its
 lifetime independently from the MCP client and render workers. A remote client
 cannot assume it can access these loopback URLs.
 
-Fast tests in `tests/test_forward_visualization.py` cover normalization, masks,
+Fast tests in `tests/pyurbanair/test_forward_visualization.py` cover normalization, masks,
 ensemble reduction order, windows/fingerprints, probe values, PNG bundles and
-HTTP range/containment. `tests/test_forward_visualization_optional.py` is marked
+HTTP range/containment. `tests/pyurbanair/test_forward_visualization_optional.py` is marked
 `integration` and exercises real ffmpeg, optional Playwright/Chromium playback,
 and offscreen VTK including vector ordering and masked streamline termination.
 Install Playwright and its Chromium browser separately to run browser checks;

@@ -1,4 +1,4 @@
-# tests_new/data_assimilation.
+# tests/data_assimilation.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: data_assimilation"
@@ -9,13 +9,13 @@ on:
   pull_request:
     paths:
       - "libs/data-assimilation/**"
-      - "scripts/**"
-      - "tests_new/data_assimilation/**"
+      - "tests/data_assimilation/**"
       - "src/**"
       - "pyproject.toml"
       - "pixi.lock"
-      - "tests_new/conftest.py"
-      - "tests_new/legacy/**"
+      - "tests/conftest.py"
+      - "tests/legacy/**"
+      - "scripts/setup_dev_env.sh"
       - ".github/actions/setup/**"
       - ".github/workflows/tests-data-assimilation.yml"
   workflow_dispatch:
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   test:
-    name: tests_new/data_assimilation
+    name: tests/data_assimilation
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -35,4 +35,4 @@ jobs:
           submodules: recursive
       - uses: ./.github/actions/setup
       - name: Run tests
-        run: pixi run -e dev python -m pytest tests_new/data_assimilation --durations=10
+        run: pixi run -e dev python -m pytest tests/data_assimilation --durations=10

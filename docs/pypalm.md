@@ -39,11 +39,12 @@ edit the module constant to pin a release tag like `v25.10`).
 ### Lazy-import invariant
 
 `pypalm` is **lazy-imported**. All `pypalm.*` `_target_` blocks live
-exclusively in [conf/model/pypalm.yaml](../conf/model/pypalm.yaml).
+exclusively in [configs/model/pypalm.yaml](../configs/model/pypalm.yaml).
 Composing a config with `model=pylbm` or `model=pyudales` never imports
 `pypalm` and never triggers PALM's download/compile. This invariant is
-asserted by a regression test:
-`tests/test_hydra_config.py::test_palm_target_does_not_import_for_non_palm_composition`.
+asserted by a regression test in the archived suite (not yet ported to
+`tests/`):
+`archive/tests/test_hydra_config.py::test_palm_target_does_not_import_for_non_palm_composition`.
 
 ---
 
@@ -55,7 +56,7 @@ asserted by a regression test:
 
 Subclasses `BaseForwardModel` from
 [src/pyurbanair/base_forward_model.py](../src/pyurbanair/base_forward_model.py).
-Key constructor args (all wired from Hydra via `conf/model/pypalm.yaml`):
+Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 
 | Arg | Purpose |
 |---|---|
@@ -217,7 +218,7 @@ PALM writes `u`/`v` on `zu_3d` and `w` on `zw_3d`. The
 1. **Renames** dims: `zu_3d → z`, `zw_3d → zw` (and `zs_3d → zs` if present).
 2. **Shifts coordinates** onto the physical domain: PALM's native NetCDF axes
    start at 0; `xmin`/`ymin`/`zmin` offsets from `bounds` are added so sensor
-   coords from `conf/case/*/obs.yaml` resolve correctly (especially for
+   coords from the `obs` block of `configs/case/*.yaml` resolve correctly (especially for
    `xmin < 0` inflow regions).
 3. **Fills NaN with 0** in `u/v/w` — PALM writes NaN at topography-occluded
    cells (no-slip BC); leaving NaN would poison Kalman updates.
@@ -267,9 +268,9 @@ and, for time-varying inflow, into the `inflow_plane_u/v` arrays in the
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -320,9 +321,9 @@ Write site: `_apply_sgs_setting` in `ForwardModel` →
 
 ---
 
-## 7. Config wiring — `conf/model/pypalm.yaml`
+## 7. Config wiring — `configs/model/pypalm.yaml`
 
-[conf/model/pypalm.yaml](../conf/model/pypalm.yaml)
+[configs/model/pypalm.yaml](../configs/model/pypalm.yaml)
 
 ```
 name: pypalm
@@ -373,9 +374,9 @@ Key field notes:
 
 Select pypalm for forward or assimilation runs:
 ```bash
-python scripts/run_forward_model.py model=pypalm
-python scripts/esmda/run_esmda.py model@assim_model=pypalm model@truth_model=pylbm \
-    esmda/smoother=static params@truth_params=static_truth params@prior_params=static
+python scripts/run_forward.py model=pypalm
+python scripts/run_smoother.py model@assim_model=pypalm model@truth_model=pylbm \
+    'smoothing.smoother=${smoother.static}' params@truth_params=static_truth params@prior_params=static
 ```
 
 ---
@@ -636,7 +637,7 @@ Experiment configs live in
   copies into `INPUT/` and edits.
 
 These are the files referenced by `case_dir: ${geometry.palm_case_dir}` in
-`pypalm.yaml`. The case bundle (`conf/case/{xie_and_castro,barcelona}/`) sets
+`pypalm.yaml`. The case bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 `geometry.palm_case_dir` and `geometry.stl_path`.
 
 ---
@@ -646,9 +647,9 @@ These are the files referenced by `case_dir: ${geometry.palm_case_dir}` in
 | You want to change… | Look here |
 |---|---|
 | PALM version pinned | `PALM_VERSION` constant in [`__init__.py`](../libs/pypalm/src/pypalm/__init__.py) |
-| Grid / bounds / time | `conf/case/<name>/` (domain + time groups) |
+| Grid / bounds / time | `configs/case/<name>.yaml` (`domain` + `time` blocks) |
 | Inflow profile shape (`alpha`) | `nudging_config.profile_config.alpha` in `pypalm.yaml` (or via `vertical_inflow_exponent` ESMDA parameter) |
-| SGS knob | `sgs_constant` parameter prior in `conf/params/` (maps to `km_constant` m²/s — not dimensionless) |
+| SGS knob | `sgs_constant` parameter prior in `configs/params/` (maps to `km_constant` m²/s — not dimensionless) |
 | ncpu / processor topology | `ncpu` in `pypalm.yaml`; `derive_npex_npey` validates divisibility |
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |
