@@ -95,9 +95,10 @@ def test_untrusted_overrides_fail(checkout: Path, override: str) -> None:
 
 
 def test_discovery_and_subtree(checkout: Path) -> None:
-    # The four backends plus the three tests/configs/model overlays.
+    # The backends plus the tests/configs/model overlays `checkout` copies in.
+    models = list((checkout / "configs/model").glob("*.yaml"))
     options = list_config_options(checkout, group="model", page_size=2)
-    assert options["total"] == 7 and len(options["options"]) == 2
+    assert options["total"] == len(models) and len(options["options"]) == 2
     second = list_config_options(checkout, group="model", page=1, page_size=2)
     assert second["options"] != options["options"]
     assert {entry["group"] for entry in list_config_options(checkout)["options"]} == {
