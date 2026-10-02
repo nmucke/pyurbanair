@@ -10,6 +10,12 @@ docs; detail lives in `docs/`.
   Delete dead code rather than deprecate it; no compatibility shims, no new
   abstractions, configs knobs or files unless they remove real duplication.
   One obvious place for each thing.
+- **Portable: clone, install, run.** Anyone must be able to clone the repo,
+  install the pixi environments and run all the code on Linux or macOS. Nothing
+  may depend on one machine: no absolute paths, user names, preinstalled
+  system tools or local edits. Snellius and DelftBlue specifics are the only
+  exception, and they live in `activation_scripts/`, `job_scripts/` and the
+  per-machine entries of `configs/common.yaml`.
 - **Reuse before adding.** Extend the existing scripts, configs, helpers and
   tests in their own style before creating new ones.
 - **Match the surrounding code**: comment density, naming, idioms.

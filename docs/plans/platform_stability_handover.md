@@ -25,6 +25,15 @@ cd pyurbanair && git checkout feat/simplified-configs-and-scripts
 git submodule update --init --recursive
 ```
 
+## The principle
+
+From the user: **anyone must be able to clone the repo, install the pixi
+environments and run all the code.** Nothing may be tied to a single machine.
+Snellius and DelftBlue are the only exception, and their specifics belong in
+`activation_scripts/`, `job_scripts/` and the per-machine `paths.scratch.*`
+entries of `configs/common.yaml`. This is now in `AGENTS.md` ("Portable") and
+is the yardstick for every change in this PR.
+
 ## Goal
 
 We claim to support the platforms in `pyproject.toml`: **linux-64** and
@@ -95,6 +104,22 @@ you get macOS feedback while you work.
 - **Orphaned solver processes:** a cancelled or killed run once left a
   `prterun … u-dales` process running for hours. Check that cancellation,
   timeouts and test teardown kill the whole process tree.
+
+**Tied to one machine (audit and remove):**
+- `configs/model/pyudales.yaml` and `configs/model/neural_surrogate.yaml` set
+  `matlab_bin: /opt/sw/matlab-2023b/bin/matlab`, a path from one specific
+  machine. MATLAB is only needed for MATLAB preprocessing (the default is
+  Python). Make it unset by default (e.g. `null`) and required only when
+  MATLAB preprocessing is chosen. Check `libs/pyudales` (`DEFAULT_MATLAB_BIN`)
+  and the MCP's `matlab_bin` trust check in
+  `libs/mcp-server/src/mcp_server/jobs/composition.py`.
+- **Audit everything else** for absolute paths, user names, assumed system
+  tools (e.g. a system MPI, compiler or ffmpeg outside pixi) and steps missing
+  from `pixi run setup-dev`. Start from this search, and also look for
+  undocumented manual steps in the docs:
+  `grep -rnE "/Users/|/home/|/opt/|/export/|/projects/|/scratch|/usr/local" configs scripts src workflows tests libs/*/src libs/*/shell_scripts activation_scripts pyproject.toml`.
+  Everything found must either come from the pixi env, be derived from the
+  repo, or be an explicit Snellius/DelftBlue setting in the places above.
 
 **Not covered anywhere:**
 - **CI is Linux-only** (`ubuntu-latest`) and runs only the default suite. No
@@ -188,6 +213,9 @@ you get macOS feedback while you work.
   `pixi run setup-dev`, `py.test`, `test-integration` and the MCP suite, twice
   in a row, with no platform-specific deselects or workaround variables.
 - [ ] Issue #148's checklist is done (link the PR to it).
+- [ ] Nothing outside the Snellius/DelftBlue places is tied to one machine: no
+  machine-specific defaults (incl. `matlab_bin`), and no setup step beyond
+  cloning and `pixi run setup-dev` / `pixi install -e <env>`.
 - [ ] No `*_macos.sh` names remain. Build failures raise clearly and are
   retried. Local NetCDF/FFTW come from the pixi env.
 - [ ] CI runs the default suite on both platforms, plus an integration workflow
