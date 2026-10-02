@@ -5,7 +5,6 @@ and output_frequency, regardless of the inflow velocity (which affects C_u and
 therefore the internal timestep size).
 """
 
-from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -13,18 +12,19 @@ import xarray
 from hydra.utils import instantiate
 
 from pyurbanair.config.hydra_helpers import clean_outputs
+from tests.conftest import compose
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture(scope="module")  # type: ignore[misc]
-def pylbm_cfg(compose_module_cfg: Callable[..., Any]) -> Any:
+def pylbm_cfg(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """Compose a single-model pylbm test config once for this module."""
-    return compose_module_cfg(
-        [
-            "model=pylbm",
-            "model.forward_model.cuda=false",
-        ]
+    return compose(
+        "forward",
+        "+test=forward",
+        "model=pylbm_tiny",
+        root=tmp_path_factory.mktemp("pylbm"),
     )
 
 

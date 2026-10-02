@@ -14,7 +14,6 @@ on:
       - "pyproject.toml"
       - "pixi.lock"
       - "tests/conftest.py"
-      - "tests/legacy/**"
       - "scripts/setup_dev_env.sh"
       - ".github/actions/setup/**"
       - ".github/workflows/tests-evaluation.yml"

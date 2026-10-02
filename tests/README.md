@@ -13,7 +13,6 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |
 | `visualization/` | the forward-run viewer and renderer (`libs/visualization`) |
 | `scripts/` | `scripts/`, `configs/` and `workflows/`; relative links in the Markdown docs |
-| `legacy/` | shared fixtures and frozen configs some library tests still use (see below) |
 
 ```bash
 pixi run -e dev py.test             # no compiled CFD solver
@@ -26,10 +25,10 @@ pixi run --locked -e mcp python -m pytest tests/mcp   # the MCP server's own env
 Tests that run a compiled CFD solver are marked `integration` and are skipped
 by default.
 
-## scripts/: configs with test overlays
+## Configs with test overlays
 
-The script tests compose the real `configs/` entry points and make them
-tiny with an overlay from `tests/configs/`:
+The tests compose the real `configs/` entry points and make them tiny with an
+overlay from `tests/configs/`:
 
 ```python
 cfg = compose("forward", "+test=forward", root=tmp_path)
@@ -44,6 +43,7 @@ cfg = compose("surrogate/train_stepper", "+test=train_stepper", root=tmp_path)
 | `surrogate/test/train_*.yaml`, `finetune_stepper.yaml` | one CPU epoch on the synthetic data (`training.yaml`) |
 | `surrogate/test/eval.yaml` | the evaluations of those models |
 | `model/*_tiny.yaml` | each backend on the tiny grid; `neural_surrogate_tiny` runs the trained test surrogates |
+| `model/pyudales_stock.yaml` | `pyudales_tiny` on one rank with Vreman pinned and inlet turbulence and SGS discrepancy off, for the uDALES library tests |
 
 `compose(..., root=...)` puts every output and scratch dir under `root`. From
 the command line, `--config-dir tests/configs` adds the overlays:
@@ -65,15 +65,3 @@ stepper, cold-started from the latent generator.
 | `test_assimilation.py` | smoother, filtering and hybrid + `compute_metrics` + `visualize_assimilation`; a forward run as the truth |
 | `test_surrogate.py` | every training task, the three evaluations, `generate_data` |
 | `test_workflows.py` | `workflows/*.sh` |
-
-## legacy/: carried over from the old tests
-
-The library tests came over from the old test suite (now `archive/tests/`)
-unchanged apart from import paths.
-Some compose the frozen test configs of the old `conf/` schema through the
-`compose_test_cfg` / `compose_module_cfg` / `surrogate_model_dir_factory`
-fixtures; those, `legacy/conf/`, `legacy/fixtures/` (golden files) and
-`legacy/config_loader.py` live in `legacy/`. A few library tests also call an
-archived runner from `archive/scripts/`. Move them to `tests/configs/`
-overlays and the current `scripts/` as they are rewritten; `legacy/` goes when
-nothing uses it.

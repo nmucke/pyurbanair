@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from tests.legacy.config_loader import TEST_CONF_DIR
+from tests.conftest import CONFIGS
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("kappamodules")
@@ -38,7 +38,8 @@ N_PARAMS = 2
 STATE_VARS = ("u", "v", "w")
 PARAM_VARS = ("inflow_angle", "velocity_magnitude")
 
-# ``tiny``-preset sizing (mirrors conf/.../upt/tiny.yaml); small enough for CPU.
+# ``tiny``-preset sizing (mirrors ``upt_tiny`` in
+# configs/surrogate/architectures.yaml); small enough for CPU.
 TINY = dict(
     dim=32,
     num_latent_tokens=16,
@@ -52,7 +53,8 @@ TINY = dict(
     max_degree=8,
 )
 
-PRESET_DIR = TEST_CONF_DIR / "neural_surrogate" / "architectures" / "upt"
+# The ``upt_<size>`` entries of the surrogate architecture registry.
+ARCHITECTURES = OmegaConf.load(CONFIGS / "surrogate" / "architectures.yaml")
 
 
 # -- helper builders --------------------------------------------------------
@@ -185,7 +187,7 @@ def test_autoregressive_rollout_stays_finite() -> None:
 
 @pytest.mark.parametrize("preset", ["tiny", "small", "medium", "large", "xlarge"])  # type: ignore[misc]
 def test_presets_instantiate(preset: str) -> None:
-    cfg = OmegaConf.load(PRESET_DIR / f"{preset}.yaml")
+    cfg = ARCHITECTURES[f"upt_{preset}"]
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS)
     assert isinstance(model, UPT)
 
@@ -193,7 +195,7 @@ def test_presets_instantiate(preset: str) -> None:
 def test_tiny_preset_forward_shape() -> None:
     """Only forward-pass the tiny preset to keep the suite fast."""
     torch.manual_seed(0)
-    cfg = OmegaConf.load(PRESET_DIR / "tiny.yaml")
+    cfg = ARCHITECTURES["upt_tiny"]
     model = instantiate(cfg, n_state_channels=N_STATE, n_params=N_PARAMS).eval()
     state, params, geometry, _ = _inputs(batch=2)
     with torch.no_grad():

@@ -1,8 +1,0 @@
-# @package filtering
-# Independent frozen test configuration.
-localization:
-  _target_: data_assimilation.localization.correlation.CorrelationLocalization
-  truncation_correlation: 0.35
-  tapering_beta: 0.5
-  max_inflation: 8.0
-  block_grouping: true

@@ -1,5 +1,0 @@
-# @package filtering
-# Independent frozen test configuration.
-inflation:
-  _target_: data_assimilation.inflation.RTPP
-  alpha: 0.5

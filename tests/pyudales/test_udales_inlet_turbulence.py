@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import inspect
 import pathlib
-from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -651,7 +650,7 @@ def test_disabled_path_writes_nothing(tmp_path: pathlib.Path) -> None:
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
-    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+    tmp_path: pathlib.Path,
 ) -> None:
     """The no-op guarantee, asserted against a REAL run rather than the util.
 
@@ -663,12 +662,7 @@ def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
     from pyudales.utils.inlet_turbulence_utils import elapsed_time_path
     from pyudales.utils.namoptions_utils import NamoptionsFile
 
-    cfg = compose_test_cfg(
-        [
-            *_smoke_overrides(tmp_path),
-            "model.forward_model.inlet_turbulence.enabled=false",
-        ]
-    )
+    cfg = _smoke_cfg(tmp_path, "model.forward_model.inlet_turbulence.enabled=false")
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
     fm.run_single()
@@ -808,15 +802,14 @@ def test_bcxm_driver_is_wired_to_the_inlet_face() -> None:
 # makes the solver read garbage (or run off the end of the file).
 
 
-def _smoke_overrides(tmp_path: pathlib.Path) -> list[str]:
-    return [
-        "model=pyudales",
-        # Pin ncpu: the model config's value is tuned for production runs, and
-        # decomposing the 20-cell smoke domain into that many x-strips is its
-        # own source of instability. These tests are about the inlet, so keep
-        # the decomposition out of the picture (conftest pins the domain for the
-        # same reason).
-        "model.forward_model.ncpu=1",
+def _smoke_cfg(tmp_path: pathlib.Path, *overrides: str) -> DictConfig:
+    """The tiny uDALES run (one rank, no x-strip decomposition) with the inlet on."""
+    from tests.conftest import compose
+
+    return compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
         "model.forward_model.inlet_turbulence.enabled=true",
         # The shipped length scales (~building height) exceed the 20x20x10 m
         # smoke domain, where the filter would wrap onto itself; scale them to
@@ -825,14 +818,14 @@ def _smoke_overrides(tmp_path: pathlib.Path) -> list[str]:
         "model.forward_model.inlet_turbulence.length_scale_z=4.0",
         "model.forward_model.inlet_turbulence.length_scale_x=6.0",
         "model.forward_model.inlet_turbulence.intensity=0.15",
-        f"paths.experiment_dir={tmp_path / 'experiment'}",
-        f"++paths.base_results_dir={tmp_path / 'results'}",
-    ]
+        *overrides,
+        root=tmp_path,
+    )
 
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_solver_reads_and_interpolates_the_driver_planes(
-    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+    tmp_path: pathlib.Path,
 ) -> None:
     """A real run consumes the planes and puts them on the inlet face.
 
@@ -845,7 +838,7 @@ def test_e2e_solver_reads_and_interpolates_the_driver_planes(
     from hydra.utils import instantiate
     from pyudales.utils.driver_file_utils import read_driver_files
 
-    cfg = compose_test_cfg(_smoke_overrides(tmp_path))
+    cfg = _smoke_cfg(tmp_path)
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
 
@@ -894,7 +887,7 @@ def test_e2e_solver_reads_and_interpolates_the_driver_planes(
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_two_window_rollout_continues_the_turbulence(
-    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+    tmp_path: pathlib.Path,
 ) -> None:
     """Window 2 warm-starts and picks the turbulence history up where 1 left off.
 
@@ -906,7 +899,7 @@ def test_e2e_two_window_rollout_continues_the_turbulence(
     from hydra.utils import instantiate
     from pyudales.utils.driver_file_utils import read_driver_files
 
-    cfg = compose_test_cfg(_smoke_overrides(tmp_path))
+    cfg = _smoke_cfg(tmp_path)
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
 
@@ -1051,7 +1044,7 @@ def test_clock_is_copied_on_failure_substitution(tmp_path: pathlib.Path) -> None
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_parallel_ensemble_keeps_each_member_continuous(
-    tmp_path: pathlib.Path, compose_test_cfg: Callable[..., "DictConfig"]
+    tmp_path: pathlib.Path,
 ) -> None:
     """Continuity must hold when members run in forkserver worker processes.
 
@@ -1065,12 +1058,8 @@ def test_e2e_parallel_ensemble_keeps_each_member_continuous(
     from hydra.utils import instantiate
     from pyudales.utils.driver_file_utils import read_driver_files
 
-    cfg = compose_test_cfg(
-        [
-            *_smoke_overrides(tmp_path),
-            "ensemble.ensemble_size=2",
-            "ensemble.num_parallel_processes=2",
-        ]
+    cfg = _smoke_cfg(
+        tmp_path, "ensemble.ensemble_size=2", "ensemble.num_parallel_processes=2"
     )
     template = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=template)

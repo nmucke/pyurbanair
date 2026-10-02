@@ -20,7 +20,6 @@ on:
       - "pyproject.toml"
       - "pixi.lock"
       - "tests/conftest.py"
-      - "tests/legacy/**"
       - ".github/actions/setup/**"
       - ".github/workflows/tests-mcp.yml"
   workflow_dispatch:

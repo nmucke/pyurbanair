@@ -17,6 +17,7 @@ import importlib.util
 import os
 import pathlib
 import sys
+import tempfile
 from types import ModuleType
 from typing import Any
 
@@ -28,18 +29,16 @@ from hydra import compose as hydra_compose
 from hydra import initialize_config_dir
 from omegaconf import DictConfig, OmegaConf
 
-# The library tests' fixtures (compose_test_cfg, ...) on the old frozen configs.
-from tests.legacy.fixtures import (  # noqa: E402,F401
-    _isolate_run_outputs,
-    _limit_torch_test_threads,
-    _restore_hydra_config_singleton,
-    compose_module_cfg,
-    compose_test_cfg,
-    surrogate_model_dir_factory,
-)
-
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
+# One LBM build per user, shared by every test, instead of one per run dir.
+os.environ.setdefault(
+    "PYLBM_BUILD_ROOT",
+    str(
+        pathlib.Path(tempfile.gettempdir())
+        / f"pyurbanair-pytest-lbm-build-{os.getuid()}"
+    ),
+)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 CONFIGS = REPO / "configs"

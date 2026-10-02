@@ -39,10 +39,10 @@ from tests.neural_surrogates.test_neural_surrogate_forward_model import (
     NX,
     NY,
     NZ,
-    PARAM_VARS,
     STATE_VARS,
     _ensemble_stub_factory,
     _make_model,
+    _model_dir,
     _params,
     _patch_backend,
     _regular_snapshot,
@@ -278,28 +278,14 @@ def test_ensemble_history_cold_start_repeats_spinup_frame(
 # -- trained-config plumbing -------------------------------------------------
 
 
-def test_num_history_steps_read_from_model_dir(
-    tmp_path, surrogate_model_dir_factory
-) -> None:
+def test_num_history_steps_read_from_model_dir(tmp_path) -> None:
     """H is read off the built network, which the saved config configures.
 
     The only test here that uses a *real* architecture (``UNetConvNeXt`` with
     ``num_history_steps=2``) rather than the recording stub, so the config ->
     instantiate -> ``self.num_history_steps`` plumbing is checked end to end.
     """
-    model_dir = surrogate_model_dir_factory(
-        tmp_path,
-        domain={
-            "nx": NX,
-            "ny": NY,
-            "nz": NZ,
-            "bounds": [[0.0, NX], [0.0, NY], [0.0, NZ]],
-        },
-        time={"simulation_time": 3.0, "output_frequency": 1.0, "spinup_time": 0.0},
-        state_vars=STATE_VARS,
-        param_vars=PARAM_VARS,
-        num_history_steps=2,
-    )
+    model_dir = _model_dir(tmp_path, num_history_steps=2)
     model = fm_mod.NeuralSurrogateForwardModel(
         spinup_forward_model=_StubSpinup(),
         nx=NX,

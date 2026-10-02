@@ -134,22 +134,64 @@ def _params() -> xr.Dataset:
     )
 
 
-def test_resolves_everything_from_model_dir(
-    tmp_path, surrogate_model_dir_factory
-) -> None:
-    """Architecture, vars, trained grid + cadence all come from the folder."""
-    model_dir = surrogate_model_dir_factory(
-        tmp_path,
-        domain={
-            "nx": NX,
-            "ny": NY,
-            "nz": NZ,
-            "bounds": [[0.0, NX], [0.0, NY], [0.0, NZ]],
-        },
-        time={"simulation_time": 5.0, "output_frequency": 2.0, "spinup_time": 0.0},
-        state_vars=STATE_VARS,
-        param_vars=PARAM_VARS,
+def _model_dir(
+    tmp_path: pathlib.Path,
+    *,
+    nx: int = NX,
+    output_frequency: float = 1.0,
+    num_history_steps: int = 1,
+) -> pathlib.Path:
+    """A minimal trained-surrogate folder, as the stepper trainer writes it.
+
+    ``config.yaml`` (architecture + dataset vars) and ``weights.pt``, plus the
+    training-data ``config.yaml`` under ``root_dir`` with the trained domain
+    and cadence.
+    """
+    from omegaconf import OmegaConf
+
+    architecture = dict(
+        base_channels=4,
+        channel_mults=[1, 2],
+        depths=[1, 1],
+        kernel_size=3,
+        expansion=2,
+        num_history_steps=num_history_steps,
     )
+    root_dir = tmp_path / "training_data"
+    root_dir.mkdir()
+    domain = {"nx": nx, "ny": NY, "nz": NZ, "bounds": [[0.0, nx], [0.0, NY], [0.0, NZ]]}
+    OmegaConf.save(
+        {"domain": domain, "time": {"output_frequency": output_frequency}},
+        root_dir / "config.yaml",
+    )
+    model_dir = tmp_path / "model_dir"
+    model_dir.mkdir()
+    dataset = {
+        "root_dir": str(root_dir),
+        "state_vars": list(STATE_VARS),
+        "param_vars": list(PARAM_VARS),
+        "num_history_steps": num_history_steps,
+    }
+    OmegaConf.save(
+        {
+            "architecture": {
+                "_target_": "neural_surrogates.UNetConvNeXt",
+                **architecture,
+            },
+            "dataset": dataset,
+        },
+        model_dir / "config.yaml",
+    )
+    net = UNetConvNeXt(
+        n_state_channels=len(STATE_VARS), n_params=len(PARAM_VARS), **architecture
+    )
+    torch.save(net.state_dict(), model_dir / "weights.pt")
+    return model_dir
+
+
+def test_resolves_everything_from_model_dir(tmp_path) -> None:
+    """Architecture, vars, trained grid + cadence all come from the folder."""
+    model_dir = _model_dir(tmp_path, output_frequency=2.0)
 
     model = NeuralSurrogateForwardModel(
         spinup_forward_model=_StubSpinup(),
@@ -172,22 +214,9 @@ def test_resolves_everything_from_model_dir(
     assert out.sizes["time"] == 2  # 4.0 / 2.0 predicted frames (no t=0 frame)
 
 
-def test_model_dir_domain_mismatch_raises(
-    tmp_path, surrogate_model_dir_factory
-) -> None:
+def test_model_dir_domain_mismatch_raises(tmp_path) -> None:
     """The trained domain read from the folder is enforced."""
-    model_dir = surrogate_model_dir_factory(
-        tmp_path,
-        domain={
-            "nx": NX + 4,  # trained on a wider grid than requested
-            "ny": NY,
-            "nz": NZ,
-            "bounds": [[0.0, NX + 4], [0.0, NY], [0.0, NZ]],
-        },
-        time={"simulation_time": 5.0, "output_frequency": 1.0, "spinup_time": 0.0},
-        state_vars=STATE_VARS,
-        param_vars=PARAM_VARS,
-    )
+    model_dir = _model_dir(tmp_path, nx=NX + 4)  # trained on a wider grid
     with pytest.raises(ValueError, match="does not match the domain"):
         NeuralSurrogateForwardModel(
             spinup_forward_model=_StubSpinup(),

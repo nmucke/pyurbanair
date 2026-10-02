@@ -141,7 +141,7 @@ scripts/                           # Scripts you run; their shared helpers are i
 workflows/                         # forward_workflow.sh, assimilation_workflow.sh <method>
 geometries/                        # Case inputs, one folder per case (+ urbantales/)
 tests/                             # One folder per package + scripts/ + configs/ (tiny
-                                   #   overlays) + legacy/ (old fixtures). See tests/README.md.
+                                   #   overlays). See tests/README.md.
 job_scripts/                       # SLURM wrappers (snellius/, delftblue/)
 archive/                           # Retired conf/, scripts/, tests/ (not run or tested)
 .temp/                             # Default scratch dir. Everything mutable lands here.
@@ -246,13 +246,11 @@ selected components explicitly.
 
 ### Tests
 
-The script tests compose the real `configs/` entry points made tiny by an
-overlay from `tests/configs/` (`compose("forward", "+test=forward",
-root=tmp_path)`); every output goes under `root`. Most script tests run on the
-neural-surrogate backend trained once per session on synthetic data, so they
-need no compiled solver. Some library tests still use the frozen old-schema
-configs through the `compose_test_cfg` / `compose_module_cfg` fixtures in
-`tests/legacy/`.
+The tests compose the real `configs/` entry points made tiny by an overlay
+from `tests/configs/` (`compose("forward", "+test=forward", root=tmp_path)`);
+every output goes under `root`. Most script tests run on the neural-surrogate
+backend trained once per session on synthetic data, so they need no compiled
+solver.
 
 The default test command (`pixi run -e dev py.test`) runs fast tests; real CFD
 calls are marked `integration` (`test-integration`, `test-all`). See

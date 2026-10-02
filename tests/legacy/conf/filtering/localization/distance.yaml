@@ -1,9 +1,0 @@
-# @package filtering
-# Independent frozen test configuration.
-localization:
-  _target_: data_assimilation.localization.distance.DistanceLocalization
-  localization_radius: 10.0
-  tapering_beta: 0.5
-  max_inflation: 4.0
-  block_grouping: true
-  horizontal_only: false

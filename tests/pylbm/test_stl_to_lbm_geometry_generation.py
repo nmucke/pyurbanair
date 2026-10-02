@@ -1,12 +1,13 @@
 import pathlib
 import re
+from typing import Any
 
 import numpy as np
 from pylbm.stl_to_lbm import process_stl_to_fortran
 from scipy import ndimage
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
-FIXTURE_DIR = PROJECT_ROOT / "tests" / "legacy" / "fixtures" / "stl_to_lbm"
+CASE_DIR = PROJECT_ROOT / "geometries" / "xie_and_castro"
 
 # New voxel-occupancy output: one blanking line per (i, j) column over a solid
 # z-run, e.g. ``blanking(ioff+12, joff+34, 1:5)=.true.``.
@@ -18,14 +19,17 @@ _COLUMN_PATTERN = re.compile(
 
 
 def _extract_column_runs(fortran_text: str) -> list[tuple[int, int, int, int]]:
-    return [tuple(map(int, m)) for m in _COLUMN_PATTERN.findall(fortran_text)]
+    return [
+        (int(i), int(j), int(k0), int(k1))
+        for i, j, k0, k1 in _COLUMN_PATTERN.findall(fortran_text)
+    ]
 
 
 def test_stl_to_lbm_voxel_occupancy_on_xie_castro(tmp_path: pathlib.Path) -> None:
     """The Xie & Castro array of uniform cubes should map to a set of disjoint,
     roughly cube-shaped solid blocks, with no column clamped to the x-boundary.
     """
-    stl_path = FIXTURE_DIR / "xie_castro_2008_STL.stl"
+    stl_path = CASE_DIR / "xie_castro_2008_STL.stl"
     generated_fortran_path = tmp_path / "generated_city3.F90"
 
     nx, ny, nz = 64, 64, 8
@@ -83,7 +87,7 @@ def test_stl_to_lbm_voxel_occupancy_on_xie_castro(tmp_path: pathlib.Path) -> Non
     assert max(r[0] for r in runs) < nx
 
 
-def _hollow_square_ring(outer: float, inner: float, height: float):
+def _hollow_square_ring(outer: float, inner: float, height: float) -> Any:
     """Build a hollow square ring (a courtyard wall) as an explicit triangle
     soup, without any CSG/shapely backend. Outer footprint is [0, outer]^2, the
     inner courtyard hole is centered with side ``inner``. The ring is extruded

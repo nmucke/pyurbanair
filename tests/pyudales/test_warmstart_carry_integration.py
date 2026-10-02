@@ -7,20 +7,20 @@ the SGS TKE) must carry actual turbulence from the cold run, which is precisely
 what removes the per-window re-spin-up bias.
 """
 
-from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pytest
+import xarray
 from hydra.utils import instantiate
 from numpy.typing import NDArray
-from omegaconf import DictConfig
 from pyudales.utils.warm_start_utils import _carry_dir, fetch_carry
 from scipy.io import FortranFile
 
 pytestmark = pytest.mark.integration
 
 from pyurbanair.config.hydra_helpers import clean_outputs
+from tests.conftest import compose
 
 # Record layout of a uDALES restart (see update_warmstart_file_from_xarray):
 # 0=mindist 1=wall 2=u0 3=v0 4=w0 5=pres0 6=thl0 7=e120 8=ekm ...
@@ -42,22 +42,19 @@ def _read_record(path: str | Path, idx: int) -> NDArray[np.float64]:
     return records[idx]
 
 
-def test_warm_start_reuses_carry_subgrid_fields(
-    compose_test_cfg: Callable[..., DictConfig],
-) -> None:
-    # Use the shared smoke grid, isolated output paths and single-rank restart
-    # layout. Production MPI and inlet settings are not part of this contract.
-    cfg = compose_test_cfg(
-        overrides=[
-            "model=pyudales",
-            "params=static",
-            "time.spinup_time=2.0",
-            "model.forward_model.closure=smagorinsky",
-            "model.forward_model.verbose=true",
-        ],
+def test_warm_start_reuses_carry_subgrid_fields(tmp_path: Path) -> None:
+    # The tiny grid on one rank (single-rank restart layout), no inlet turbulence.
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
+        "time.spinup_time=2.0",
+        "model.forward_model.closure=smagorinsky",
+        "model.forward_model.verbose=true",
+        root=tmp_path,
     )
 
-    true_params = instantiate(cfg.params).sample(1).isel(ensemble=0, drop=True)
+    true_params = xarray.Dataset({"inflow_angle": 0.0, "velocity_magnitude": 5.0})
 
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
