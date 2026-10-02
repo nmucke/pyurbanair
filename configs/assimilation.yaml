@@ -105,7 +105,7 @@ smoothing:
   smoother: ${smoother.dynamic}
   localization: ${localization.correlation}
   state_reduction: ${state_reduction.none}
-  num_steps: 3
+  num_steps: 1
   alpha: ${.num_steps}
   # Optional post-loop Kalman smoothing of the full window trajectory reusing the
   # final posterior forecast (no extra forward solve, parameters frozen).

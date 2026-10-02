@@ -1,5 +1,5 @@
 # Shared scalar ESMDA settings. Component choices live in selected groups.
-num_steps: 1
+num_steps: 3
 alpha: ${.num_steps}
 num_assimilation_windows: 2
 seed: 42
