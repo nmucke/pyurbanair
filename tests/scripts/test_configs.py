@@ -4,6 +4,7 @@ test overlays make it tiny."""
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 from omegaconf import OmegaConf
@@ -56,8 +57,9 @@ def test_case_geometry_paths_exist(case: str, tmp_path: pathlib.Path) -> None:
     assert (case_dir / "_p3d").is_file()
     assert (REPO / geometry.stl_path).is_file()
     # uDALES reads the STL that namoptions names from its case folder.
+    name = re.escape(pathlib.Path(geometry.stl_path).name)
     namoptions = (case_dir / "namoptions.300").read_text()
-    assert f"stl_file     = {pathlib.Path(geometry.stl_path).name}\n" in namoptions
+    assert re.search(rf"^\s*stl_file\s*=\s*{name}\s*$", namoptions, re.M)
     if geometry.get("udales_precomputed_geom_dir"):
         assert (
             REPO / geometry.udales_precomputed_geom_dir / "geom_meta.json"
