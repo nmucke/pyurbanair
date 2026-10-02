@@ -1,4 +1,4 @@
-"""Beta tempering of the filter-smoothing hybrid (docs/plans/hybrid_beta_tempering.md).
+"""Beta tempering of the filter-smoothing hybrid (docs/plans/implemented/hybrid_beta_tempering.md).
 
 Three groups, none touching a CFD solver:
 

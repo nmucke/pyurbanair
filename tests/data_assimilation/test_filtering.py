@@ -1,6 +1,6 @@
 """Unit tests for the sequential filtering package (data_assimilation.filtering).
 
-Covers the Phase 1 deliverables of docs/temp/da_filtering_module_plan.md:
+Covers the Phase 1 deliverables of docs/plans/implemented/da_filtering_module_plan.md:
 the linear-Gaussian cycle against the exact Kalman filter, scalar parameter
 convergence on a toy forward model, joint-mode localization equivalence, the
 parameter-collapse construction guard, and the inflation / parameter-evolution
@@ -1972,7 +1972,7 @@ def test_random_walk_evolution_adds_configured_noise() -> None:
 #
 # The transform diagnostics exist only as attributes of the last analysis call;
 # without the filter reading them back, nothing outside the scheme can see the
-# resource-gate quantities of docs/plans/filtering_state_reduction_and_
+# resource-gate quantities of docs/plans/implemented/filtering_state_reduction_and_
 # transforms.md §6. These tests pin the additive/nullable contract: a field is
 # populated exactly on the path where it means something, and None everywhere
 # else, so cycle_diagnostics.yaml has one schema for every analysis.
@@ -2210,7 +2210,7 @@ def test_transform_diagnostics_come_from_the_posterior_producing_call() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Beta tempering: R_filter = beta * R (docs/plans/hybrid_beta_tempering.md)
+# Beta tempering: R_filter = beta * R (docs/plans/implemented/hybrid_beta_tempering.md)
 # ---------------------------------------------------------------------------
 
 

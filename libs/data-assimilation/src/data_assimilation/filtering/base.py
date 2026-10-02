@@ -85,7 +85,7 @@ def validate_beta(beta: Any) -> float:
     (``R_filter = beta * R``), so it must be a real, finite number ``>= 1``:
     below one it would SHARPEN the likelihood beyond the data's own errors, and
     ``inf`` — the "filter off" limit — must not be passed through a solver (see
-    ``docs/plans/hybrid_beta_tempering.md``). Booleans are rejected explicitly:
+    ``docs/plans/implemented/hybrid_beta_tempering.md``). Booleans are rejected explicitly:
     ``True`` is an ``int`` in Python and would otherwise pass as ``beta = 1``,
     which is exactly the silent config slip (``beta: yes``) this guards against.
     """
@@ -1248,7 +1248,7 @@ class BaseFilter:
                 f"Time-varying parameters {time_vars} are not supported by the "
                 "filter yet: filtering estimates the parameter value *now*, "
                 "evolved between cycles by a parameter evolution model (see "
-                "docs/temp/da_filtering_module_plan.md §4.4). Use the "
+                "docs/plans/implemented/da_filtering_module_plan.md §4.4). Use the "
                 "TimeVaryingParameterESMDA smoother, or reduce the parameters "
                 "to static scalars."
             )
@@ -1633,7 +1633,7 @@ class BaseFilter:
         a localized transform) how many local blocks that took — as attributes
         of the last call. Without this hook those numbers exist only inside the
         scheme: they are the resource-gate quantities of
-        ``docs/plans/filtering_state_reduction_and_transforms.md`` §6, and the
+        ``docs/plans/implemented/filtering_state_reduction_and_transforms.md`` §6, and the
         cost and meaning of a localized analysis are otherwise invisible from
         its output.
 

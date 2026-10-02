@@ -4,7 +4,7 @@ This is a **leaf library**: plain functions, arrays / ``xr.Dataset``s in →
 floats / dicts / ``Figure``s out. It knows nothing about Hydra, run-directory
 layout, or the forward-model backends, and it never imports ``pyurbanair``,
 ``data_assimilation`` or a backend package. Scripts
-(``scripts/esmda/``, ``scripts/filtering/``, ``scripts/figure_creation/``)
+(``scripts/compute_metrics.py``, ``scripts/visualize_*.py``)
 own I/O and orchestration and call in here.
 
 Five flat modules, no subpackages. This is the *target* shape from the master
@@ -34,5 +34,5 @@ Nothing is re-exported here on purpose: ``style`` and ``figures`` import
 matplotlib, and a root re-export would drag it into every consumer. Import
 from the module you need (``from evaluation.scores import ...``).
 
-See ``docs/plans/esmda_evaluation/master_plan.md``.
+See ``docs/plans/implemented/esmda_evaluation/master_plan.md``.
 """

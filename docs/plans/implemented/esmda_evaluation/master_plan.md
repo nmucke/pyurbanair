@@ -9,7 +9,7 @@
 > left is the single reviewed merge into `main`, opened 2026-08-10 as PR
 > **#117** — see [Branching model](#branching-model). **Companion to** the
 > research document
-> [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md)
+> [../esmda_turbulence_evaluation.md](../../../research/esmda_turbulence_evaluation.md)
 > (the *what and why* — metric definitions, formulas, figure conventions).
 > This file is the index and status board; the per-phase plans carry the
 > implementation detail. The pre-slim plans (14 WPs, full metric survey)
@@ -174,7 +174,7 @@ the filter keeps only one analyzed frame per cycle unless
 forecast segment. Both are supported and which one a run used is recorded in
 `run_summary.yaml`'s `cycle_states`; the weaker one nulls the per-cycle
 variance and takes the TKE moments across cycles instead of within them. See
-[scripts_and_configs.md](../../scripts_and_configs.md) §2.4. S4 has no
+[scripts_and_configs.md](../../../scripts_and_configs.md) §2.4. S4 has no
 filtering counterpart — the probe records need a dedicated solver rerun, which
 the ESMDA *pipeline* script does not run either.
 
@@ -201,7 +201,7 @@ in a separate `moment_sampling_is_sparse` (`0`/`1`) attribute on
 is provenance and prints on both sources, the flag alone drives the
 time-mean/sample-mean wording and S1's TKE-row marker. Encoding a caveat in the
 presence of prose was the defect. See
-[scripts_and_configs.md](../../scripts_and_configs.md) §2.3.
+[scripts_and_configs.md](../../../scripts_and_configs.md) §2.3.
 
 **Outside the WP list: three pylbm backend fixes** (PRs **#112**, **#113**,
 **#114**, all merged 2026-08-07). Phase 3's verification run turned up two
@@ -210,8 +210,8 @@ PRs, and fixing the first uncovered a third. Together they add ~350 lines under
 `libs/pylbm` (plus ~50 in `pyurbanair`'s ensemble base class) and 1,022 lines of
 new test files — none of it planned work, all of it on this branch.
 Cross-referenced from
-[data_assimilation.md](../../data_assimilation.md) and documented in
-[pylbm.md](../../pylbm.md).
+[data_assimilation.md](../../../data_assimilation.md) and documented in
+[pylbm.md](../../../pylbm.md).
 
 - **#112 — restart/output filename width** (`bea72c3`). The pinned Fortran
   declares `character(len=6) cit` and opens `restart_0000_<it:i6.6>.uf`; pylbm
@@ -283,7 +283,7 @@ Cross-cutting cautions:
   the floor is refused in 5/5 windows at both shipped case shapes. Absent
   means unmeasured, not identifiable — this is the honest verdict, not a
   regression, and it replaces a number that was silently 2.6–4.2× optimistic.
-  See [scripts_and_configs.md](../../scripts_and_configs.md) §`identifiability`
+  See [scripts_and_configs.md](../../../scripts_and_configs.md) §`identifiability`
   and the phase-3 note.
 - The smoke shape (2-member ensemble) degenerates several diagnostics
   (ddof=1 variances, rank histograms) — guard with `null` + log, don't

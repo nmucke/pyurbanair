@@ -2,7 +2,7 @@
 
 > Part of the ESMDA-evaluation effort. Master plan:
 > [master_plan.md](master_plan.md). Rationale: §3, §4.1–4.2, §6 and the
-> figure list of [../esmda_turbulence_evaluation.md](../esmda_turbulence_evaluation.md).
+> figure list of [../esmda_turbulence_evaluation.md](../../../research/esmda_turbulence_evaluation.md).
 > Requires phase 0. Pure post-processing — no run-stage or artifact
 > changes. One PR per WP. Much of WP1.1–1.3 exists on the rollback
 > branches (see master plan) — cherry-pick the math and tests, adapt paths

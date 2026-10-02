@@ -2,7 +2,7 @@
 
 > **Status: working plan.** Written 2026-08-10. Companion to the deck in
 > `presentations/isda/` (which references the experiment IDs below) and to
-> [filtering_state_reduction_and_transforms.md](filtering_state_reduction_and_transforms.md),
+> [filtering_state_reduction_and_transforms.md](../implemented/filtering_state_reduction_and_transforms.md),
 > assumed implemented **with its review amendments** (§2). Working notes, not a
 > maintained reference — verify config/flag names against the tree when running.
 

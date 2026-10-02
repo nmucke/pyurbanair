@@ -339,8 +339,7 @@ The returned/saved state carries JSON in its `model_discrepancy` attribute:
 feature settings, coefficients, executable/build provenance and native multiplier
 extrema/saturation diagnostics. The native diagnostic text file is collected
 before output cleanup. Ensemble metadata is aggregated as
-`model_discrepancy_by_member`; forward rollouts retain each window under
-`model_discrepancy_by_window`. General native physics, multi-rank equivalence,
+`model_discrepancy_by_member`. General native physics, multi-rank equivalence,
 wall/energy budgets, continuous-versus-segmented forecasts, and coefficient
 recovery remain separate acceptance gates; compiling the extension does not
 demonstrate transfer skill.
@@ -495,7 +494,7 @@ nnudge = int(np.count_nonzero(heights < nnudge_meters))
 ```
 
 where `heights` are cell centres `(0.5*dz, 1.5*dz, …)`. This takes precedence
-over the raw `nnudge` key. Config default: `nnudge_meters: 4.0`.
+over the raw `nnudge` key.
 
 **`tnudge`**: nudging relaxation timescale in seconds (default 15.0). Xie & Castro
 "divergence" in practice is marginal dt-collapse at end-of-window, not a nudging
@@ -648,9 +647,9 @@ intensity * |U(z)|` with constant TI in z, the backflow rate is
 0.25** — hundreds of backflow cells per window on a 200x32 inlet plane. Keep
 `intensity` at or below ~0.15 unless you first restore that guard.
 
-**Calibrated defaults.** `configs/model/pyudales.yaml` now ships values tuned for
-the `realistic` STL pool at 4 m spacing (`intensity: 0.15`,
-`length_scale_y/z: 24`, `length_scale_x: 48`, `time_step: 0.5`). Three things
+**Shipped values.** `configs/model/pyudales.yaml` carries values chosen for
+the `realistic` STL pool at 4 m spacing; its comments say which are still test
+values. Three things
 still bias the realised turbulence below its nominal value, all of which
 calibration should account for before reaching for more amplitude:
 
@@ -667,7 +666,7 @@ calibration should account for before reaching for more amplitude:
   refinement if the canyon flow turns out to care.
 
 See §8 of
-[docs/plans/udales_inlet_turbulence.md](plans/udales_inlet_turbulence.md).
+[docs/plans/implemented/udales_inlet_turbulence.md](plans/implemented/udales_inlet_turbulence.md).
 
 #### Why not the Lund generator
 
@@ -789,7 +788,7 @@ compensation knobs".
 | Module | Purpose |
 |---|---|
 | [`clean_up_utils.py`](../libs/pyudales/src/pyudales/utils/clean_up_utils.py) | `clean_output_dir` (delete output), `clean_temp_dir` (wipe experiment dir except namoptions/STL/config.sh) |
-| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_NCPU`, `MATLAB_BIN` |
+| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_TOOLSDIR`, `DA_BUILD`, `DA_WORKDIR`, `NCPU`, `MATLAB_BIN` |
 | [`dir_utils.py`](../libs/pyudales/src/pyudales/utils/dir_utils.py) | `DirectoryPaths` dataclass, `get_udales_directory_paths`, `get_project_root` |
 | [`file_update_utils.py`](../libs/pyudales/src/pyudales/utils/file_update_utils.py) | `update_prof_file`, `update_lscale_file`, `…_profile` variants — patch `prof.inp` and `lscale.inp` in-place |
 | [`file_utils.py`](../libs/pyudales/src/pyudales/utils/file_utils.py) | `copy_files`, `change_file_extensions` (rename experiment-suffix files) |
@@ -814,7 +813,8 @@ compensation knobs".
 ## 10. Config wiring — `configs/model/pyudales.yaml`
 
 [`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) is the complete model
-config entry. Notable fields:
+config entry. Notable fields (values illustrative: the file is the source of
+truth and is tuned between runs):
 
 ```yaml
 name: pyudales
@@ -827,12 +827,13 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
   matlab_bin: /opt/sw/matlab-2023b/bin/matlab  # unused when python_or_matlab: python
-  ncpu: 25
+  ncpu: 1
   boundary_condition: inflow_outflow
   closure: vreman             # smagorinsky | vreman | null (keep template)
   nudging_config:
     tnudge: 15.0
-    nnudge_meters: 4.0          # skip nudging below 4 m (near-wall cells)
+    nnudge_meters: 16.0         # skip nudging below this height (m)
+    interior_nudging: true      # false -> inflow at the boundary only
     profile_config:
       type: power_law
       alpha: 0.25
@@ -843,9 +844,9 @@ forward_model:
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: false            # true -> synthetic driver planes, BCxm=3 (§6.1)
-    intensity: 0.1            # u'_rms / |U_mean(z)|
-    length_scale_x/y/z: 50/25/25   # m, digital-filter integral length scales
+    enabled: true             # synthetic driver planes, BCxm=3 (§6.1); false = no-op
+    intensity: 0.15           # u'_rms / |U_mean(z)|
+    length_scale_x/y/z: 24/12/12   # m, digital-filter integral length scales
     time_step: 0.5            # s, &DRIVER dtdriver
     driverjobnr: 998
   nx/ny/nz: ${domain.nx/ny/nz}
@@ -895,8 +896,9 @@ carry to the failed member's slot so the resampled state and the subgrid carry a
 consistent.
 
 `disable_spinup()` zeros `spinup_time` and rewrites `runtime` in namoptions.
-Called by `BaseRolloutForwardModel` after step 0 when
-`spinup_first_step_only=True`.
+Its only caller is the neural surrogate's `disable_spinup`, which forwards to
+its `spinup_forward_model`; warm-start windows zero `spinup_time` in
+`run_single` themselves.
 
 ---
 
@@ -918,7 +920,7 @@ exploding memory. Always use `_stitch_x_decomposition`.
 its own process group (`start_new_session=True`). With `ncpu=25` per member and
 `num_parallel_processes=4`, 100 MPI ranks run simultaneously. The DRAM-bandwidth
 ceiling on the development box is ~4–8 parallel processes (see
-[ensemble_scaling.md](temp/ensemble_scaling.md)).
+[ensemble_scaling.md](archive/ensemble_scaling.md)).
 
 ---
 

@@ -7,7 +7,7 @@
 none: null
 
 # SMOOTHING ONLY. Online SVD basis rebuilt from the forecast ensemble every
-# ESMDA iteration (docs/reduced_state_da.md).
+# ESMDA iteration (docs/archive/reduced_state_da.md).
 svd:
   _target_: data_assimilation.reduction.OnlineStateReduction
   # Keep the smallest rank reaching this fraction of the energy.

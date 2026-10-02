@@ -4,7 +4,7 @@ These exercise ``ForwardModel._apply_inflow_settings`` on a real, Hydra-composed
 smoke model but WITHOUT running PALM — the wiring under test is pure staging:
 which files land in ``INPUT/`` and which ``_p3d`` switches flip per
 (boundary_condition × params × nudging_config.enabled). See
-docs/plans/palm_nudging_driver_plan.md §Phases 4.
+docs/plans/implemented/palm_nudging_driver_plan.md §Phases 4.
 """
 
 import pathlib

@@ -2,13 +2,16 @@
 
 The Hydra config tree read by the scripts in `scripts/`. The design and the
 mapping from the retired `conf/` tree (now `archive/conf/`) are in
-[docs/config_setup_spec.md](../docs/config_setup_spec.md).
+[docs/plans/implemented/config_setup_spec.md](../docs/plans/implemented/config_setup_spec.md).
+Groups, scripts and workflows are described in
+[docs/scripts_and_configs.md](../docs/scripts_and_configs.md).
 
 ```
 forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
 common.yaml         # paths (per machine), ensemble budget, Hydra run dir
 model/  case/  params/
+surrogate/          # neural-surrogate configs (see below)
 assimilation_settings/   # one file per component, all options inside
 visualization/      # render presets of the MCP server's HTML viewer (libs/visualization)
 ```
@@ -55,11 +58,24 @@ observation.aggregation.interval_seconds=30
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |
 | `hybrid.*` | `likelihood_allocation` (tempering is `filtering.beta`) |
-| `forward.*` | `ensemble`, `ground_truth_dir`, `rollout_steps`, `initial_state`, `save_windows` |
+| `forward.*` | `ensemble`, `rollout_steps`, `initial_state` (NetCDF path or `{path, member, time_index}`), `save_windows` |
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
-| `paths.*` | `results_root`, `experiment_dir` from `common.yaml` (scratch chosen by `paths.machine`; `machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the workflow |
-| `ensemble.*` | one budget for every workflow (`common.yaml`), incl. `failure` |
+| `paths.*` | `machine`, `results_root`, `scratch`, `experiment_dir` (= `scratch.<machine>`), `weights_dir`, `training_data_dir` from `common.yaml` (`machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the entry point |
+| `ensemble.*` | one budget for every workflow (`common.yaml`): `ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`, `failure` (`policy: raise \| resample_from_successes`, `jitter_scale`, `seed`) |
+
+The component options in `assimilation_settings/` and the slots that select them:
+
+| File (package) | Options | Slots |
+|---|---|---|
+| `smoother.yaml` (`smoother.*`) | `static`, `dynamic`, `state`, `state_and_parameter`, `state_and_dynamic` | `smoothing.smoother` |
+| `analysis.yaml` (`analysis.*`) | `stochastic`, `etkf`, `etkf_tsvd`, `letkf`, `letkf_tsvd` | `filtering.analysis` |
+| `localization.yaml` (`localization.*`) | `none`, `correlation`, `distance` | `smoothing.localization`, `filtering.localization` |
+| `state_reduction.yaml` (`state_reduction.*`) | `none`, `svd`, `svd_current`, `svd_streaming` | `smoothing.state_reduction`, `filtering.state_reduction` |
+| `inflation.yaml` (`inflation.*`) | `none`, `multiplicative`, `rtps`, `rtpp` | `filtering.inflation` |
+
+`filtering.parameter_evolution` is set inline (`null`, or a
+`RandomWalkEvolution` block).
 
 ## What the scripts must do
 

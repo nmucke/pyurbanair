@@ -13,7 +13,7 @@ because the biased form's optimum is a collapsed ensemble -- the exact failure
 these scores exist to detect. Numbers produced before that change are ~O(1/M)
 larger and are **not** comparable with current ones; ``metrics_version: 2`` in
 ``run_summary.yaml`` marks the boundary. Formulas in
-``docs/plans/esmda_turbulence_evaluation.md`` §3--§6; rollout in
+``docs/research/esmda_turbulence_evaluation.md`` §3--§6; rollout in
 ``phase1_metrics_and_figures.md``.
 
 Populated in WP0.2 (move), extended through phase 1.
@@ -226,7 +226,7 @@ def ensemble_uniqueness(members: np.ndarray) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Sweep-figure field metrics (``docs/figure_specs.md`` §3).
+# Sweep-figure field metrics (``docs/archive/figure_specs.md`` §3).
 #
 # All field metrics operate on standardized |U| DataArrays with dims
 # ``(time, z, y, x)`` already interpolated onto the common (truth) grid, with an
@@ -352,7 +352,7 @@ def spread_skill(spread_ts: np.ndarray, rmse_ts: np.ndarray, n_members: int) -> 
 
 # Parameters drawn by the parameter figures, in panel order. The two inflow
 # drivers first, then the (constant-in-time) model-error knobs
-# (docs/esmda_model_error_parameters.md). Only those actually present in the
+# (docs/archive/esmda_model_error_parameters.md). Only those actually present in the
 # posterior are plotted, so single-model / inflow-only runs are unchanged.
 _PLOTTED_PARAMS = (
     "inflow_angle",

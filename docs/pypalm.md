@@ -41,10 +41,7 @@ edit the module constant to pin a release tag like `v25.10`).
 `pypalm` is **lazy-imported**. All `pypalm.*` `_target_` blocks live
 exclusively in [configs/model/pypalm.yaml](../configs/model/pypalm.yaml).
 Composing a config with `model=pylbm` or `model=pyudales` never imports
-`pypalm` and never triggers PALM's download/compile. This invariant is
-asserted by a regression test in the archived suite (not yet ported to
-`tests/`):
-`archive/tests/test_hydra_config.py::test_palm_target_does_not_import_for_non_palm_composition`.
+`pypalm` and never triggers PALM's download/compile.
 
 ---
 
@@ -249,7 +246,7 @@ Standard parameters (shared across backends):
 ### Model-error compensation knobs
 
 Two extra parameters let ESMDA absorb truth↔assim solver misspecification
-(see [docs/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md)).
+(see [docs/archive/esmda_model_error_parameters.md](archive/esmda_model_error_parameters.md)).
 Both are no-ops when absent, so single-model runs are unaffected.
 
 #### `vertical_inflow_exponent` → `profile_config` / `u_profile`

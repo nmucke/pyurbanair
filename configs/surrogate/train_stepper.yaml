@@ -6,7 +6,7 @@ defaults:
   - training
   - _self_
 
-# Which model scripts_new/surrogate/train.py builds.
+# Which model scripts/surrogate/train.py builds.
 task: stepper
 name: p3d_idealized
 architecture: ${architectures.p3d_medium}

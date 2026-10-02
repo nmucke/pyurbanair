@@ -1,8 +1,8 @@
 # @package _global_
 # Evaluation of trained neural surrogates. One block per evaluation script:
-#   stepper           scripts_new/surrogate/evaluate_stepper.py
-#   autoencoder       scripts_new/surrogate/evaluate_autoencoder.py
-#   latent_generator  scripts_new/surrogate/evaluate_latent_generator.py
+#   stepper           scripts/surrogate/evaluate_stepper.py
+#   autoencoder       scripts/surrogate/evaluate_autoencoder.py
+#   latent_generator  scripts/surrogate/evaluate_latent_generator.py
 defaults:
   - /common
   - _self_

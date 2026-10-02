@@ -34,7 +34,7 @@ than assuming the existing documentation describes current defaults.
 | Hydra composition can be superseded by script logic. | [`_apply_geometry_source`](../../scripts/neural_surrogate/generate_training_data.py) loads another case after composition; its case fields override even CLI values. | Use `case=` as the sole fixed-geometry selection; eliminate the post-composition case merge. |
 | Some apparently configurable values are always replaced at construction. | [`esmda/smoother/dynamic.yaml`](../../conf/esmda/smoother/dynamic.yaml) declares `num_time_points: 1`; ESMDA derives it from sampled parameters. | Omit runtime-only constructor arguments from editable YAML and record the actual values separately. |
 | Main objects already use Hydra. | Models, ensembles, samplers, smoothers, filters, and filter components already have `_target_` blocks. | Extend that pattern to remaining genuine construction choices; do not replace working declarative construction with a new factory layer. |
-| Documentation repeats defaults and has drifted. | The [config README](../../conf/README.md) and [scripts reference](../scripts_and_configs.md) describe different entry-point inventories and some outdated values. | Keep one ownership/usage guide; derive effective values from composition rather than duplicating them in prose tables. |
+| Documentation repeats defaults and has drifted. | The [config README](../../conf/README.md) and [scripts reference](../../scripts_and_configs.md) describe different entry-point inventories and some outdated values. | Keep one ownership/usage guide; derive effective values from composition rather than duplicating them in prose tables. |
 
 Renaming folders alone would leave these problems in place.
 

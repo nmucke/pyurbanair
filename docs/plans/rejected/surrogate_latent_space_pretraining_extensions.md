@@ -1,10 +1,10 @@
 # Plan 05 — Extended TadpoleAE pre-training: latent spaces that understand buildings and generalize to new geometries
 
 **Status: research report + implementation plan (2026-07-06). Builds directly on
-[plan 02](02_autoencoder_pretraining.md)'s `TadpoleAE` / `AutoencoderTrainer` /
+[plan 02](../implemented/neural_surrogates/02_autoencoder_pretraining.md)'s `TadpoleAE` / `AutoencoderTrainer` /
 `SnapshotDataset` / `pretrain_autoencoder.yaml` — same base setup, extended
 training objectives.** Complements (does not duplicate)
-[docs/multi_geometry_surrogate_research.md](../multi_geometry_surrogate_research.md),
+[docs/multi_geometry_surrogate_research.md](../../research/multi_geometry_surrogate_research.md),
 which covers geometry *inputs* (SDF > mask), multi-dataset mechanics and
 procedural geometry generation; this plan covers the *training objective*:
 what loss terms shape the latent space itself.

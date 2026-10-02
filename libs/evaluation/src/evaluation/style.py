@@ -1,10 +1,10 @@
 """Figure conventions: colors, quantile bands, shared norms, solid-cell masking.
 
 Shared by every evaluation plot so prior/posterior panels can never disagree on
-a color scale. All conventions follow ``docs/figure_specs.md`` §2: import
+a color scale. All conventions follow ``docs/archive/figure_specs.md`` §2: import
 :data:`COLORS`, :func:`apply_style`, :func:`shade_windows`, :func:`mark_windows`
 and the ``save_pdf`` / ``save_png`` helpers from here so every figure looks
-identical. See ``docs/plans/esmda_turbulence_evaluation.md`` §7 for the
+identical. See ``docs/research/esmda_turbulence_evaluation.md`` §7 for the
 conventions themselves.
 
 Geometry helpers take the STL path and grid as mandatory arguments -- where the

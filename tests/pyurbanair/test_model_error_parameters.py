@@ -2,7 +2,7 @@
 
 Covers the per-member consumption of ``vertical_inflow_exponent`` (the power-law
 shear exponent α) and ``sgs_constant`` (the sub-grid-scale mixing constant) added
-in docs/esmda_model_error_parameters.md, plus the mixed static+dynamic sampler
+in docs/archive/esmda_model_error_parameters.md, plus the mixed static+dynamic sampler
 and the uDALES param whitelist that previously dropped unknown variables.
 
 These are deliberately solver-free: they exercise the file-writer / sampler

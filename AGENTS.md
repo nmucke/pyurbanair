@@ -29,7 +29,7 @@ src/        pyurbanair: base classes every backend inherits
 libs/       pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
             evaluation, visualization, mcp-server (each an editable package)
 tests/      one folder per package; tests/scripts/ for scripts, configs, workflows
-docs/       reference docs; plans/ and other subfolders are working notes
+docs/       reference docs; plans/, research/, archive/ are working notes
 archive/    the retired setup: dead code, never edit, import or run it
 ```
 
@@ -48,19 +48,22 @@ Before editing, read the doc for the area you touch, and only that one.
 | If the task touches… | Read first |
 |---|---|
 | Anything non-trivial (orientation, "add a new X" recipes) | [docs/codebase_guide.md](docs/codebase_guide.md) |
-| `configs/`, `scripts/`, `workflows/` | [docs/scripts_and_configs.md](docs/scripts_and_configs.md), [configs/README.md](configs/README.md) |
+| `configs/`, `scripts/`, `workflows/`, `geometries/` | [docs/scripts_and_configs.md](docs/scripts_and_configs.md), [configs/README.md](configs/README.md), [geometries/README.md](geometries/README.md) |
 | LBM (`libs/pylbm`) | [docs/pylbm.md](docs/pylbm.md) |
 | uDALES (`libs/pyudales`) | [docs/pyudales.md](docs/pyudales.md) |
 | PALM (`libs/pypalm`) | [docs/pypalm.md](docs/pypalm.md) |
 | Data assimilation (`libs/data-assimilation`) | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates (`libs/neural-surrogates`, `scripts/surrogate/`) | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
+| Metrics and figures (`libs/evaluation`) | [docs/evaluation.md](docs/evaluation.md) |
 | MCP server (`libs/mcp-server`) | [docs/mcp.md](docs/mcp.md) |
 | HTML forward-run viewer (`libs/visualization`) | [docs/visualization.md](docs/visualization.md) |
 | HPC jobs (`job_scripts/`) | [docs/job_scripts.md](docs/job_scripts.md) |
 | Tests | [tests/README.md](tests/README.md) |
 
-Docs in `docs/plans/`, `docs/temp/`, `docs/archive/` and other subfolders are
-working notes, not references: verify against the code before relying on them.
+Only the top-level `docs/*.md` are maintained references. `docs/plans/` holds
+open plans (finished ones move to `plans/implemented/` or `plans/rejected/`);
+`docs/research/` and `docs/archive/` are notes and history. Verify any of these
+against the code before relying on them.
 
 ## Commands
 

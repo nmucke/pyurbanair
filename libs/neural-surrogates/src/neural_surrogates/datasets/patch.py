@@ -2,7 +2,7 @@
 
 This module exposes :class:`PatchTransitionDataset`, a sibling of
 :class:`neural_surrogates.datasets.transition.TransitionDataset` that reads the **same**
-on-disk ``training_data/`` split (see ``docs/training_data.md``) but yields
+on-disk ``training_data/`` split (see ``docs/archive/training_data.md``) but yields
 one sample *per spatial patch* of a two-level overlapping domain
 decomposition (companion PDF §2 + §5, Eq 9). It subclasses
 ``TransitionDataset`` purely to reuse its file-walking, parameter loading,

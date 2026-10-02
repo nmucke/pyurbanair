@@ -59,7 +59,7 @@ def resolve_profile_config(
     (``default_profile_config``). When the per-member ``params`` carry an
     estimated ``vertical_inflow_exponent`` it overrides ``alpha`` so the shear
     becomes a per-member, ESMDA-estimable model-error knob
-    (docs/esmda_model_error_parameters.md §2.1). Returns ``None`` when the
+    (docs/archive/esmda_model_error_parameters.md §2.1). Returns ``None`` when the
     parameter is absent, signalling the caller to keep the construction-time
     ``uvel_shear.dat`` untouched.
     """
@@ -88,7 +88,7 @@ def apply_sgs_setting(
     Precedence: a ``sgs_constant`` in ``params`` (estimated or sampled) wins;
     ``default`` is the model config's per-backend fallback; when both are absent
     this is a no-op and the template value is preserved
-    (docs/esmda_model_error_parameters.md §2.2).
+    (docs/archive/esmda_model_error_parameters.md §2.2).
     """
     sgs = get_param_value(params, "sgs_constant") if params is not None else None
     source = "params"

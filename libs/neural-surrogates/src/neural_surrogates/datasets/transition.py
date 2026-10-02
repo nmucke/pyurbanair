@@ -1,6 +1,6 @@
 """PyTorch dataset over a pyurbanair `training_data/` split.
 
-The training-data layout is documented in `docs/training_data.md`. This
+The training-data layout is documented in `docs/archive/training_data.md`. This
 module exposes `TransitionDataset`, which flattens every trajectory in a
 split into individual `(state_n, params_n, geometry) -> state_{n+K}`
 training samples for one-step or K-step (pushforward-trick) neural

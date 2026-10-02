@@ -7,7 +7,7 @@ defaults:
   - training
   - _self_
 
-# Which model scripts_new/surrogate/train.py builds.
+# Which model scripts/surrogate/train.py builds.
 task: finetune_stepper
 name: p3d_idealized_finetuned
 # A train_stepper.yaml output folder (weights + config).

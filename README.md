@@ -88,13 +88,19 @@ archive/     the previous configs, scripts and tests (not maintained)
 | Topic | Doc |
 |---|---|
 | Orientation and "how do I add X" | [docs/codebase_guide.md](docs/codebase_guide.md) |
-| Configs and scripts | [docs/scripts_and_configs.md](docs/scripts_and_configs.md) |
+| Configs, scripts and workflows | [docs/scripts_and_configs.md](docs/scripts_and_configs.md), config keys in [configs/README.md](configs/README.md) |
+| Cases and geometries | [geometries/README.md](geometries/README.md) |
 | Data assimilation | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
+| Evaluation metrics and figures | [docs/evaluation.md](docs/evaluation.md) |
 | Backends | [pylbm](docs/pylbm.md), [pyudales](docs/pyudales.md), [pypalm](docs/pypalm.md) |
 | Tests | [tests/README.md](tests/README.md) |
 | HPC jobs | [docs/job_scripts.md](docs/job_scripts.md) |
 | Agent interface (MCP) | [docs/mcp.md](docs/mcp.md) (`pixi run -e mcp register-claude` adds it to Claude Code) |
+| HTML forward-run viewer | [docs/visualization.md](docs/visualization.md) |
+
+Plans, research notes and the archive live in `docs/plans/`, `docs/research/`
+and `docs/archive/`; they are working notes, not maintained references.
 
 ## Development
 

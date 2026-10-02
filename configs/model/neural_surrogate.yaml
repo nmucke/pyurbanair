@@ -13,7 +13,7 @@ forward_model:
   _recursive_: false
 
   # --- the trained network -------------------------------------------------
-  # Point at a folder written by scripts/train_neural_surrogate.py. Its
+  # Point at a folder written by scripts/surrogate/train.py. Its
   # config.yaml supplies the architecture, state_vars and param_vars; the
   # training-data config it references supplies the trained domain and output
   # frequency; weights.pt supplies the parameters.

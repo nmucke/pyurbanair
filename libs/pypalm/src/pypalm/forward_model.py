@@ -433,11 +433,11 @@ class ForwardModel(BaseForwardModel):
         self.params = _merge_params(self.params, params)
 
         # Model-error knobs apply on both inflow branches, so resolve them up
-        # front (docs/esmda_model_error_parameters.md §6.2). ``profile_config``
+        # front (docs/archive/esmda_model_error_parameters.md §6.2). ``profile_config``
         # carries an α override from ``vertical_inflow_exponent`` when estimated.
         profile_config = self._resolve_profile_config(self.params)
 
-        # Driver selection (see docs/plans/palm_nudging_driver_plan.md §Design):
+        # Driver selection (see docs/plans/implemented/palm_nudging_driver_plan.md §Design):
         #   periodic  -> nudging driver (static OR time-varying), unless the
         #                escape hatch nudging_config.enabled=false restores
         #                today's un-driven periodic staging;
@@ -613,7 +613,7 @@ class ForwardModel(BaseForwardModel):
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` so the
         inlet shear is per-member and ESMDA-estimable
-        (docs/esmda_model_error_parameters.md §2.1). Falls back to the
+        (docs/archive/esmda_model_error_parameters.md §2.1). Falls back to the
         construction-time profile config when the parameter is absent.
         """
         base = self._nudging_config.get("profile_config")
@@ -636,7 +636,7 @@ class ForwardModel(BaseForwardModel):
         closure with a constant-Km model: a different turbulence regime, accepted
         purely as a bias-absorbing knob. The PALM ``sgs_constant`` therefore is
         NOT the same quantity as the LBM/uDALES Smagorinsky constants
-        (docs/esmda_model_error_parameters.md §2.3, §8). No-op when absent.
+        (docs/archive/esmda_model_error_parameters.md §2.3, §8). No-op when absent.
 
         PALM forbids a fixed ``km`` together with a Monin-Obukhov surface flux
         layer (check_parameters PAC0149), so a fixed ``km_constant`` also requires
@@ -729,7 +729,7 @@ class ForwardModel(BaseForwardModel):
 
         Two paths:
           - ``direct_palm.run_direct`` (default) — bypasses palmrun + palmbuild;
-            ~16x faster on tiny (see docs/palm_overhead_plan.md). It also runs
+            ~16x faster on tiny (see docs/archive/palm_overhead_plan.md). It also runs
             ``combine_plot_fields.x`` itself with the ``rrtmg.so`` symlinks it
             needs, so the merged 3D netCDF is actually produced. The slurm
             scripts already default to this; M4 flips it for local runs too.
@@ -812,7 +812,7 @@ class ForwardModel(BaseForwardModel):
         prebuilt ``palm`` + ``combine_plot_fields.x`` (no mpirun on combine),
         and transfers ``DATA_3D_NETCDF`` to ``self.dirs.output_dir``. See
         ``pypalm.direct_palm`` for the staging contract and
-        ``docs/palm_overhead_plan.md`` §M0/§M1 for the per-phase numbers.
+        ``docs/archive/palm_overhead_plan.md`` §M0/§M1 for the per-phase numbers.
         """
         # Import inside the method so non-direct runs don't pay the import
         # cost and so the existing palmrun path doesn't depend on the new module.
@@ -946,7 +946,7 @@ class ForwardModel(BaseForwardModel):
         velocity fields are streamed to a Fortran binary file and only merged
         into the per-PE ``_3d.NNN.nc`` netCDF by ``combine_plot_fields.x``.
         When that post-processing step is skipped or crashes (e.g. the macOS
-        dyld ``rrtmg.so`` load failure — see docs/pypalm_zero_field_debug.md),
+        dyld ``rrtmg.so`` load failure — see docs/archive/pypalm_zero_field_debug.md),
         the netCDF still opens cleanly but every u/v/w cell is exactly 0 with
         **no** topography fill values. A correct PALM field always carries
         NaN/fill at solid cells, so "finite everywhere AND identically zero"
@@ -965,7 +965,7 @@ class ForwardModel(BaseForwardModel):
                     "with no topography fill values — combine_plot_fields almost "
                     "certainly did not run (the per-PE netCDF skeleton was read "
                     "instead of the merged field). See "
-                    "docs/pypalm_zero_field_debug.md."
+                    "docs/archive/pypalm_zero_field_debug.md."
                 )
 
     def _load_and_postprocess_state(self) -> xarray.Dataset:

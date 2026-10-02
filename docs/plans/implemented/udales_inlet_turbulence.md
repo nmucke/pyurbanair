@@ -2,7 +2,7 @@
 
 **Status: IMPLEMENTED 2026-07-29** (steps 1–5; step 6, calibration, is still
 open). Historical design record — the maintained reference is
-[docs/pyudales.md §6.1](../pyudales.md); verify against the code before relying
+[docs/pyudales.md §6.1](../../pyudales.md); verify against the code before relying
 on details here (see the `docs/plans/` disclaimer in CLAUDE.md).
 
 Two things came out differently from the design below, both found during
