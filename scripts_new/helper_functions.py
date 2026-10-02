@@ -67,7 +67,7 @@ def make_truth(cfg: DictConfig, out_dir: pathlib.Path) -> xarray.Dataset:
         params = xarray.load_dataset(pathlib.Path(truth_dir) / "params.nc")
         if "time" in params.dims:
             start = float(cfg.assimilation.truth_start_time or 0.0)
-            params = _time_window(params, start, horizon)
+            params = _time_window(params, start, horizon, keep_start=True)
 
     params.to_netcdf(out_dir / "true_params.nc")
     return open_truth(cfg, out_dir)
@@ -88,11 +88,18 @@ def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
     return _time_window(state, start, horizon)
 
 
-def _time_window(ds: xarray.Dataset, start: float, length: float) -> xarray.Dataset:
-    """Keep [start, start + length) and shift the time axis so `start` is t=0."""
-    ds = ds.sel(time=ds.time >= start)
-    ds = ds.assign_coords(time=ds.time - start)
-    return ds.sel(time=ds.time < length)
+def _time_window(
+    ds: xarray.Dataset, start: float, length: float, keep_start: bool = False
+) -> xarray.Dataset:
+    """Keep (start, start + length] and shift the time axis so `start` is t=0.
+
+    That is where a run's output frames sit (the first one is one output
+    interval in). `keep_start` also keeps t=start, for parameter knots.
+    """
+    eps = 1e-6
+    after_start = ds.time >= start - eps if keep_start else ds.time > start + eps
+    ds = ds.sel(time=after_start & (ds.time <= start + length + eps))
+    return ds.assign_coords(time=ds.time - start)
 
 
 # ---------------------------------------------------------------------------

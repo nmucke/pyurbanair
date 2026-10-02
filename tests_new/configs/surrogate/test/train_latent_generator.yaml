@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - training
+
+name: latent_generator
+autoencoder_dir: ${paths.weights_dir}/autoencoder
+architecture:
+  param_history_steps: 2
+latent_stats:
+  max_batches: 2

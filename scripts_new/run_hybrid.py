@@ -125,21 +125,26 @@ def run(cfg: DictConfig) -> None:
         cfg.filtering.beta, cfg.hybrid.likelihood_allocation
     )
 
-    # Two model stacks with separate scratch dirs: the smoother forecasts whole
-    # windows, the filter one cycle at a time.
+    # Two model stacks with separate scratch dirs (for the backends that have
+    # one): the smoother forecasts whole windows, the filter one cycle at a time.
     # On disk, each stack writes its member files under its own root.
     scratch = pathlib.Path(cfg.paths.experiment_dir)
+
+    def temp_dir(name: str) -> dict:
+        has_scratch = "temp_dir" in cfg.assim_model.forward_model
+        return {"temp_dir": scratch / name} if has_scratch else {}
+
     states_dir = out_dir / "_ensemble_states"
     on_disk = bool(da.ensemble_save_on_disk)
     smoother_model = make_ensemble_model(
         cfg,
         states_dir / "smoother" if on_disk else None,
-        temp_dir=scratch / "hybrid_smoother",
+        **temp_dir("hybrid_smoother"),
     )
     filter_model = make_ensemble_model(
         cfg,
         states_dir / "filter" if on_disk else None,
-        temp_dir=scratch / "hybrid_filter",
+        **temp_dir("hybrid_filter"),
         simulation_time=cycle_seconds,
     )
 

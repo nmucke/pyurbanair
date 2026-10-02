@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - training
+
+name: stepper_finetuned
+pretrained_dir: ${paths.weights_dir}/stepper
+dataset:
+  pushforward_steps: 1
+lora:
+  target_preset: all  # the tiny U-Net has no attention layers

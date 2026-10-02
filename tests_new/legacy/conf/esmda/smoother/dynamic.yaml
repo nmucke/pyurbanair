@@ -1,0 +1,6 @@
+# Independent frozen test configuration.
+_target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
+num_steps: ${esmda.num_steps}
+alpha: ${esmda.alpha}
+pin_initial_time_point: true
+localization: ${esmda.localization}

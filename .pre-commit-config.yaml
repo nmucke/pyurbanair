@@ -36,3 +36,6 @@ repos:
       - id: mypy
         args: [--ignore-missing-imports]
         additional_dependencies: [types-PyYAML]
+        # The library tests carried over from tests/ never passed mypy; check
+        # each folder again once its tests are rewritten.
+        exclude: ^tests_new/(pylbm|pyudales|pypalm|data_assimilation|neural_surrogates|evaluation|pyurbanair|mcp|legacy)/

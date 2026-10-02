@@ -1,0 +1,8 @@
+# @package _global_
+defaults:
+  - training
+
+name: dft
+pretrained_dir: ${paths.weights_dir}/autoencoder
+dataset:
+  pushforward_steps: 1

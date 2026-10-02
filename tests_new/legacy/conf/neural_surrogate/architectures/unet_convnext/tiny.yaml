@@ -1,0 +1,17 @@
+# Independent frozen test configuration.
+_target_: neural_surrogates.UNetConvNeXt
+base_channels: 8
+channel_mults:
+- 1
+- 2
+depths:
+- 1
+- 1
+kernel_size: 3
+expansion: 2
+separable_dwconv: true
+normalize: true
+residual: true
+conditioning: film
+param_embed_dim: 64
+norm_groups: 8

@@ -1,0 +1,41 @@
+# scripts_new/, configs_new/ and workflows/: they use every library.
+# Pull requests run it when the package or something it depends on changes;
+# every push to main and a manual run (Actions tab) run it unconditionally.
+name: "Tests: scripts"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "libs/**"
+      - "scripts_new/**"
+      - "configs_new/**"
+      - "workflows/**"
+      - "tests_new/configs/**"
+      - "tests_new/scripts/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "pixi.lock"
+      - "tests_new/conftest.py"
+      - "tests_new/legacy/**"
+      - ".github/actions/setup/**"
+      - ".github/workflows/tests-scripts.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests_new/scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup
+      - name: Run tests
+        run: pixi run -e dev python -m pytest tests_new/scripts --durations=10

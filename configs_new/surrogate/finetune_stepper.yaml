@@ -17,7 +17,7 @@ pretrained_dir: ${paths.weights_dir}/p3d_idealized
 # lora: freeze them and train low-rank adapters (`lora`) only.
 method: lora
 lora:
-  variant: all
+  variant: standard  # standard | balora
   rank: 32
   alpha: 64
   dropout: 0.0

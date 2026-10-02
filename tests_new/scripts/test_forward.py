@@ -1,0 +1,79 @@
+"""Forward runs (run_forward.py) and their figures (visualize_forward.py)."""
+
+from __future__ import annotations
+
+import pathlib
+from typing import Any
+
+import numpy as np
+import pytest
+import xarray
+
+from tests_new.conftest import compose, load_script, surrogate
+
+FIGURES = ("field_snapshot.png", "animation.mp4", "parameters.png")
+
+
+def _run(cfg: Any) -> pathlib.Path:
+    load_script("scripts_new/run_forward.py").run(cfg)
+    run_dir = pathlib.Path(cfg.paths.results_dir)
+    load_script("scripts_new/visualize_forward.py").run(run_dir)
+    return run_dir
+
+
+def test_single_member(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=neural_surrogate_tiny",
+        *surrogate(session_root),
+        root=tmp_path,
+    )
+    run_dir = _run(cfg)
+    state = xarray.load_dataset(run_dir / "state.nc")
+    assert "ensemble" not in state.dims
+    assert {"u", "v", "w"} <= set(state.data_vars)
+    assert np.isfinite(state.u.values).all()
+    for name in FIGURES:
+        assert (run_dir / "figures" / name).exists(), name
+
+
+def test_ensemble_over_several_windows(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=neural_surrogate_tiny",
+        *surrogate(session_root),
+        "forward.ensemble=true",
+        "forward.rollout_steps=1",
+        root=tmp_path,
+    )
+    run_dir = _run(cfg)
+    state = xarray.load_dataset(run_dir / "state.nc")
+    params = xarray.load_dataset(run_dir / "params.nc")
+    assert state.sizes["ensemble"] == 2
+    # Two 3 s windows joined on one strictly increasing time axis.
+    times = state.time.values
+    assert np.all(np.diff(times) > 0) and times[-1] == pytest.approx(6.0)
+    assert params.time.values[-1] == pytest.approx(6.0)
+
+
+@pytest.mark.integration  # type: ignore[misc]
+@pytest.mark.parametrize("model", ["pyudales_tiny", "pylbm_tiny"])  # type: ignore[misc]
+def test_solver(tmp_path: pathlib.Path, model: str) -> None:
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        f"model={model}",
+        "forward.ensemble=true",
+        root=tmp_path,
+    )
+    run_dir = _run(cfg)
+    state = xarray.load_dataset(run_dir / "state.nc")
+    assert state.sizes["ensemble"] == 2
+    assert np.isfinite(state.u.values).all()
+    assert (run_dir / "figures" / "parameters.png").exists()

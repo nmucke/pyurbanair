@@ -1,0 +1,22 @@
+# @package _global_
+# Tiny evaluation (configs_new/surrogate/eval.yaml) of the models the
+# train_* overlays write.
+device: cpu
+
+stepper:
+  models: [ "${paths.weights_dir}/stepper" ]
+  animate: false
+
+autoencoder:
+  model_dir: ${paths.weights_dir}/autoencoder
+  num_figures: 1
+  num_metric_samples: 4
+
+latent_generator:
+  model_dir: ${paths.weights_dir}/latent_generator
+  max_snapshots: 4
+  num_noise_seeds: 2
+  num_steps_sweep: [2, 5]
+  num_figures: 1
+  bootstrap_resamples: 10
+  rollout_steps: 2

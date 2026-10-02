@@ -171,6 +171,9 @@ examples/
 tests/                             # pytest suite. tests/conftest.py provides
                                    # `compose_test_cfg` / `compose_module_cfg` fixtures
                                    # that compose tests/conf + isolated paths + caller overrides.
+tests_new/                         # successor of tests/ (retired after the refactoring):
+                                   # one folder per package + scripts/ for scripts_new/ +
+                                   # configs_new/. See tests_new/README.md.
 .temp/                             # Default scratch dir. Everything mutable lands here.
 ```
 

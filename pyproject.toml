@@ -212,6 +212,8 @@ setup-dev = { cmd = "bash scripts/setup_dev_env.sh", description = "Bootstrap de
 "py.test" = { cmd = "python -m pytest tests --exitfirst --durations=20", description = "Run fast tests without compiled CFD solves" }
 test-integration = { cmd = "python -m pytest tests -m integration --exitfirst --durations=20", description = "Run the small real-solver integration suite" }
 test-all = { cmd = "python -m pytest tests -m '' --exitfirst --durations=20", description = "Run all unit and solver integration tests" }
+test-new = { cmd = "python -m pytest tests_new --exitfirst --durations=10", description = "Run tests_new/ without compiled CFD solves" }
+test-new-integration = { cmd = "python -m pytest tests_new -m integration --exitfirst --durations=10", description = "Run the tests_new/ real-solver runs" }
 pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }
 format = { cmd = "black src", description = "Format code" }
 type-check = { cmd = "mypy src", description = "Type check code" }
