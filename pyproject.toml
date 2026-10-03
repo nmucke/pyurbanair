@@ -113,10 +113,11 @@ evaluation = { path = "libs/evaluation", editable = true }
 # Exception: on osx-arm64 the PyPI torch wheel bundles its own libomp, which
 # clashes with conda-forge llvm-openmp (OMP Error #15 on `import torch, numpy`).
 # There torch comes from conda-forge so the env has one OpenMP runtime (no
-# triton on macOS, so the conflict above does not apply).
+# triton on macOS, so the conflict above does not apply). Keep these versions
+# equal to the Linux +cpu / +cu126 wheel pins below.
 [tool.pixi.feature.neural-surrogates.target.osx-arm64.dependencies]
-pytorch = "2.12.*"
-torchvision = "0.27.*"
+pytorch = "2.12.1.*"
+torchvision = "0.27.1.*"
 
 [tool.pixi.feature.neural-surrogates.pypi-dependencies]
 neural-surrogates = { path = "libs/neural-surrogates", editable = true }
@@ -258,10 +259,10 @@ jax = { version = "==0.7.2", extras = ["cuda12"] }
 # on the host's 560.x driver; the default PyPI wheel is CUDA 13 and needs a
 # >=580 driver. Lives only on the pytorch wheel index. torch's own deps pull
 # in the matching triton for torch.compile.
-torch = { version = "==2.12.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
+torch = { version = "==2.12.1+cu126", index = "https://download.pytorch.org/whl/cu126" }
 # torchvision (transitive via timm / p3d-surrogate) must match the torch wheel
-# ABI and index — see the cpu feature note. 0.27.0 pairs with torch 2.12.0.
-torchvision = { version = "==0.27.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
+# ABI and index — see the cpu feature note. 0.27.1 pairs with torch 2.12.1.
+torchvision = { version = "==0.27.1+cu126", index = "https://download.pytorch.org/whl/cu126" }
 
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
@@ -298,12 +299,12 @@ JAX_PLATFORMS = "cpu"
 # of CUDA 13 libraries; the `+cpu` variant skips them. (macOS wheels have no
 # CUDA baggage, so no pin is needed there.)
 [tool.pixi.feature.cpu.target.linux-64.pypi-dependencies]
-torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
+torch = { version = "==2.12.1+cpu", index = "https://download.pytorch.org/whl/cpu" }
 # torchvision is pulled in transitively by timm (a p3d-surrogate dep). It must
 # come from the same wheel index as torch: the generic-PyPI torchvision is built
 # against the CUDA torch ABI and fails with `operator torchvision::nms does not
-# exist` against torch +cpu. 0.27.0 is the build that pairs with torch 2.12.0.
-torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
+# exist` against torch +cpu. 0.27.1 is the build that pairs with torch 2.12.1.
+torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
 # Forward-run HTML viewer and PNG/MP4 renderer. Leaf library: numpy, xarray,

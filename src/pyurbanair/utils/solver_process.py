@@ -27,9 +27,13 @@ from typing import IO, Any, Callable, Mapping, Optional, Sequence
 GRACE_SECONDS = 5
 
 # Waits for EOF on stdin (the owner exiting), then stops the solver's group.
+# `kill -s SIG -- -PGID` is the POSIX form: dash (Ubuntu's sh) rejects
+# `kill -SIG -- -PGID`. The first kill fails only when the group is already
+# gone (its error still reaches stderr); the group exiting on SIGTERM before
+# the SIGKILL is the normal case, so that one is quiet.
 _LIFELINE = (
-    'read _; kill -TERM -- "-$1" 2>/dev/null || exit 0; '
-    f'sleep {GRACE_SECONDS}; kill -KILL -- "-$1" 2>/dev/null; exit 0'
+    'read _; kill -s TERM -- "-$1" || exit 0; '
+    f'sleep {GRACE_SECONDS}; kill -s KILL -- "-$1" 2>/dev/null; exit 0'
 )
 
 
@@ -111,7 +115,6 @@ def run_solver(
         ["sh", "-c", _LIFELINE, "lifeline", str(proc.pid)],
         stdin=read_end,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
     )
     os.close(read_end)
     stopped = False

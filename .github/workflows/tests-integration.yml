@@ -1,7 +1,9 @@
 # The tiny real-solver runs (`pixi run -e dev test-integration`): builds uDALES,
 # LBM and PALM from a fresh checkout and runs them, on Linux and macOS.
-# Slow, so pull requests run it only when a solver wrapper, its build or its
-# environment changes; it also runs nightly and on demand (Actions tab).
+# Slow, so pull requests run it only when something a real solver run depends
+# on changes (a wrapper, its build or environment, the configs, the case
+# geometries, the scripts the tests drive); it also runs nightly and on demand
+# (Actions tab).
 name: "Tests: integration"
 
 on:
@@ -9,6 +11,9 @@ on:
     paths:
       - "libs/py*/**"
       - "activation_scripts/**"
+      - "configs/**"
+      - "geometries/**"
+      - "scripts/**"
       - "src/pyurbanair/utils/**"
       - "tests/configs/**"
       - "pyproject.toml"
