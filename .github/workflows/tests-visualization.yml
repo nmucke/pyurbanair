@@ -23,8 +23,12 @@ concurrency:
 
 jobs:
   test:
-    name: tests/visualization
-    runs-on: ubuntu-latest
+    name: tests/visualization (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7

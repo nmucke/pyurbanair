@@ -77,6 +77,8 @@ src/pyurbanair/                    # Top-level package: base classes + glue
     discrepancy.py                 # validate_sgs_discrepancy_settings (uDALES discrepancy)
   utils/
     cpu_pinning.py                 # Worker → CPU pinning for parallel ensembles
+    solver_process.py              # run_solver: every backend's solver launch
+    toolchain.py                   # apple_linker_flags: macOS linking for solver builds
     run_utils.py, animation_utils.py
 
 configs/                           # Hydra config (see §5); keys in configs/README.md
@@ -442,6 +444,9 @@ gotchas worth knowing up front:
    pulls the underlying Fortran/C source if needed.
 2. Subclass `BaseForwardModel`: `__init__` (call super with `results_dir`),
    `run_single`, `_apply_inflow_settings`, `save_results`, `_clean_output`.
+   Launch the solver with `pyurbanair.utils.solver_process.run_solver`, and
+   pass `apple_linker_flags` (`pyurbanair.utils.toolchain`) to any native
+   build's link step, so it builds and runs on Linux and macOS.
 3. Subclass `BaseEnsembleForwardModel`; the only mandatory override is
    `_create_new_forward_model` (clone the template into a per-member directory).
 4. Add a Pixi feature in [pyproject.toml](../pyproject.toml).

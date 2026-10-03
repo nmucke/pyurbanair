@@ -204,8 +204,8 @@ Workers capture native stdout/stderr into their job log and select `dev`,
 identities and inherited job tokens, including detached MPI/forkserver children,
 then escalates TERM to KILL after five seconds. The slot stays occupied until
 owned descendants exit. Forward workers hold a checkout-wide backend lock for
-shared source/cache operations; imports cannot auto-sync LBM sources or
-auto-install PALM. Recovery reconciles recorded completion with verified
+shared source/cache operations, including PALM's first-use build; imports
+cannot auto-sync LBM sources. Recovery reconciles recorded completion with verified
 PID creation times; reused PIDs are never signalled. Unfinished jobs whose
 workers disappeared are marked interrupted after supervisor recovery.
 There is no automatic numerical resume after reboot.

@@ -135,8 +135,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 3. **Inflow settings** — `_apply_inflow_settings(params)` (see below).
 4. **Output cleanup** — `_clean_output()` deletes all `out_*.nc` files in
    `output_dir` to prevent stale files from a prior run being collected.
-5. **Run** — `self.run()` executes the `boltzmann` binary via `subprocess.run`
-   with `check=True` (non-zero exit raises `CalledProcessError`). Stack size is
+5. **Run** — `self.run()` executes the `boltzmann` binary through the shared
+   `pyurbanair.utils.solver_process.run_solver` (non-zero exit raises
+   `CalledProcessError`; the process dies with its Python owner). Stack size is
    raised to `unlimited` / `hard` before launch to handle large
    `nx*ny*nz` automatic arrays.
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
@@ -226,10 +227,18 @@ handles the full build chain:
    failure so the real build starts with both files up to date.
 5. **Make invocation** — always `make -B` (full rebuild); passes
    `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=<build tree>/bin`,
-   `LIBDIR`. Compilation failure raises `RuntimeError`.
+   `LIBDIR`. Compilation failure raises `RuntimeError` with the end of the
+   build output.
 6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
    cuda/netcdf mode, and hashes of the compiled-in sources next to the binary
-   (see §1).
+   (see §1). A failed build writes no stamp, so the next compile retries it.
+
+**Platforms.** The gfortran build runs on Linux and macOS (osx-arm64) with the
+pixi env's compilers, FFTW and NetCDF. On macOS, `LIBDIR` also carries
+`-B/usr/bin/` from the shared `pyurbanair.utils.toolchain.apple_linker_flags`,
+so the link uses Apple's ld: conda's ld64 cannot read a current SDK's
+`libSystem.tbd` (`unknown architecture arm64e.x1`, then missing `expf`,
+`memcpy`). The CUDA build is Linux-only.
 
 `Makefile.set_path` (`makefile_utils.py`) is idempotent: it scans the whole file
 rather than stopping at the first blank line, consumes the line's own newline

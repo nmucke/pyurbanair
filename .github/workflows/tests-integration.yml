@@ -1,0 +1,48 @@
+# The tiny real-solver runs (`pixi run -e dev test-integration`): builds uDALES,
+# LBM and PALM from a fresh checkout and runs them, on Linux and macOS.
+# Slow, so pull requests run it only when a solver wrapper, its build or its
+# environment changes; it also runs nightly and on demand (Actions tab).
+name: "Tests: integration"
+
+on:
+  pull_request:
+    paths:
+      - "libs/py*/**"
+      - "activation_scripts/**"
+      - "src/pyurbanair/utils/**"
+      - "tests/configs/**"
+      - "pyproject.toml"
+      - "pixi.lock"
+      - "conda-pypi-mapping.json"
+      - ".github/actions/setup/**"
+      - ".github/workflows/tests-integration.yml"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: integration (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup
+      - name: Run the solver tests
+        run: pixi run -e dev test-integration
+      - name: No solver process outlives the tests
+        if: always()
+        run: |
+          if pgrep -l -x 'u-dales|boltzmann|prterun|palm'; then
+            exit 1
+          fi

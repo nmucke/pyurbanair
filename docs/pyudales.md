@@ -26,11 +26,19 @@ select another writable location. Package resources may be read-only. Cache keys
 include source/extension hashes, build scripts, toolchain, dependencies, flags and
 platform. Reuse requires a matching capability manifest and executable hash.
 Failed or partial builds are rebuilt; `CMakeCache.txt` alone is insufficient.
-On macOS with a Pixi/Conda Fortran compiler, preparation selects Apple's
-`/usr/bin/ld` for both native builds and the IBM geometry compiler. This keeps
-linking compatible with the active macOS SDK's `libSystem.tbd`. An explicit
-caller-supplied `-B` flag takes precedence. The active SDK and effective linker
-flags enter the build cache key.
+A failed configure or compile raises with the build output, publishes nothing,
+and the next preparation retries it.
+
+**Platforms.** The same scripts build on Linux and macOS
+([`shell_scripts/build_udales.sh`](../libs/pyudales/shell_scripts/build_udales.sh),
+`build_preprocessing.sh`). `build_udales.sh` points CMake at the pixi env
+(`CMAKE_PREFIX_PATH`, `NETCDF_DIR`, `NETCDF_FORTRAN_DIR`, `FFTW_ROOT` default to
+`$CONDA_PREFIX`), so a system NetCDF or FFTW can never be picked up instead;
+values you set yourself still win. On macOS with a pixi compiler, the shared
+`pyurbanair.utils.toolchain.apple_linker_flags` selects Apple's `/usr/bin/ld`
+for both native builds and the IBM geometry compiler: conda's ld64 cannot read
+a current SDK's `libSystem.tbd`. An explicit caller-supplied `-B` flag takes
+precedence. The active SDK and effective linker flags enter the build cache key.
 
 The selected executable travels in `DirectoryPaths.solver_executable` and
 `config.sh`'s `DA_BUILD`; its source tree supplies the corresponding preprocessing
@@ -410,6 +418,14 @@ uDALES requires preprocessing that converts an STL geometry into IBM (Immersed
 Boundary Method) input files (`solid_*.txt`, `fluid_boundary_*.txt`,
 `facet_sections_*.txt`, `facets.inp`, `facetarea.inp`). Two paths exist:
 
+**Keep the domain top 1.5 cells above the buildings.** Upstream's
+`matchFacetsCells.f90` does not clamp a facet's top cell in z, so geometry
+ending in the top cell of the w-grid makes it read past its arrays: the facet
+sections then depend on uninitialised memory (zeroed on Linux, random on
+macOS, where uDALES stops in `wallfunmom`). `ibm.py` refuses such geometry
+with an error naming the highest allowed roof. The tests' tiny grid uses a 15 m
+lid over the 10 m roof for this reason.
+
 **Python preprocessor** (default):
 [`python_udgeom/`](../libs/pyudales/src/pyudales/python_udgeom/) — a pure-Python
 reimplementation of the Matlab `write_inputs.m` workflow.
@@ -429,7 +445,8 @@ The Python preprocessor is invoked via `shell_scripts/write_inputs.sh`, which se
 against the experiment directory. It uses `trimesh` for STL loading.
 
 **Matlab preprocessor** (legacy, optional):
-Calls `u-dales/tools/write_inputs.sh` and requires `matlab_bin` to be on `PATH`.
+Calls `u-dales/tools/write_inputs.sh` and needs `matlab_bin` (unset by default)
+to point at your MATLAB binary.
 The Matlab path sleeps 90 s after subprocess launch to wait for MATLAB to finish.
 
 **Selector.** The `prepare._target_` in
@@ -709,9 +726,13 @@ generator: it needs no Fortran changes at all.
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
 
-`run_with_dt_watchdog` replaces the bare `subprocess.run` used to launch uDALES.
-It spawns the process in its own session (so killing the session kills the entire
-`bash → mpiexec → MPI-rank` tree), then tails `run.<expnr>.log` in a polling loop:
+`run_with_dt_watchdog` launches uDALES through the shared
+[`pyurbanair.utils.solver_process.run_solver`](../src/pyurbanair/utils/solver_process.py),
+which every backend uses: the `bash → mpiexec → MPI-rank` tree runs in its own
+process group, is killed on return or error, and dies with its owner even when
+that Python process is killed without cleanup. A failure raises a
+`CalledProcessError` carrying the tail of `run.<expnr>.log`. The watchdog tails
+that log in a polling loop:
 
 ```
 line pattern: "... dt:  0.242654880"   ← parsed by _DT_RE
@@ -826,7 +847,7 @@ forward_model:
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
-  matlab_bin: /opt/sw/matlab-2023b/bin/matlab  # unused when python_or_matlab: python
+  matlab_bin: null            # only python_or_matlab: matlab needs it
   ncpu: 1
   boundary_condition: inflow_outflow
   closure: vreman             # smagorinsky | vreman | null (keep template)
@@ -917,7 +938,7 @@ written. `_read_fielddump` detects this and stitches per-rank slabs in Python vi
 exploding memory. Always use `_stitch_x_decomposition`.
 
 **Ensemble parallelism.** Each ensemble member runs its own uDALES instance with
-its own process group (`start_new_session=True`). With `ncpu=25` per member and
+its own process group (`run_solver`). With `ncpu=25` per member and
 `num_parallel_processes=4`, 100 MPI ranks run simultaneously. The DRAM-bandwidth
 ceiling on the development box is ~4–8 parallel processes (see
 [ensemble_scaling.md](archive/ensemble_scaling.md)).
