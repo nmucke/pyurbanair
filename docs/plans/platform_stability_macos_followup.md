@@ -98,8 +98,9 @@ done
 diff -rq .temp/det_exp_a .temp/det_exp_b
 ```
 
-Expected: only `config.sh` differs (it holds the paths); in particular no
-`facet_sections_*` or `fluid_boundary_*` file differs.
+Expected: only `config.sh` (the paths) and `write_inputs.<expnr>.log` (the
+IBM routine's elapsed time) differ; in particular no `facet_sections_*` or
+`fluid_boundary_*` file differs.
 
 ## 6. No solver outlives its owner
 

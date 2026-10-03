@@ -49,7 +49,9 @@ INSTALL_LOG = _project_root / "palm_install.log"
 def _download_tarball(url: str, dest: pathlib.Path) -> None:
     logger.info("Downloading PALM tarball from %s …", url)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+    # A stalled connection must fail, not hang the run: the timeout bounds each
+    # blocking read, not the whole download.
+    with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
 
 
