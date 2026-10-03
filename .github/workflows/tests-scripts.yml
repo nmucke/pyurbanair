@@ -1,0 +1,49 @@
+# scripts/, configs/ and workflows/: they use every library. Also checks the
+# relative links in the Markdown docs.
+# Pull requests run it when the package or something it depends on changes;
+# every push to main and a manual run (Actions tab) run it unconditionally.
+name: "Tests: scripts"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "libs/**"
+      - "scripts/**"
+      - "configs/**"
+      - "workflows/**"
+      - "docs/**"
+      - "README.md"
+      - "AGENTS.md"
+      - "**/README.md"
+      - "tests/configs/**"
+      - "tests/scripts/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "pixi.lock"
+      - "tests/conftest.py"
+      - ".github/actions/setup/**"
+      - ".github/workflows/tests-scripts.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests/scripts (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup
+      - name: Run tests
+        run: pixi run -e dev python -m pytest tests/scripts --durations=10

@@ -95,7 +95,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
         # drawn once in sample() (window 0) and thereafter carried forward via the
         # ESMDA-updated posterior in extrapolate(), so they are estimated jointly
         # but never re-randomized per window
-        # (docs/esmda_model_error_parameters.md §6.1).
+        # (docs/archive/esmda_model_error_parameters.md §6.1).
         self.static_parameters: dict[str, Distribution] = static_parameters or {}
 
         # Carried state: per-parameter terminal (z, w) of the most

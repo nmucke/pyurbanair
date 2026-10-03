@@ -1,0 +1,29 @@
+# @package _global_
+# The tiny run every test shares: a 20 x 20 x 6 grid around the Xie & Castro
+# block, 3 s windows written every second, and a 2-member ensemble on one
+# worker. Sensors and nudging height fit this grid. The 15 m lid keeps two
+# cells above the 10 m roof: uDALES's IBM preprocessing reads past its arrays
+# when a roof ends in the top cell (see pyudales.python_udgeom.ibm).
+domain:
+  nx: 20
+  ny: 20
+  nz: 6
+  bounds: [[0.0, 20.0], [0.0, 20.0], [0.0, 15.0]]
+
+time:
+  simulation_time: 3.0
+  output_frequency: 1.0
+  spinup_time: 1.0
+  seconds_per_knot: 1.5
+
+obs:
+  x_points: [2.5, 2.5, 18.0, 18.0]
+  y_points: [5.0, 15.0, 5.0, 15.0]
+  z_points: [3.0, 3.0, 3.0, 3.0]
+  validation_x_points: [16.0]
+  validation_y_points: [18.0]
+  validation_z_points: [2.0]
+
+ensemble:
+  ensemble_size: 2
+  num_parallel_processes: 1

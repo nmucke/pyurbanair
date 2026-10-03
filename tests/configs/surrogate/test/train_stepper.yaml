@@ -1,0 +1,10 @@
+# @package _global_
+defaults:
+  - training
+
+name: stepper
+architecture: ${architectures.unet_convnext_tiny}
+dataset:
+  pushforward_steps: 1
+  # The latent generator's parameters, so it can be rolled out from generated fields.
+  param_vars: [inflow_angle, velocity_magnitude]

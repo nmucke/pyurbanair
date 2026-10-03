@@ -18,32 +18,40 @@ for wind-environment studies; the wrapper drives it in that mode
 
 ### Source acquisition
 
+Importing pypalm never downloads or builds anything. `install_palm()` in
 [libs/pypalm/src/pypalm/__init__.py](../libs/pypalm/src/pypalm/__init__.py)
-downloads the PALM source tree as a tarball from GitLab on first import and
-runs `install_palm.sh` to produce the compiled binary
-`palm_model_system/MAKE_DEPOSITORY_default/palm`. Unlike pylbm, **PALM does not
-need to be recompiled when the grid changes** — `nx/ny/nz` are read from the
-`_p3d` namelist at runtime.
+runs before every PALM run and is a no-op once PALM is built. The first time,
+it downloads the pinned release (`PALM_COMMIT`, the commit of tag `v25.10`) as a
+tarball from GitLab and runs `install_palm.sh` against the pixi env, logging to
+`libs/pypalm/palm_install.log`, to produce
+`palm_model_system/MAKE_DEPOSITORY_default/palm`. A failed download or build
+raises with the log tail and the next run retries; a tree from another commit
+is replaced. Linux and macOS (osx-arm64) build the same way: the installer
+runs with the pixi env first on `CMAKE_PREFIX_PATH` (so PALM's CMake finds the
+env's FFTW and NetCDF, never e.g. Homebrew's), with `HOME` set to
+`palm_model_system` (the installer otherwise writes `~/.palm/palmtest*.yml`),
+and on macOS with Apple's linker (`apple_linker_flags`, through `LDFLAGS` and
+Open MPI's `OMPI_LDFLAGS`, plus header padding for the `install_name_tool`
+fix-up in `install_palm.sh`). Unlike pylbm,
+**PALM does not need to be recompiled when the grid changes** — `nx/ny/nz` are
+read from the `_p3d` namelist at runtime (PALM needs `nz >= 14`).
 
 Palmrun resolution priority:
 1. `PALM_BIN` env var
 2. `palmrun` on `PATH`
 3. `$PALM_ROOT/bin/palmrun`
-4. Auto-installed `palm_model_system/bin/palmrun`
+4. `palm_model_system/bin/palmrun` built by `install_palm`
 
-Skip auto-install with `PYPALM_SKIP_AUTOINSTALL=1`.
-
-The version is pinned by `PALM_VERSION` (default `master`; set the env var or
-edit the module constant to pin a release tag like `v25.10`).
+Both launch paths run through the shared
+`pyurbanair.utils.solver_process.run_solver`: a failure carries the tail of
+PALM's output, and no `mpirun`/`palm` process outlives its Python owner.
 
 ### Lazy-import invariant
 
 `pypalm` is **lazy-imported**. All `pypalm.*` `_target_` blocks live
-exclusively in [conf/model/pypalm.yaml](../conf/model/pypalm.yaml).
+exclusively in [configs/model/pypalm.yaml](../configs/model/pypalm.yaml).
 Composing a config with `model=pylbm` or `model=pyudales` never imports
-`pypalm` and never triggers PALM's download/compile. This invariant is
-asserted by a regression test:
-`tests/test_hydra_config.py::test_palm_target_does_not_import_for_non_palm_composition`.
+`pypalm` and never triggers PALM's download/compile.
 
 ---
 
@@ -55,7 +63,7 @@ asserted by a regression test:
 
 Subclasses `BaseForwardModel` from
 [src/pyurbanair/base_forward_model.py](../src/pyurbanair/base_forward_model.py).
-Key constructor args (all wired from Hydra via `conf/model/pypalm.yaml`):
+Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 
 | Arg | Purpose |
 |---|---|
@@ -217,7 +225,7 @@ PALM writes `u`/`v` on `zu_3d` and `w` on `zw_3d`. The
 1. **Renames** dims: `zu_3d → z`, `zw_3d → zw` (and `zs_3d → zs` if present).
 2. **Shifts coordinates** onto the physical domain: PALM's native NetCDF axes
    start at 0; `xmin`/`ymin`/`zmin` offsets from `bounds` are added so sensor
-   coords from `conf/case/*/obs.yaml` resolve correctly (especially for
+   coords from the `obs` block of `configs/case/*.yaml` resolve correctly (especially for
    `xmin < 0` inflow regions).
 3. **Fills NaN with 0** in `u/v/w` — PALM writes NaN at topography-occluded
    cells (no-slip BC); leaving NaN would poison Kalman updates.
@@ -248,7 +256,7 @@ Standard parameters (shared across backends):
 ### Model-error compensation knobs
 
 Two extra parameters let ESMDA absorb truth↔assim solver misspecification
-(see [docs/esmda_model_error_parameters.md](temp/esmda_model_error_parameters.md)).
+(see [docs/archive/esmda_model_error_parameters.md](archive/esmda_model_error_parameters.md)).
 Both are no-ops when absent, so single-model runs are unaffected.
 
 #### `vertical_inflow_exponent` → `profile_config` / `u_profile`
@@ -267,9 +275,9 @@ and, for time-varying inflow, into the `inflow_plane_u/v` arrays in the
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -320,9 +328,9 @@ Write site: `_apply_sgs_setting` in `ForwardModel` →
 
 ---
 
-## 7. Config wiring — `conf/model/pypalm.yaml`
+## 7. Config wiring — `configs/model/pypalm.yaml`
 
-[conf/model/pypalm.yaml](../conf/model/pypalm.yaml)
+[configs/model/pypalm.yaml](../configs/model/pypalm.yaml)
 
 ```
 name: pypalm
@@ -373,9 +381,9 @@ Key field notes:
 
 Select pypalm for forward or assimilation runs:
 ```bash
-python scripts/run_forward_model.py model=pypalm
-python scripts/esmda/run_esmda.py model@assim_model=pypalm model@truth_model=pylbm \
-    esmda/smoother=static params@truth_params=static_truth params@prior_params=static
+python scripts/run_forward.py model=pypalm
+python scripts/run_smoother.py model@assim_model=pypalm model@truth_model=pylbm \
+    'smoothing.smoother=${smoother.static}' params@truth_params=static_truth params@prior_params=static
 ```
 
 ---
@@ -626,18 +634,18 @@ step silently yields all-zero fields due to a dyld `rrtmg.so` load failure;
 
 ## 9. Example configs
 
-Experiment configs live in
-[examples/palm/](../examples/palm/), one directory per case:
+Case inputs live in [geometries/](../geometries/), one folder per case:
 
-- [examples/palm/xie_and_castro/](../examples/palm/xie_and_castro/) — the
+- [geometries/xie_and_castro/](../geometries/xie_and_castro/) — the
   Xie & Castro 2008 benchmark geometry.
-- [examples/palm/barcelona/](../examples/palm/barcelona/) — the Barcelona urban
+- [geometries/barcelona/](../geometries/barcelona/) — the Barcelona urban
   case. Each contains a `_p3d` namelist template that `ForwardModel.__init__`
-  copies into `INPUT/` and edits.
+  copies into `INPUT/` and edits. The folder also holds the uDALES inputs;
+  PALM copies only its `_p3d`/`_topo`/`_static`/`_dynamic` files.
 
-These are the files referenced by `case_dir: ${geometry.palm_case_dir}` in
-`pypalm.yaml`. The case bundle (`conf/case/{xie_and_castro,barcelona}/`) sets
-`geometry.palm_case_dir` and `geometry.stl_path`.
+`pypalm.yaml` reads the folder as `case_dir: ${geometry.case_dir}`. The case
+bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
+`geometry.case_dir` and `geometry.stl_path`.
 
 ---
 
@@ -645,10 +653,10 @@ These are the files referenced by `case_dir: ${geometry.palm_case_dir}` in
 
 | You want to change… | Look here |
 |---|---|
-| PALM version pinned | `PALM_VERSION` constant in [`__init__.py`](../libs/pypalm/src/pypalm/__init__.py) |
-| Grid / bounds / time | `conf/case/<name>/` (domain + time groups) |
+| PALM version pinned | `PALM_COMMIT` constant in [`__init__.py`](../libs/pypalm/src/pypalm/__init__.py) |
+| Grid / bounds / time | `configs/case/<name>.yaml` (`domain` + `time` blocks) |
 | Inflow profile shape (`alpha`) | `nudging_config.profile_config.alpha` in `pypalm.yaml` (or via `vertical_inflow_exponent` ESMDA parameter) |
-| SGS knob | `sgs_constant` parameter prior in `conf/params/` (maps to `km_constant` m²/s — not dimensionless) |
+| SGS knob | `sgs_constant` parameter prior in `configs/params/` (maps to `km_constant` m²/s — not dimensionless) |
 | ncpu / processor topology | `ncpu` in `pypalm.yaml`; `derive_npex_npey` validates divisibility |
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |

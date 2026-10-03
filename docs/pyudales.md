@@ -26,11 +26,19 @@ select another writable location. Package resources may be read-only. Cache keys
 include source/extension hashes, build scripts, toolchain, dependencies, flags and
 platform. Reuse requires a matching capability manifest and executable hash.
 Failed or partial builds are rebuilt; `CMakeCache.txt` alone is insufficient.
-On macOS with a Pixi/Conda Fortran compiler, preparation selects Apple's
-`/usr/bin/ld` for both native builds and the IBM geometry compiler. This keeps
-linking compatible with the active macOS SDK's `libSystem.tbd`. An explicit
-caller-supplied `-B` flag takes precedence. The active SDK and effective linker
-flags enter the build cache key.
+A failed configure or compile raises with the build output, publishes nothing,
+and the next preparation retries it.
+
+**Platforms.** The same scripts build on Linux and macOS
+([`shell_scripts/build_udales.sh`](../libs/pyudales/shell_scripts/build_udales.sh),
+`build_preprocessing.sh`). `build_udales.sh` points CMake at the pixi env
+(`CMAKE_PREFIX_PATH`, `NETCDF_DIR`, `NETCDF_FORTRAN_DIR`, `FFTW_ROOT` default to
+`$CONDA_PREFIX`), so a system NetCDF or FFTW can never be picked up instead;
+values you set yourself still win. On macOS with a pixi compiler, the shared
+`pyurbanair.utils.toolchain.apple_linker_flags` selects Apple's `/usr/bin/ld`
+for both native builds and the IBM geometry compiler: conda's ld64 cannot read
+a current SDK's `libSystem.tbd`. An explicit caller-supplied `-B` flag takes
+precedence. The active SDK and effective linker flags enter the build cache key.
 
 The selected executable travels in `DirectoryPaths.solver_executable` and
 `config.sh`'s `DA_BUILD`; its source tree supplies the corresponding preprocessing
@@ -53,11 +61,11 @@ available — `&NAMSUBGRID cs` under `lsmagorinsky=.true.`, `c_vreman` under
 `ForwardModel(BaseForwardModel)`
 
 Key constructor arguments (all wired from
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml)):
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml)):
 
 | Argument | Purpose |
 |---|---|
-| `case_dir` | Source of the namoptions / STL template files (from `${geometry.udales_case_dir}`) |
+| `case_dir` | Case folder whose files (namoptions, the STL its `stl_file` names) are copied into the run (from `${geometry.case_dir}`) |
 | `experiment_name` | uDALES experiment number string (default `"999"`) |
 | `ncpu` | Total MPI ranks; always decomposed as `nprocx=ncpu, nprocy=1` (x-strips only) |
 | `simulation_time` | Window length in seconds; written to `&RUN runtime` |
@@ -193,7 +201,7 @@ belonging to the closure that is on (`u-dales/src/modsubgrid.f90`, subroutine
 | One-equation | `loneeqn=.true.` | `cm`/`ce1`/`ce2` — **not** in the namelist | prognostic SGS TKE |
 
 The closure itself is chosen by the `closure` constructor arg
-(`conf/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
+(`configs/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
 chosen one `.true.`, the others `.false.` — so the active closure is fully
 determined by the config rather than by whatever the case template shipped. Only
 the keys uDALES declares in the NAMSUBGRID namelist may ever be written: an
@@ -222,9 +230,9 @@ from `run.<expnr>.log`'s companion Python log.
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -237,7 +245,7 @@ value in the shared params sampler cannot be correct for all three at once.
 > **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
 > (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
 > for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
-> retune `conf/params/*.yaml` when switching a case's closure.
+> retune `configs/params/*.yaml` when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -283,8 +291,8 @@ model_discrepancy:
 Height is measured in metres from the native solver's vertical datum (`zf`);
 `canopy_height` is a fixed representative building height. The regularization is
 in s⁻¹ and the logarithmic cap is dimensionless. Coefficient priors live in
-`conf/params/static.yaml` or the `static_parameters` block of
-`conf/params/dynamic.yaml`; truth values live in the regular truth configs.
+`configs/params/static.yaml` or the `static_parameters` block of
+`configs/params/dynamic.yaml`; truth values live in the regular truth configs.
 Explicit distributions take precedence.
 `prior_std` is an optional fallback: its three positive finite scales supply
 zero-centred Gaussian priors for selected coefficients missing from a custom
@@ -339,8 +347,7 @@ The returned/saved state carries JSON in its `model_discrepancy` attribute:
 feature settings, coefficients, executable/build provenance and native multiplier
 extrema/saturation diagnostics. The native diagnostic text file is collected
 before output cleanup. Ensemble metadata is aggregated as
-`model_discrepancy_by_member`; forward rollouts retain each window under
-`model_discrepancy_by_window`. General native physics, multi-rank equivalence,
+`model_discrepancy_by_member`. General native physics, multi-rank equivalence,
 wall/energy budgets, continuous-versus-segmented forecasts, and coefficient
 recovery remain separate acceptance gates; compiling the extension does not
 demonstrate transfer skill.
@@ -411,6 +418,14 @@ uDALES requires preprocessing that converts an STL geometry into IBM (Immersed
 Boundary Method) input files (`solid_*.txt`, `fluid_boundary_*.txt`,
 `facet_sections_*.txt`, `facets.inp`, `facetarea.inp`). Two paths exist:
 
+**Keep the domain top 1.5 cells above the buildings.** Upstream's
+`matchFacetsCells.f90` does not clamp a facet's top cell in z, so geometry
+ending in the top cell of the w-grid makes it read past its arrays: the facet
+sections then depend on uninitialised memory (zeroed on Linux, random on
+macOS, where uDALES stops in `wallfunmom`). `ibm.py` refuses such geometry
+with an error naming the highest allowed roof. The tests' tiny grid uses a 15 m
+lid over the 10 m roof for this reason.
+
 **Python preprocessor** (default):
 [`python_udgeom/`](../libs/pyudales/src/pyudales/python_udgeom/) — a pure-Python
 reimplementation of the Matlab `write_inputs.m` workflow.
@@ -430,11 +445,12 @@ The Python preprocessor is invoked via `shell_scripts/write_inputs.sh`, which se
 against the experiment directory. It uses `trimesh` for STL loading.
 
 **Matlab preprocessor** (legacy, optional):
-Calls `u-dales/tools/write_inputs.sh` and requires `matlab_bin` to be on `PATH`.
+Calls `u-dales/tools/write_inputs.sh` and needs `matlab_bin` (unset by default)
+to point at your MATLAB binary.
 The Matlab path sleeps 90 s after subprocess launch to wait for MATLAB to finish.
 
 **Selector.** The `prepare._target_` in
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) points at
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) points at
 `pyurbanair.config.hydra_helpers.prepare_udales`, which receives
 `python_or_matlab: python` (the config default) and passes it to
 `forward_model.run_preprocessing(python_or_matlab=...)`.
@@ -495,7 +511,7 @@ nnudge = int(np.count_nonzero(heights < nnudge_meters))
 ```
 
 where `heights` are cell centres `(0.5*dz, 1.5*dz, …)`. This takes precedence
-over the raw `nnudge` key. Config default: `nnudge_meters: 4.0`.
+over the raw `nnudge` key.
 
 **`tnudge`**: nudging relaxation timescale in seconds (default 15.0). Xie & Castro
 "divergence" in practice is marginal dt-collapse at end-of-window, not a nudging
@@ -506,7 +522,7 @@ failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.
 
 uDALES v2.2.0 has two inlet-turbulence routes. The Lund (1998) recycling
 generator is dead code (documented below, and still asserted against the Fortran
-source by `tests/test_udales_inlet_turbulence.py`). The **precursor/driver**
+source by `tests/pyudales/test_udales_inlet_turbulence.py`). The **precursor/driver**
 route — `BCxm=3` → `idriver=2`, `moddriver.f90` — is wired end to end, and that
 is what `inlet_turbulence.enabled: true` drives, fed by driver planes
 **synthesised in Python** rather than by a precursor run.
@@ -648,9 +664,9 @@ intensity * |U(z)|` with constant TI in z, the backflow rate is
 0.25** — hundreds of backflow cells per window on a 200x32 inlet plane. Keep
 `intensity` at or below ~0.15 unless you first restore that guard.
 
-**Calibrated defaults.** `conf/model/pyudales.yaml` now ships values tuned for
-the `realistic` STL pool at 4 m spacing (`intensity: 0.15`,
-`length_scale_y/z: 24`, `length_scale_x: 48`, `time_step: 0.5`). Three things
+**Shipped values.** `configs/model/pyudales.yaml` carries values chosen for
+the `realistic` STL pool at 4 m spacing; its comments say which are still test
+values. Three things
 still bias the realised turbulence below its nominal value, all of which
 calibration should account for before reaching for more amplitude:
 
@@ -667,7 +683,7 @@ calibration should account for before reaching for more amplitude:
   refinement if the canyon flow turns out to care.
 
 See §8 of
-[docs/plans/udales_inlet_turbulence.md](plans/udales_inlet_turbulence.md).
+[docs/plans/implemented/udales_inlet_turbulence.md](plans/implemented/udales_inlet_turbulence.md).
 
 #### Why not the Lund generator
 
@@ -710,9 +726,13 @@ generator: it needs no Fortran changes at all.
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
 
-`run_with_dt_watchdog` replaces the bare `subprocess.run` used to launch uDALES.
-It spawns the process in its own session (so killing the session kills the entire
-`bash → mpiexec → MPI-rank` tree), then tails `run.<expnr>.log` in a polling loop:
+`run_with_dt_watchdog` launches uDALES through the shared
+[`pyurbanair.utils.solver_process.run_solver`](../src/pyurbanair/utils/solver_process.py),
+which every backend uses: the `bash → mpiexec → MPI-rank` tree runs in its own
+process group, is killed on return or error, and dies with its owner even when
+that Python process is killed without cleanup. A failure raises a
+`CalledProcessError` carrying the tail of `run.<expnr>.log`. The watchdog tails
+that log in a polling loop:
 
 ```
 line pattern: "... dt:  0.242654880"   ← parsed by _DT_RE
@@ -789,7 +809,7 @@ compensation knobs".
 | Module | Purpose |
 |---|---|
 | [`clean_up_utils.py`](../libs/pyudales/src/pyudales/utils/clean_up_utils.py) | `clean_output_dir` (delete output), `clean_temp_dir` (wipe experiment dir except namoptions/STL/config.sh) |
-| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_NCPU`, `MATLAB_BIN` |
+| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_TOOLSDIR`, `DA_BUILD`, `DA_WORKDIR`, `NCPU`, `MATLAB_BIN` |
 | [`dir_utils.py`](../libs/pyudales/src/pyudales/utils/dir_utils.py) | `DirectoryPaths` dataclass, `get_udales_directory_paths`, `get_project_root` |
 | [`file_update_utils.py`](../libs/pyudales/src/pyudales/utils/file_update_utils.py) | `update_prof_file`, `update_lscale_file`, `…_profile` variants — patch `prof.inp` and `lscale.inp` in-place |
 | [`file_utils.py`](../libs/pyudales/src/pyudales/utils/file_utils.py) | `copy_files`, `change_file_extensions` (rename experiment-suffix files) |
@@ -811,10 +831,11 @@ compensation knobs".
 
 ---
 
-## 10. Config wiring — `conf/model/pyudales.yaml`
+## 10. Config wiring — `configs/model/pyudales.yaml`
 
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) is the complete model
-config entry. Notable fields:
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) is the complete model
+config entry. Notable fields (values illustrative: the file is the source of
+truth and is tuned between runs):
 
 ```yaml
 name: pyudales
@@ -822,17 +843,18 @@ solver_name: udales          # selects dim_mapping in ObservationOperator
 
 forward_model:
   _target_: pyudales.forward_model.ForwardModel
-  case_dir: ${geometry.udales_case_dir}
+  case_dir: ${geometry.case_dir}
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
-  matlab_bin: /opt/sw/matlab-2023b/bin/matlab  # unused when python_or_matlab: python
-  ncpu: 25
+  matlab_bin: null            # only python_or_matlab: matlab needs it
+  ncpu: 1
   boundary_condition: inflow_outflow
   closure: vreman             # smagorinsky | vreman | null (keep template)
   nudging_config:
     tnudge: 15.0
-    nnudge_meters: 4.0          # skip nudging below 4 m (near-wall cells)
+    nnudge_meters: 16.0         # skip nudging below this height (m)
+    interior_nudging: true      # false -> inflow at the boundary only
     profile_config:
       type: power_law
       alpha: 0.25
@@ -843,9 +865,9 @@ forward_model:
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: false            # true -> synthetic driver planes, BCxm=3 (§6.1)
-    intensity: 0.1            # u'_rms / |U_mean(z)|
-    length_scale_x/y/z: 50/25/25   # m, digital-filter integral length scales
+    enabled: true             # synthetic driver planes, BCxm=3 (§6.1); false = no-op
+    intensity: 0.15           # u'_rms / |U_mean(z)|
+    length_scale_x/y/z: 24/12/12   # m, digital-filter integral length scales
     time_step: 0.5            # s, &DRIVER dtdriver
     driverjobnr: 998
   nx/ny/nz: ${domain.nx/ny/nz}
@@ -895,8 +917,9 @@ carry to the failed member's slot so the resampled state and the subgrid carry a
 consistent.
 
 `disable_spinup()` zeros `spinup_time` and rewrites `runtime` in namoptions.
-Called by `BaseRolloutForwardModel` after step 0 when
-`spinup_first_step_only=True`.
+Its only caller is the neural surrogate's `disable_spinup`, which forwards to
+its `spinup_forward_model`; warm-start windows zero `spinup_time` in
+`run_single` themselves.
 
 ---
 
@@ -915,10 +938,10 @@ written. `_read_fielddump` detects this and stitches per-rank slabs in Python vi
 exploding memory. Always use `_stitch_x_decomposition`.
 
 **Ensemble parallelism.** Each ensemble member runs its own uDALES instance with
-its own process group (`start_new_session=True`). With `ncpu=25` per member and
+its own process group (`run_solver`). With `ncpu=25` per member and
 `num_parallel_processes=4`, 100 MPI ranks run simultaneously. The DRAM-bandwidth
 ceiling on the development box is ~4–8 parallel processes (see
-[ensemble_scaling.md](temp/ensemble_scaling.md)).
+[ensemble_scaling.md](archive/ensemble_scaling.md)).
 
 ---
 
@@ -933,7 +956,7 @@ ceiling on the development box is ~4–8 parallel processes (see
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |
 | Debug a silent crash | Set `verbose: true` on the forward model (or `model.forward_model.verbose=true` CLI) |
-| Tune the instability watchdog | `instability_check:` block in `conf/model/pyudales.yaml` |
+| Tune the instability watchdog | `instability_check:` block in `configs/model/pyudales.yaml` |
 | Interpolate staggered → centred | `pyudales.utils.grid_utils.interpolate_grid(ds)` |
 | Change nudging height cutoff | `nudging_config.nnudge_meters` in model config |
 | Understand ncpu → nprocx mapping | `utils/ncpu_utils.validate_and_sync_ncpu` |

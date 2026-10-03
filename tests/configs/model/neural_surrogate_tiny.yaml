@@ -1,0 +1,15 @@
+# The neural surrogate on the CPU: the tiny stepper and latent generator the
+# tests train (`trained` fixture, in `paths.weights_dir`), cold-started from a
+# generated field on the synthetic training data's grid.
+defaults:
+  - neural_surrogate
+  - _self_
+
+forward_model:
+  model_dir: ${paths.weights_dir}/stepper
+  device: cpu
+  spinup_source: generative
+  generative_spinup:
+    model_dir: ${paths.weights_dir}/latent_generator
+    template_path: ${paths.training_data_dir}/tiny/state/test/sample_0000.nc
+    num_sampling_steps: 2

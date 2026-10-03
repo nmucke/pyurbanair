@@ -1,0 +1,22 @@
+# @package inflation
+# Filter spread inflation. Pick one with `filtering.inflation=${inflation.<name>}`.
+# The parameter-updating filter modes need an inflation or an evolution.
+
+none: null
+
+# Scale forecast anomalies by `factor` before each analysis.
+multiplicative:
+  _target_: data_assimilation.inflation.MultiplicativeInflation
+  factor: 1.05
+
+# Relax posterior spread a fraction `alpha` back to the prior spread
+# (Whitaker & Hamill 2012).
+rtps:
+  _target_: data_assimilation.inflation.RTPS
+  alpha: 0.6
+
+# Blend posterior anomalies with prior anomalies, weight `alpha` on the prior
+# (Zhang et al. 2004).
+rtpp:
+  _target_: data_assimilation.inflation.RTPP
+  alpha: 0.5

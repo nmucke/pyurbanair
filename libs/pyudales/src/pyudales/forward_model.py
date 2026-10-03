@@ -65,8 +65,6 @@ from .utils.window_checkpoint import WindowCheckpoint, validate_carry
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
-
 # Glob patterns for the grid-dependent IBM geometry files that the STL->IBM
 # Fortran step produces and that a precomputed bundle reuses.
 PRECOMPUTED_GEOM_PATTERNS = (
@@ -290,7 +288,7 @@ class ForwardModel(BaseForwardModel):
         ny: int | None = None,
         nz: int | None = None,
         bounds: DomainBounds | None = None,
-        matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
+        matlab_bin: Optional[pathlib.Path] = None,
         save_only_last_timestep: bool = False,
         output_frequency: Optional[float] = None,
         params: Optional[xarray.Dataset] = None,
@@ -325,7 +323,7 @@ class ForwardModel(BaseForwardModel):
             bounds: Domain bounds in the form
                 ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
                 Domain lengths are written to xlen/ylen/zsize in namoptions.
-            matlab_bin: The path to the MATLAB binary.
+            matlab_bin: The path to the MATLAB binary; only MATLAB preprocessing needs it.
             save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
             output_frequency: The frequency at which the output will be saved.
             params: The parameters of the forward model.
@@ -731,7 +729,7 @@ class ForwardModel(BaseForwardModel):
             raise ValueError("ForwardModel parameters are unexpectedly unset.")
 
         # Model-error knobs apply identically to both inflow branches, so resolve
-        # them here, outside the branch (docs/esmda_model_error_parameters.md §6.2).
+        # them here, outside the branch (docs/archive/esmda_model_error_parameters.md §6.2).
         # When ``vertical_inflow_exponent`` (α) is estimated it overrides the
         # construction-time shear; ``sgs_constant`` is written to the &NAMSUBGRID
         # key of whichever closure is active (``cs`` or ``c_vreman``).
@@ -808,7 +806,7 @@ class ForwardModel(BaseForwardModel):
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` inside the
         nudging config's ``profile_config`` so the inlet shear is per-member and
-        ESMDA-estimable (docs/esmda_model_error_parameters.md §2.1). Falls back to
+        ESMDA-estimable (docs/archive/esmda_model_error_parameters.md §2.1). Falls back to
         the construction-time config when the parameter is absent.
         """
         alpha = get_param_value(params, "vertical_inflow_exponent")
@@ -840,7 +838,7 @@ class ForwardModel(BaseForwardModel):
         not False.
 
         No-op when ``sgs_constant`` is absent, preserving the template value
-        (docs/esmda_model_error_parameters.md §2.2).
+        (docs/archive/esmda_model_error_parameters.md §2.2).
         """
         # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
         # model config's ``sgs_constant`` is the per-backend fallback; absent in
@@ -1059,6 +1057,11 @@ class ForwardModel(BaseForwardModel):
             _augment_runtime_library_paths(env)
 
         elif python_or_matlab == "matlab":
+            if self.matlab_bin is None:
+                raise ValueError(
+                    "MATLAB preprocessing needs matlab_bin (the path to your MATLAB "
+                    "binary); set model.forward_model.matlab_bin."
+                )
             # Use MATLAB-based preprocessing script
             command = [
                 "bash",
@@ -1267,7 +1270,7 @@ class ForwardModel(BaseForwardModel):
             ):
                 # Guarded: with the knob off nothing reads the clock, and the
                 # disabled path must not drop a file into the experiment dir
-                # (CLAUDE.md strict no-op rule).
+                # (AGENTS.md strict no-op rule).
                 write_elapsed_time(self.dirs, self._elapsed_time)
             return result
         finally:

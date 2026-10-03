@@ -12,8 +12,14 @@ import numpy as np
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.solver_process import run_solver
 
-from . import LOCAL_EXECUTE_SCRIPT, PALM_MODEL_SYSTEM_PATH, PALMRUN_BIN
+from . import (
+    LOCAL_EXECUTE_SCRIPT,
+    PALM_MODEL_SYSTEM_PATH,
+    install_palm,
+    resolve_palmrun,
+)
 from .stl_to_palm import stl_to_palm_topography
 from .utils.clean_up_utils import clean_palm_output_dir
 from .utils.compile_utils import compile_palm
@@ -433,11 +439,11 @@ class ForwardModel(BaseForwardModel):
         self.params = _merge_params(self.params, params)
 
         # Model-error knobs apply on both inflow branches, so resolve them up
-        # front (docs/esmda_model_error_parameters.md §6.2). ``profile_config``
+        # front (docs/archive/esmda_model_error_parameters.md §6.2). ``profile_config``
         # carries an α override from ``vertical_inflow_exponent`` when estimated.
         profile_config = self._resolve_profile_config(self.params)
 
-        # Driver selection (see docs/plans/palm_nudging_driver_plan.md §Design):
+        # Driver selection (see docs/plans/implemented/palm_nudging_driver_plan.md §Design):
         #   periodic  -> nudging driver (static OR time-varying), unless the
         #                escape hatch nudging_config.enabled=false restores
         #                today's un-driven periodic staging;
@@ -613,7 +619,7 @@ class ForwardModel(BaseForwardModel):
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` so the
         inlet shear is per-member and ESMDA-estimable
-        (docs/esmda_model_error_parameters.md §2.1). Falls back to the
+        (docs/archive/esmda_model_error_parameters.md §2.1). Falls back to the
         construction-time profile config when the parameter is absent.
         """
         base = self._nudging_config.get("profile_config")
@@ -636,7 +642,7 @@ class ForwardModel(BaseForwardModel):
         closure with a constant-Km model: a different turbulence regime, accepted
         purely as a bias-absorbing knob. The PALM ``sgs_constant`` therefore is
         NOT the same quantity as the LBM/uDALES Smagorinsky constants
-        (docs/esmda_model_error_parameters.md §2.3, §8). No-op when absent.
+        (docs/archive/esmda_model_error_parameters.md §2.3, §8). No-op when absent.
 
         PALM forbids a fixed ``km`` together with a Monin-Obukhov surface flux
         layer (check_parameters PAC0149), so a fixed ``km_constant`` also requires
@@ -729,7 +735,7 @@ class ForwardModel(BaseForwardModel):
 
         Two paths:
           - ``direct_palm.run_direct`` (default) — bypasses palmrun + palmbuild;
-            ~16x faster on tiny (see docs/palm_overhead_plan.md). It also runs
+            ~16x faster on tiny (see docs/archive/palm_overhead_plan.md). It also runs
             ``combine_plot_fields.x`` itself with the ``rrtmg.so`` symlinks it
             needs, so the merged 3D netCDF is actually produced. The slurm
             scripts already default to this; M4 flips it for local runs too.
@@ -738,18 +744,12 @@ class ForwardModel(BaseForwardModel):
             fails to load ``rrtmg.so`` and silently yields an all-zero field
             (caught by ``_assert_combine_succeeded``); prefer the default path.
         """
+        install_palm()
         if os.environ.get("PYPALM_USE_DIRECT_RUN", "1") != "0":
             self._run_direct()
             return
 
-        if PALMRUN_BIN is None and not shutil.which("palmrun"):
-            raise RuntimeError(
-                "palmrun not found. Install palm_model_system and either:\n"
-                "  - add palmrun to PATH, or\n"
-                "  - set PALM_BIN to the palmrun executable, or\n"
-                "  - set PALM_ROOT (palmrun is expected at $PALM_ROOT/bin/palmrun).\n"
-                "See https://palm.muk.uni-hannover.de for installation."
-            )
+        palmrun = resolve_palmrun()
         self._ensure_palm_config_in_cwd()
         logger.info("Running PALM …")
         # Run palmrun from experiment_dir (per-member) so parallel ensemble
@@ -763,46 +763,36 @@ class ForwardModel(BaseForwardModel):
         ]
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
-        if PALMRUN_BIN is not None:
-            bin_dir = str(PALMRUN_BIN.parent)
-            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["PATH"] = f"{palmrun.parent}:{env.get('PATH', '')}"
 
         # palmrun prompts interactively (">>> everything o.k. (y/n) ?") unless
         # it thinks it's in batch mode. With a blocking stdin this hangs forever
         # — which is exactly what happens for ensemble members run inside
         # forkserver pool workers (the serial truth run survives only because
-        # the main process inherits sbatch's /dev/null stdin). Force stdin to
-        # /dev/null so palmrun's `read` always hits EOF and proceeds.
+        # the main process inherits sbatch's /dev/null stdin). run_solver's stdin
+        # is /dev/null, so palmrun's `read` always hits EOF and proceeds.
         if self.verbose:
-            subprocess.run(command, check=True, env=env, stdin=subprocess.DEVNULL)
+            run_solver(command, env=env)
             return
 
-        # When not verbose, capture output so we can surface PALM's error
-        # message on failure instead of leaving the user with just an exit code.
+        # When not verbose, keep the output in a log so a failure carries PALM's
+        # error message instead of just an exit code.
+        log_path = self.dirs.experiment_dir / "palmrun.log"
         _t0 = time.monotonic()
-        result = subprocess.run(
-            command,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        logger.info(
-            "palmrun(%s) wall=%.1fs rc=%s",
-            self.experiment_name,
-            time.monotonic() - _t0,
-            result.returncode,
-        )
-        if result.returncode != 0:
-            tail = "\n".join((result.stdout or "").splitlines()[-80:])
-            logger.error(
-                "palmrun failed (exit %s). Last lines of captured output:\n%s",
-                result.returncode,
-                tail,
-            )
-            raise subprocess.CalledProcessError(
-                result.returncode, command, output=result.stdout
+        try:
+            with open(log_path, "w") as log:
+                run_solver(
+                    command,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    log_path=log_path,
+                )
+        finally:
+            logger.info(
+                "palmrun(%s) wall=%.1fs",
+                self.experiment_name,
+                time.monotonic() - _t0,
             )
 
     def _run_direct(self) -> None:
@@ -812,7 +802,7 @@ class ForwardModel(BaseForwardModel):
         prebuilt ``palm`` + ``combine_plot_fields.x`` (no mpirun on combine),
         and transfers ``DATA_3D_NETCDF`` to ``self.dirs.output_dir``. See
         ``pypalm.direct_palm`` for the staging contract and
-        ``docs/palm_overhead_plan.md`` §M0/§M1 for the per-phase numbers.
+        ``docs/archive/palm_overhead_plan.md`` §M0/§M1 for the per-phase numbers.
         """
         # Import inside the method so non-direct runs don't pay the import
         # cost and so the existing palmrun path doesn't depend on the new module.
@@ -833,14 +823,13 @@ class ForwardModel(BaseForwardModel):
             verbose=self.verbose,
         )
         logger.info(
-            "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs) rc=%s",
+            "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs)",
             self.experiment_name,
             time.monotonic() - _t0,
             result.stage_s,
             result.palm_s,
             result.combine_s,
             result.transfer_s,
-            result.palm_rc,
         )
 
     def _fit_output_window(self, state: xarray.Dataset) -> xarray.Dataset:
@@ -946,7 +935,7 @@ class ForwardModel(BaseForwardModel):
         velocity fields are streamed to a Fortran binary file and only merged
         into the per-PE ``_3d.NNN.nc`` netCDF by ``combine_plot_fields.x``.
         When that post-processing step is skipped or crashes (e.g. the macOS
-        dyld ``rrtmg.so`` load failure — see docs/pypalm_zero_field_debug.md),
+        dyld ``rrtmg.so`` load failure — see docs/archive/pypalm_zero_field_debug.md),
         the netCDF still opens cleanly but every u/v/w cell is exactly 0 with
         **no** topography fill values. A correct PALM field always carries
         NaN/fill at solid cells, so "finite everywhere AND identically zero"
@@ -965,7 +954,7 @@ class ForwardModel(BaseForwardModel):
                     "with no topography fill values — combine_plot_fields almost "
                     "certainly did not run (the per-PE netCDF skeleton was read "
                     "instead of the merged field). See "
-                    "docs/pypalm_zero_field_debug.md."
+                    "docs/archive/pypalm_zero_field_debug.md."
                 )
 
     def _load_and_postprocess_state(self) -> xarray.Dataset:

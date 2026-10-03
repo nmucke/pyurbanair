@@ -1,0 +1,23 @@
+# @package _global_
+# Tiny assimilation (configs/assimilation.yaml) on uDALES: two windows, one
+# ESMDA step, observations in 1.5 s bins (wide enough for
+# uDALES's slightly irregular output times).
+defaults:
+  - tiny
+  - override /model@truth_model: pyudales_tiny
+  - override /model@assim_model: pyudales_tiny
+
+assimilation:
+  num_windows: 2
+
+observation:
+  aggregation:
+    interval_seconds: 1.5
+
+smoothing:
+  num_steps: 1
+  localization: ${localization.none}
+
+filtering:
+  # filtering.mode=state keeps the parameters fixed.
+  parameter_evolution: null

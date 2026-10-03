@@ -9,21 +9,20 @@ gets a chance to kick in.
 
 This module runs the executable under a watchdog that tails the ``run.<exp>.log``
 file, parses the printed ``dt`` values, and -- if ``dt`` stays below an absolute
-floor for a sustained number of steps -- kills the whole process tree and raises
+floor for a sustained number of steps -- kills the whole process tree (through
+the shared ``pyurbanair.utils.solver_process.run_solver``) and raises
 ``subprocess.CalledProcessError``.  That is exactly the signal the ensemble layer
 already treats as a member failure, so the resample path fires unchanged, just
 much sooner.
 """
 
 import logging
-import os
 import re
-import signal
-import subprocess
-import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import IO, Any, Optional
+
+from pyurbanair.utils.solver_process import run_solver
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +36,7 @@ class InstabilityCheck:
     """Configuration for the dt-collapse watchdog.
 
     Attributes:
-        enabled: When False, the run executes exactly like
-            ``subprocess.run(..., check=True)`` with no monitoring.
+        enabled: When False, the run executes with no monitoring.
         min_dt: Absolute timestep floor.  A step whose ``dt`` is below this is
             counted as "low".
         patience: Number of *consecutive* low steps that must occur before the
@@ -117,27 +115,6 @@ def _consume_log(
     return offset, buffer, False
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """Terminate the run's whole process tree (bash -> mpiexec -> ranks)."""
-    try:
-        pgid = os.getpgid(proc.pid)
-    except ProcessLookupError:
-        return
-    try:
-        os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    # Give it a short grace period to unwind, then force-kill.
-    for _ in range(50):
-        if proc.poll() is not None:
-            return
-        time.sleep(0.1)
-    try:
-        os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
 def run_with_dt_watchdog(
     command: list[str],
     env: dict[str, str],
@@ -146,11 +123,11 @@ def run_with_dt_watchdog(
     stdout: int | IO[Any] | None = None,
     stderr: int | IO[Any] | None = None,
 ) -> None:
-    """Run ``command`` like ``subprocess.run(check=True)`` plus a dt watchdog.
+    """Run ``command`` through ``run_solver``, plus the dt watchdog when enabled.
 
-    Raises ``subprocess.CalledProcessError`` on a non-zero exit (matching the
-    previous ``check=True`` behavior) *and* when the timestep collapse criterion
-    in ``check`` trips, after killing the process tree.
+    Raises ``SolverProcessError`` (a ``subprocess.CalledProcessError`` carrying
+    the tail of ``log_path``) on a non-zero exit *and* when the timestep
+    collapse criterion in ``check`` trips, after killing the process tree.
 
     Args:
         command: Argument vector to execute.
@@ -162,46 +139,34 @@ def run_with_dt_watchdog(
             log file, not the pipe).
     """
     if not check.enabled:
-        subprocess.run(command, check=True, env=env, stdout=stdout, stderr=stderr)
+        run_solver(command, env=env, stdout=stdout, stderr=stderr, log_path=log_path)
         return
 
     # The log is reused across warm-start windows (tee -a appends), so only
     # parse lines written by *this* run: start from the current end-of-file.
     offset = log_path.stat().st_size if log_path.exists() else 0
     buffer = b""
+    watch = _DtWatch(check)
 
-    proc = subprocess.Popen(
+    def collapsed() -> bool:
+        nonlocal offset, buffer
+        offset, buffer, tripped = _consume_log(log_path, offset, buffer, watch)
+        if tripped:
+            logger.warning(
+                "uDALES instability detected (%s): dt < %g for %d consecutive "
+                "steps. Killing run early so it can be resampled.",
+                log_path.name,
+                check.min_dt,
+                check.patience,
+            )
+        return tripped
+
+    run_solver(
         command,
         env=env,
         stdout=stdout,
         stderr=stderr,
-        start_new_session=True,  # own process group so we can kill the whole tree
+        log_path=log_path,
+        poll=collapsed,
+        poll_interval_s=check.poll_interval_s,
     )
-    watch = _DtWatch(check)
-    tripped = False
-
-    try:
-        while True:
-            finished = proc.poll() is not None
-            offset, buffer, tripped = _consume_log(log_path, offset, buffer, watch)
-            if tripped:
-                logger.warning(
-                    "uDALES instability detected (%s): dt < %g for %d consecutive "
-                    "steps. Killing run early so it can be resampled.",
-                    log_path.name,
-                    check.min_dt,
-                    check.patience,
-                )
-                _kill_process_group(proc)
-                break
-            if finished:
-                break
-            time.sleep(check.poll_interval_s)
-    finally:
-        if proc.poll() is None:
-            _kill_process_group(proc)
-        proc.wait()
-
-    returncode = proc.returncode if proc.returncode is not None else -1
-    if tripped or returncode != 0:
-        raise subprocess.CalledProcessError(returncode, command)

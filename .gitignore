@@ -9,6 +9,10 @@ pyproject.lock
 __pycache__/
 *.pyc
 
+# Local agent files (personal permissions, scratch plans)
+.claude/settings.local.json
+.claude/plans/
+
 
 ##### pyudales #####
 libs/pyudales/u-dales/*
@@ -23,29 +27,30 @@ libs/pyudales/*.pyc
 ##### pypalm #####
 libs/pypalm/palm_model_system/
 libs/pypalm/palm_model_system.tar.gz
+libs/pypalm/palm_install.log
+libs/pypalm/.palm_install.lock
 libs/pypalm/__pycache__/*
 libs/pypalm/*.pyc
 
-# temp files
-.temp/*
-
 # Raw geometry exports dropped at the repo root (buildings.stl,
 # groundpatched_extrude.stl, ...). These are inputs to
-# tools/prepare_case_stl.py — often hundreds of MB — and are converted into the
-# committed, domain-frame STL under examples/<case>/. Never commit the raw ones.
+# scripts/tools/prepare_case_stl.py — often hundreds of MB — and are converted
+# into the committed, domain-frame STL under geometries/<case>/. Never commit the
+# raw ones.
 /*.stl
 /*.STL
 
 # UrbanTALES geometry dataset — bulk data (~350 MB rasters + ~600 MB STLs),
-# regenerable via examples/geometries/{download_urbantales_geometries,rasters_to_stl}.py.
+# regenerable via scripts/tools/{download_urbantales_geometries,rasters_to_stl}.py.
 # The scripts stay tracked; the downloaded/derived data does not.
-examples/geometries/raw/
-examples/geometries/processed/
+geometries/urbantales/raw/
+geometries/urbantales/processed/
 
-# Figures
+# Figures and animations
 *.pdf
 *.png
 *.mp4
+*.gif
 figures/*
 
 # torch weights
@@ -57,18 +62,23 @@ model_weights/
 # macOS files
 *.DS_Store
 
+# LaTeX build artefacts
+*.aux
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.out
+*.log
+
 # job output files
 job_scripts/delftblue/out_files/*
 job_scripts/snellius/out_files/*
+!job_scripts/*/out_files/.gitkeep
+slurm-*.out
 
 # training data
 training_data/*
-training_data_old/*
-
-# esmda files
-esmda_init_conditions/*
-esmda_results/*
-
 
 # cache
 .cache/*
@@ -76,50 +86,26 @@ esmda_results/*
 # Stray Hydra default run dir (when a script runs without the configured run.dir).
 outputs/
 
-# latex
+# latex (manuscripts)
 latex/
+local_files/
 
 # Ground truth simulations
 ground_truth/*
-ground_truth_spunup/*
-ground_truth_spunup/large/*
 
-# temp folders
-.temp_udales/*
-.temp_palm/*
+# temp / run folders
+.temp
 .temp_lbm/*
+.temp_pyudales/*
+.local_runs/*
 
 # Metrics and comparison
 comparison/*
 sweep_metrics/*
 
-# animations
-*.gif
-*.mp4
-
 # generated artifacts
-.temp
-slurm-*.out
 state.nc
 params.nc
 
-
-.local_runs/*
-.temp_pyudales/*
-.temp_pypalm/*
-.temp_pylbm/*
-.temp_pypalm_draw_a/*
-.temp_pypalm_draw_b/*
-.temp_pyudales_draw_a/*
-.temp_pyudales_draw_b/*
-
-
 # Results
 results/*
-
-# manuscripts and model comparison outputs
-manuscripts/
-model_comparison/
-
-# Presentations
-presentations/*

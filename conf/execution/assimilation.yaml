@@ -1,5 +1,0 @@
-# @package ensemble
-# Complete assimilation execution budget. Override individual values per run.
-ensemble_size: 8
-num_parallel_processes: 8
-num_cpus_per_process: 1

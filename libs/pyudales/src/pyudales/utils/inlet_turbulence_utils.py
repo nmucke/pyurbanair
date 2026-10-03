@@ -14,7 +14,7 @@ synthesised in Python from the same ESMDA parameters the nudging path uses
 (``velocity_magnitude``, ``inflow_angle``, ``vertical_inflow_exponent``), plus
 digital-filter turbulent fluctuations in the style of Xie & Castro (2008) — the
 same authors as the benchmark case. Design record:
-``docs/plans/udales_inlet_turbulence.md``.
+``docs/plans/implemented/udales_inlet_turbulence.md``.
 
 Why synthetic rather than a real precursor
 ------------------------------------------
@@ -218,7 +218,7 @@ def is_inlet_turbulence_enabled(config: Optional[dict]) -> bool:
     """True only when an ``inlet_turbulence`` dict explicitly enables the knob.
 
     ``None``/``{}``/``enabled: false`` are all a strict no-op — nothing is
-    written to namoptions and no driver files appear (CLAUDE.md no-op rule).
+    written to namoptions and no driver files appear (AGENTS.md no-op rule).
     """
     if not config:
         return False
