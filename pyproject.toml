@@ -110,6 +110,14 @@ evaluation = { path = "libs/evaluation", editable = true }
 # gcc 15.2 the CFD features pin. The generic requirement lives in the
 # neural-surrogates package itself (torch>=2.4,<3); the cpu/cuda features
 # pin the wheel variant (+cpu / +cu126) per environment.
+# Exception: on osx-arm64 the PyPI torch wheel bundles its own libomp, which
+# clashes with conda-forge llvm-openmp (OMP Error #15 on `import torch, numpy`).
+# There torch comes from conda-forge so the env has one OpenMP runtime (no
+# triton on macOS, so the conflict above does not apply).
+[tool.pixi.feature.neural-surrogates.target.osx-arm64.dependencies]
+pytorch = "2.12.*"
+torchvision = "0.27.*"
+
 [tool.pixi.feature.neural-surrogates.pypi-dependencies]
 neural-surrogates = { path = "libs/neural-surrogates", editable = true }
 # UPT architecture deps (pure-torch/python, PyPI-only). kappamodules is not on
