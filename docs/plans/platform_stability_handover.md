@@ -176,6 +176,23 @@ you get macOS feedback while you work.
    - update `AGENTS.md` "Environment notes": remove each workaround you
      eliminate, and keep the section short.
 
+## Notes for the macOS follow-up session
+
+After this PR, a separate session on a Mac (osx-arm64, a current macOS/Xcode)
+checks that everything fully works there. Prepare it: write
+`docs/plans/platform_stability_macos_followup.md` and keep it up to date as
+you work. It lists everything you could not run or verify yourself on macOS.
+- Anything only the CI runner covered, which has an older SDK than a current
+  Mac.
+- Fixes that only a current macOS SDK can confirm. For example, the shared
+  Apple-linker fix for the uDALES and LBM builds and the discrepancy kernel
+  test.
+- Anything else you couldn't verify.
+
+For each item give the exact commands to run (from a fresh clone), the expected
+result, and what to look at if it fails. Keep it short and actionable. That
+session works through it and then moves it to `docs/plans/implemented/`.
+
 ## Constraints
 
 - **Lean and simple:** the smallest change that makes each problem go away,
@@ -224,3 +241,6 @@ you get macOS feedback while you work.
   setup, and obsolete workarounds are removed.
 - [ ] The PR lists each problem above with its root cause and fix, or why it
   was out of reach.
+- [ ] `docs/plans/platform_stability_macos_followup.md` lists every macOS item
+  you couldn't run or verify yourself, with exact commands and expected
+  results for the follow-up session on a Mac.
