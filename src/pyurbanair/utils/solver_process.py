@@ -57,18 +57,23 @@ def log_tail(path: Optional[Path], lines: int = 40) -> str:
     return f"Last {len(tail)} lines of {path}:\n" + "\n".join(tail)
 
 
+# killpg errors meaning the group is gone. macOS answers EPERM, not ESRCH, when
+# only unreaped zombies are left in the group.
+_GROUP_GONE = (ProcessLookupError, PermissionError)
+
+
 def kill_process_group(proc: subprocess.Popen) -> None:
     """Stop the process group led by ``proc``: SIGTERM, then SIGKILL."""
     try:
         os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except _GROUP_GONE:
         return
     deadline = time.monotonic() + GRACE_SECONDS
     while proc.poll() is None and time.monotonic() < deadline:
         time.sleep(0.1)
     try:
         os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except _GROUP_GONE:
         pass
 
 

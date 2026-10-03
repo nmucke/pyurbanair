@@ -9,7 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from pyurbanair.utils.solver_process import SolverProcessError, run_solver
+from pyurbanair.utils.solver_process import (
+    SolverProcessError,
+    kill_process_group,
+    run_solver,
+)
 
 
 def _alive(pid: int) -> bool:
@@ -48,6 +52,14 @@ def test_failure_carries_the_log_tail(tmp_path: Path) -> None:
     assert error.value.returncode == 3
     assert "dt collapsed" in str(error.value)
     assert "step 0\n" not in str(error.value)
+
+
+def test_group_of_zombies_counts_as_gone() -> None:
+    # macOS: killpg on a group holding only unreaped zombies raises EPERM.
+    proc = subprocess.Popen(["true"], start_new_session=True)
+    _wait_dead(proc.pid)  # exited, not yet reaped
+    kill_process_group(proc)
+    proc.wait()
 
 
 def test_poll_stops_the_whole_tree(tmp_path: Path) -> None:
