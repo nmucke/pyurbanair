@@ -67,7 +67,6 @@ def execute(job: dict[str, Any]) -> None:
             for directory in environment.values():
                 pathlib.Path(directory).mkdir(parents=True, exist_ok=True)
             os.environ.pop("PYLBM_LBM_PATH", None)
-            os.environ["PYPALM_SKIP_AUTOINSTALL"] = "1"
             os.environ["PYLBM_AUTOSYNC_SUBMODULE"] = "0"
             os.environ.update(environment)
             working = root / "work"
@@ -81,7 +80,6 @@ def execute(job: dict[str, Any]) -> None:
                     "environment": {
                         **environment,
                         "PYLBM_LBM_PATH": None,
-                        "PYPALM_SKIP_AUTOINSTALL": "1",
                         "PYLBM_AUTOSYNC_SUBMODULE": "0",
                     },
                     "shared_build_lock": str(

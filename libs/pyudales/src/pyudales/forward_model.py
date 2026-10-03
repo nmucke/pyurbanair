@@ -65,8 +65,6 @@ from .utils.window_checkpoint import WindowCheckpoint, validate_carry
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
-
 # Glob patterns for the grid-dependent IBM geometry files that the STL->IBM
 # Fortran step produces and that a precomputed bundle reuses.
 PRECOMPUTED_GEOM_PATTERNS = (
@@ -290,7 +288,7 @@ class ForwardModel(BaseForwardModel):
         ny: int | None = None,
         nz: int | None = None,
         bounds: DomainBounds | None = None,
-        matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
+        matlab_bin: Optional[pathlib.Path] = None,
         save_only_last_timestep: bool = False,
         output_frequency: Optional[float] = None,
         params: Optional[xarray.Dataset] = None,
@@ -325,7 +323,7 @@ class ForwardModel(BaseForwardModel):
             bounds: Domain bounds in the form
                 ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
                 Domain lengths are written to xlen/ylen/zsize in namoptions.
-            matlab_bin: The path to the MATLAB binary.
+            matlab_bin: The path to the MATLAB binary; only MATLAB preprocessing needs it.
             save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
             output_frequency: The frequency at which the output will be saved.
             params: The parameters of the forward model.
@@ -1059,6 +1057,11 @@ class ForwardModel(BaseForwardModel):
             _augment_runtime_library_paths(env)
 
         elif python_or_matlab == "matlab":
+            if self.matlab_bin is None:
+                raise ValueError(
+                    "MATLAB preprocessing needs matlab_bin (the path to your MATLAB "
+                    "binary); set model.forward_model.matlab_bin."
+                )
             # Use MATLAB-based preprocessing script
             command = [
                 "bash",

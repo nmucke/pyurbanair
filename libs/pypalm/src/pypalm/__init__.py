@@ -1,13 +1,15 @@
 """pypalm - Python wrapper for the PALM LES model.
 
-On first import, downloads the PALM source tree (``palm_model_system``) as a
-tarball and runs its ``install`` script against the active pixi environment.
-After that, ``palmrun`` is available at ``palm_model_system/bin/palmrun``
-regardless of whether PALM was installed system-wide. Unlike pylbm, PALM does
-not need to be recompiled when the grid changes — nx/ny/nz are read from the
-``_p3d`` namelist at runtime.
+Importing never downloads or builds PALM. ``install_palm`` runs before every
+PALM run: the first time it downloads the pinned PALM source tree
+(``palm_model_system``) as a tarball and builds it with ``install_palm.sh``
+against the active pixi environment; after that it only checks the binary.
+Unlike pylbm, PALM does not need to be recompiled when the grid changes --
+nx/ny/nz are read from the ``_p3d`` namelist at runtime.
 """
 
+import contextlib
+import fcntl
 import logging
 import os
 import pathlib
@@ -15,6 +17,9 @@ import shutil
 import subprocess
 import tarfile
 import urllib.request
+from typing import Iterator
+
+from pyurbanair.utils.solver_process import log_tail
 
 __version__ = "0.1.0"
 
@@ -26,15 +31,19 @@ _project_root = pathlib.Path(__file__).parent.parent.parent
 LOCAL_EXECUTE_SCRIPT = _project_root / "shell_scripts" / "execute.sh"
 LOCAL_INSTALL_SCRIPT = _project_root / "shell_scripts" / "install_palm.sh"
 
-# Pin a tag here when a specific PALM release is required. "master" pulls the
-# current tip; a named release tag (e.g. "v25.10") pins to that release.
-PALM_VERSION = os.environ.get("PYPALM_PALM_VERSION", "master")
+# The PALM release this wrapper is tested against: the commit of tag v25.10.
+# A commit, unlike a branch or tag, cannot move under a fresh clone.
+PALM_COMMIT = "27f42650ec9ba885ddead8cbe50f736540d45e71"
 PALM_TARBALL_URL = (
     "https://gitlab.palm-model.org/releases/palm_model_system/-/archive/"
-    f"{PALM_VERSION}/palm_model_system-{PALM_VERSION}.tar.gz"
+    f"{PALM_COMMIT}/palm_model_system-{PALM_COMMIT}.tar.gz"
 )
 
 PALM_MODEL_SYSTEM_PATH = _project_root / "palm_model_system"
+# What install_palm.sh builds. bin/palmrun is not proof of a build: that perl
+# wrapper ships in the source tarball.
+PALM_BINARY = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
+INSTALL_LOG = _project_root / "palm_install.log"
 
 
 def _download_tarball(url: str, dest: pathlib.Path) -> None:
@@ -65,76 +74,66 @@ def _extract_tarball(tarball: pathlib.Path, target: pathlib.Path) -> None:
             tf.extract(m, target)
 
 
-def _ensure_palm_source() -> bool:
-    """Ensure ``palm_model_system/`` contains the PALM source tree.
+@contextlib.contextmanager
+def _lock() -> Iterator[None]:
+    """Serialize installs across processes (e.g. parallel ensemble members)."""
+    with open(_project_root / ".palm_install.lock", "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
-    Returns True when the source is present (either pre-existing or freshly
-    downloaded); False when download failed. Network failure is logged but
-    non-fatal — the user can still install PALM manually.
+
+def install_palm() -> None:
+    """Make sure the pinned PALM is downloaded and built.
+
+    A no-op once ``PALM_BINARY`` exists for ``PALM_COMMIT``. A tree from
+    another commit is replaced. A failed download or build raises with the
+    tail of ``INSTALL_LOG`` and leaves no binary, so the next call retries.
     """
-    install_script = PALM_MODEL_SYSTEM_PATH / "install"
-    if install_script.exists():
-        return True
-
-    logger.info("PALM source not found at %s — downloading …", PALM_MODEL_SYSTEM_PATH)
-    tarball = _project_root / "palm_model_system.tar.gz"
-    try:
-        _download_tarball(PALM_TARBALL_URL, tarball)
-        _extract_tarball(tarball, PALM_MODEL_SYSTEM_PATH)
-    except Exception as e:
-        logger.warning("Failed to download/extract PALM source: %s", e)
-        return False
-    finally:
-        if tarball.exists():
-            tarball.unlink()
-
-    return install_script.exists()
-
-
-def _install_palm() -> bool:
-    """Run the PALM install script if the compiled solver is missing.
-
-    The presence of ``bin/palmrun`` alone is not sufficient: that is a perl
-    wrapper that ships in the source tarball and exists as soon as the source
-    is extracted. The Fortran binary at ``MAKE_DEPOSITORY_default/palm`` is
-    what install_palm.sh actually produces, so gate on that instead.
-
-    Returns True when the compiled binary is present after this call. Install
-    failure is logged but non-fatal.
-    """
-    palm_bin = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
-    if palm_bin.exists():
-        return True
-
-    if not LOCAL_INSTALL_SCRIPT.exists():
-        logger.warning("install_palm.sh missing at %s", LOCAL_INSTALL_SCRIPT)
-        return False
-
-    logger.info("Installing PALM — this may take several minutes …")
-    try:
-        subprocess.run(
-            ["bash", str(LOCAL_INSTALL_SCRIPT), str(PALM_MODEL_SYSTEM_PATH)],
-            check=True,
-            env=os.environ.copy(),
-        )
-    except subprocess.CalledProcessError as e:
-        logger.warning("PALM install failed (exit %s).", e.returncode)
-        return False
-    except Exception as e:
-        logger.warning("PALM install raised: %s", e)
-        return False
-
-    return palm_bin.exists()
+    stamp = PALM_MODEL_SYSTEM_PATH / ".pypalm_commit"
+    with _lock():
+        pinned = stamp.is_file() and stamp.read_text().strip() == PALM_COMMIT
+        if pinned and os.access(PALM_BINARY, os.X_OK):
+            return
+        if not pinned:
+            shutil.rmtree(PALM_MODEL_SYSTEM_PATH, ignore_errors=True)
+            logger.info("Downloading PALM %s from %s", PALM_COMMIT, PALM_TARBALL_URL)
+            tarball = _project_root / "palm_model_system.tar.gz"
+            try:
+                _download_tarball(PALM_TARBALL_URL, tarball)
+                _extract_tarball(tarball, PALM_MODEL_SYSTEM_PATH)
+                stamp.write_text(PALM_COMMIT + "\n")
+            except Exception as error:
+                raise RuntimeError(
+                    f"Could not download PALM from {PALM_TARBALL_URL}: {error}"
+                ) from error
+            finally:
+                tarball.unlink(missing_ok=True)
+        logger.info("Building PALM; this takes several minutes (log: %s)", INSTALL_LOG)
+        with open(INSTALL_LOG, "w") as log:
+            result = subprocess.run(
+                ["bash", str(LOCAL_INSTALL_SCRIPT), str(PALM_MODEL_SYSTEM_PATH)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        if not os.access(PALM_BINARY, os.X_OK):
+            raise RuntimeError(
+                f"PALM build failed (install_palm.sh exited {result.returncode}); "
+                f"the next run retries it.\n{log_tail(INSTALL_LOG)}"
+            )
 
 
-def _resolve_palmrun() -> pathlib.Path | None:
+def resolve_palmrun() -> pathlib.Path:
     """Locate the palmrun executable.
 
     Preference order:
       1. ``PALM_BIN`` env var pointing at the palmrun script.
       2. ``palmrun`` on ``PATH``.
       3. ``$PALM_ROOT/bin/palmrun`` when ``PALM_ROOT`` is set.
-      4. ``<libs/pypalm/palm_model_system>/bin/palmrun`` (auto-installed).
+      4. ``<libs/pypalm/palm_model_system>/bin/palmrun`` (``install_palm``).
     """
     explicit = os.environ.get("PALM_BIN")
     if explicit and pathlib.Path(explicit).exists():
@@ -150,31 +149,4 @@ def _resolve_palmrun() -> pathlib.Path | None:
         if candidate.exists():
             return candidate
 
-    bundled = PALM_MODEL_SYSTEM_PATH / "bin" / "palmrun"
-    if bundled.exists():
-        return bundled
-
-    return None
-
-
-# Skip auto-install when the user has opted out (e.g. CI that installs PALM
-# separately) or already has palmrun on PATH / via env vars.
-_preinstalled = (
-    os.environ.get("PALM_BIN")
-    or shutil.which("palmrun")
-    or (os.environ.get("PALM_ROOT") and (pathlib.Path(os.environ["PALM_ROOT"]) / "bin" / "palmrun").exists())
-)
-_skip_autoinstall = os.environ.get("PYPALM_SKIP_AUTOINSTALL") == "1"
-
-if not _preinstalled and not _skip_autoinstall:
-    if _ensure_palm_source():
-        _install_palm()
-
-PALMRUN_BIN = _resolve_palmrun()
-if PALMRUN_BIN is None:
-    logger.info(
-        "palmrun not found. Auto-install may have failed — set PALM_BIN/PALM_ROOT "
-        "or install palm_model_system manually; ForwardModel.run() will raise."
-    )
-else:
-    logger.info("palmrun resolved to: %s", PALMRUN_BIN)
+    return PALM_MODEL_SYSTEM_PATH / "bin" / "palmrun"

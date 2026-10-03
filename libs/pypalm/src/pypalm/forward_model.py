@@ -14,7 +14,12 @@ import xarray
 from pyurbanair.base_forward_model import BaseForwardModel
 from pyurbanair.utils.solver_process import run_solver
 
-from . import LOCAL_EXECUTE_SCRIPT, PALM_MODEL_SYSTEM_PATH, PALMRUN_BIN
+from . import (
+    LOCAL_EXECUTE_SCRIPT,
+    PALM_MODEL_SYSTEM_PATH,
+    install_palm,
+    resolve_palmrun,
+)
 from .stl_to_palm import stl_to_palm_topography
 from .utils.clean_up_utils import clean_palm_output_dir
 from .utils.compile_utils import compile_palm
@@ -739,18 +744,12 @@ class ForwardModel(BaseForwardModel):
             fails to load ``rrtmg.so`` and silently yields an all-zero field
             (caught by ``_assert_combine_succeeded``); prefer the default path.
         """
+        install_palm()
         if os.environ.get("PYPALM_USE_DIRECT_RUN", "1") != "0":
             self._run_direct()
             return
 
-        if PALMRUN_BIN is None and not shutil.which("palmrun"):
-            raise RuntimeError(
-                "palmrun not found. Install palm_model_system and either:\n"
-                "  - add palmrun to PATH, or\n"
-                "  - set PALM_BIN to the palmrun executable, or\n"
-                "  - set PALM_ROOT (palmrun is expected at $PALM_ROOT/bin/palmrun).\n"
-                "See https://palm.muk.uni-hannover.de for installation."
-            )
+        palmrun = resolve_palmrun()
         self._ensure_palm_config_in_cwd()
         logger.info("Running PALM …")
         # Run palmrun from experiment_dir (per-member) so parallel ensemble
@@ -764,9 +763,7 @@ class ForwardModel(BaseForwardModel):
         ]
         env = os.environ.copy()
         _augment_runtime_library_paths(env)
-        if PALMRUN_BIN is not None:
-            bin_dir = str(PALMRUN_BIN.parent)
-            env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+        env["PATH"] = f"{palmrun.parent}:{env.get('PATH', '')}"
 
         # palmrun prompts interactively (">>> everything o.k. (y/n) ?") unless
         # it thinks it's in batch mode. With a blocking stdin this hangs forever

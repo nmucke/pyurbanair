@@ -32,13 +32,12 @@ from typing import Optional
 
 from pyurbanair.utils.solver_process import run_solver
 
-from . import PALM_MODEL_SYSTEM_PATH
+from . import PALM_BINARY, PALM_MODEL_SYSTEM_PATH
 from .utils.dir_utils import PALMDirectoryPaths
 
 logger = logging.getLogger(__name__)
 
 
-PALM_BINARY = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
 COMBINE_BINARY = (
     PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "combine_plot_fields.x"
 )
@@ -170,8 +169,8 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     for binary in (PALM_BINARY, COMBINE_BINARY):
         if not binary.exists():
             raise FileNotFoundError(
-                f"Prebuilt PALM binary missing at {binary}. Run pypalm "
-                f"compile_palm first (Hydra: model.compile=true)."
+                f"Prebuilt PALM binary missing at {binary}; "
+                "pypalm.install_palm() builds it."
             )
         link = dst_tempdir / binary.name
         # symlink is enough — both binaries are dynamically linked and read

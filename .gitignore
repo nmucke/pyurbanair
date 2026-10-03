@@ -27,6 +27,8 @@ libs/pyudales/*.pyc
 ##### pypalm #####
 libs/pypalm/palm_model_system/
 libs/pypalm/palm_model_system.tar.gz
+libs/pypalm/palm_install.log
+libs/pypalm/.palm_install.lock
 libs/pypalm/__pycache__/*
 libs/pypalm/*.pyc
 

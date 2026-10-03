@@ -90,7 +90,7 @@ def test_initial_state_selects_member_and_frame(tmp_path: pathlib.Path) -> None:
 
 
 @pytest.mark.integration  # type: ignore[misc]
-@pytest.mark.parametrize("model", ["pyudales_tiny", "pylbm_tiny"])  # type: ignore[misc]
+@pytest.mark.parametrize("model", ["pyudales_tiny", "pylbm_tiny", "pypalm_tiny"])  # type: ignore[misc]
 def test_solver(tmp_path: pathlib.Path, model: str) -> None:
     cfg = compose(
         "forward",

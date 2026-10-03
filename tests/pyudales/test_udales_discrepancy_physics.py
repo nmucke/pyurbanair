@@ -1,6 +1,7 @@
 """Native Vreman discrepancy regressions on the small frozen uDALES case."""
 
 import json
+import re
 from pathlib import Path
 from typing import cast
 
@@ -46,7 +47,27 @@ def _forecast(root: Path, *, ncpu: int, enabled: bool) -> xr.Dataset:
             else None
         )
     )
-    return cast(xr.Dataset, result.load())
+    state = cast(xr.Dataset, result.load())
+    namoptions = model.dirs.experiment_dir / f"namoptions.{model.dirs.experiment_name}"
+    match = re.search(r"courant\s*=\s*([0-9.]+)", namoptions.read_text())
+    assert match is not None
+    state.attrs["courant"] = float(match.group(1))
+    return state
+
+
+def _max_step(state: xr.Dataset) -> float:
+    """Courant bound on uDALES's adaptive step at the output instants.
+
+    ``dt <= courant * dx_i / |u_i|`` in every direction and cell. Each run
+    writes an output at the first step past the output time, so two runs'
+    output times differ by less than one such step.
+    """
+    return min(
+        state.attrs["courant"]
+        * float(np.diff(state[dim].values).max())
+        / float(np.abs(state[name].values).max())
+        for name, dim in (("u", "xm"), ("v", "ym"), ("w", "zm"))
+    )
 
 
 def _assert_finite_velocity(state: xr.Dataset) -> None:
@@ -59,10 +80,10 @@ def _assert_velocity_close(
     actual: xr.Dataset,
     expected: xr.Dataset,
     *,
-    time_atol: float,
     max_range_fraction: float,
     rms_range_fraction: float,
 ) -> None:
+    time_atol = max(_max_step(actual), _max_step(expected))
     for name in VELOCITY:
         assert actual[name].dims == expected[name].dims
         assert actual[name].shape == expected[name].shape
@@ -118,14 +139,12 @@ def test_zero_coefficients_recover_stock_and_agree_across_mpi_ranks(
     _assert_velocity_close(
         zero_one,
         stock_one,
-        time_atol=1e-4,
         max_range_fraction=1e-3,
         rms_range_fraction=1e-4,
     )
     _assert_velocity_close(
         zero_two,
         stock_two,
-        time_atol=1e-4,
         max_range_fraction=1e-3,
         rms_range_fraction=1e-4,
     )
