@@ -12,6 +12,7 @@ import numpy as np
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.solver_process import run_solver
 
 from . import LOCAL_EXECUTE_SCRIPT, PALM_MODEL_SYSTEM_PATH, PALMRUN_BIN
 from .stl_to_palm import stl_to_palm_topography
@@ -771,38 +772,30 @@ class ForwardModel(BaseForwardModel):
         # it thinks it's in batch mode. With a blocking stdin this hangs forever
         # — which is exactly what happens for ensemble members run inside
         # forkserver pool workers (the serial truth run survives only because
-        # the main process inherits sbatch's /dev/null stdin). Force stdin to
-        # /dev/null so palmrun's `read` always hits EOF and proceeds.
+        # the main process inherits sbatch's /dev/null stdin). run_solver's stdin
+        # is /dev/null, so palmrun's `read` always hits EOF and proceeds.
         if self.verbose:
-            subprocess.run(command, check=True, env=env, stdin=subprocess.DEVNULL)
+            run_solver(command, env=env)
             return
 
-        # When not verbose, capture output so we can surface PALM's error
-        # message on failure instead of leaving the user with just an exit code.
+        # When not verbose, keep the output in a log so a failure carries PALM's
+        # error message instead of just an exit code.
+        log_path = self.dirs.experiment_dir / "palmrun.log"
         _t0 = time.monotonic()
-        result = subprocess.run(
-            command,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        logger.info(
-            "palmrun(%s) wall=%.1fs rc=%s",
-            self.experiment_name,
-            time.monotonic() - _t0,
-            result.returncode,
-        )
-        if result.returncode != 0:
-            tail = "\n".join((result.stdout or "").splitlines()[-80:])
-            logger.error(
-                "palmrun failed (exit %s). Last lines of captured output:\n%s",
-                result.returncode,
-                tail,
-            )
-            raise subprocess.CalledProcessError(
-                result.returncode, command, output=result.stdout
+        try:
+            with open(log_path, "w") as log:
+                run_solver(
+                    command,
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    log_path=log_path,
+                )
+        finally:
+            logger.info(
+                "palmrun(%s) wall=%.1fs",
+                self.experiment_name,
+                time.monotonic() - _t0,
             )
 
     def _run_direct(self) -> None:
@@ -833,14 +826,13 @@ class ForwardModel(BaseForwardModel):
             verbose=self.verbose,
         )
         logger.info(
-            "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs) rc=%s",
+            "palm_direct(%s) wall=%.1fs (stage=%.2fs palm=%.2fs combine=%.2fs transfer=%.2fs)",
             self.experiment_name,
             time.monotonic() - _t0,
             result.stage_s,
             result.palm_s,
             result.combine_s,
             result.transfer_s,
-            result.palm_rc,
         )
 
     def _fit_output_window(self, state: xarray.Dataset) -> xarray.Dataset:

@@ -19,7 +19,7 @@ from mcp_server.jobs.supervisor import Supervisor, _forward_worker_environment
 @pytest.mark.parametrize(  # type: ignore[misc]
     "relative",
     [
-        "libs/pyudales/shell_scripts/build_udales_macos.sh",
+        "libs/pyudales/shell_scripts/build_udales.sh",
         "activation_scripts/cuda_activation.sh",
         "libs/pyudales/src/pyudales/solver_extensions/discrepancy/manifest.json",
         "libs/pyudales/src/pyudales/solver_extensions/discrepancy/discrepancy.patch",
@@ -42,7 +42,7 @@ def test_udales_executable_resources_change_code_identity(
 @pytest.mark.parametrize(  # type: ignore[misc]
     "relative",
     [
-        "libs/pyudales/shell_scripts/build_preprocessing_macos.sh",
+        "libs/pyudales/shell_scripts/build_preprocessing.sh",
         "libs/pyudales/src/pyudales/solver_extensions/discrepancy/discrepancy.patch",
     ],
 )

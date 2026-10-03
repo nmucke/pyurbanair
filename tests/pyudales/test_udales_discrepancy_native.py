@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from pyurbanair.utils.toolchain import apple_linker_flags
+
 ROOT = Path(__file__).resolve().parents[2]
 RESOURCES = ROOT / "libs/pyudales/src/pyudales/solver_extensions/discrepancy"
 UPSTREAM = ROOT / "libs/pyudales/u-dales"
@@ -172,6 +174,7 @@ end program test_kernel
     if sys.platform == "darwin":
         sdk = subprocess.check_output(["xcrun", "--show-sdk-path"], text=True).strip()
         command.extend(["-isysroot", sdk])
+    command.extend(apple_linker_flags(compiler))
     if default_real_8:
         command.append("-fdefault-real-8")
     # NaN validation itself must also work with upstream's FPE trap settings.
@@ -218,6 +221,7 @@ def test_native_vreman_zero_gradient_limit(tmp_path: Path) -> None:
                 ["xcrun", "--show-sdk-path"], text=True
             ).strip()
             command.extend(["-isysroot", sdk])
+        command.extend(apple_linker_flags(compiler))
         executable = tmp_path / label
         command.extend([str(source), "-o", str(executable)])
         subprocess.run(command, cwd=tmp_path, check=True, capture_output=True)
