@@ -20,6 +20,11 @@ SETTINGS = {
     "log_multiplier_cap": 1.0,
 }
 VELOCITY = ("u", "v", "w")
+# Replays of one window agree to roundoff, not bit for bit: uDALES plans its
+# Poisson FFTs with FFTW_MEASURE, whose choice of codelets depends on timing and
+# array alignment. Seen on macOS: up to 2.8e-17 m/s. A replay that fails to
+# restore the native carry, clocks or inputs differs by far more.
+REPLAY_ATOL = 1e-12
 
 
 def _forecast(root: Path, *, ncpu: int, enabled: bool) -> xr.Dataset:
@@ -194,7 +199,7 @@ def test_native_forecast_window_replays_cold_and_warm_state(
     model.begin_forecast_window()
     cold = model.run_single(params=reference_coefficients).load()
     cold_replay = model.run_single(params=reference_coefficients).load()
-    xr.testing.assert_equal(cold_replay, cold)
+    xr.testing.assert_allclose(cold_replay, cold, rtol=0, atol=REPLAY_ATOL)
     model.end_forecast_window(commit=True)
 
     initial_state = cold.isel(time=[-1])
@@ -211,7 +216,7 @@ def test_native_forecast_window_replays_cold_and_warm_state(
     warm_replay = model.run_single(
         state=initial_state, params=reference_coefficients
     ).load()
-    xr.testing.assert_equal(warm_replay, warm)
+    xr.testing.assert_allclose(warm_replay, warm, rtol=0, atol=REPLAY_ATOL)
     assert (
         np.max(np.abs(changed_coefficient_result["u"].values - warm["u"].values)) > 1e-7
     )

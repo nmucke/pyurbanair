@@ -117,3 +117,24 @@ pgrep -l -x 'u-dales|prterun'
 ```
 
 Expected: the tests pass and `pgrep` prints nothing.
+
+## 7. Open: one IBM preprocessor crash on macos-15
+
+Once, on the `macos-15` runner, `IBM_preproc.exe` (upstream's STL-to-IBM
+Fortran tool, compiled at run time by `pyudales/python_udgeom/ibm.py`) died
+with SIGSEGV during `test_spinup_trims_output[pyudales_stock]`; every other
+preprocessing of the same grid in that job, and on the other runners, worked.
+On Linux the same inputs run clean under `-fcheck=bounds`, AddressSanitizer
+and valgrind, with 1 and 8 threads and with 64 KB OpenMP stacks. The one
+remaining suspect is its parallel file I/O (`IBM_preproc_io.f90` reads and
+writes four files in concurrent OpenMP sections). Watch for it in item 4: the
+error names `IBM_preproc.exe ... SIGSEGV` in `write_inputs.<expnr>.log`. If it
+recurs, rerun that log's preprocessing with `OMP_NUM_THREADS=1` and with the
+sources built `-O0 -g -fcheck=all` to get a symbolized backtrace.
+
+## Background: identical runs agree to roundoff, not bit for bit
+
+uDALES plans its Poisson FFTs with `FFTW_MEASURE`, which picks codelets by
+timing and array alignment: two identical runs on one Mac can differ by one ulp
+(2.8e-17 m/s seen on `macos-26`). That is expected; the replay test compares to
+1e-12 m/s for that reason. Larger differences are a bug.
