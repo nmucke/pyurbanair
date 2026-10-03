@@ -19,6 +19,7 @@ from pylbm.utils import get_lbm_directory_paths
 
 from pyurbanair.base_ensemble_forward_model import ForwardModelRunFailure
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.solver_process import run_solver
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import (
@@ -596,18 +597,15 @@ class ForwardModel(BaseForwardModel):
             f"{self.dirs.executable_path}"
         )
         try:
-            # check=True so a non-zero LBM exit raises CalledProcessError, which
-            # the ensemble runner catches to resample the member from a survivor.
-            # Without it, a crashed member silently produces partial/no output and
-            # later breaks the cross-member concat with an AlignmentError.
-            _ = subprocess.run(
-                shell_cmd,
-                shell=True,
+            # A non-zero LBM exit raises CalledProcessError, which the ensemble
+            # runner catches to resample the member from a survivor. Without it,
+            # a crashed member silently produces partial/no output and later
+            # breaks the cross-member concat with an AlignmentError.
+            run_solver(
+                ["sh", "-c", shell_cmd],
                 env=env,
                 stderr=self.stderr,
                 stdout=self.stdout,
-                text=True,
-                check=True,
             )
         finally:
             # Always return to original directory, even if the run failed.

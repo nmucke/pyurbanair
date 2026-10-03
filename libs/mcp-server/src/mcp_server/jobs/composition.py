@@ -52,8 +52,10 @@ def validate_targets(config: dict[str, Any], repo_root: str | Path) -> None:
             not isinstance(value, str) or value not in allowed
         ):
             raise ValueError(f"{path}: untrusted executable target {value!r}")
-        if path.rsplit(".", 1)[-1] == "matlab_bin" and (
-            not isinstance(value, str) or value not in executables
+        if (
+            path.rsplit(".", 1)[-1] == "matlab_bin"
+            and value is not None
+            and (not isinstance(value, str) or value not in executables)
         ):
             raise ValueError(
                 f"{path}: executable paths must be registered in repository model configuration"

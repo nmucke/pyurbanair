@@ -2,13 +2,14 @@
 
 import pathlib
 import shlex
+from typing import Optional
 
 from .dir_utils import DirectoryPaths
 
 
 def create_config_sh(
     dirs: DirectoryPaths,
-    matlab_bin: pathlib.Path,
+    matlab_bin: Optional[pathlib.Path],
     ncpu: int,
 ) -> None:
     """
@@ -19,7 +20,7 @@ def create_config_sh(
 
     Args:
         dirs: DirectoryPaths instance containing experiment_base_dir, udales_root_path, and output_dir.
-        matlab_bin: The path to the MATLAB binary.
+        matlab_bin: The path to the MATLAB binary, or None without MATLAB.
         ncpu: The number of CPUs to use.
     """
     config_sh_path = dirs.experiment_dir / "config.sh"
@@ -32,7 +33,7 @@ def create_config_sh(
         "DA_BUILD": executable,
         "DA_WORKDIR": dirs.output_dir,
         "NCPU": ncpu,
-        "MATLAB_BIN": matlab_bin,
+        "MATLAB_BIN": matlab_bin or "",
     }
     with open(config_sh_path, "w") as f:
         for key, value in values.items():

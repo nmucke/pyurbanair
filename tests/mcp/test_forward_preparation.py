@@ -46,7 +46,7 @@ print(json.dumps(result['config']['paths']))
 def test_test_overlays_compose(checkout: Path) -> None:
     config = compose_forward_config(checkout, ["+test=forward"])["config"]
     assert config["model"]["name"] == "pyudales"
-    assert [config["domain"][key] for key in ("nx", "ny", "nz")] == [20, 20, 4]
+    assert [config["domain"][key] for key in ("nx", "ny", "nz")] == [20, 20, 6]
     assert config["model"]["forward_model"]["nudging_config"]["nnudge_meters"] == 4.0
     config = compose_forward_config(checkout, ["+test=forward", "model=pylbm_tiny"])[
         "config"
@@ -156,7 +156,7 @@ def test_plan_records_forward_run(checkout: Path, tmp_path: Path) -> None:
     assert plan["validation"]["configuration_valid"]
     assert plan["resources"]["members"] == 2
     assert plan["resources"]["windows"] == 2
-    assert plan["resources"]["grid"] == {"nx": 20, "ny": 20, "nz": 4}
+    assert plan["resources"]["grid"] == {"nx": 20, "ny": 20, "nz": 6}
     assert "artifacts/state.nc" in plan["expected_artifacts"]
     assert {entry["field"] for entry in plan["diff_from_defaults"]} >= {
         "domain.nx",

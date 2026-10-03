@@ -8,10 +8,6 @@ lengths, ``lod=2`` attributes, and no fill values — plus coexistence with a
 time-varying ``inflow_plane_*`` driver in the same file.
 """
 
-import os
-
-os.environ.setdefault("PYPALM_SKIP_AUTOINSTALL", "1")
-
 import numpy as np
 import pytest
 import xarray

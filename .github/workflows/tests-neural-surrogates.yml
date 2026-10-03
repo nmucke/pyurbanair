@@ -27,8 +27,12 @@ concurrency:
 
 jobs:
   test:
-    name: tests/neural_surrogates
-    runs-on: ubuntu-latest
+    name: tests/neural_surrogates (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7

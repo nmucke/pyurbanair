@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 from pyudales.utils import solver_build as build
 
+from pyurbanair.utils import toolchain
+
 
 @pytest.fixture  # type: ignore[misc]
 def fake_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str]]:
@@ -28,12 +30,12 @@ def fake_build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[list[str
 
     def run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         calls.append(command)
-        if command[0] == "bash" and command[1].endswith("build_udales_macos.sh"):
+        if command[0] == "bash" and command[1].endswith("build_udales.sh"):
             executable = Path(command[-1]) / "u-dales"
             executable.parent.mkdir()
             executable.write_bytes(b"native executable")
             executable.chmod(0o755)
-        if command[0] == "bash" and command[1].endswith("build_preprocessing_macos.sh"):
+        if command[0] == "bash" and command[1].endswith("build_preprocessing.sh"):
             executable = Path(command[-1]) / "tools/View3D/build/src/view3d"
             executable.parent.mkdir(parents=True)
             executable.write_bytes(b"preprocessor")
@@ -88,8 +90,10 @@ def test_macos_conda_build_uses_system_linker(
     compiler = prefix / "bin/mpif90"
     compiler.parent.mkdir(parents=True)
     compiler.touch()
-    monkeypatch.setattr(build.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(build.shutil, "which", lambda *args, **kwargs: str(compiler))
+    monkeypatch.setattr(toolchain.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        toolchain.shutil, "which", lambda *args, **kwargs: str(compiler)
+    )
     monkeypatch.setenv("CONDA_PREFIX", str(prefix))
     monkeypatch.setenv("LDFLAGS", "-Wl,-dead_strip")
 
@@ -104,8 +108,10 @@ def test_macos_pixi_build_without_conda_prefix_uses_system_linker(
     compiler = tmp_path / ".pixi/envs/dev/bin/mpif90"
     compiler.parent.mkdir(parents=True)
     compiler.touch()
-    monkeypatch.setattr(build.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(build.shutil, "which", lambda *args, **kwargs: str(compiler))
+    monkeypatch.setattr(toolchain.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        toolchain.shutil, "which", lambda *args, **kwargs: str(compiler)
+    )
     monkeypatch.delenv("CONDA_PREFIX", raising=False)
     monkeypatch.delenv("LDFLAGS", raising=False)
 
@@ -115,7 +121,7 @@ def test_macos_pixi_build_without_conda_prefix_uses_system_linker(
 def test_linux_build_does_not_change_linker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(build.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(toolchain.platform, "system", lambda: "Linux")
     monkeypatch.setenv("LDFLAGS", "-Wl,--as-needed")
     assert build._build_environment()["LDFLAGS"] == "-Wl,--as-needed"
 

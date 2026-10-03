@@ -18,23 +18,33 @@ for wind-environment studies; the wrapper drives it in that mode
 
 ### Source acquisition
 
+Importing pypalm never downloads or builds anything. `install_palm()` in
 [libs/pypalm/src/pypalm/__init__.py](../libs/pypalm/src/pypalm/__init__.py)
-downloads the PALM source tree as a tarball from GitLab on first import and
-runs `install_palm.sh` to produce the compiled binary
-`palm_model_system/MAKE_DEPOSITORY_default/palm`. Unlike pylbm, **PALM does not
-need to be recompiled when the grid changes** — `nx/ny/nz` are read from the
-`_p3d` namelist at runtime.
+runs before every PALM run and is a no-op once PALM is built. The first time,
+it downloads the pinned release (`PALM_COMMIT`, the commit of tag `v25.10`) as a
+tarball from GitLab and runs `install_palm.sh` against the pixi env, logging to
+`libs/pypalm/palm_install.log`, to produce
+`palm_model_system/MAKE_DEPOSITORY_default/palm`. A failed download or build
+raises with the log tail and the next run retries; a tree from another commit
+is replaced. Linux and macOS (osx-arm64) build the same way: the installer
+runs with the pixi env first on `CMAKE_PREFIX_PATH` (so PALM's CMake finds the
+env's FFTW and NetCDF, never e.g. Homebrew's), with `HOME` set to
+`palm_model_system` (the installer otherwise writes `~/.palm/palmtest*.yml`),
+and on macOS with Apple's linker (`apple_linker_flags`, through `LDFLAGS` and
+Open MPI's `OMPI_LDFLAGS`, plus header padding for the `install_name_tool`
+fix-up in `install_palm.sh`). Unlike pylbm,
+**PALM does not need to be recompiled when the grid changes** — `nx/ny/nz` are
+read from the `_p3d` namelist at runtime (PALM needs `nz >= 14`).
 
 Palmrun resolution priority:
 1. `PALM_BIN` env var
 2. `palmrun` on `PATH`
 3. `$PALM_ROOT/bin/palmrun`
-4. Auto-installed `palm_model_system/bin/palmrun`
+4. `palm_model_system/bin/palmrun` built by `install_palm`
 
-Skip auto-install with `PYPALM_SKIP_AUTOINSTALL=1`.
-
-The version is pinned by `PALM_VERSION` (default `master`; set the env var or
-edit the module constant to pin a release tag like `v25.10`).
+Both launch paths run through the shared
+`pyurbanair.utils.solver_process.run_solver`: a failure carries the tail of
+PALM's output, and no `mpirun`/`palm` process outlives its Python owner.
 
 ### Lazy-import invariant
 
@@ -643,7 +653,7 @@ bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 
 | You want to change… | Look here |
 |---|---|
-| PALM version pinned | `PALM_VERSION` constant in [`__init__.py`](../libs/pypalm/src/pypalm/__init__.py) |
+| PALM version pinned | `PALM_COMMIT` constant in [`__init__.py`](../libs/pypalm/src/pypalm/__init__.py) |
 | Grid / bounds / time | `configs/case/<name>.yaml` (`domain` + `time` blocks) |
 | Inflow profile shape (`alpha`) | `nudging_config.profile_config.alpha` in `pypalm.yaml` (or via `vertical_inflow_exponent` ESMDA parameter) |
 | SGS knob | `sgs_constant` parameter prior in `configs/params/` (maps to `km_constant` m²/s — not dimensionless) |

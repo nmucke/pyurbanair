@@ -40,6 +40,13 @@ pixi shell -e dev                            # activate it
 Other environments: `cuda` (GPU), `snellius` and `delftblue` (HPC), `mcp`
 (the agent interface), `rendering` (3D views).
 
+Supported platforms are Linux (linux-64) and macOS on Apple silicon
+(osx-arm64). The pixi environment brings the compilers, MPI, NetCDF and FFTW;
+nothing else needs installing on Linux. On macOS, also install Xcode's command
+line tools once (`xcode-select --install`) for the SDK and Apple's linker. The
+solvers build themselves on first use: uDALES and the LBM from the pinned
+submodules, PALM from a pinned release it downloads once.
+
 ## Quick start
 
 Every run is configured by [Hydra](https://hydra.cc) from `configs/`. Override

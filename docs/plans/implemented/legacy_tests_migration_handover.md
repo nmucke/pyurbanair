@@ -110,7 +110,7 @@ grep -rlE "compose_test_cfg|compose_module_cfg|surrogate_model_dir_factory|TEST_
   - some multi-rank uDALES integration tests are flaky.
 
   Compare against the base branch before blaming your change. A separate PR
-  (`docs/plans/platform_stability_handover.md`) fixes these.
+  (`docs/plans/implemented/platform_stability_handover.md`) fixes these.
 - **Untouchable files:** never edit `archive/`. Never commit, stash or reset
   `configs/*.yaml` edits you didn't make (the user tunes them between runs).
 

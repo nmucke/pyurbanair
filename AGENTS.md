@@ -130,7 +130,8 @@ Each script's module docstring lists its options and outputs.
 
 ## Environment notes
 
-- macOS: `import torch` can abort on an OpenMP clash; set
-  `KMP_DUPLICATE_LIB_OK=TRUE`.
-- `tests/pyudales/test_udales_discrepancy_native.py` fails to compile its
-  kernel with the macOS gfortran; CI (Linux) runs it.
+- Linux (linux-64) and macOS (osx-arm64) are supported and both run in CI;
+  macOS also needs Xcode's command line tools. Setup per platform is in
+  `README.md` and the backend docs.
+- Solver processes go through `pyurbanair.utils.solver_process.run_solver`, so
+  none outlives its Python owner; launch new ones through it too.
