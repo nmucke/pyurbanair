@@ -47,6 +47,10 @@ line tools once (`xcode-select --install`) for the SDK and Apple's linker. The
 solvers build themselves on first use: uDALES and the LBM from the pinned
 submodules, PALM from a pinned release it downloads once.
 
+If pixi fails to link a package after an update (e.g. `failed to link
+pytorch`), delete the environment and reinstall: `rm -rf .pixi/envs/dev &&
+pixi run setup-dev`.
+
 ## Quick start
 
 Every run is configured by [Hydra](https://hydra.cc) from `configs/`. Override
