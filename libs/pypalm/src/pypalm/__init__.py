@@ -13,6 +13,7 @@ import fcntl
 import logging
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -20,6 +21,7 @@ import urllib.request
 from typing import Iterator
 
 from pyurbanair.utils.solver_process import log_tail
+from pyurbanair.utils.toolchain import apple_linker_flags
 
 __version__ = "0.1.0"
 
@@ -87,6 +89,45 @@ def _lock() -> Iterator[None]:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _install_environment() -> dict[str, str]:
+    """The environment ``install_palm.sh`` builds PALM in.
+
+    - ``CMAKE_PREFIX_PATH`` puts the pixi env first, so PALM's CMake finds its
+      FFTW and NetCDF instead of a system copy (e.g. Homebrew's FFTW).
+    - ``HOME`` keeps the installer's ``~/.palm/palmtest*.yml`` (and pip caches)
+      inside ``palm_model_system`` instead of the user's home.
+    - On macOS, Apple's linker (``apple_linker_flags``) for both of PALM's link
+      paths: ``LDFLAGS`` for its CMake checks, ``OMPI_LDFLAGS`` for the links
+      through ``mpif90``. ``OMPI_LDFLAGS`` replaces the wrapper's own linker
+      flags, so those are kept. The header padding leaves room for the
+      ``install_name_tool`` fix-up in ``install_palm.sh``.
+    """
+    env = os.environ.copy()
+    prefixes = [env.get("CONDA_PREFIX", ""), env.get("CMAKE_PREFIX_PATH", "")]
+    env["CMAKE_PREFIX_PATH"] = os.pathsep.join(p for p in prefixes if p)
+    env["HOME"] = str(PALM_MODEL_SYSTEM_PATH)
+    apple = apple_linker_flags("mpif90", env)
+    if apple:
+
+        def showme(part: str) -> list[str]:
+            command = ["mpif90", f"--showme:{part}"]
+            output = subprocess.run(
+                command, capture_output=True, text=True, check=True, env=env
+            ).stdout
+            return shlex.split(output)
+
+        compile_flags = set(showme("compile"))
+        wrapper = [
+            flag
+            for flag in showme("link")
+            if flag not in compile_flags and not flag.startswith("-l")
+        ]
+        link = [*apple, "-Wl,-headerpad_max_install_names"]
+        env["LDFLAGS"] = " ".join([env.get("LDFLAGS", "").strip(), *link]).strip()
+        env["OMPI_LDFLAGS"] = " ".join([*wrapper, *link])
+    return env
+
+
 def install_palm() -> None:
     """Make sure the pinned PALM is downloaded and built.
 
@@ -120,7 +161,11 @@ def install_palm() -> None:
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
+                env=_install_environment(),
             )
+        if result.returncode != 0:
+            # A binary from a failed install (e.g. its macOS fix-up) is unusable.
+            PALM_BINARY.unlink(missing_ok=True)
         if not os.access(PALM_BINARY, os.X_OK):
             raise RuntimeError(
                 f"PALM build failed (install_palm.sh exited {result.returncode}); "

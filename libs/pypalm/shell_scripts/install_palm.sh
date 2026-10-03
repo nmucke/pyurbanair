@@ -85,12 +85,15 @@ fi
 if [ "$(uname)" = "Darwin" ]; then
     rrtmg_so="${palm_root}/MAKE_DEPOSITORY_default/rrtmg/rrtmg.so"
     palm_tar="${palm_root}/MAKE_DEPOSITORY_default/palm_current_version.tar"
+    # The links leave header room for these (-headerpad_max_install_names, set
+    # by pypalm.install_palm); a failure here means palm cannot load rrtmg.so.
     if [ -f "${rrtmg_so}" ] && command -v install_name_tool >/dev/null 2>&1; then
-        install_name_tool -id "${rrtmg_so}" "${rrtmg_so}"
-        install_name_tool -change "rrtmg.so" "${rrtmg_so}" "${palm_bin}"
-        if [ -f "${palm_tar}" ]; then
-            (cd "${palm_root}/MAKE_DEPOSITORY_default" \
-             && tar -uf "$(basename "${palm_tar}")" palm rrtmg/rrtmg.so)
+        if ! install_name_tool -id "${rrtmg_so}" "${rrtmg_so}" \
+            || ! install_name_tool -change "rrtmg.so" "${rrtmg_so}" "${palm_bin}" \
+            || ! (cd "${palm_root}/MAKE_DEPOSITORY_default" \
+                  && tar -uf "$(basename "${palm_tar}")" palm rrtmg/rrtmg.so); then
+            echo "install_palm.sh: the macOS rrtmg.so install-name fix-up failed." 1>&2
+            exit 1
         fi
     fi
 fi

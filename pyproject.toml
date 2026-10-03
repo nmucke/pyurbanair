@@ -19,6 +19,9 @@ requires-python = ">= 3.12,<3.13"
 version = "0.1.0"
 
 [tool.pixi.workspace]
+# pixi.lock is written by pixi 0.63; an older pixi rewrites it on install
+# (drops pypi-prerelease-mode, re-adds editable flags), dirtying a fresh clone.
+requires-pixi = ">=0.63"
 preview = ["pixi-build"]
 channels = ["conda-forge","robostack"]
 platforms = ["osx-arm64","linux-64"]

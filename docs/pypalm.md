@@ -26,7 +26,13 @@ tarball from GitLab and runs `install_palm.sh` against the pixi env, logging to
 `libs/pypalm/palm_install.log`, to produce
 `palm_model_system/MAKE_DEPOSITORY_default/palm`. A failed download or build
 raises with the log tail and the next run retries; a tree from another commit
-is replaced. Linux and macOS (osx-arm64) build the same way. Unlike pylbm,
+is replaced. Linux and macOS (osx-arm64) build the same way: the installer
+runs with the pixi env first on `CMAKE_PREFIX_PATH` (so PALM's CMake finds the
+env's FFTW and NetCDF, never e.g. Homebrew's), with `HOME` set to
+`palm_model_system` (the installer otherwise writes `~/.palm/palmtest*.yml`),
+and on macOS with Apple's linker (`apple_linker_flags`, through `LDFLAGS` and
+Open MPI's `OMPI_LDFLAGS`, plus header padding for the `install_name_tool`
+fix-up in `install_palm.sh`). Unlike pylbm,
 **PALM does not need to be recompiled when the grid changes** — `nx/ny/nz` are
 read from the `_p3d` namelist at runtime (PALM needs `nz >= 14`).
 
