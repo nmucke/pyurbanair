@@ -45,7 +45,7 @@ def test_every_option_resolves(group: str, tmp_path: pathlib.Path) -> None:
 def test_test_overlay_is_tiny(name: str, tmp_path: pathlib.Path) -> None:
     overlay = "+test=" + name.split("/")[-1]
     cfg = compose(name, overlay, root=tmp_path)
-    assert (cfg.domain.nx, cfg.domain.ny, cfg.domain.nz) == (20, 20, 4)
+    assert (cfg.domain.nx, cfg.domain.ny, cfg.domain.nz) == (20, 20, 6)
     assert cfg.ensemble.ensemble_size == 2
 
 
