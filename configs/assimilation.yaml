@@ -63,7 +63,8 @@ assimilation:
   # Save the per-cycle analyzed params/state histories (analysis frames only).
   save_history: true
   # Also save forecast frames at the full output cadence
-  # (windows/window_{w}_forecast_state.nc). Large; off by default.
+  # (windows/window_{w}_forecast_state.nc); the hybrid's filter too.
+  # Large; off by default.
   save_forecast_history: false
 
 observation:

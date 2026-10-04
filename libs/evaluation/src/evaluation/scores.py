@@ -722,13 +722,16 @@ def vector_sensor_metrics(
         shared, time-aligning metric is reused unchanged).
       * ``energy_score(t)`` -- the multivariate CRPS (:func:`_energy_score`) over
         the aligned member/truth vectors.
+      * ``spread(t) = sqrt(mean_s sum_c var_ens,c)`` -- the ensemble spread on
+        the same vector norm as ``rmse`` (``ddof=1``; ``nan`` for one member),
+        so :func:`spread_skill` compares like with like.
 
     Args:
         truth_comp: ``(component, time, sensor)`` truth series.
         ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
 
     Returns:
-        ``{"rmse": (T,), "energy_score": (T,)}``.
+        ``{"rmse": (T,), "energy_score": (T,), "spread": (T,)}``.
     """
     components = [str(c) for c in np.asarray(truth_comp["component"].values)]
     # Per-component metrics reuse the shared compute_sensor_metrics, which also
@@ -743,7 +746,15 @@ def vector_sensor_metrics(
     rmse = np.sqrt(np.sum([per[c]["rmse"] ** 2 for c in components], axis=0))  # (T,)
     members = np.stack([per[c]["members"] for c in components], axis=0)  # (C,E,T,S)
     truth = np.stack([per[c]["truth"] for c in components], axis=0)  # (C,T,S)
-    return {"rmse": rmse, "energy_score": _energy_score(members, truth)}
+    if members.shape[1] > 1:
+        spread = np.sqrt(members.var(axis=1, ddof=1).sum(axis=0).mean(axis=1))
+    else:
+        spread = np.full(rmse.shape, np.nan)
+    return {
+        "rmse": rmse,
+        "energy_score": _energy_score(members, truth),
+        "spread": spread,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1098,6 +1109,7 @@ def window_statistics_summary(
     posterior_sampling_std: dict[str, xr.DataArray] | None = None,
     prior_sampling_std: dict[str, xr.DataArray] | None = None,
     label: str = "",
+    reference: str = "prior",
 ) -> dict:
     """The ``sensor_statistics`` block for one sensor set (metrics doc §4.2).
 
@@ -1123,9 +1135,12 @@ def window_statistics_summary(
         prior_sampling_std: The same for the prior.
         label: Prefix for the log lines (e.g. the sensor-set name), so a run
             with several sets does not emit indistinguishable warnings.
+        reference: What the ``prior_*`` arguments hold, used as the name of
+            their block and skill keys (``"forecast"`` scores the filter's
+            forecasts the same way).
 
     Returns:
-        ``{"n_members", "n_windows", "num_sensors", "posterior"[, "prior"]}``,
+        ``{"n_members", "n_windows", "num_sensors", "posterior"[, reference]}``,
         or ``{}`` when the posterior carries no ensemble dimension.
     """
     sample = posterior_stats["mean"]
@@ -1182,8 +1197,8 @@ def window_statistics_summary(
     if prior_stats is None:
         return summary
 
-    prior, prior_crps = _score(prior_stats, prior_sampling_std, "prior")
-    summary["prior"] = prior
+    prior, prior_crps = _score(prior_stats, prior_sampling_std, reference)
+    summary[reference] = prior
     for name, entry in posterior.items():
         post_windows = np.isfinite(posterior_crps[name])
         prior_windows = np.isfinite(prior_crps[name])
@@ -1193,14 +1208,15 @@ def window_statistics_summary(
             # 2-window prior against a 3-window posterior puts two horizons in
             # one skill score, which is the comparison this WP exists to avoid.
             logger.warning(
-                "%s: the prior covers %d windows and the posterior %d, so their "
+                "%s: the %s covers %d windows and the posterior %d, so their "
                 "skill score would compare two different horizons (null)",
                 name,
+                reference,
                 int(prior_windows.sum()),
                 int(post_windows.sum()),
             )
-            entry["prior_crps_mean"] = None
-            entry["crps_reduction_vs_prior"] = None
+            entry[f"{reference}_crps_mean"] = None
+            entry[f"crps_reduction_vs_{reference}"] = None
             continue
         # An all-empty prior (every window truncated away) reduces to nan, but
         # quietly: _skill_score handles the empty case itself rather than
@@ -1211,8 +1227,10 @@ def window_statistics_summary(
         # ``null``, never ``.nan``: the reductions elsewhere in this block
         # filter on ``np.isfinite``, and a bare nan in the YAML reads as a
         # measured value to anything that does not check.
-        entry["prior_crps_mean"] = prior_mean if np.isfinite(prior_mean) else None
-        entry["crps_reduction_vs_prior"] = skill
+        entry[f"{reference}_crps_mean"] = (
+            prior_mean if np.isfinite(prior_mean) else None
+        )
+        entry[f"crps_reduction_vs_{reference}"] = skill
     return summary
 
 
@@ -1451,6 +1469,50 @@ def data_mismatch(
         # An all-nan column -- a member whose forecast failed at every sensor --
         # scores nan, which the summary then drops.
         return np.nanmean(standardized, axis=0) / 2.0
+
+
+def observation_fit(
+    obs: np.ndarray,
+    obs_std: np.ndarray,
+    forecast: np.ndarray,
+    analysis: np.ndarray,
+) -> dict[str, float]:
+    """Observation-space fit of one update (a smoother window or a filter cycle).
+
+    With ``d_f = obs - mean(forecast)`` and ``d_a = obs - mean(analysis)``:
+
+      * ``forecast_rmse``, ``analysis_rmse`` -- RMS of ``d_f`` and ``d_a``, and
+        ``rmse_ratio`` = forecast / analysis.
+      * ``innovation_chi2_diag`` -- ``mean_i d_f,i^2 / (var_ens,i + obs_std_i^2)``,
+        the diagonal of the normalised innovation χ² (``ddof=1``); ≈ 1 when R
+        and the forecast spread are honest.
+      * ``obs_std_estimated`` -- Desroziers et al. (2005):
+        ``sqrt(mean(d_a * d_f))`` estimates the observation error std; ``nan``
+        when the mean is not positive.
+
+    Args:
+        obs: The noisy observations, ``(N_d,)``.
+        obs_std: Their error std as used by the update, ``(N_d,)``.
+        forecast: Forecast predicted observations, ``(N_d, M)``.
+        analysis: Analysis predicted observations, ``(N_d, M)``.
+    """
+    d = np.asarray(obs, dtype=float).ravel()
+    fc = np.asarray(forecast, dtype=float)
+    d_f = d - fc.mean(axis=1)
+    d_a = d - np.asarray(analysis, dtype=float).mean(axis=1)
+    var = fc.var(axis=1, ddof=1) if fc.shape[1] > 1 else np.full(d.shape, np.nan)
+    forecast_rmse = float(np.sqrt(np.mean(d_f**2)))
+    analysis_rmse = float(np.sqrt(np.mean(d_a**2)))
+    cross = float(np.mean(d_a * d_f))
+    return {
+        "forecast_rmse": forecast_rmse,
+        "analysis_rmse": analysis_rmse,
+        "rmse_ratio": forecast_rmse / analysis_rmse if analysis_rmse > 0 else np.nan,
+        "innovation_chi2_diag": float(
+            np.mean(d_f**2 / (var + np.asarray(obs_std, dtype=float).ravel() ** 2))
+        ),
+        "obs_std_estimated": float(np.sqrt(cross)) if cross > 0 else np.nan,
+    }
 
 
 def data_mismatch_target_band(n_obs: int) -> float | None:

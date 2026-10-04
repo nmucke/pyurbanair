@@ -373,6 +373,11 @@ CycleDiagnostics` per filter cycle, renumbered 0..L-1 over the window (the
       parameters each segment actually used (``e_k + c_k``). Dynamic state
       mode has per-segment trajectories of differing knot counts, so these
       do not stack.
+
+    ``forecast_history`` passes the filter's
+    :attr:`~data_assimilation.filtering.base.FilterResult.forecast_history`
+    through (``time``-concatenated over the segments in the dynamic path),
+    gated, as there, on ``filter.collect_forecast_frames``.
     """
 
     esmda_params: xarray.Dataset
@@ -383,6 +388,7 @@ CycleDiagnostics` per filter cycle, renumbered 0..L-1 over the window (the
     params_history: Optional[xarray.Dataset] = None
     applied_params_history: Optional[xarray.Dataset] = None
     state_history: Optional[xarray.Dataset] = None
+    forecast_history: Optional[xarray.Dataset] = None
 
 
 class FilterSmoothing:
@@ -944,6 +950,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
             params_history=params_history,
             applied_params_history=getattr(result, "applied_params_history", None),
             state_history=result.state_history if return_history else None,
+            forecast_history=result.forecast_history,
         )
 
     def _run_dynamic(
@@ -978,6 +985,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         applied_history: list[xarray.Dataset] = []
         params_history: list[xarray.Dataset] = []
         state_history: list[xarray.Dataset] = []
+        forecast_history: list[xarray.Dataset] = []
         carry_state = state
         final_params: Optional[xarray.Dataset] = None
         # The joint correction, ``None`` until the first analysis produces one
@@ -1025,6 +1033,8 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
                     final_params = result.params
 
                 carry_state = result.state
+                if result.forecast_history is not None:
+                    forecast_history.append(result.forecast_history)
                 # Renumber onto the window's global cycle index: every
                 # single-cycle call numbered its own cycle 0.
                 for diag in result.diagnostics:
@@ -1073,6 +1083,11 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
             state_history=(
                 xarray.concat(state_history, dim="cycle", join="override")
                 if state_history
+                else None
+            ),
+            forecast_history=(
+                xarray.concat(forecast_history, dim="time", join="override")
+                if forecast_history
                 else None
             ),
         )
