@@ -11,7 +11,7 @@ Metrics (each summarised as {mean, final, max, min} over its series):
   parameters      per parameter: RMSE and CRPS of the posterior ensemble vs the
                   truth, the prior's, and the reduction 1 - posterior/prior.
   state           RMSE of the ensemble-mean velocity magnitude |U| vs the truth
-                  over time (on a few z-levels).
+                  over time (on a few z-levels, building cells left out).
   sensors         per sensor set (assimilated and held-out validation): RMSE of
                   the ensemble-mean (u, v, w) vector and its energy score
                   (multivariate CRPS), per time step.
@@ -68,6 +68,7 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
+    case_stl_path,
     concat_windows,
     global_time,
     open_truth,
@@ -112,6 +113,7 @@ def run(run_dir: pathlib.Path) -> None:
         if all(f.exists() for f in files)
     }
     truth = open_truth(cfg, run_dir)
+    stl_path = case_stl_path(cfg)
     frames_per_window = truth.sizes["time"] // num_windows
 
     truth_series: dict[str, list] = {name: [] for name in sets}
@@ -144,6 +146,7 @@ def run(run_dir: pathlib.Path) -> None:
                     time=mean_state.time, method="nearest", tolerance=tolerance
                 ),
                 mean_state,
+                stl_path,
             )
         )
 

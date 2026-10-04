@@ -324,3 +324,18 @@ def test_a_truth_from_before_the_time_axis_change_is_refused(
     )
     with pytest.raises(ValueError, match="frame at t=0"):
         helpers.open_truth(cfg, tmp_path)
+
+
+def test_case_stl_path_is_from_the_repo_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helpers = load_script("scripts/utils/helper_functions.py")
+    monkeypatch.chdir(tmp_path)
+    stl = "geometries/xie_and_castro/xie_castro_2008_STL.stl"
+    cfg = OmegaConf.create({"geometry": {"stl_path": stl}})
+
+    assert helpers.case_stl_path(cfg).is_file()
+
+    cfg.geometry.stl_path = "geometries/xie_and_castro/missing.stl"
+    with pytest.raises(FileNotFoundError, match="geometry.stl_path"):
+        helpers.case_stl_path(cfg)

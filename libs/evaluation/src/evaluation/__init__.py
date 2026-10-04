@@ -15,12 +15,13 @@ docstring says what has actually landed there:
   energy score, z-score, rank, spread--skill, hit rate) and the parameter /
   sensor metric bundles built on them.
 - :mod:`evaluation.turbulence` -- flow statistics: streaming moment
-  accumulation over state files, block bootstrap, spectra.
+  accumulation over state files, the state RMSE and its building mask, block
+  bootstrap, spectra.
 - :mod:`evaluation.sensors` -- reductions of pre-extracted sensor / probe
   series to window statistics. Extraction itself stays in the scripts: it
   needs the observation-operator machinery from ``data_assimilation`` (jax).
 - :mod:`evaluation.style` -- figure conventions: colors, quantile bands,
-  shared norms, solid-cell masking.
+  shared norms.
 - :mod:`evaluation.figures` -- one function per figure ID plus the general
   state / parameter plots.
 

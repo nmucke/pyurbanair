@@ -85,8 +85,24 @@ Everything streams; window state files `(ensemble, time, z, y, x)` are never
 loaded whole.
 
 - `streaming_state_rmse`: per-time RMSE of `|U|` between truth and an
-  ensemble-mean state on a few z-levels; `select_z_plane`,
-  `evenly_spaced_levels` pick the levels.
+  ensemble-mean state on a few z-levels, building cells left out;
+  `select_z_plane`, `evenly_spaced_levels` pick the levels. The building cells
+  are NaN on each grid before anything else, and the mean skips NaN. When the
+  truth and ensemble grids differ, the truth is interpolated onto the ensemble
+  grid after masking, so an open-air cell whose interpolation stencil touches a
+  building cell drops out of the RMSE too.
+- `stl_solid_mask(stl_path, z, y, x)`: the building cells of the case STL
+  (`read_binary_stl`) on a grid of cell centres, in the STL's frame (every
+  backend writes its state in it). A cell is solid when its centre is at or
+  below the highest point where the vertical ray through its column meets the
+  mesh, or within `SURFACE_TOLERANCE` (1e-3 of the smallest cell size) of it,
+  so a centre on a wall or a roof is solid. That is pylbm's voxelisation and
+  PALM's topography, and on the Xie & Castro grid it equals pylbm's mask cell
+  for cell. The geometry is taken as 2.5-D: the space under an overhang or a
+  bridge counts as solid, as in pylbm and PALM. Inside a building the backends
+  write different things, which is why the mask cannot come from the data:
+  PALM exact zeros, uDALES near-zero leftovers, pylbm arbitrary values on its
+  solid nodes (up to ~1 m/s next to walls).
 - `colocate_components(ds, solver_name)`: interpolates staggered `u, v, w`
   onto cell centres per backend, so one-point moments (Reynolds stresses, TKE)
   are formed at one point. `extrapolated_centre_dims` names the dims whose last
@@ -125,12 +141,7 @@ counts -> histogram) is derived step by step in
 Shared colours and labels (`COLORS`, `MODEL_*`, `METHOD_*`, `PARAM_LABELS`,
 `PARAM_UNITS`, colormaps), `apply_style`, window shading (`shade_windows`,
 `mark_windows`), bands (`band`, `nested_bands`), `finite_limits`,
-`save_pdf` / `save_png`, `write_table` (CSV plus a booktabs `.tex`), and the
-geometry helpers `read_binary_stl` / `stl_solid_mask`.
-
-`stl_solid_mask` skips columns with fewer than two z-crossings, so on an STL
-without ground triangles under the buildings (Xie & Castro) it marks no solid
-cells. Check the mask before relying on it.
+`save_pdf` / `save_png` and `write_table` (CSV plus a booktabs `.tex`).
 
 ## Who calls it
 
@@ -149,7 +160,7 @@ summarised as `{mean, final, max, min}`):
 | Block | Holds |
 |---|---|
 | `parameters` | per parameter: posterior and prior RMSE and CRPS against the truth, and the reduction |
-| `state` | RMSE of the ensemble-mean \|U\| over time |
+| `state` | RMSE of the ensemble-mean \|U\| over time, building cells left out (`geometry.stl_path`, relative to the repo root) |
 | `sensors` | per sensor set (`assimilation`, `validation`): RMSE and energy score of the `(u, v, w)` vector |
 | `spread_skill` | per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
 | `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
@@ -190,7 +201,7 @@ writes PNGs into `<run dir>/figures/` and reads `rank_counts` from
 runs both after the assimilation run.
 
 The other functions (`hit_rate`, spectra, `MomentAccumulator`,
-the P1/S1/S5/F1/S4/D3 figures, `stl_solid_mask`) have no caller in `scripts/`
+the P1/S1/S5/F1/S4/D3 figures) have no caller in `scripts/`
 today; only the tests exercise them.
 
 ## Tests

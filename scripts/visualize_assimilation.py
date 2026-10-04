@@ -63,6 +63,7 @@ from pyurbanair.utils.run_utils import add_velocity_magnitude  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
+    case_stl_path,
     concat_windows,
     global_time,
     open_truth,
@@ -95,6 +96,7 @@ def run(run_dir: pathlib.Path) -> None:
 
     # --- One pass over truth and ensembles, window by window ---------------------
     truth = open_truth(cfg, run_dir)
+    stl_path = case_stl_path(cfg)
     frames = truth.sizes["time"] // num_windows
     stations = _station_points(sets)
     truth_c = Collector(cfg.truth_model.solver_name, sets, stations)
@@ -112,6 +114,7 @@ def run(run_dir: pathlib.Path) -> None:
                     time=mean_state.time, method="nearest", tolerance=tolerance
                 ),
                 mean_state,
+                stl_path,
             )
         )
         if has_prior:

@@ -83,6 +83,19 @@ def make_truth(cfg: DictConfig, out_dir: pathlib.Path) -> xarray.Dataset:
     return open_truth(cfg, out_dir)
 
 
+def case_stl_path(cfg: DictConfig) -> pathlib.Path:
+    """The case STL, `geometry.stl_path`; a relative path is from the repo root."""
+    path = pathlib.Path(cfg.geometry.stl_path)
+    if not path.is_absolute():
+        path = pathlib.Path(__file__).resolve().parents[2] / path
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Case STL {path} (geometry.stl_path) not found; the state metrics "
+            "need it to leave the building cells out."
+        )
+    return path
+
+
 def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
     """A run's truth state over its horizon, opened lazily.
 
