@@ -7,14 +7,21 @@ broken STL mask helper. It **changes default results** (the state block of
 `metrics.yaml` and the state-RMSE figures), so it is its own PR. Read `AGENTS.md`
 and `docs/evaluation.md` first.
 
-Branch from `main`, open the PR into `main`, don't merge it.
+Continue on the branch `fix/state-metrics-solid-cells`, which holds the updated
+version of this file, and open the PR into `main`. Don't merge it.
 
 ## What is there now
 
-- `evaluation.scores.streaming_state_rmse` (`libs/evaluation`) takes |U| on a
-  few z-levels, interpolates the truth onto the assimilation grid when the grids
-  differ, and returns `sqrt(nanmean(diff**2))` per time step. No mask. Callers:
-  `scripts/compute_metrics.py` and `scripts/visualize_assimilation.py`.
+- `evaluation.turbulence.streaming_state_rmse` (`libs/evaluation`) takes |U|
+  on `n_z_slices=4` evenly spaced z-levels (`_vel_field_4z`, components
+  combined by index), interpolates the truth onto the assimilation grid when the
+  grids differ, and returns `sqrt(nanmean(diff**2))` per time step. No mask.
+  Callers: `scripts/compute_metrics.py` (the `state.vel_magnitude_rmse` block)
+  and `scripts/visualize_assimilation.py` (the state-RMSE figure). Since #163
+  both pass the truth already on the mean state's times
+  (`sel(..., method="nearest", tolerance=0.5 * output_frequency)`), so the mask
+  only has to handle space. The lowest selected z-level is where the buildings
+  are, so it carries most of the dilution.
 - `evaluation.style.stl_solid_mask` has no caller (`docs/evaluation.md`, "Who
   calls it"), and is broken on Xie & Castro: the `if cz.size < 2: continue`
   guard skips every column with a single z-crossing. That STL has no ground
