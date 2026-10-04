@@ -69,7 +69,7 @@ are scored as `forecast`, separate from the free-run `prior`.
 - [x] `metrics.yaml` has the five additions for all three methods (item 5
       as revised: `forecast` for filter and hybrid, the hybrid `prior` left).
 - [x] Default runs byte-identical (only the metrics output grows).
-- [ ] `tests/evaluation`, `tests/data_assimilation`, `tests/scripts`,
+- [x] `tests/evaluation`, `tests/data_assimilation`, `tests/scripts`,
       `pre-commit` pass; CI green on Linux and macOS.
 - [x] The PR shows the new blocks for one tiny run of each method.
 - [x] This file moved to `docs/plans/implemented/`.
