@@ -1,33 +1,31 @@
 # Neural surrogates
 
-End-to-end stack for training a learned one-step surrogate of the CFD
-forward models: dataset generation → on-disk layout → PyTorch
-`TransitionDataset` → architectures → training loop. Complements the
-broader [codebase_guide.md](codebase_guide.md); read that first for
-orientation on the forward-model / ensemble abstractions referenced
-below.
+Learned surrogates of the CFD forward models: training-data generation →
+on-disk layout → PyTorch datasets → architectures → training → evaluation →
+use as a forward model in the DA scripts. Read
+[codebase_guide.md](codebase_guide.md) first for the forward-model / ensemble
+abstractions referenced below. The library is
+[libs/neural-surrogates/src/neural_surrogates](../libs/neural-surrogates/src/neural_surrogates/);
+the scripts and configs are:
 
-The stack splits into four pieces that are useful (and runnable) on
-their own:
+| Step | Script | Config (`configs/`) |
+|---|---|---|
+| Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
+| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
+| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` | `surrogate/eval.yaml`, one block per script |
+| Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
-1. **Training-data generation** — drive the CFD ensemble to produce a
-   `(state, parameter)` dataset on disk. See §1–§5.
-2. **Data loading** — `TransitionDataset` turns the on-disk layout into
-   one-step transition pairs ready for PyTorch training. See §6.
-3. **Architectures + training loop** — `SimpleConv` baseline,
-   `UNetConvNeXt` architecture, `UPT` (Universal Physics Transformer),
-   `P3D`, and the generic `Trainer`. The trainer checkpoints the best-val
-   weights and supports patience-based early stopping; resolved config +
-   best weights land under `model_weights/<model_name>/`. See §7–§10.
-4. **Autoregressive rollout / test** — reload a saved model from its
-   config + weights and step it through a full test trajectory,
-   producing diagnostic plots and a `truth | pred | |err|`
-   animation. See §11.
+Each script's module docstring lists its options and outputs. `train.py` builds
+the datasets and model for the config's `task` in
+[scripts/utils/tasks.py](../scripts/utils/tasks.py) and writes
+`<paths.weights_dir>/<name>/` (`model_weights/` by default); training data
+lives under `<paths.training_data_dir>/` (`training_data/`). SLURM wrappers are
+in [job_scripts.md](job_scripts.md).
 
-Later parts extend the stack: running the surrogate as an ESMDA forward model
-(Part D), domain decomposition (Part E), LoRA fine-tuning (Part F), Tadpole
-autoencoder pre-training (Part G) and AE → time-stepper fine-tuning (Part H),
-and generative spin-up by latent flow matching (Part I, §35–42).
+Parts: training data (A), data loading (B), next-step architectures and
+training (C), the surrogate as a forward model (D), domain decomposition (E),
+LoRA fine-tuning (F), Tadpole autoencoder pre-training (G), AE → time-stepper
+(H) and generative spin-up by latent flow matching (I).
 
 ---
 
@@ -35,347 +33,158 @@ and generative spin-up by latent flow matching (Part I, §35–42).
 
 ### 1. What the script produces
 
-One invocation of `scripts/neural_surrogate/generate_training_data.py` builds a complete
-`train` / `val` / `test` split for one backend at one size:
+[scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py)
+runs one simulation per sample, each with its own sampled inflow trajectory,
+and writes a `train` / `val` / `test` split to `paths.results_dir` =
+`<paths.training_data_dir>/<model.name>_<data.geometry.name>/`:
 
 ```
-training_data/<model_name>_<size>/
-├── config.yaml                  resolved Hydra config used for this run
-├── state/
-│   ├── train/sample_XXXX.nc     one forward-model output per sample
-│   ├── val/sample_XXXX.nc
-│   └── test/sample_XXXX.nc
-├── param/
-│   ├── train/sample_XXXX.nc     matching parameter trajectory per sample
-│   ├── val/sample_XXXX.nc       (interpolated onto the state time grid)
-│   └── test/sample_XXXX.nc
-├── params.nc                    consolidated interpolated trajectories
-├── sampled_params.nc            consolidated sampler control points
-├── sampled_params.png           every control-point trajectory, colored by split
-├── params_interpolated.png      same, after projection onto state time
-├── split_examples.png           one mid-window velocity slice per split
-├── <stl>.stl                    backend geometry (when applicable)
-└── <split>_animation.mp4        velocity-magnitude animation per split
+training_data/<model>_<name>/
+├── config.yaml                              resolved config of the run
+├── state/{train,val,test}/sample_XXXX.nc    the field on cell centres + `blanking` (1 = building)
+└── param/{train,val,test}/sample_XXXX.nc    the parameters at the state times
 ```
 
-The split is by sample index in a single shared ensemble of size
-`num_train + num_val + num_test`: indices `[0, num_train)` go to train,
-the next `num_val` to val, and the remainder to test. Every per-sample
-state file has a sibling under `param/` at the same path, with the
-inflow parameters interpolated onto the state's output time grid (one
-value per saved state time step).
+Every state file has a parameter file at the same relative path under
+`param/`: the time-varying parameters linearly interpolated onto the state's
+output times, scalar parameters (pyudales `pressure_gradient_magnitude`) kept
+as scalars. State files carry the attrs `geometry` (the STL stem, or the case
+name) and `spinup_time_s` (the spin-up actually used). `data.save_vars` lists
+the time-varying variables kept; time-independent ones such as `blanking` are
+always kept.
 
 **Grid collocation.** pyudales solves on a staggered C-grid (`u@xm`,
-`v@ym`, `w@zm`); before saving, each member state is linearly
-interpolated to cell centers (`xt`, `yt`, `zt`) via
-`pyudales.utils.grid_utils.interpolate_grid` so all state channels land
-on a common regular grid. pylbm output is already cell-centered and is
-passed through unchanged.
+`v@ym`, `w@zm`); before saving, each state is linearly interpolated to cell
+centres (`xt`, `yt`, `zt`) by
+`pyudales.utils.grid_utils.interpolate_grid` so all channels share one
+regular grid, and its `blanking` mask is rebuilt from uDALES's `solid_c.txt`
+(uDALES leaves small non-zero velocities inside buildings, so the mask cannot
+be recovered from the field). pylbm output is already cell-centred.
 
-### 2. Config layout
+### 2. Config and geometry modes
 
-A single config drives data generation:
-[conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
-(`config_name="neural_surrogate/training_data"`), shared by both generation
-scripts. Fixed geometry is selected by `case=` during Hydra composition:
+[configs/surrogate/generate_data.yaml](../configs/surrogate/generate_data.yaml)
+composes like `forward.yaml` (`/common`, `/case`, `/params`, `/model`) with a
+`time` block for one trajectory (`simulation_time`, `output_frequency`,
+`spinup_time`, `seconds_per_knot`; it overrides the case's window times) and a
+`data` block:
 
-```bash
-python scripts/neural_surrogate/generate_training_data.py \
-    training_data/geometry_mode=fixed case=xie_and_castro
-python scripts/neural_surrogate/generate_training_data.py \
-    training_data/geometry_mode=fixed model=pylbm case=barcelona
-```
-
-The selected case owns domain, geometry, sensors and physical window settings;
-CLI overrides retain precedence. There is no script-side case merge. The old
-`geometry.source=barcelona|xie_and_castro` selector is rejected with migration
-instructions. Random geometry uses `training_data/geometry_mode=random` and
-`training_data.geometry.source=idealized|realistic` with the separate
-`generate_random_geometries_training_data.py` runner (§2b). Fixed output names
-come from `case_name`; random output names come from the pool source.
-
-It declares (under `training_data:`):
-
-| Field | Purpose |
+| Key | Purpose |
 |---|---|
-| `num_train`, `num_val`, `num_test` | per-split sample counts |
-| `geometry.source` | random pool selection; fixed geometry uses `case=` |
-| `geometry.stl_dir` / `geometry.udales_case_dir` / `geometry.palm_case_dir` | pool + backend case-template dirs, derived from `source` (pool sources only) |
-| `geometry.resolution` / `geometry.z_size` | pool grid spacing + fixed vertical extent (§2b) |
-| `output_dir` | resolves to the configured root plus `${model.name}_${training_data.geometry.output_name}/` |
-| `simulation_time` / `output_frequency` / `spinup_time` | generation horizon — set directly in this file (not inherited from the case) |
-| `seed` | RNG seed driving every random draw |
-| `num_parallel_processes` | ensemble parallelism for `generate_training_data.py` — see §5. The random-geometry script runs strictly sequentially and ignores it. |
-| `params_sampler` | Hydra `_target_` block (incl. `num_time_points`, the sampler time-grid control points); see §3 |
+| `num_train` / `num_val` / `num_test` | samples per split |
+| `seed` | geometry split, parameter draws and uDALES inlet-turbulence seeds |
+| `save_vars` | time-varying variables written (default `[u, v, w]`) |
+| `pressure_gradient_magnitude` | constant forcing added for backends whose parameter schema has it (pyudales) |
+| `adaptive_spinup` | `enabled`, `fill_times`, `max_spinup_time` (§3) |
+| `state_encoding` | NetCDF encoding of the state files: `zlib`/`complevel` on every variable, `least_significant_digit` (lossy) on float variables only |
+| `sharding` | `num_shards`, `shard_index` (§3) |
+| `geometry` | `mode` (`fixed` \| `random`), the pool `source` with its `stl_dir` / `case_dir`, the output-name suffix `name`, and the random-mode grid: `resolution`, `upstream_padding`, `downstream_padding`, `lateral_padding`, `z_size` (metres) |
 
-CLI overrides apply to any field, e.g.:
-
-```bash
-python scripts/neural_surrogate/generate_training_data.py \
-  model=pylbm \
-  training_data.num_train=8 \
-  training_data.params_sampler.time_series.correlation_length=30
-```
-
-### 2b. Random-geometry generation
-
-[scripts/neural_surrogate/generate_random_geometries_training_data.py](../scripts/neural_surrogate/generate_random_geometries_training_data.py)
-consumes the pool sources (`training_data.geometry.source: idealized |
-realistic`) and shares the config, sampler and split layout of §1–2, with
-these differences:
-
-- **One geometry per simulation, geometry-disjoint splits.** `num_val` +
-  `num_test` geometries are held out (one simulation each); train draws
-  from the remainder and re-draws geometries (with fresh parameter
-  trajectories) when `num_train` exceeds the pool.
-- **Per-geometry grid.** Each geometry's physical domain size comes from the
-  pool's `manifest.csv` (mesh-bounds fallback for pools without one; the
-  bounds under-span the domain when buildings sit inset from its edges); at
-  `geometry.resolution` (metres), `nx`/`ny` are rounded UP to a multiple of
-  16 by extending the domain (the mesh is never moved, the slack is open
-  fluid). The extra cells are distributed around the geometry: in **x**,
-  `geometry.upstream_padding` / `geometry.downstream_padding` (m, each rounded
-  up to whole cells, `0.0` = off) are inflow fetch in front of the mesh and
-  wake behind it — `nx` covers geometry + fetch + wake rounded up to a
-  multiple of 16, and the rounding slack tops up the wake, so both knobs are
-  minima; in **y**, `geometry.lateral_padding` is applied to BOTH sides (the
-  two are not distinguishable — `inflow_angle` crosses either way — so they
-  share one knob) with the rounding slack split evenly over them on top (an
-  odd count leaves the spare cell at the far side). The domain window moves rather
-  than the mesh — lower `bounds` go negative, and all three backends shift the
-  geometry and un-shift the output coordinates accordingly. The vertical
-  extent is the fixed
-  `geometry.z_size` for every geometry; `nz = z_size / resolution` must
-  itself be a multiple of 16. Geometries whose tallest building reaches
-  `z_size` are dropped from the pool with a warning (pylbm SIGFPEs when
-  buildings pierce the domain top).
-- **Adaptive spin-up.** `training_data.spinup_time` is a FLOOR, not the value
-  every sample gets. With `training_data.adaptive_spinup.enabled: true` each
-  geometry's spin-up is sized from its own streamwise fill time —
-  `fill_times * Lx_domain / (bulk speed * cos(inflow_angle))`, using the
-  sample's INITIAL parameters (the spin-up holds them on a constant plateau),
-  quantised up to a whole `output_frequency` and clamped to
-  `[spinup_time, adaptive_spinup.max_spinup_time]`. This matters on the uDALES
-  turbulent-inlet path, where the interior starts from rest with nudging off
-  and so fills by advection from the inlet face alone: a spin-up sized from
-  nudging-path experience leaves a visible streamwise velocity deficit in the
-  early frames (see [pyudales.md §6.1](pyudales.md)). Because the clamp floor
-  is `spinup_time`, the scalar written into the corpus `config.yaml` stays a
-  valid lower bound for `train_latent_generator`'s `constant_prehistory`
-  check. `enabled: false` gives every sample the flat `spinup_time` as before.
-  The value actually used is recorded per sample in the state file's
-  `spinup_time_s` attribute.
-- **Saved variables and on-disk encoding.** `training_data.save_vars` is a
-  whitelist of time-varying variables (null keeps everything the backend
-  returned); variables with no time dimension, such as the pyudales blanking
-  mask, are always kept. `training_data.state_encoding` is passed through to
-  `Dataset.to_netcdf(encoding=...)` (null writes uncompressed, as before);
-  `least_significant_digit` is applied to float variables only. Both default
-  to the previous behaviour when absent. These matter at pool scale: uDALES
-  returns `pres` alongside `u`/`v`/`w` and no surrogate config reads it, and
-  the fields compress far better after bit-rounding than with deflate alone.
-- **Direct sequential single-model runs — no ensemble machinery.** Resampled
-  duplicates are grouped so each geometry's forward model is built and
-  prepared once, then called once per simulation (`save_on_disk` mode writes
-  `state_{j}.nc` per run). Each geometry gets a fresh scratch dir under
-  `paths.experiment_dir` (stale solver outputs from a previous grid are the
-  classic uDALES fielddump trap). For pyudales the script stages a
-  disposable case dir per geometry (template from
-  `geometry.udales_case_dir`, `stl_file` rewritten) and forces
-  `precomputed_geom_dir=None`; pylbm recompiles per grid; for pypalm the
-  turbulent-inflow `input_block_size` is clamped to 2·(nx/ncpu) when the
-  PALM default (30) exceeds it (error TUI0019 otherwise).
-- **Extra outputs.** `geometries.csv` (per-sample geometry + grid manifest,
-  including `x0_domain_m` / `y0_domain_m` — the domain's lower bounds in the
-  mesh frame, i.e. where the geometry sits inside the padded domain)
-  and `geometries/` (copies of every STL used); each state file carries
-  `geometry_stl` / `geometry_source` / `resolution_m` attrs.
-- **Sharded generation (`training_data.sharding`).** A generation too long
-  for one job splits into `stage: plan | simulate | finalize` and yields the
-  same corpus as the one-process `stage: all` (the default). `plan` draws
-  everything random once — the geometry/split assignment and every parameter
-  trajectory — and freezes it with the resolved `config.yaml` (sharding block
-  stripped) in the output dir; `sampled_params.nc` is written last and marks
-  the plan complete. `simulate` shards (`num_shards`, `shard_index`) re-read
-  that frozen config (only runtime keys — `paths`, `ncpu`, `temp_dir`,
-  `verbose`, ... — come from the shard's own command line), check that the
-  pool still reproduces `geometries.csv`, and run a disjoint set of whole
-  geometry groups, balanced greedily on cells × simulated seconds × mean
-  inflow speed. Spin-up is still sized over each group's full sample list.
-  Sample files are written atomically (hidden temp name + rename, param file
-  last), and samples already on disk are skipped, so resubmitting a shard that
-  hit the time limit resumes it; a failing geometry is logged and skipped and
-  the shard exits nonzero at the end. `finalize` refuses to run until every
-  sample exists (naming the shards to resubmit), then writes `params.nc` from
-  the first planned sample's time axis, the frame-count check and the figures
-  from the saved files. An explicit `training_data.output_dir` is required
-  for every stage but `all`. Rerunning `all` or `plan` against an existing
-  plan with the same config resumes it; a plan made under a different config
-  is refused rather than overwritten. DelftBlue wrapper:
-  [job_scripts/delftblue/submit_random_geometries_training_data.sh](../job_scripts/delftblue/submit_random_geometries_training_data.sh)
-  (plan → simulate array + resume rounds → finalize, chained with SLURM
-  dependencies).
-- **ncpu must divide every sampled `nx`** (pypalm/pyudales slab
-  decomposition). All pool `nx` are multiples of 16, so `ncpu` ∈
-  {1, 2, 4, 8, 16} always works; the script validates this before running
-  anything.
+- **`mode: fixed`** — every sample runs on the case geometry and grid
+  (`case=`); set `data.geometry.name=${case_name}` so the output folder is
+  named after the case.
+- **`mode: random`** (default) — every sample runs on a building layout from
+  the STL pool in `stl_dir` (made by `scripts/tools/rasters_to_stl.py`), with
+  the uDALES/PALM templates from `case_dir`. Val and test each get
+  `num_val` / `num_test` distinct held-out geometries (one sample each); train
+  cycles through the remaining ones when it needs more samples than
+  geometries.
 
 ```bash
-python scripts/neural_surrogate/generate_random_geometries_training_data.py \
-    model=pypalm training_data.geometry.source=realistic \
-    training_data.geometry.resolution=2.0 training_data.geometry.z_size=64.0 \
-    model.forward_model.ncpu=16
+# random layouts from the realistic UrbanTALES pool, uDALES (the defaults)
+pixi run -e dev python scripts/surrogate/generate_data.py
+# the case geometry for every sample
+pixi run -e dev python scripts/surrogate/generate_data.py model=pylbm case=barcelona \
+    data.geometry.mode=fixed 'data.geometry.name=${case_name}'
+# another pool, resolution and backend
+pixi run -e dev python scripts/surrogate/generate_data.py model=pypalm \
+    data.geometry.source=idealized data.geometry.resolution=2.0 data.geometry.z_size=64.0
 ```
 
-### 3. The parameter sampler
+### 3. How samples run
 
-The default sampler is
-[`pyurbanair.training_data.UniformExternalAR2Sampler`](../src/pyurbanair/training_data/samplers.py),
-configured via two blocks:
+- **Per-geometry grid (random mode).** Each layout's physical size comes from
+  the pool's `manifest.csv` (mesh bounds as fallback, which under-span the
+  domain when the outer buildings sit inset from its edges). At `resolution`,
+  the domain adds `upstream_padding` in front of the mesh, `downstream_padding`
+  behind it and `lateral_padding` on both sides (each rounded up to whole
+  cells), then rounds `nx` and `ny` up to multiples of 16: the x slack goes
+  behind the mesh, the y slack is split over both sides (an odd cell at the
+  far side). The domain window moves, not the mesh, so lower `bounds` go
+  negative. `nz = z_size / resolution` (keep it a multiple of 16); layouts as
+  tall as `z_size` are skipped.
+- **One prepared model per geometry.** Samples on the same geometry run one
+  after the other on one model, built and prepared once in a fresh scratch dir
+  `<paths.experiment_dir>/data_<name>` (stale solver output from another grid
+  is the classic uDALES fielddump trap). For pyudales the script copies the
+  case template with `stl_file` rewritten in every `namoptions.*` and sets
+  `precomputed_geom_dir=None`; pylbm and pypalm get `stl_path` (pypalm also
+  `case_dir`). Samples on one uDALES model get distinct inlet-turbulence seeds
+  (`seed * 100003 + member`).
+- **Adaptive spin-up.** `time.spinup_time` is a floor. With
+  `adaptive_spinup.enabled` the spin-up of a geometry is
+  `fill_times * Lx / u_slow`, where `u_slow = 0.8 * U * max(cos θ, 0.1)` is the
+  slowest initial streamwise inflow over that geometry's samples, rounded up
+  to a whole `output_frequency` and clamped to
+  `[spinup_time, max_spinup_time]`. It matters on the uDALES turbulent-inlet
+  path, where the interior starts at rest and fills from the inlet face alone
+  (see [pyudales.md](pyudales.md)). In fixed mode all samples share one
+  geometry, hence one spin-up.
+- **Resumable and shardable.** Both files of a sample are written atomically
+  (hidden temp name, then rename; the parameters last) and a sample whose two
+  files exist is skipped, so rerunning after a crash or with a larger
+  `num_train` only runs what is missing. `data.sharding` splits the geometry
+  groups between independent jobs (group `k` runs on shard
+  `k % num_shards`); the split and the parameters are deterministic in the
+  config, so every shard plans the same corpus. A failing geometry is logged
+  and skipped, and the job raises at the end naming the failed geometries. On
+  SLURM, submit one `surrogate_generate_data.slurm` per shard
+  ([job_scripts.md](job_scripts.md)).
+- **`ncpu` must divide every `nx`** for pypalm/pyudales (slab decomposition).
+  Pool `nx` are multiples of 16, so `ncpu` ∈ {1, 2, 4, 8, 16} always works.
+
+### 4. The parameter sampler
+
+[configs/params/surrogate_training_data.yaml](../configs/params/surrogate_training_data.yaml)
+selects
+[`pyurbanair.training_data.UniformExternalAR2Sampler`](../src/pyurbanair/training_data/samplers.py):
 
 ```yaml
-params_sampler:
-  _target_: pyurbanair.training_data.UniformExternalAR2Sampler
-  _convert_: all
-  external:
-    inflow_angle:
-      mean: {min: -30.0, max: 30.0}   # uniform per sim
-      std: 5.0                          # fixed; use {min, max} to sample
-    velocity_magnitude:
-      mean: {min: 7.0, max: 8.0}
-      std: 0.5
-  time_series:
-    correlation_length: 60.0
-  ensemble_size: 1                     # overridden by the script
+_target_: pyurbanair.training_data.UniformExternalAR2Sampler
+_convert_: all
+ensemble_size: 1                       # set to the number of samples by the script
+external:
+  inflow_angle:
+    mean: {min: -45.0, max: 45.0}      # uniform per sample
+    std: 15.0                          # fixed; use {min, max} to sample
+  velocity_magnitude:
+    mean: {min: 5.0, max: 10.0}
+    std: 0.5
+time_series:
+  correlation_length: 300.0
 ```
 
-For every simulation member and every parameter:
+For every sample and every parameter:
 
-1. Draw `mean_e` from the param's `mean` spec — either fixed (scalar) or
-   `Uniform(min, max)` (dict). Same for `std_e`.
-2. Integrate a critically-damped AR(2) anomaly `z(t)` (unit-variance,
-   smooth, correlation length set by `time_series.correlation_length`).
+1. Draw `mean_e` from the `mean` spec — fixed (scalar) or `Uniform(min, max)`
+   (dict). Same for `std_e`.
+2. Integrate a critically-damped AR(2) anomaly `z(t)` (unit variance, smooth,
+   correlation length `time_series.correlation_length`).
 3. Return `x(t, e) = mean_e + std_e · z(t, e)`.
 
-The result has shape `(time, ensemble)`. Each individual simulation
-gets its own per-sim central value and its own AR(2) trajectory.
+The script evaluates this on knots `time.seconds_per_knot` apart over
+`[0, simulation_time]`, and the forward model interpolates between knots.
+**Clipping:** AR(2) anomalies are unbounded, so a `{min, max}` `mean` spec also
+clips the trajectory to that range (no solver-unsafe values); an explicit
+`clip: {min?, max?}` block next to `mean`/`std` takes precedence.
 
-**Optional clipping.** AR(2) anomalies are unbounded; if a parameter's
-`mean` spec is a `{min, max}` dict, the final trajectory is clipped to
-that range so it never punches outside the user-stated bounds (this
-prevents solver-unsafe values like sub-physical velocity). For finer
-control, pass an explicit `clip: {min?, max?}` block alongside `mean`/
-`std`.
+### 5. Adding a sampler
 
-The script swaps `ensemble_size` to `num_train + num_val + num_test`
-at instantiate time so a single `sample_prior(time_coords, rng_key)`
-call yields every member's trajectory in one shot.
-
-### 4. End-to-end script flow
-
-[scripts/neural_surrogate/generate_training_data.py](../scripts/neural_surrogate/generate_training_data.py)
-runs:
-
-1. **Resolve `output_dir`** (`training_data/<model>_<size>/`), persist
-   the resolved Hydra config to `config.yaml`, and wipe any stale
-   `_raw_states/` staging dir — see §5.
-2. **Instantiate the sampler** with `ensemble_size = n_total`. Draw all
-   trajectories. Save the raw control points to `sampled_params.nc`
-   and render `sampled_params.png`.
-3. **Build the template forward model** (`results_dir=None`), run the
-   backend's `prepare` step (compile/preprocess), and clean stale
-   solver outputs.
-4. **Copy the STL geometry** (if `model.forward_model.stl_path` is set).
-5. **Augment params for the backend**: pyudales gets a constant-per-
-   member `pressure_gradient_magnitude` array (no time dim).
-6. **Build the ensemble model** with `ensemble_size = n_total`,
-   `num_parallel_processes` from the config, and `results_dir = output_dir/_raw_states`.
-   Failure policy is `raise` — parallel + on-disk does not support
-   resample-from-successes.
-7. **Run the ensemble once**: `ensemble_model.run_ensemble(params=sampled, sim_name="state")`.
-   This writes per-member NetCDFs `state_{i}.nc` into the staging dir,
-   in parallel.
-8. **Partition into splits**: open each raw state in order, write it to
-   `state/{split}/sample_{i:04d}.nc`, and delete the raw file. After
-   reading the first state to learn the canonical output time grid,
-   linearly interpolate the sampler control points onto that grid and
-   save one `param/{split}/sample_{i:04d}.nc` per sample. Also write
-   the consolidated `params.nc` at the top level.
-9. **Plots and animations**: `params_interpolated.png` (post-interpolation
-   trajectories), `split_examples.png` (mid-time velocity-magnitude
-   slice per split), and `<split>_animation.mp4` for the first sample
-   of each split.
-
-### 5. Parallelism, sizing, and gotchas
-
-The script runs *all* `n_total` samples in a single
-`ensemble_model.run_ensemble(...)` call — train, val, and test together
-— so the underlying `ProcessPoolExecutor` keeps all
-`num_parallel_processes` workers saturated until the dataset is done.
-Splits are a post-hoc partition, not separate runs.
-
-Sizing defaults:
-
-| Preset | n_total | num_parallel_processes |
-|---|---|---|
-| `tiny` | 8 | 2 |
-| `small` | 24 | 4 |
-| `medium` | 48 | 8 |
-| `large` | 96 | 8 |
-| `xlarge` | 192 | 8 |
-
-The ensemble's worker pool uses `forkserver` (not `fork`) because the
-parent imports JAX, and Linux pins each worker to distinct physical
-cores via `pyurbanair.utils.cpu_pinning`. See
-[ensemble_scaling.md](temp/ensemble_scaling.md) for the DRAM-bandwidth
-ceiling on the dev machine — past ~4–8 workers, returns diminish.
-
-**Failure modes:**
-
-- **Stale `_raw_states/` triggers warm-start.** The ensemble model's
-  `get_member_state` interprets any pre-existing `state_{i}.nc` in
-  `results_dir` as a warm-start initial condition. A partial NetCDF
-  from a previous *failed* run will silently switch that member into
-  warm-start mode and can crash the solver during restart-file I/O
-  (a uDALES SIGILL was the symptom). The script wipes
-  `_raw_states/` at the top of every run so the ensemble always
-  cold-starts.
-- **Parallel + on-disk has no resample.** With `failure: raise` (the
-  default for training-data generation), the first per-member failure
-  aborts the whole ensemble. Prefer fixing the root cause (e.g. an
-  out-of-range parameter clip) over trying to skip failed members.
-- **`num_time_points` controls trajectory smoothness.** The forward
-  model linearly interpolates between sampled control points, so few
-  points → smoother / coarser inflow, many points → more dynamic.
-  When `correlation_length` is much larger than `simulation_time` AND
-  `num_time_points` is small, each member's trajectory degenerates
-  toward a straight line — set the correlation length comparable to or
-  smaller than the window if you want visible time variation.
-- **Output `state_*.nc` files do not embed parameters.** The matching
-  trajectory is the file at the same relative path under `param/{split}/`
-  (or sliced from `params.nc`). The single source of truth is
-  `params.nc`.
-
-### Adding a new sampler
-
-Implement a class exposing the
-`sample_prior(time_coords, rng_key) -> xarray.Dataset` contract used by
-`ParameterTimeSeries` subclasses. The returned dataset must have
-`(time, ensemble)` arrays for every parameter; non-time-varying vars
-(e.g. pyudales `pressure_gradient_magnitude`, shape `(ensemble,)`) are
-passed through unchanged by the interpolation step. Register it under
-`src/pyurbanair/training_data/` and point `training_data.params_sampler._target_`
-in [conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
-at it.
-
-### Changing the dataset size
-
-There is a single data-generation config (no size group). Edit the
-`training_data.*` fields in
-[conf/neural_surrogate/training_data.yaml](../conf/neural_surrogate/training_data.yaml)
-(or override them on the CLI), and switch the grid/horizon via `case=`. The
-`output_dir` pattern `training_data/${model.name}_medium/` keeps backend-specific
-datasets in separate trees.
+A new sampler implements `sample_prior(time_coords, rng_key) ->
+xarray.Dataset` with `(time, ensemble)` arrays per parameter (time-independent
+ones as `(ensemble,)`) and accepts `ensemble_size`; put it in
+`src/pyurbanair/training_data/` and point the `_target_` of a `configs/params/`
+file at it.
 
 ---
 
@@ -405,8 +214,8 @@ is the mirror-image *backward* window — see below. Each item is a dict:
 | `geom_features` | `(C, *grid)` | SDF / ∇SDF channels — present **only** when built with a non-`none` `sdf_features` mode (default `none`); `C` = 1 (`sdf`), 3 (`grad`) or 4 (`both`); one tensor per unique mask |
 
 The geometry mask is read from each state file's `geometry_var`
-(default `"blanking"` — pylbm's per-cell obstacle indicator, inverted to
-match the `1`-is-fluid convention). For backends that don't ship one,
+(default `"blanking"`, the obstacle mask every generated corpus carries
+(§1), inverted to the `1`-is-fluid convention). For data without one,
 the fallback marks fluid cells as those with a non-zero stacked state in
 that trajectory's first snapshot; ground-and-building cells stay 0.
 
@@ -443,7 +252,7 @@ domain-decomposed model both assume one `C`-channel block (§14) — and
 
 #### Multi-geometry splits (`TrajectoryBatchSampler`)
 
-Random-geometry training data (§2b) gives every trajectory its own grid
+Random-geometry training data (§3) gives every trajectory its own grid
 and geometry. The dataset handles this natively: geometry, SDF features
 and state shapes are all per-trajectory, with equal masks deduped to one
 tensor object — a single-geometry split therefore behaves byte-identically
@@ -455,15 +264,14 @@ draws every batch from a single trajectory: `default_collate` sees one
 shape and `transition_collate` ships that trajectory's mask (it fails
 loud on a mixed-geometry batch rather than training against the wrong
 mask). Batches are shuffled across trajectories each epoch, and the
-per-trajectory batch size is `min(batch_size, cell_budget // cells)` —
+per-trajectory batch size is `min(batch_size, max(1, cell_budget // cells))` —
 the `cell_budget` (total grid cells per batch) keeps memory flat across
 domain sizes (the UrbanTALES realistic pool spans ~25× in cell count).
 The sampler re-reads the dataset's flat index at each epoch, so the
 pushforward curriculum (`set_pushforward_steps`) propagates without a
-rebuild. Enable it via the `batch_sampler:` block in
-[conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
-(default `null` — single-geometry runs keep the plain DataLoader path);
-the trainer keys its device-side geometry/SDF cache on the batch's mask,
+rebuild. [training.yaml](../configs/surrogate/training.yaml) ships it in
+the `batch_sampler:` block (`batch_sampler: null` falls back to the plain
+shuffled DataLoader); the trainer keys its device-side geometry/SDF cache on the batch's mask,
 so `state_mean`/`std` stats, the masked loss and the SDF features always
 match the current batch's trajectory. The P3D wrapper itself accepts any
 grid divisible by 16 (§7), which the random-geometry generator
@@ -493,7 +301,7 @@ ships it once per batch as `(1, C, *grid)`, exactly like the mask. `sdf_clamp_ce
 (default `32`) is the clamp radius `L`: `sdf_n = clip(sdf, −L, L) / L`. The
 features enter the model stem **raw** (no z-scoring, no masking) and are excluded
 from `_compute_normalization_stats`. Only `P3D` consumes them today (§10, §7);
-see the SDF plan in [docs/plans/sdf_features_plan.md](plans/sdf_features_plan.md).
+see the SDF plan in [archive/sdf_features_plan.md](archive/sdf_features_plan.md).
 
 #### Memory model
 
@@ -523,30 +331,6 @@ State file handles are kept in a per-process `_state_cache` dict; a
 worker rebuilds its own handles (avoids sharing netCDF descriptors across
 processes).
 
-#### Smoke script
-
-[scripts/neural_surrogate/dataloading.py](../scripts/neural_surrogate/dataloading.py) is the smoke test:
-it builds a `TransitionDataset`, wraps it in a `DataLoader`, prints the
-shape of the first few batches, and writes three diagnostic plots into
-`plot_dir`:
-
-- `states.png` — `|u|` at the mid-z slice for the first 4 batch items, with
-  `state_n` on top and `state_next` on the bottom on a shared color scale.
-  Under `--num-history-steps N` the top row is `state_n`'s **newest** frame
-  (its last `C` channels) and the printed `state_n` shape is annotated `H*C`.
-- `params.png` — scatter of the batch's `(inflow_angle, velocity_magnitude)`
-  pairs.
-- `geometry.png` — one subplot per vertical (z) level, white = fluid,
-  black = obstacle.
-
-```bash
-pixi run -e dev python scripts/neural_surrogate/dataloading.py
-pixi run -e dev python scripts/neural_surrogate/dataloading.py \
-  --data-dir training_data/pylbm_medium --cache --batch-size 16
-```
-
-It is a plain argparse CLI (not Hydra) — run with `--help` to see every flag.
-
 ---
 
 ## Part C — Architectures and training
@@ -562,8 +346,8 @@ It is a plain argparse CLI (not Hydra) — run with `--help` to see every flag.
 | `BaseTraining` (shared machinery) | [libs/neural-surrogates/src/neural_surrogates/training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
 | `Trainer` (full-grid train/val loop) | [libs/neural-surrogates/src/neural_surrogates/training/standard.py](../libs/neural-surrogates/src/neural_surrogates/training/standard.py) |
 | `TransitionDataset` | [libs/neural-surrogates/src/neural_surrogates/datasets/transition.py](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py) |
-| Run script | [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py) |
-| Config | [conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: stepper`, built in [tasks.py](../scripts/utils/tasks.py)) |
+| Config | [configs/surrogate/train_stepper.yaml](../configs/surrogate/train_stepper.yaml) + [training.yaml](../configs/surrogate/training.yaml) |
 
 All architectures share the contract
 `forward(state, params, geometry) -> state_next`. The geometry mask is
@@ -587,9 +371,8 @@ use site. Residual-predicting models add the **newest** frame
 (`state[:, -C:] + out`), and the geometry mask broadcasts over the whole
 `H·C` input. `H=1` gives an identical state dict and a bit-identical
 forward output versus a model built without the argument. The dataset and
-the model must agree: the train script cross-checks
-`dataset.num_history_steps` against `architecture.num_history_steps` and
-fails loud (§10). `DomainDecomposed` (§14) and `TadpoleTimeStepper` (§31)
+the model must agree: `train.py` stamps the dataset's `num_history_steps`
+onto the architecture (§10). `DomainDecomposed` (§14) and `TadpoleTimeStepper` (§31)
 accept the key but raise `NotImplementedError` for `H>1`.
 
 **SDF geometry features (P3D).** `P3D` accepts an optional `sdf_features` mode
@@ -598,8 +381,8 @@ selected channels, inserted right after the mask: stem order `[state, geometry,
 <sdf channels>, params, extra]` where `<sdf channels>` is `sdf_n` (`sdf`), `g_z,
 g_y, g_x` (`grad`), or all four (`both`). It advertises `n_geom_feature_channels`
 = 1 / 3 / 4 accordingly (`true`/`false` alias `both`/`none`). The dataset and the
-model must agree on the mode — the train script cross-checks it and fails loud on
-a mismatch.
+model must agree on the mode: `train.py` copies the architecture's mode onto the
+dataset (§10).
 During **training** the features arrive precomputed via a `geom_features=`
 argument (shipped by `TransitionDataset`/`transition_collate` when
 `dataset.sdf_features` is non-`none`; the trainer keys off `n_geom_feature_channels`
@@ -676,19 +459,20 @@ delta-state structure.
 
 #### Size presets
 
-The config group
-[conf/neural_surrogate/architectures/unet_convnext/](../conf/neural_surrogate/architectures/unet_convnext/)
-holds five presets that scale `base_channels`, `channel_mults`,
-`depths`, `kernel_size`, `expansion`. Each file is a single
-`_target_: neural_surrogates.UNetConvNeXt` block:
+[architectures.yaml](../configs/surrogate/architectures.yaml) holds
+`unet_convnext_{tiny,small,medium,large,xlarge}` (all with
+`separable_dwconv`, `normalize`, `residual`, FiLM conditioning):
 
 | Preset | base | mults | depths | kernel | expansion |
 |---|---|---|---|---|---|
 | tiny | 8 | [1, 2] | [1, 1] | 3 | 2 |
 | small | 16 | [1, 2, 4] | [1, 1, 1] | 5 | 4 |
-| medium | 24 | [1, 2, 4] | [2, 2, 2] | 7 | 4 |
+| medium | 32 | [1, 2, 4, 8] | [3, 3, 3, 3] | 7 | 2 |
 | large | 32 | [1, 2, 4, 8] | [2, 2, 2, 2] | 7 | 4 |
 | xlarge | 48 | [1, 2, 4, 8] | [3, 3, 3, 3] | 7 | 4 |
+
+The same file holds `p3d_{tiny,small,medium,large,xlarge}` (`P3D` sizes S/B/L;
+`p3d_medium`, the `train_stepper` default, adds `sdf_features: both`).
 
 ### 9a. `UPT` — Universal Physics Transformer
 
@@ -730,8 +514,9 @@ for a given geometry and is reused every subsequent step.
 | `attention_type` | `"dot_product"` | Self-attention implementation for all transformer stacks (perceiver cross-attention tails are unaffected). Options: `"dot_product"` (standard scaled-dot-product), `"dot_product_slow"`, `"efficient"` (linear), `"linformer"`, `"transsolver"`. `"transsolver"` requires `attention_kwargs: {num_slices: N}`. |
 | `extra_in_channels` | `0` | Extra input-only channels gathered at fluid cells raw (no normalisation) and concatenated before the params. Used by the DD wrapper to feed per-patch coarse context + positional encodings. Default 0 keeps the state dict byte-identical to a model built without the argument. |
 
-**Normalization stats.** Computed by `_compute_normalization_stats` in
-the training script: streamed file-by-file over the training split in
+**Normalization stats.** Computed by `get_normalization_stats`
+([training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py)):
+streamed file-by-file over the training split in
 float64, restricted to fluid cells via each trajectory's geometry mask
 (per-trajectory on multi-geometry splits). Installed via
 `model.set_normalization(state_mean, state_std, param_mean, param_std)`;
@@ -740,9 +525,8 @@ with the checkpoint so rollout/test callers get the correct
 standardisation for free.
 
 The streaming pass is slow on large splits, so it is **cached in the data
-folder** at `<root_dir>/normalization_stats/<split>.npz` (via
-`_get_normalization_stats`). The cache is keyed by a signature of every
-input the computation reads — split name, `state_vars`/`param_names`
+folder** at `<root_dir>/normalization_stats/<split>.npz`. The cache is keyed by a signature of every
+input the computation reads — dataset class, split name, `state_vars`/`param_names`
 order, `geometry_var`, and each state file's `(name, size, mtime)` — so
 regenerating or editing the training data (or changing any of those
 knobs) invalidates it and forces a recompute; `pushforward_steps` is not
@@ -760,19 +544,9 @@ differ.
 
 #### Size presets
 
-The config group
-[conf/neural_surrogate/architectures/upt/](../conf/neural_surrogate/architectures/upt/)
-holds five presets (`_target_: neural_surrogates.UPT`). All default to
-`normalize: true`, `predict_residual: true`, `attention_type:
-dot_product`, `cond_dim: null`.
-
-| Preset | dim | latent tokens | supernodes | gnn_dim | enc/approx/dec depth | heads | radius | max_degree |
-|---|---|---|---|---|---|---|---|---|
-| tiny | 32 | 16 | 16 | 16 | 1/1/1 | 2 | 2.5 | 8 |
-| small | 128 | 64 | 128 | 128 | 2/4/2 | 4 | 4.0 | 24 |
-| medium | 192 | 128 | 256 | 192 | 4/4/4 | 3 | 5.0 | 32 |
-| large | 384 | 256 | 512 | 256 | 4/6/4 | 6 | 5.0 | 32 |
-| xlarge | 768 | 512 | 1024 | 384 | 4/8/4 | 12 | 6.0 | 32 |
+[architectures.yaml](../configs/surrogate/architectures.yaml) holds
+`upt_{tiny,small,medium,large,xlarge}` with `attention_type: dot_product`;
+`normalize`, `predict_residual` and `cond_dim` keep their class defaults.
 
 ### 10. `Trainer` / `BaseTraining` and run script
 
@@ -846,9 +620,9 @@ window, then cosine-anneals down to `lr_min` over the remaining epochs.
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss
 improves, and reloads it into the model at the end of `fit()` so the
-returned model is the best-val checkpoint (not the last epoch). The run
-script passes `weights_path=model_weights/<model_name>/weights.pt`, so
-nothing needs to be saved by the caller after `fit()`.
+returned model is the best-val checkpoint (not the last epoch). `train.py`
+passes `weights_path=<weights_dir>/<name>/weights.pt`, so nothing needs to
+be saved by the caller after `fit()`.
 
 Every best-weight save also writes `best_val.json`. On resume this score takes
 precedence over a worse score in an older periodic checkpoint, for both plain
@@ -861,230 +635,81 @@ Increasing `num_epochs` on resume extends the cosine horizon while preserving
 the checkpoint's current learning rate. It continues decreasing to `lr_min`;
 a run already at `lr_min` stays there instead of cycling back upward.
 
-**Early stopping.** When `trainer.patience` is set in the config
-(default `null`, disabled), training halts after `patience` consecutive
-epochs without val-loss improvement. Combine with a generous
-`num_epochs` to let the patience criterion choose when to stop.
-
-**Normalization.** After building the model but before saving the config,
-the training script calls `_compute_normalization_stats(train_ds)` if
-`hasattr(model, "set_normalization")` — currently only `UPT` exposes this
-hook. Stats are streamed file-by-file in float64, restricted to fluid
-cells via the geometry mask (so obstacle zeros don't bias the mean), and
-passed to `model.set_normalization(state_mean, state_std, param_mean,
-param_std)`. They are stored as model buffers, travel with the checkpoint,
-and are restored automatically at rollout / test time.
+**Early stopping.** `patience` (class default `None`, disabled; `20` in
+`training.yaml`) halts training after that many epochs without val-loss
+improvement.
 
 The model and dataloaders are deliberately **constructed outside** the
 trainer and passed in — this keeps `Trainer` agnostic to backend choice,
 augmentation, and config structure.
 
-[scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py):
+### Run script and config
 
-1. Pull `dtype` from `cfg.dataset.dtype` (string → `torch.dtype`).
+`train.py` with `task: stepper`
+([train_stepper.yaml](../configs/surrogate/train_stepper.yaml)) does, via
+`_stepper` in [tasks.py](../scripts/utils/tasks.py):
+
+1. Copy `sdf_features` / `sdf_clamp_cells` from the architecture onto the
+   dataset, so the dataset ships the geometry features the model takes.
 2. `instantiate(cfg.dataset, split="train"|"val", dtype=...)` → two
    `TransitionDataset`s.
-3. `instantiate(cfg.dataloader, dataset=...)` for each, forcing
-   `shuffle=False` on val.
-4. `instantiate(cfg.architecture, n_state_channels=len(cfg.dataset.state_vars),
-   n_params=len(train_ds.param_names))` → model. `dataset.num_history_steps`
-   is the canonical history window and is mirrored onto the architecture
-   here unless the architecture node sets the key itself; the two are then
-   cross-checked and a mismatch raises, exactly like the SDF cross-check.
-5. Save the resolved Hydra config to
-   `model_weights/<model_name>/config.yaml`. `model_name` is a top-level
-   config field (default `unet_convnext_small`); override on the CLI
-   with `model_name=...`. The resolved `num_history_steps` is stamped
-   under **both** `dataset:` and `architecture:` first, because the
-   forward model (§12) rebuilds the net from the `architecture` node
-   alone while the eval (§11) and fine-tune (§23) scripts read it back
-   off `dataset`.
-6. `instantiate(cfg.trainer, model=..., train_loader=..., val_loader=...,
-   optimizer=instantiate(cfg.optimizer, params=model.parameters()),
-   loss_fn=instantiate(cfg.loss),
-   weights_path=model_weights/<model_name>/weights.pt)`.
-7. `trainer.fit()` — the trainer writes `weights.pt` on every val-loss
-   improvement and loads the best checkpoint back into the model before
-   returning. Re-instantiating the architecture from the saved
-   `config.yaml` and loading `weights.pt` rebuilds the exact trained
+3. Stamp the dataset's `num_history_steps` and `param_vars` onto both
+   `dataset:` and `architecture:` (the forward model (§12) rebuilds the net
+   from `architecture` alone; the evaluation reads `dataset`), then
+   `instantiate(cfg.architecture, n_state_channels=..., n_params=...)`.
+   `init_weights` (a `weights.pt`) warm-starts it.
+4. If the model has `set_normalization`, install the train-split stats from
+   `get_normalization_stats` ([training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py),
+   fluid cells only, float64, cached as in §9a).
+5. Save the config to `<weights_dir>/<name>/config.yaml`, build the loaders
+   (`build_loader`: the `TrajectoryBatchSampler` when `batch_sampler` is set,
+   val unshuffled), and `instantiate(cfg.trainer, ..., optimizer=..., loss_fn=...,
+   weights_path=<weights_dir>/<name>/weights.pt).fit()`. Rebuilding the
+   architecture from `config.yaml` and loading `weights.pt` gives the trained
    model.
 
-Every runtime object — architecture, dataset, dataloader, optimizer,
-loss, trainer — is constructed via `hydra.utils.instantiate` against a
-`_target_` block. Only `n_state_channels` and `n_params` stay explicit
-because they're derived from the dataset, not the architecture preset
-(plus `num_history_steps`, when only the dataset declares it).
-
-### Config and CLI
-
-[conf/neural_surrogate/training.yaml](../conf/neural_surrogate/training.yaml)
-is `# @package _global_` and pulls an architecture preset into its
-defaults list:
-
-```yaml
-defaults:
-  - _self_
-  - /neural_surrogate/mode@_global_: domain_decomposition
-```
-
-`@hydra.main` is pointed at the top-level `conf/` so the cross-group
-defaults entries resolve. The trainer is **not** a group — its fields live in an
-inline `trainer:` block in `training.yaml`. The `mode` group (see §19) bundles
-everything that varies together — the **architecture default**, the trainer
-*class*, the *loss* and `model_name`: `mode=standard` → `unet_convnext/medium` +
-`Trainer` + `MSELoss`, `mode=domain_decomposition` → `domain_decomposed/medium` +
-`PatchTrainer` + `DomainDecompositionLoss`. The `mode` entry sits **after**
-`_self_` so it overrides the inline `trainer._target_`, and it supplies both the
-architecture default and the whole `loss:` config (there is no separate `loss`
-group). The architecture family/size is still swappable on the CLI on top of the
-mode default. Default preset:
+[training.yaml](../configs/surrogate/training.yaml) holds the shared
+defaults (`trainer`, `loss: MSELoss`, `optimizer: AdamW`, `batch_sampler`,
+`dataloader`, `dataset`, `paths.data_dir`); each training config overrides
+what differs. The stepper architecture is picked from
+[architectures.yaml](../configs/surrogate/architectures.yaml) (quote the
+interpolation on the CLI):
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_stepper
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_stepper \
+    'architecture=${architectures.unet_convnext_large}' name=unet_large \
+    paths.data_dir=training_data/pylbm_barcelona \
+    dataset.pushforward_steps=4 dataset.num_history_steps=3 \
+    trainer.num_epochs=20 optimizer.lr=5e-4
 ```
 
-Swap architecture presets / families — the override value is the nested
-`family/preset` path:
+### 11. Evaluating steppers
+
+[scripts/surrogate/evaluate_stepper.py](../scripts/surrogate/evaluate_stepper.py)
+(block `stepper` of [eval.yaml](../configs/surrogate/eval.yaml)) rolls one or
+several trained steppers out on the **same** test trajectories. Each model is
+rebuilt from its `config.yaml` + `weights.pt` and its own training dataset
+class on `split` (top-level `data_dir` puts every model on one dataset; `null`
+uses each model's own). The dataset is built with `sdf_features=none`: an
+SDF-consuming model computes its features from the mask at inference. A model
+with `num_history_steps = H` is seeded with the true frames `0 … H-1` (the
+first `H` frames of its prediction are the truth) and then steps with the
+trajectory's own parameters up to `max_steps` frames (`null`: the whole
+trajectory).
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    'neural_surrogate/architectures@architecture=unet_convnext/large'
+pixi run -e dev python scripts/surrogate/evaluate_stepper.py \
+    'stepper.models=[model_weights/p3d_a,model_weights/p3d_b]' 'stepper.sample_indices=[0,1]'
 ```
 
-Override individual fields:
-
-```bash
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    dataset.root_dir=training_data/pylbm_small \
-    dataset.pushforward_steps=4 \
-    dataloader.batch_size=16 \
-    trainer.num_epochs=20 \
-    optimizer.lr=5e-4 \
-    architecture.kernel_size=5
-```
-
-The architecture presets ship `num_history_steps` **commented out** (like
-`sdf_features`), so a history run sets it on both nodes and the
-architecture side needs Hydra's append form:
-
-```bash
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    +architecture.num_history_steps=3 dataset.num_history_steps=3
-```
-
-### 11. Autoregressive rollout on the test split
-
-[scripts/neural_surrogate/test_neural_surrogate.py](../scripts/neural_surrogate/test_neural_surrogate.py)
-loads `model_weights/<model_name>/config.yaml`, re-instantiates the
-architecture and `TransitionDataset` from it, restores `weights.pt`, and
-steps the model from `truth[0]` for `T - 1` steps so the predicted
-trajectory matches the test trajectory length. At each step the
-ground-truth `params_n` for that time index is fed in. A
-history-conditioned model (`num_history_steps = H > 1`, read back from the
-saved config with a legacy-safe default of `1`) is instead seeded with the
-ground-truth window `truth[0:H]` and predicts from `t = H` onward, with
-`pred[0:H] = truth[0:H]` — so the returned trajectory keeps the truth's
-length and time indexing and every plot and metric below indexes
-identically (the first `H` per-step RMSE values are then exactly zero).
-The script is
-Hydra-driven via
-[conf/neural_surrogate/testing.yaml](../conf/neural_surrogate/testing.yaml)
-and takes `model_dir`, `sample_idx`, `device`, `output_dir` (default
-`${model_dir}/rollout_${sample_idx}`) and `tke_window`.
-
-Besides the velocity error the rollout is scored on **resolved turbulent
-kinetic energy**, because the two fail independently: a surrogate can track
-`|u|` closely while carrying too little (the usual failure — a diffused,
-over-smooth rollout) or too much fluctuation, and nothing in the RMSE separates
-that from a phase drift. `k = 0.5*sum_i var(u_i)` is formed per frame by
-[`evaluation.turbulence.rolling_tke`](../libs/evaluation/src/evaluation/turbulence.py)
-from a sliding Reynolds average of `tke_window` saved frames. `null` (the
-default) resolves to a fifth of the rollout, floored at 8 frames — short enough
-that the per-step curve is a curve and the animation's TKE panel moves, long
-enough that each variance is a measurement rather than its own sampling scatter.
-A window spanning the whole rollout gives the pass-long Reynolds average
-instead, which makes `k` one static field (the per-step panel then goes flat and
-says nothing the headline scalar does not). Every TKE statistic
-is taken over **fluid cells only** (the dataset's geometry mask): the solid
-cells the solver holds at rest carry no turbulence, and leaving them in would
-dilute the error by whatever fraction of the domain the buildings occupy. The
-TKE is *resolved only* — the subgrid contribution is not in the saved fields and
-is not negligible inside a canopy.
-
-Outputs in `${output_dir}/`:
-
-| File | Contents |
-|---|---|
-| `trajectory.pt` | `{"truth": (T, C, *grid), "pred": (T, C, *grid)}` torch tensors |
-| `rollout.png` | mid-z `|u|` slices at evenly-spaced times: truth / pred / `|err|` rows |
-| `rmse.png` | per-step RMSE vs ground truth across the rollout |
-| `tke_error.png` | domain-mean `k` (truth vs pred) and the per-step spatial `k` error (MAE + RMSE) over the rollout |
-| `rollout.mp4` | four-panel animation (truth, pred, `|err|`, per-cell TKE `\|Δk\|`) of `|u|` z-slices, all `T` steps. Falls back to `rollout.gif` when ffmpeg is missing. |
-
-The scalar the whole diagnostic reduces to — the mean TKE error over the entire
-domain and time span, with its RMSE, bias and the truth's own mean `k` for scale
-— is printed alongside the overall velocity RMSE at the end of the run. A state
-whose `state_vars` carry no velocity component skips TKE with a message rather
-than failing.
-
-All slice plots index the z-axis (first spatial dim of the `(C, nz, ny, nx)`
-state tensor), matching the convention used in
-[scripts/neural_surrogate/dataloading.py](../scripts/neural_surrogate/dataloading.py).
-
-```bash
-pixi run -e dev python scripts/neural_surrogate/test_neural_surrogate.py \
-    model_dir=model_weights/unet_convnext_small sample_idx=0
-```
-
-### 11b. Comparing several models
-
-[scripts/neural_surrogate/compare_surrogate_models.py](../scripts/neural_surrogate/compare_surrogate_models.py)
-is the multi-model sibling of §11: it rolls out *several* trained
-surrogates on the **same** test trajectories and writes side-by-side
-plots plus a metrics table, so different architectures / sizes /
-fine-tunes can be compared apples-to-apples. Each model is rebuilt from
-its own `model_weights/<name>/config.yaml` + `weights.pt` exactly as in
-§11; the diagnostics are the same ones, restructured so models overlay
-(per-step RMSE) or stack (slice grids / animation) instead of standing
-alone. The config is
-[conf/neural_surrogate/comparison.yaml](../conf/neural_surrogate/comparison.yaml):
-
-- `models` — the list of `{name, dir}` entries to include. `dir` is a
-  `model_weights/<...>` folder; `name` labels it in every plot/table.
-- `data` — the trajectories every model is evaluated on. `data.root_dir`
-  forces all models onto one shared dataset (leave `null` to use each
-  model's own training `root_dir` — only meaningful when they match; a
-  warning fires otherwise). `data.split`, `data.sample_indices` and
-  `data.max_steps` pick the split / trajectories / rollout horizon.
-- `animate` — render the stacked truth/pred/`|err|` animation (needs
-  ffmpeg/pillow; disable for a metrics-only pass).
-
-Because the rollout only feeds `(state, params, geometry)`, SDF-consuming
-models (P3D) self-compute their features at inference; the dataset is
-built with `sdf_features=none` to skip the init-time EDT. Only
-`split` / `dtype` / `sdf_features` (and `root_dir`) are overridden on each
-saved `dataset:` node, so a model's own `num_history_steps` survives —
-models with different history windows can be compared in one run, each
-seeded from `truth[0:H]` as in §11, and `ms_per_step` divides by the
-`T − H` frames actually predicted.
-
-Outputs in `${output_dir}/` (default `model_comparison/`):
-
-| File | Contents |
-|---|---|
-| `metrics.csv` | per-(model, sample) + per-model aggregate RMSE / MAE / rel-L2 / final-step RMSE / ms-per-step / param count |
-| `per_step_rmse_sample_*.png` | per-step rollout RMSE, all models overlaid, one figure per sample |
-| `per_step_rmse_mean.png` | per-step RMSE averaged across samples, all models overlaid |
-| `summary_metrics.png` | bar charts of the aggregate metrics per model (accuracy, speed, size) |
-| `slices_sample_*.png` | mid-z `|u|` grid: a truth row, then a pred + `|err|` row per model, across evenly-spaced times |
-| `rollout_sample_*.mp4` | stacked truth/pred/`|err|` animation, one row per model (falls back to `.gif` without ffmpeg) |
-
-```bash
-pixi run -e dev python scripts/neural_surrogate/compare_surrogate_models.py \
-    data.root_dir=training_data/pyudales_idealized \
-    'data.sample_indices=[0,1,2]' data.max_steps=100 \
-    'models=[{name:p3d,dir:model_weights/p3d_idealized},{name:unet,dir:model_weights/unet_convnext_medium}]'
-```
+Outputs in `stepper.output_dir`: `metrics.csv` (RMSE, MAE, relative L2,
+final-step RMSE and rollout time per model and sample, plus their mean),
+`rmse.png` / `rmse_mean.png` (RMSE per rollout step), `summary_metrics.png`,
+`slices.png` (`|U|` truth / prediction / error), `tke_slices.png` (resolved
+TKE, the per-cell time variance), `params.png` (the trajectory's parameters
+with the inflow angle and speed recovered at the inlet) and `rollout.mp4`
+(`animate: true`).
 
 ---
 
@@ -1104,15 +729,14 @@ pylbm` (the regular-grid observation mapping) applies regardless of the
 spin-up backend.
 
 Everything describing the trained network is read from a **`model_dir`** —
-the folder [scripts/neural_surrogate/train_neural_surrogate.py](../scripts/neural_surrogate/train_neural_surrogate.py)
-writes (§10):
+the folder `train.py` writes (§10):
 
 | Read from | Supplies |
 |---|---|
 | `model_dir/config.yaml` → `architecture` | the network to rebuild |
 | `model_dir/config.yaml` → `dataset.state_vars` / `param_vars` | channel & parameter ordering (`param_vars: null` → read from the first training param file) |
 | `model_dir/weights.pt` | trained parameters |
-| `dataset.root_dir/config.yaml` → `domain` | the **trained domain** the requested grid is checked against |
+| `dataset.root_dir/config.yaml` → `domain` | the **trained domain** the requested grid is checked against (for a random-geometry corpus this is the case template, not any trajectory's grid: pass `trained_domain` explicitly) |
 | `dataset.root_dir/config.yaml` → `time.output_frequency` | the **trained step size** (one network step) |
 
 Each can still be overridden explicitly (handy for tests), but the normal
@@ -1124,7 +748,7 @@ Key behaviours:
 |---|---|
 | **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
 | **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
-| **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the assimilation is warm-started from training snapshots loaded by `run_esmda` (see below), so a cold start (`state is None`) raises. With `spinup_source: generative` a cold start is **sampled** from a trained latent generator conditioned on the member's current parameters (Part I, §40); the CFD backend is neither built nor run. |
+| **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the caller must supply warm-start states (see below), so a cold start (`state is None`) raises. With `spinup_source: generative` a cold start is **sampled** from a trained latent generator conditioned on the member's current parameters (Part I, §40); the CFD backend is neither built nor run. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
 | **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
 | **State history** | `num_history_steps` (`H`) is read **off the built network** — there is no forward-model config knob. The rollout buffer is `(B, H·C, *grid)`, oldest first; each step feeds it to the net, appends the `(B, C, *grid)` prediction, drops the oldest frame, and **emits the prediction** rather than the wider buffer. `_output_schedule()` (`n_internal`, `emit_steps`) is unchanged, so a history rollout emits exactly as many frames as an `H=1` one and substepping stays orthogonal. At `H=1` it is the historic loop, tensor for tensor. Seeding policy below. |
@@ -1171,88 +795,54 @@ hold several time steps.
 
 ### Config and usage
 
-[conf/model/neural_surrogate.yaml](../conf/model/neural_surrogate.yaml)
-mirrors the other `conf/model/*.yaml` files (`name`, `solver_name`,
-`forward_model._target_`, `ensemble_model._target_`, `prepare._target_`).
-The `forward_model` node points at a `model_dir` (default
-`model_weights/unet_convnext_tiny`) and uses `_recursive_: false` so the
-surrogate fills in `n_state_channels` / `n_params` and builds its spin-up
-backend itself. `prepare` runs `prepare_neural_surrogate`, which
-compiles/preprocesses the spin-up backend. `default_params` provides
-constant fallbacks for trained parameters a caller omits (e.g. ESMDA only
-varies the inflow, but a uDALES-trained net also expects
-`pressure_gradient_magnitude`).
+[configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml)
+mirrors the other `configs/model/*.yaml` files (`name`, `solver_name`,
+`forward_model`, `ensemble_model`, `prepare`). `forward_model` points at a
+`model_dir` and uses `_recursive_: false` so the surrogate fills in
+`n_state_channels` / `n_params` and builds its spin-up backend itself.
+`prepare` runs `prepare_neural_surrogate`, which compiles/preprocesses the
+spin-up backend (a no-op for `training_data` and `generative`).
+`default_params` gives constant fallbacks for trained parameters a caller
+omits (DA varies only the inflow, but a uDALES-trained net also expects
+`pressure_gradient_magnitude`). `rollout_batch_size` caps the members rolled
+through the network in one batched pass.
 
-Select it as a truth or assimilation model just like any backend:
+Select it like any backend:
 
 ```bash
-python scripts/esmda/run_esmda.py \
-    model@truth_model=pyudales model@assim_model=neural_surrogate \
-    assim_model.forward_model.model_dir=model_weights/unet_convnext_tiny
+pixi run -e dev python scripts/run_smoother.py \
+    model@assim_model=neural_surrogate \
+    assim_model.forward_model.model_dir=model_weights/p3d_barcelona \
+    assim_model.forward_model.spinup_source=forward_model
 ```
 
-**Training-data warm start (`spinup_source: training_data`).** When the surrogate
-is the assimilation model and `forward_model.spinup_source` is `training_data`,
-`scripts/esmda/run_esmda.py` seeds the **first** assimilation window from pre-computed
-training trajectories instead of a CFD spin-up, using the model-level
-`training_data_spinup` config node (`root` / `split` /
-`initial_param_jitter_scale`) and the helpers in
-[`neural_surrogates.training_spinup`](../libs/neural-surrogates/src/neural_surrogates/training_spinup.py):
-each ensemble member starts from the **last** frame of a training sample
-(streamed one frame at a time to per-member files on disk, so the full ensemble
-never sits in RAM — these files are handed to ESMDA as the window-0 initial
-state), and its sampled prior inflow is anchored to that sample's final inflow
-value (the AR(2) draw's shape is kept; only its level is pinned). The known `t=0`
-is then pinned in the smoother for window 0. The surrogate forward model itself
-holds **no** training-data logic — it only rolls a provided warm-start state
-forward — so the two pieces (loading + anchoring) live entirely in `run_esmda`.
-
-For a history-conditioned surrogate the same helper writes the **last `H`**
-frames per member instead of the last one (`time` kept, oldest first;
-`H=1` still writes the byte-identical single squeezed frame), and
-`run_esmda` passes `getattr(assim_model, "num_history_steps", 1)` through —
-so every non-surrogate assimilation model keeps the old path, and window 0
-is seeded with **real** history rather than a repeated snapshot.
-`anchor_prior_params` is unchanged: the prior is still anchored to the
-sample's value at `frame`, i.e. to the *newest* seeded frame — the one the
-first prediction steps off.
-
-The `pyudales_neural_surrogate` case in
-[tests/test_run_esmda.py](../tests/test_run_esmda.py)
-builds a throwaway `model_dir` (random weights, trained domain == the test
-grid) via the `surrogate_model_dir_factory` fixture, exercising the full
-load-from-folder path without needing a real checkpoint.
-
-**Generative spin-up (`spinup_source: generative`).** The third cold-start
-source samples the window-0 field from a trained `TadpoleLatentGenerator`
-artifact (plan 07) via
-[`neural_surrogates.generative_spinup.GenerativeSpinup`](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py),
-configured by the nested `forward_model.generative_spinup` block. It is the
-**opposite** of the training-data warm start above: window 0 stays a cold start
-(`state_input=None`), nothing is pre-generated to `_initial_states`, the prior is
-not anchored and `pin_initial_from_spinup` stays `False`, so every ESMDA
-iteration regenerates the initial state from the *updated* parameters. Full
-contract — template requirements, current-first-knot conditioning, per-member
-seeded noise, the ESMDA lifecycle and the rejected joint-state smoothers — in
-[Part I, §40](#40-deployment-spinup_source-generative).
+**Spin-up sources.** `forward_model` runs the CFD backend; `generative`
+samples the cold start (§40). `training_data` (the config default) has **no**
+cold start of its own: the caller must hand every member a warm-start state,
+or the run raises. The helpers that build those states (the last `H` frames of
+a training sample per member, streamed to disk, and the prior inflow anchored
+to that sample's final value) are in
+[`neural_surrogates.training_spinup`](../libs/neural-surrogates/src/neural_surrogates/training_spinup.py),
+configured by the model-level `training_data_spinup` block, but the current DA
+scripts do not call them (the archived `run_esmda.py` did), so use
+`forward_model` or `generative` with them.
 
 ### Extending
 
 - **New architecture**: add a module under
   [libs/neural-surrogates/src/neural_surrogates/architectures/](../libs/neural-surrogates/src/neural_surrogates/architectures/),
-  re-export from
+  re-export it from
   [architectures/__init__.py](../libs/neural-surrogates/src/neural_surrogates/architectures/__init__.py)
-  (and the top-level
+  and the top-level
   [neural_surrogates/__init__.py](../libs/neural-surrogates/src/neural_surrogates/__init__.py)
-  if you want a flat `_target_`), and add a sibling group under
-  [conf/neural_surrogate/architectures/](../conf/neural_surrogate/architectures/)
-  with one preset file per size. The `Trainer` does not need to change
-  as long as the new model accepts `(state, params, geometry)`.
-- **New optimizer / loss / loader**: change the `_target_` (and kwargs)
-  in [train.yaml](../conf/neural_surrogate/training.yaml). No code
-  edits required.
+  (for a flat `_target_`), and add `<family>_<size>` entries to
+  [architectures.yaml](../configs/surrogate/architectures.yaml). The
+  `Trainer` does not need to change as long as the model accepts
+  `(state, params, geometry)`.
+- **New optimizer / loss / loader**: change the `_target_` (and kwargs) in
+  [training.yaml](../configs/surrogate/training.yaml) or on the CLI.
 - **New trainer behavior** (schedulers, checkpointing, logging): extend
-  `Trainer` and bump the `_target_` in the `trainer:` block.
+  `Trainer` and point `trainer._target_` at it.
 
 ---
 
@@ -1265,7 +855,7 @@ overlapping patches, runs a shared per-patch *fine* net, and stitches the
 patch outputs back together with a partition-of-unity (PoU) blend — while a
 small *coarse* net supplies global context. The design (companion PDF §2 +
 §5, Algorithm 1) is described in
-[docs/dd_implementation_plan.md](plans/dd_implementation_plan.md).
+[archive/dd_implementation_plan.md](archive/dd_implementation_plan.md).
 
 The point of the decomposition is **grid flexibility**: because the model
 tiles a fixed patch size, one trained instance runs on any global grid that
@@ -1342,7 +932,7 @@ chunking all assume `C` state channels per block, and the fine net's
 `extra_in_channels = n_state_channels + n_pos` context contract is written
 against a single frame. The key is deliberately **not** forwarded to the
 sub-nets, so `fine_net.num_history_steps == 1`. For `H>1` use a plain
-next-step architecture with `mode=standard`; `PatchTransitionDataset` rejects
+next-step architecture; `PatchTransitionDataset` rejects
 a history window too (§6). `TadpoleTimeStepper` (§31) rejects it for the same
 class of reason — its frozen, pre-trained AE encodes exactly `C` state
 channels (plus the geometry block) per crop.
@@ -1449,73 +1039,19 @@ interface/divergence terms still need `PatchTrainer`'s full-field path.
 full PoU merge (a patch's halo at `t+1` depends on its neighbours' interiors),
 which only the model owns.
 
-### 19. Config and CLI
+### 19. Config
 
-The config group
-[conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/)
-holds three presets. Each is a single
-`_target_: neural_surrogates.DomainDecomposed` block with
-`_recursive_: false` and `_convert_: all` (so the nested `decomposition` /
-`fine_net` / `coarse_net` arrive as plain kwarg dicts — they are **not**
-`_target_` nodes — and the wrapper builds `DomainDecomposition` /
-`UNetConvNeXt(**...)` itself). `extra_in_channels`, `residual=True` and the
-inner-net `periodic_axes=()` are fixed by the wrapper and must not be set in the
-config; global periodicity lives under `decomposition.periodic_axes`.
-
-| Preset | interior_size | halo | taper | coarsen | fine-net (base / mults / depths / kernel) |
-|---|---|---|---|---|---|
-| tiny | 16 | 4 | 2 | 4 | 8 / [1, 2] / [1, 1] / 3 |
-| small | 32 | 8 | 4 | 4 | 16 / [1, 2, 4] / [1, 1, 1] / 5 |
-| medium | 32 | 8 | 4 | 4 | 24 / [1, 2, 4] / [2, 2, 2] / 7 |
-
-(All three use `periodic_axes: [false, true, false]`, `geometry_coarsen:
-any_fluid`, `n_pos: 3`, FiLM conditioning, `normalize: true`, and a small
-dedicated coarse net at `base_channels: 8`.)
-
-**The architecture, trainer class and loss are bundled into the `mode` group.**
-A single `mode` choice selects all three (plus `model_name`): `mode=standard` →
-`p3d/medium` + `neural_surrogates.Trainer` + `MSELoss` (model_name
-`p3d_barcelona`), `mode=domain_decomposition` → `domain_decomposed/small` +
-[`PatchTrainer`](../libs/neural-surrogates/src/neural_surrogates/training/patch.py)
-+ `DomainDecompositionLoss`. The mode entry sits **after** `_self_` in the
-defaults list so it overrides the inline `trainer._target_`, and it supplies the
-architecture default and the whole `loss:` config inline (there is no separate
-`loss` group and no separate `trainer` config group — both are embedded in the
-`mode/` files). The trainer's remaining fields stay in the inline `trainer:`
-block in `training.yaml`. The architecture **family/size is still swappable on
-the CLI** on top of the mode default (the override value is the nested
-`family/preset` path) — e.g. to train a DD model as a full-grid drop-in
-(generic Trainer + MSELoss):
-
-```bash
-# (a) Drop-in path: mode=standard but with a domain_decomposed architecture.
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    neural_surrogate/mode@_global_=standard \
-    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-    model_name=domain_decomposed_small init_weights_path=null
-```
-
-```bash
-# (b) Patch (Eq 9) path: PatchTrainer + DomainDecompositionLoss (the default mode).
-pixi run -e dev python scripts/neural_surrogate/train_neural_surrogate.py \
-    'neural_surrogate/architectures@architecture=domain_decomposed/small' \
-    neural_surrogate/mode@_global_=domain_decomposition \
-    model_name=domain_decomposed_small init_weights_path=null
-```
-
-Both trainers share the inline `trainer:` config and the same machinery via
-`BaseTraining` (AMP, `torch.compile`, the pushforward-rollout curriculum, the
-warmup+cosine LR schedule, gradient clipping, early stopping, checkpoint/resume),
-so only `_target_` differs between the two paths. `DomainDecompositionLoss` cannot
-be driven by the generic `Trainer` (its `forward` signature differs from a plain
-element-wise loss), which is why the loss is paired with the trainer inside each
-mode rather than chosen independently.
-
-**Periodicity.** The single `architecture.periodic_axes: [y]` knob in
-`training.yaml` drives a DD model exactly as it drives a plain `UNetConvNeXt`:
-`DomainDecomposed` translates the axis-letter list into its decomposition's
-`(z, y, x)` periodicity (overriding the preset's `decomposition.periodic_axes`);
-the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`.
+No shipped config uses domain decomposition: the `domain_decomposed` presets
+and the `mode` group went with the archived setup. A `DomainDecomposed` node
+takes `_recursive_: false` and `_convert_: all` (the nested `decomposition` /
+`fine_net` / `coarse_net` are plain kwarg dicts, not `_target_` nodes; the
+wrapper builds `DomainDecomposition` / `UNetConvNeXt(**...)` itself).
+`extra_in_channels`, `residual=True` and the inner-net `periodic_axes=()` are
+fixed by the wrapper and must not be set; global periodicity lives under
+`decomposition.periodic_axes`, and `interior_size` must divide every periodic
+axis. `DomainDecompositionLoss` cannot be driven by the generic `Trainer` (its
+`forward` signature differs from an element-wise loss), so the patch path
+pairs it with `PatchTrainer`; both trainers share `BaseTraining`.
 
 ### 20. File map
 
@@ -1528,9 +1064,7 @@ the inner patch nets stay non-periodic. For DD, `interior_size` must divide `Ny`
 | `DomainDecompositionLoss` (Eq 9, four terms) | [dd_loss.py](../libs/neural-surrogates/src/neural_surrogates/dd_loss.py) |
 | `PatchTrainer` (full-field Eq-9 training) | [training/patch.py](../libs/neural-surrogates/src/neural_surrogates/training/patch.py) |
 | Spacing-invariant domain check (`domain_flexible`) | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py) |
-| Architecture presets `tiny` / `small` / `medium` | [conf/neural_surrogate/architectures/domain_decomposed/](../conf/neural_surrogate/architectures/domain_decomposed/) |
-| Mode groups `standard` / `domain_decomposition` (bundle trainer class + loss + architecture default) | [conf/neural_surrogate/mode/](../conf/neural_surrogate/mode/) |
-| Tests | [test_decomposition.py](../tests/test_decomposition.py), [test_domain_decomposed.py](../tests/test_domain_decomposed.py), [test_unet_convnext_extra_channels.py](../tests/test_unet_convnext_extra_channels.py), [test_patch_transition_dataset.py](../tests/test_patch_transition_dataset.py), [test_dd_loss.py](../tests/test_dd_loss.py), [test_dd_forward_model_flexible.py](../tests/test_dd_forward_model_flexible.py), [test_dd_training_wiring.py](../tests/test_dd_training_wiring.py) |
+| Tests | [test_decomposition.py](../tests/neural_surrogates/test_decomposition.py), [test_domain_decomposed.py](../tests/neural_surrogates/test_domain_decomposed.py), [test_unet_convnext_extra_channels.py](../tests/neural_surrogates/test_unet_convnext_extra_channels.py), [test_patch_transition_dataset.py](../tests/neural_surrogates/test_patch_transition_dataset.py), [test_dd_loss.py](../tests/neural_surrogates/test_dd_loss.py), [test_dd_forward_model_flexible.py](../tests/neural_surrogates/test_dd_forward_model_flexible.py) |
 
 ---
 
@@ -1540,9 +1074,8 @@ Take an already-trained next-step surrogate (focus: `P3D`, but
 architecture-agnostic), inject LoRA adapters, train **only** the adapter weights
 on new data with the existing `Trainer`, and export a fine-tuned `model_dir`
 that drops into `NeuralSurrogateForwardModel` unchanged. This is plan 01 of
-[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it supersedes
-the crude full-weight `init_weights_path` warm start for parameter-efficient
-fine-tuning (that hook still exists).
+the [surrogate plans](plans/implemented/neural_surrogates/00_master_plan.md); `method: full` (and the stepper's
+`init_weights` warm start) remain for full-weight fine-tuning.
 
 ### 21. `neural_surrogates.finetuning`
 
@@ -1586,7 +1119,7 @@ The trainer writes best-val `weights.pt` on every improvement. A LoRA run's
 in-loop `state_dict()` is the *wrapped* (base + adapter) dict, which a crash
 mid-training would leave behind in a format `NeuralSurrogateForwardModel` can't
 load. The optional `weights_transform` callable (default `None` → byte-identical
-old behavior) is applied when persisting best weights; the fine-tune script
+old behavior) is applied when persisting best weights; a LoRA fine-tune
 passes `merge_to_state_dict`, so the on-disk `weights.pt` is **always** a plain
 merged dict. When it is set, `BaseTraining` also keeps the best-val *wrapped*
 state in RAM and restores that (not the on-disk merged form) into the model at
@@ -1596,9 +1129,9 @@ the end of `fit()`.
 `checkpoint.pt` (`best_model_state`) and recovered on resume, so a resumed run
 that never beats the pre-resume `best_val` still restores the *true* best at the
 end of `fit()` — otherwise the caller's final `save(merge(...))` would clobber the
-on-disk best with last-epoch weights. `fit()` exposes `restored_best_weights`; the
-fine-tune script only overwrites `weights.pt` in step 7 when it is `True` (else it
-keeps the trainer's on-disk best and warns). `merge_to_state_dict` returns
+on-disk best with last-epoch weights. `fit()` exposes `restored_best_weights`;
+`_save_lora` in [tasks.py](../scripts/utils/tasks.py) only overwrites `weights.pt`
+when it is `True` (else it keeps the trainer's on-disk best). `merge_to_state_dict` returns
 **CPU** tensors, so the per-improvement deepcopy+merge retains no GPU memory and
 `weights.pt` is device-agnostic.
 
@@ -1607,60 +1140,44 @@ matching; it is not limited to `weights_transform` runs.
 
 ### 23. Config + script
 
-[conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml)
-(`config_name="neural_surrogate/finetuning"`) mirrors `training.yaml`'s shape
-(reused `trainer`/`dataset`/`dataloader`/`optimizer` blocks) plus a `lora:` block
-and `pretrained_model_dir` / `model_name`. A `finetune_mode` group
-([lora_nextstep](../conf/neural_surrogate/finetune_mode/lora_nextstep.yaml))
-bundles `Trainer` + `MSELoss` exactly like the training `mode` group — but leaves
-the **architecture to the pretrained config** (plan 03 adds `dft`).
+`train.py --config-name surrogate/finetune_stepper`
+([finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml),
+`task: finetune_stepper`, built by `_finetune_stepper` in
+[tasks.py](../scripts/utils/tasks.py)):
 
-[scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py)
-(`def run(cfg)` + thin `@hydra.main`, mirrors `train_neural_surrogate.py`):
-
-1. Load `<pretrained_model_dir>/config.yaml`; take the `architecture` node and
-   the `state_vars`/`param_vars`/`sdf_features`/`sdf_clamp_cells` as the **single
-   source of truth**, stamping them onto the fine-tune dataset. The dataloader +
-   normalization-stats helpers are shared with the train script via
-   [`neural_surrogates.training.data_utils`](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py)
-   (`build_loader`, `get_normalization_stats`) — a normal import, not a
-   cross-script reach-in.
-2. Build the fine-tune `TransitionDataset`s and **cross-check** their
-   `state_vars`/`param_names` against the pretrained spec (fail loud on
-   mismatch).
-3. Instantiate the architecture, `load_state_dict(weights.pt)`, optionally
-   recompute normalization (`recompute_normalization`, default off — **fails
-   loud** if set on an architecture without a `set_normalization` hook).
-4. Freeze all params; `inject_lora(...)`; `print_trainable_parameters()`.
-5. Save the resolved config to the new `model_dir` — the pretrained
-   `architecture` node, the fine-tune `dataset` (root/state_vars/param_vars), and
-   a `pretrained:` provenance block — so ESMDA rebuilds the net without chasing
-   the source dir.
-6. `Trainer` on the `PeftModel` with `weights_transform=merge_to_state_dict` and
-   the optimizer over the trainable (adapter) params only.
-7. After `fit()`: `save_adapter` → `model_dir/adapter/`, then overwrite
-   `weights.pt` with the final merged plain dict **only when
-   `trainer.restored_best_weights`** (else keep the trainer's on-disk best and
-   warn — see §22 resume-safety).
+1. Load `<pretrained_dir>/config.yaml`; take its `architecture` node and its
+   dataset `state_vars` / `sdf_features` / `sdf_clamp_cells` (and
+   `param_vars` / `num_history_steps` unless set) as the fine-tune dataset's.
+2. Build the fine-tune `TransitionDataset`s (`dataset.root_dir`: the new
+   data), instantiate the architecture and load `weights.pt`. With
+   `recompute_normalization: true` install the new data's stats; otherwise
+   keep the pretrained ones.
+3. `method: full` trains every weight from there. `method: lora` freezes the
+   model and `inject_lora`s the `lora:` block (`variant`, `rank`, `alpha`,
+   `dropout`, `target_preset`, `target_modules`, `modules_to_save`); the
+   optimizer gets only the trainable (adapter) parameters and the trainer
+   `weights_transform=merge_to_state_dict`.
+4. After `fit()` (LoRA): `save_adapter` → `<name>/adapter/`, then overwrite
+   `weights.pt` with the merged plain dict (and `best_val.json`) **only when
+   `trainer.restored_best_weights`**, else keep the trainer's on-disk best
+   (§22).
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/finetune_neural_surrogate.py \
-    pretrained_model_dir=model_weights/p3d_xie_and_castro \
-    model_name=p3d_xie_and_castro_ft_barcelona \
-    dataset.root_dir=training_data/pylbm_barcelona \
-    lora.rank=32 lora.target_preset=attention
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/finetune_stepper \
+    pretrained_dir=model_weights/p3d_xie_and_castro name=p3d_ft_barcelona \
+    dataset.root_dir=training_data/pylbm_barcelona lora.rank=32 lora.target_preset=attention
 ```
 
 ### 24. Artifact layout + ESMDA compatibility
 
 ```
 model_weights/<name>/
-  config.yaml           # pretrained architecture + fine-tune dataset + pretrained:
+  config.yaml           # pretrained architecture + fine-tune dataset + pretrained_dir
   weights.pt            # full MERGED plain state dict — ESMDA loads this, unchanged
   adapter/
     adapter_model.safetensors   # PEFT adapter (small, portable)
     adapter_config.json
-  checkpoint.pt, metrics.csv    # training-loop artifacts (unchanged)
+  checkpoint.pt, metrics.csv, best_val.json   # training-loop artifacts
 ```
 
 `weights.pt` is indistinguishable from a fully trained model, so
@@ -1676,21 +1193,20 @@ fine-tune data (that *is* the domain the fine-tuned model targets).
 | `inject_lora` / `merge_to_state_dict` / `save_adapter` / `load_adapter` | [finetuning/inject.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/inject.py) |
 | `resolve_target_modules` / presets / `all_adaptable_module_names` | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
 | `weights_transform` hook + resume-safe best-val restore | [training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
-| Shared loader + normalization helpers (both scripts) | [training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py) |
-| Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/](../conf/neural_surrogate/finetune_mode/) |
-| Run script | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
-| Tests | [test_lora_finetuning.py](../tests/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/test_base_training_weights_transform.py) |
+| Shared loader + normalization helpers | [training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py) |
+| Config | [configs/surrogate/finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: finetune_stepper`) |
+| Tests | [test_lora_finetuning.py](../tests/neural_surrogates/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/neural_surrogates/test_base_training_weights_transform.py) |
 
 ---
 
 ## Part G — Autoencoder (foundation-model) pre-training (Tadpole)
 
 Pre-train a **Tadpole-style (V)AE** on flow snapshots as pure representation
-learning — **no** next-step objective. This is plan 02 of
-[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it brings in
-the autoencoder wrapper, a single-snapshot dataset and an AE trainer. Plan 03
-(not yet implemented) turns a pre-trained AE into a next-step time-stepper; the
-AE itself is **never** an ESMDA forward model.
+learning — **no** next-step objective. This is plan 02 of the
+[surrogate plans](plans/implemented/neural_surrogates/00_master_plan.md): the autoencoder wrapper, a
+single-snapshot dataset and an AE trainer. Part H turns a pre-trained AE into a
+next-step time-stepper; the AE itself is **never** a forward model.
 
 ### 26. `TadpoleAE` — the wrapper architecture
 
@@ -1722,9 +1238,9 @@ What the wrapper adds:
 
 | Concern | Behaviour |
 |---|---|
-| **Normalization** | `normalize=True` z-scores each state channel with buffered training stats (`set_normalization`, saved with the weights) — the same contract as `P3D`/`UPT`, so the pre-train script's `get_normalization_stats` path just works. Standardising *before* the autoencoder folds channels into the batch makes each folded **state** crop ~`N(0,1)`, matching Tadpole's pre-training statistics (this is what the HF warm start relies on). The geometry-block channels are fed **raw** (see below), so on those few auxiliary channels the HF encoder sees out-of-distribution inputs — acceptable: they carry a bounded, near-constant geometry cue (not primary flow statistics) that the encoder adapts to during continued pre-training. |
+| **Normalization** | `normalize=True` z-scores each state channel with buffered training stats (`set_normalization`, saved with the weights) — the same contract as `P3D`/`UPT`, so `train.py`'s `get_normalization_stats` path just works. Standardising *before* the autoencoder folds channels into the batch makes each folded **state** crop ~`N(0,1)`, matching Tadpole's pre-training statistics (this is what the HF warm start relies on). The geometry-block channels are fed **raw** (see below), so on those few auxiliary channels the HF encoder sees out-of-distribution inputs — acceptable: they carry a bounded, near-constant geometry cue (not primary flow statistics) that the encoder adapts to during continued pre-training. |
 | **Geometry** | Input is masked (`state * geometry`, obstacles zeroed) like `P3D`. With `encode_geometry=True` the mask (`{0,1}`) and, if `sdf_features` is on, the SDF channels (`[-1,1]`) are appended **raw** (already bounded; a 0/1 mask has no mean/std to standardise) as **extra folded encoder channels**, and *reconstructed* — on purpose: recon loss on the state alone would let the encoder discard geometry from the latent, so making it reconstruct the geometry block is the supervision that forces geometry *into* the latent, which is what the plan-03 DFT attends over. On a single-geometry corpus this re-encodes a constant per snapshot (intended for the multi-geometry regime; use `encode_geometry=False` for state-only / single-geometry). |
-| **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` **or** a `geometry_branch` (in branch mode the same channels feed the branch instead of the encoder), and must match the dataset's mode + `sdf_clamp_cells` (the script cross-checks). |
+| **SDF features** | `sdf_features` (`none`/`sdf`/`grad`/`both`) appends the clamped-SDF / gradient channels alongside the encoded mask; requires `encode_geometry=True` **or** a `geometry_branch` (in branch mode the same channels feed the branch instead of the encoder), and must match the dataset's mode + `sdf_clamp_cells` (`train_autoencoder.yaml` interpolates them from `dataset`). |
 | **Geometry branch** | `geometry_branch: {width: 32}` (default `null`) switches geometry from *content* to *conditioning* — see below. |
 | **Spatial processing** | `spatial_mode: local` preserves independent tiles; `global` processes each whole rectangular field; `halo` uses overlapping encoder/decoder tiles and keeps central cores. `encoder_crop_size` accepts a scalar or an anisotropic `[z, y, x]` shape; local/halo pad each axis to its tile size, while global pads only to stride 16. See below. |
 | **Params** | Deliberately **not** an AE input — physical params condition dynamics, not single-snapshot appearance (they enter in plan 03). `n_params` is accepted for signature parity and ignored. |
@@ -1808,7 +1324,7 @@ assumed equivalent to global processing. `max_internal_batchsize` limits the
 encoder/decoder batch, not the full-grid latent transform or all saved training
 activations.
 
-For example, set these in `pretrain_autoencoder.yaml` or `finetune_mode/dft.yaml`:
+For example, set these in `train_autoencoder.yaml` or `train_dft.yaml`:
 
 ```yaml
 architecture:
@@ -1895,7 +1411,7 @@ field with the geometry block concatenated as extra channels:
 real and the fake pass are given the **true** geometry block — never the
 reconstructed one, which would let the AE hide flow errors behind a distorted
 obstacle field. The trainer settles the channel contract once at construction and
-fails loudly (naming both counts) on a mismatch; the pre-train script injects
+fails loudly (naming both counts) on a mismatch; `train.py` (tasks.py) injects
 `n_state_channels` / `encode_geometry` / `sdf_features` from the *built model*, so
 the critic and the AE cannot disagree. Both real and reconstructed state
 channels are zeroed inside solids before either critic pass; geometry/SDF
@@ -1950,54 +1466,37 @@ must run the adversarial path under fp16.
 
 ### 29. Config + script + artifacts
 
-[conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml)
-(`# @package _global_`, no `mode` group — a single trainer + architecture
-pairing) drives
-[scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py)
-(`run(cfg)` + `@hydra.main`, same skeleton as `train_neural_surrogate.py`):
-datasets → normalization stats → `set_normalization` → save `config.yaml` →
-`AutoencoderTrainer.fit()`.
+`train.py --config-name surrogate/train_autoencoder`
+([train_autoencoder.yaml](../configs/surrogate/train_autoencoder.yaml),
+`task: autoencoder`): datasets → `TadpoleAE` with `n_state_channels` from the
+data → `set_normalization` → optional discriminator (§28b) → save
+`config.yaml` → `AutoencoderTrainer.fit()`. The architecture's `sdf_features`
+/ `sdf_clamp_cells` interpolate the dataset's, so the two always agree; the
+KL, geometry and adversarial weights are in `loss_weights`.
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/pretrain_autoencoder.py \
-    dataset.root_dir=training_data/pylbm_barcelona model_name=tadpole_ae_s
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_autoencoder \
+    paths.data_dir=training_data/pylbm_barcelona name=tadpole_ae_s
 ```
 
-Artifacts in `model_weights/<name>/`: `weights.pt` (full `TadpoleAE` state dict —
-our standard), plus `encoder.pt` / `decoder.pt` via `save_separate_weights` (the
-handoff format for plan 03 and HF-style reuse), and `config.yaml` /
-`checkpoint.pt` / `metrics.csv` as usual. In geometry-branch mode one more file
-sits next to them — `geometry_branch.pt`, a plain `torch.save` of the branch's
-`state_dict` (the encoder/decoder projections it feeds already travel inside
-`encoder.pt`/`decoder.pt`). It is written **only** in branch mode, so a standard
-run's artifact set is unchanged, and it is what `TadpoleTimeStepper` loads (§31).
+Artifacts in `model_weights/<name>/`: `weights.pt` (full `TadpoleAE` state
+dict), plus `encoder.pt` / `decoder.pt` via `save_separate_weights` (the
+handoff to the DFT stepper and the latent generator), and `config.yaml` /
+`checkpoint.pt` / `metrics.csv` as usual. In geometry-branch mode one more
+file sits next to them — `geometry_branch.pt`, a plain `state_dict` of the
+branch (the encoder/decoder projections it feeds already travel inside
+`encoder.pt`/`decoder.pt`); `TadpoleTimeStepper` loads it (§31).
 
-**Batching default.** The shipped default is `batch_sampler: null` — the plain
-shuffled `DataLoader`, which honours `dataloader.batch_size` / `shuffle` /
-`drop_last` as written and mixes snapshots freely across trajectories. This is
-the right default for the shipped single-geometry targets (e.g.
-`pylbm_barcelona`). The config also ships a commented-out `TrajectoryBatchSampler`
-block as a ready-to-enable example for a **multi-geometry** snapshot corpus (its
-per-trajectory grids cannot be stacked by plain shuffled batching — see §6,
-"Multi-geometry splits", for the same contract on `TransitionDataset`). Enabling
-it has three
-consequences to be aware of: (1) it **replaces** `dataloader.batch_size` /
-`shuffle` / `drop_last`, which become dead knobs (neutralised in
-`training/data_utils.py`) — set batch size via the sampler's own `batch_size`;
-(2) every batch is drawn from a single trajectory, so batches never mix
-geometries within a step (they still shuffle across trajectories each epoch); and
-(3) `cell_budget` caps the total cells per batch as `max(1, cell_budget // cells)`,
-so on grids ≥ ~2.1M cells the default `cell_budget: 4194304` silently drops the
-per-trajectory batch size to 1. Size `cell_budget` from a known-good
-single-geometry run (`batch_size * cells_per_sample`).
-
-The pre-train script also **warns** when encoder tiling wastes compute on
-padding. It derives each actual dataset crop shape (a scalar `random_crop_size`
-is clipped independently to each grid axis), then checks it against the scalar
-or `[z, y, x]` `encoder_crop_size`. Non-divisible axes are zero-padded to their
-next tile multiple every forward; this wastes compute and the padded tiles also
-inflate the logged `kl` metric. Choose each tile dimension as a multiple of 16
-that divides its corresponding grid or dataset-crop dimension.
+**Batching.** `training.yaml` ships the `TrajectoryBatchSampler` (§6), which
+replaces `dataloader.batch_size` / `shuffle` / `drop_last` (set the batch size
+on `batch_sampler`), draws every batch from one trajectory (needed for
+multi-geometry corpora) and caps it at `max(1, cell_budget // cells)` cells:
+on large grids that silently drops the batch to 1, so size `cell_budget`
+from a known-good run (`batch_size * cells_per_sample`).
+`train_autoencoder.yaml` sets `batch_size: 8`, `cell_budget: 393216` and
+`random_crop_size: 64`. Choose each `encoder_crop_size` entry as a multiple of
+16 that divides the crop (or grid) along that axis: non-divisible axes are
+zero-padded every forward, which wastes compute and inflates the logged `kl`.
 
 ### 30. File map
 
@@ -2009,20 +1508,20 @@ that divides its corresponding grid or dataset-crop dimension.
 | Vendored autoencoder subtree | [architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/) |
 | `SnapshotDataset` / `snapshot_collate` | [datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py) |
 | `AutoencoderTrainer` | [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py) |
-| Config | [conf/neural_surrogate/pretrain_autoencoder.yaml](../conf/neural_surrogate/pretrain_autoencoder.yaml) |
-| Run script | [scripts/neural_surrogate/pretrain_autoencoder.py](../scripts/neural_surrogate/pretrain_autoencoder.py) |
-| Tests | [test_autoencoder_pretraining.py](../tests/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/test_autoencoder_adversarial.py), [test_tadpole_geometry_branch.py](../tests/test_tadpole_geometry_branch.py) |
+| Config | [configs/surrogate/train_autoencoder.yaml](../configs/surrogate/train_autoencoder.yaml) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: autoencoder`) |
+| Tests | [test_autoencoder_pretraining.py](../tests/neural_surrogates/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/neural_surrogates/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/neural_surrogates/test_autoencoder_adversarial.py), [test_tadpole_geometry_branch.py](../tests/neural_surrogates/test_tadpole_geometry_branch.py) |
 
 ---
 
 ## Part H — Autoencoder → time-stepper (Tadpole DFT)
 
-Turn a **pre-trained** autoencoder (Part G) into a next-step ESMDA forward model
+Turn a **pre-trained** autoencoder (Part G) into a next-step forward model
 with Tadpole's **DFT** ("Dynamic Fine-Tuning") recipe: a *frozen* encoder/decoder
 with **zero-initialised** reintroduced skip connections (the paper's γ scales) and
 a **zero-initialised** latent sub-network that together act as a trainable
-increment *around* the frozen AE reconstruction. This is plan 03 of
-[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md); it composes
+increment *around* the frozen AE reconstruction. This is plan 03 of the
+[surrogate plans](plans/implemented/neural_surrogates/00_master_plan.md); it composes
 plans 01 (LoRA/PEFT) and 02 (`TadpoleAE`, `encoder.pt`/`decoder.pt` handoff) — the
 DFT stage is "just" a plan-01 fine-tune with a different architecture plus a few
 extra fully-trained modules.
@@ -2048,8 +1547,8 @@ What the wrapper adds around `TadpoleDFT`:
 | **Latent sub-network** | `subnetwork="default"` builds a `ParamConditionedSubnetwork` wrapping a vendored `SequentialModel` (`attention_method="naive"` — the dev box has **no** triton, so the upstream `"hyper"` attention is unavailable) over the folded latent tokens, with `init_zero_proj=True` so its output is exactly `0` at init. `None` builds no sub-network (pure frozen AE). |
 | **Param conditioning** (our addition; Tadpole has none) | `param_conditioning="film"` (default): the (z-scored) params `(B, P)` drive a small MLP with a **zero-initialised** output layer producing per-channel `(scale, shift)` applied to the latent tokens as `x*(1+scale)+shift`. `"token"`: an additive (adaLN-style) zero-init param embedding. `"none"` or `n_params==0`: **no** conditioning module at all (repo no-op rule) — the module tree is byte-identical to a param-free build. |
 | **Normalization** | State stats are **inherited** from the AE (read from `<ae_dir>/weights.pt`) so the frozen encoder sees its pre-training distribution; `set_normalization` installs the fine-tune split's **param** stats (used to z-score params before conditioning). Buffers travel with the checkpoint. **Fail-loud:** if the AE dir's `weights.pt` is missing or lacks `state_mean`/`state_std`, loading the stats now **raises** (repo convention) rather than silently continuing with identity zeros/ones — the only exception is an explicit `recompute_normalization` opt-out, which will overwrite the stats anyway. |
-| **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Cross-checked against the AE (must match). |
-| **Geometry branch** | `geometry_branch: {width: 32}` (default `null`): the AE's pre-trained branch is reused, **frozen**, and its features condition the frozen enc/dec and the latent sub-network — see below. Mutually exclusive with `encode_geometry`; cross-checked against the AE. |
+| **Geometry** | Masked like `P3D` (`state * geometry`); with `encode_geometry=True` the mask (+SDF) channels ride through the frozen encoder exactly as in pre-training, so the latent tokens the sub-network attends over carry geometry. Output geometry channels are discarded (geometry is static). Must match the AE. |
+| **Geometry branch** | `geometry_branch: {width: 32}` (default `null`): the AE's pre-trained branch is reused, **frozen**, and its features condition the frozen enc/dec and the latent sub-network — see below. Mutually exclusive with `encode_geometry`; must match the AE. |
 
 **Optional state mixing on DFT skips.** Set
 `architecture.skip_mixing: {width: 32, levels: [4, 8]}` to add one pointwise
@@ -2087,9 +1586,9 @@ branch instead of folding geometry: it builds `GeometryBranch(in_channels=1 +
 n_sdf, **geometry_branch)`, loads `<pretrained_ae_dir>/geometry_branch.pt` (a
 plain `state_dict`; **fail loud** if absent, since a random branch would feed the
 frozen AE conditioning it has never seen) and **freezes** it — the branch is part
-of the frozen AE, exactly like `encoder.pt`/`decoder.pt`, and the fine-tune
-script's `trainable_modules` never lists it. `skip_pretrained_load` (the ESMDA
-deploy build) is the only sanctioned way past the load, because the merged
+of the frozen AE, exactly like `encoder.pt`/`decoder.pt`, and `train_dft.yaml`'s
+`trainable_modules` never lists it. `skip_pretrained_load` (the deploy
+build) is the only sanctioned way past the load, because the merged
 `weights.pt` already carries the branch as a submodule. The four features are
 injected in two places:
 
@@ -2110,9 +1609,7 @@ during DFT fine-tuning the **only trainable geometry path is the FiLM**.
 Only the **state** crops are folded in branch mode (`n_geometry_channels == 0`),
 so the sub-network already reads and writes `C * Cl` channels and only state
 crops are decoded — "condition, don't predict". `encode_geometry` must be
-`False`; setting both raises. **Footgun:** `dft.yaml` ships `encode_geometry:
-true`, so a branch-mode run must pass `architecture.encode_geometry=false`
-explicitly (and match the AE, which the cross-check below enforces).
+`False`; setting both raises.
 
 **Residual convention.** Output is `state_next = dft_state * mask` — the DFT
 *directly* predicts the next state (it morphs its own reconstruction toward
@@ -2134,34 +1631,38 @@ belong to the frozen AE, so `_ae_reference_recon` applies the *same* branch
 features, and the only new DFT-side addition — the spatial FiLM — is zero-init. This is *not* `state_next == state`: that holds only for
 a perfectly-reconstructing AE, a **training** outcome, not a wiring invariant.
 
-### 32. Training path — `finetune_mode=dft`
+### 32. Training path — `task: dft`
 
-[conf/neural_surrogate/finetune_mode/dft.yaml](../conf/neural_surrogate/finetune_mode/dft.yaml)
-extends the plan-01 fine-tune config. Unlike `lora_nextstep` (which leaves the
-architecture to the pretrained config), `dft.yaml` declares the architecture
-**inline** (`TadpoleTimeStepper` + `size`/`param_conditioning`/`latent_type`/
-`subnetwork`), because `pretrained_model_dir` here is the **AE** dir, not a
-next-step model. It also sets `lora.target_preset: tadpole_encdec` and a
-`trainable_modules` list (the NEW modules trained *fully*, not via LoRA):
-`subnetwork`, `latent_residual_scale`, the γ skip `scales`, and optional
-`skip_mixing` adapters.
+`train.py --config-name surrogate/train_dft`
+([train_dft.yaml](../configs/surrogate/train_dft.yaml), `_dft` in
+[tasks.py](../scripts/utils/tasks.py)). `pretrained_dir` is the **AE** export,
+and the architecture is declared inline (`TadpoleTimeStepper` with
+`pretrained_ae_dir: ${pretrained_dir}`, `size`, `spatial_mode`,
+`param_conditioning`, `latent_type`, `subnetwork`, `skip_mixing`,
+geometry settings). The task:
 
-`finetune_neural_surrogate.py` dispatches on the presence of the inline
-`cfg.architecture` node (dft.yaml sets it; `lora_nextstep` does not). In DFT mode
-it: instantiates `cfg.architecture` fresh with `n_state_channels` /`n_params` from
-the fine-tune dataset and `pretrained_ae_dir = pretrained_model_dir`;
-**cross-checks** the AE's `size` / `encode_geometry` / `sdf_features` /
-`sdf_clamp_cells` / `normalize` / `geometry_branch` (from the AE `config.yaml`)
-against the stepper and **fails loud** on a mismatch — so an AE trained with
-`normalize: false` can no longer silently pair with a `normalize: true` stepper,
-and a stepper cannot pick up an AE's `geometry_branch.pt` under a different branch
-config (both sides must be `null`, or the exact same mapping); installs the fine-tune
-split's param stats via `set_normalization`
-(state stats inherited from the AE); freezes everything, injects LoRA on
-`dft.encoder`/`dft.decoder` via the `tadpole_encdec` preset, and unfreezes the
-`trainable_modules`. Everything else — the `TransitionDataset`, masked-MSE
-`Trainer`, `weights_transform=merge_to_state_dict` merged export — is identical to
-plan 01. `lora_nextstep` stays byte-identical (the DFT branch is mode-guarded).
+1. takes the AE's dataset `state_vars` / `sdf_features` / `sdf_clamp_cells`
+   (and `param_vars`, `num_history_steps` = 1 unless set) for the fine-tune
+   `TransitionDataset`s;
+2. builds the stepper with `require_ae_state_stats = not
+   recompute_normalization`: by default the AE's state stats are kept and only
+   the param stats of the fine-tune split are installed;
+3. freezes everything, injects LoRA on `dft.encoder` / `dft.decoder` with the
+   `lora:` block (`target_preset: tadpole_encdec`), and unfreezes the
+   `trainable_modules` (the NEW modules trained *fully*: `subnetwork`,
+   `latent_residual_scale`, `skip_mixing`, the γ skip `scales`);
+4. stamps `skip_pretrained_load: true` / `pretrained_ae_dir: null` on the
+   saved architecture and trains with `weights_transform=merge_to_state_dict`
+   and the plan-01 export (§23 step 4).
+
+The stepper's geometry settings (`encode_geometry`, `sdf_features`,
+`geometry_branch`, `size`, `normalize`) must match the AE's: nothing
+cross-checks them beyond the strict encoder/decoder weight load.
+
+```bash
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_dft \
+    pretrained_dir=model_weights/tadpole_ae_s name=dft_s
+```
 
 **`tadpole_encdec` LoRA preset** ([targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py)):
 a regex selecting the Linear + 3×3×3 Conv3d leaves inside `dft.encoder`/
@@ -2178,10 +1679,10 @@ The export is the standard plan-01 shape, so
 ```
 model_weights/<name>/
   config.yaml   # inline TadpoleTimeStepper arch (skip_pretrained_load: true,
-                #   pretrained_ae_dir: null) + fine-tune dataset + pretrained:
+                #   pretrained_ae_dir: null) + fine-tune dataset + pretrained_dir
   weights.pt    # full MERGED plain state dict (enc/dec + subnetwork + γ + LoRA)
   adapter/      # PEFT adapter (adapter_model.safetensors + adapter_config.json)
-  checkpoint.pt, metrics.csv
+  checkpoint.pt, metrics.csv, best_val.json
 ```
 
 `weights.pt` is the **sole source of truth** for this mode. Unlike a pure-LoRA
@@ -2189,10 +1690,10 @@ next-step fine-tune, the fully-trained NEW modules (`subnetwork`, the γ skip
 `scales`, `latent_residual_scale`, and optional `skip_mixing`) live **only** in the merged `weights.pt`, not in
 `adapter/` — which holds just the encoder/decoder LoRA deltas. So `adapter/` alone
 cannot reconstruct the trained model here; it is **provenance-only** (a portable
-record of the LoRA half). This matters for the resume-without-best-weights WARNING
-branch in the fine-tune script's step 7: if that branch fires it keeps the
-trainer's on-disk best-val `weights.pt` and a *last-epoch* `adapter/` — the two can
-disagree, and `weights.pt` (which ESMDA loads) is the one to trust.
+record of the LoRA half). When a resumed run does not restore its best weights
+(§22), `weights.pt` is the trainer's on-disk best while `adapter/` is the last
+epoch's — the two can disagree, and `weights.pt` (what deployment loads) is the
+one to trust.
 
 The critical detail: the saved `architecture` node is stamped with
 **`skip_pretrained_load: true`** and **`pretrained_ae_dir: null`**, so at deploy
@@ -2210,10 +1711,10 @@ unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
 | Vendored `TadpoleDFT` + downstream sub-network | [architectures/_tadpole/model/dft.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/model/dft.py), [.../architecture/downstream/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/architecture/downstream/) |
 | Shared field IO mixin | [architectures/_tadpole_field_io.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_field_io.py) |
 | `tadpole_encdec` LoRA preset | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
-| Config + `finetune_mode` group | [conf/neural_surrogate/finetuning.yaml](../conf/neural_surrogate/finetuning.yaml), [conf/neural_surrogate/finetune_mode/dft.yaml](../conf/neural_surrogate/finetune_mode/dft.yaml) |
-| Run script (DFT dispatch) | [scripts/neural_surrogate/finetune_neural_surrogate.py](../scripts/neural_surrogate/finetune_neural_surrogate.py) |
+| Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`) |
 | `GeometryBranch` (shared with the AE) | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
-| Tests | [test_ae_to_timestepper.py](../tests/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/test_tadpole_stepper_geometry_branch.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py) |
 
 ---
 
@@ -2223,9 +1724,9 @@ Replace the CFD spin-up with a **sample**: a conditional flow-matching model
 trained in the latent space of a *frozen* pre-trained `TadpoleAE` (Part G)
 generates a statistically developed flow state from the obstacle geometry and a
 short history of the inflow parameters, and the surrogate rollout (Part D / H)
-starts from it. This is plan 07 of
-[neural_surrogate_plans](neural_surrogate_plans/00_master_plan.md)
-([07_latent_flow_matching_spinup.md](neural_surrogate_plans/07_latent_flow_matching_spinup.md));
+starts from it. This is plan 07 of the
+[surrogate plans](plans/implemented/neural_surrogates/00_master_plan.md)
+([07_latent_flow_matching_spinup.md](plans/implemented/neural_surrogates/07_latent_flow_matching_spinup.md));
 it depends on plan 02 (the AE) and, for deployment, on the `TadpoleTimeStepper`
 of plan 03. None of the DFT machinery (skips, gates, LoRA, skip mixers) is
 involved — a generated latent has no input state whose encoder skips could be
@@ -2264,8 +1765,8 @@ transition datasets are lenient:
 |---|---|
 | **Pairing** | State and parameter files are paired by sample id (the `sample_XXXX` stem), never by sorted position. A state sample without a param partner, or a param sample without a state partner, raises. |
 | **Time coordinates** | Both files must carry a `time` coordinate (no alignment by index); the two must agree per sample (`allclose`), be finite and strictly increasing. Parameter values must be finite and the resolved variable set identical across samples. |
-| **Cadence** | The median saved `dt` over every trajectory is stored as `history_dt_seconds`; every `dt` must lie within `cadence_rtol` (default `0.05`) of it, else the error names the sample and the step. Real corpora are slightly non-uniform (`pyudales_idealized` saves at 0, 4.85, 9.92, 15.00, … s), so an exact check would reject valid data while a loose one would let a mixed-cadence corpus train a generator whose `Hp` rows span an ill-defined duration. `Hp` samples span `(Hp-1) * history_dt_seconds` (12 × 5 s → 55 s). |
-| **Anchors** | Anchors start at `t = Hp-1` so every history is fully recorded; a trajectory shorter than `Hp` raises. With `constant_prehistory=True` anchors start at `t = 0` and the missing leading rows repeat the first recorded row — valid **only** when the data's provenance guarantees the forcing was constant at those values before the first saved time (e.g. a constant-forcing spin-up ending exactly at the first save). The flag lives in the training config (and the artifact's `data_provenance`) so the choice is explicit and auditable, and the training script *verifies* it against the corpus' own `config.yaml` rather than taking it on trust: the spin-up the data were generated with — `training_data.spinup_time`, resolved by `corpus_time_config` (the saved top-level `time` block is the unused Hydra default and is read only when the corpus has no `training_data` horizon) — must be recorded and be at least `(Hp-1) * history_dt_seconds` (the repeated plateau must fit inside the constant-forcing spin-up), the split must share one first saved time (state and parameter times are already identical per sample), and the verdict is written to `data_provenance.verified_prehistory`. `time_stride` thins the *anchors* only; histories always use contiguous saved steps. |
+| **Cadence** | The median saved `dt` over every trajectory is stored as `history_dt_seconds`; every `dt` must lie within `cadence_rtol` (class default `0.05`, `0.1` in the config) of it, else the error names the sample and the step. Real corpora are slightly non-uniform (`pyudales_idealized` saves at 0, 4.85, 9.92, 15.00, … s), so an exact check would reject valid data while a loose one would let a mixed-cadence corpus train a generator whose `Hp` rows span an ill-defined duration. `Hp` samples span `(Hp-1) * history_dt_seconds` (12 × 5 s → 55 s). |
+| **Anchors** | Anchors start at `t = Hp-1` so every history is fully recorded; a trajectory shorter than `Hp` raises. With `constant_prehistory=True` anchors start at `t = 0` and the missing leading rows repeat the first recorded row — valid **only** when the forcing was constant at those values before the first saved time (e.g. a constant-forcing spin-up at least `(Hp-1) * history_dt_seconds` long ending at the first save). Nothing verifies this against the corpus; the flag lives in the training config so the choice is explicit. `time_stride` thins the *anchors* only; histories always use contiguous saved steps. |
 | **Shared reader** | The `(T, P)` per-trajectory parameter table is read by `load_param_table(param_path, t_len, param_vars, dtype) -> (Tensor, names)` in [datasets/_params.py](../libs/neural-surrogates/src/neural_surrogates/datasets/_params.py), hoisted from `TransitionDataset._load_params` (which is now a thin wrapper — same broadcasting of scalars, same length check, same error messages; behaviour unchanged and tested). |
 
 The per-trajectory `_params` tables are kept exactly as `TransitionDataset`
@@ -2412,9 +1913,9 @@ caller's (bf16) autocast during training. A cast *after* a bf16 encoding would
 not recover fp32 latents, which is why autocast is disabled explicitly rather
 than left to the caller.
 
-The flow training entry point requires `dataset.dtype: float32` and rejects
-other dtypes before loading data. Use `trainer.amp` / `amp_dtype` for mixed
-precision of the velocity network; the data dtype never casts the frozen AE.
+The training task forces `dataset.dtype: float32`. Use `trainer.amp` /
+`amp_dtype` for mixed precision of the velocity network; the data dtype never
+casts the frozen AE.
 
 **Self-contained artifact.** `ae_kwargs` (a plain, YAML-serialisable dict) and
 `ae_fingerprint` are recorded at build time, and the generator's own
@@ -2478,91 +1979,42 @@ estimated on exactly what the objective later encodes.
 
 ### 38. Config + script + artifacts
 
-[conf/neural_surrogate/train_latent_generator.yaml](../conf/neural_surrogate/train_latent_generator.yaml)
-(`# @package _global_`, no `mode` group — one trainer + architecture pairing,
-like `pretrain_autoencoder.yaml`) drives
-[scripts/neural_surrogate/train_latent_generator.py](../scripts/neural_surrogate/train_latent_generator.py)
-(`run(cfg)` + `@hydra.main`; `run` returns the trainer so tests can inspect it):
+`train.py --config-name surrogate/train_latent_generator`
+([train_latent_generator.yaml](../configs/surrogate/train_latent_generator.yaml),
+`_latent_generator` in [tasks.py](../scripts/utils/tasks.py)):
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/train_latent_generator.py \
-    pretrained_ae_dir=model_weights/tadpole_ae_s \
-    dataset.root_dir=training_data/pyudales_idealized \
-    'dataset.param_vars=[inflow_angle,velocity_magnitude,pressure_gradient_magnitude]' \
-    physical_metadata.boundary_conditions='...' model_name=latent_generator_s
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_latent_generator \
+    autoencoder_dir=model_weights/tadpole_ae_s paths.data_dir=training_data/pyudales_idealized \
+    'dataset.param_vars=[inflow_angle,velocity_magnitude]' name=latent_generator_s
 ```
 
-Four things are **required** and fail loud before any data is read:
-`pretrained_ae_dir` (a `pretrain_autoencoder.py` export with a geometry path),
-`dataset.root_dir`, `dataset.param_vars` (the ordered conditioning schema —
-include *every* varying forcing parameter needed to distinguish target states;
-omitted ones must be documented constants) and the `physical_metadata` block
-(source files carry no units or conventions). `model_name` names the export dir.
-
-| Block | Keys (defaults) |
+| Block | Contents |
 |---|---|
-| `architecture` | `_target_: neural_surrogates.TadpoleLatentGenerator`; `param_history_steps: 12` (`Hp`); `hidden_size: null` (→ `D`); `n_layers: 4`; `num_heads: 8`; `time_embed_dim: 64`; `film_hidden: 128`; `mlp_ratio: 4`; `use_checkpoint: false` (velocity transformer activation checkpointing); `normalize: true`; `num_sampling_steps: 50`; `latent_eps: 1.0e-6`; `max_latent_tokens: 4096` (`null` = unlimited). `n_state_channels` / `n_params` / `pretrained_ae_dir` are injected by the script. The export stamps the *resolved* `hidden_size`, `mlp_ratio` and `normalize` so the deploy rebuild never depends on the defaults of the day. |
-| `dataset` | `_target_: neural_surrogates.SnapshotHistoryDataset`; `state_vars: [u, v, w]` (must equal the AE export's `dataset.state_vars`); `param_vars: [inflow_angle, velocity_magnitude]`; `param_history_steps: ${architecture.param_history_steps}` (the two can never disagree); `time_stride: 1`; `random_crop_size: null`; `sdf_features: null` / `sdf_clamp_cells: null` (inherited from the AE export — an explicit value must agree); `constant_prehistory: true` (the corpus must verify the plateau); `cadence_rtol: 0.05`; `cache`; `dtype: float32` (required). |
-| `physical_metadata` | `units` (one entry per state **and** parameter variable — a missing one refuses the run), `geometry_mask_convention` (must be *exactly* `neural_surrogates.generative_spinup.MASK_CONVENTION`, `"blanking: 1 = obstacle; model fluid mask = 1 - blanking"` — the one polarity the deploy side applies, so any other value is refused rather than exported), `coordinate_order: [z, y, x]` (anything else is rejected; the state files' own spatial dims must be in that order too, in either the canonical `z/y/x` or the backend `zt/yt/xt` spelling), `boundary_conditions: ???` (free text), `constant_forcing_notes: ""` (parameters held constant across the corpus, i.e. not in `param_vars`). Recorded verbatim in the artifact. |
-| `latent_stats` | `max_batches: 50` train batches drawn with a **seeded shuffle** (`seed: 0`) so a multi-geometry corpus contributes several trajectories rather than the first one in file order; `null` = the whole split. |
-| `trainer` | `_target_: neural_surrogates.LatentFlowMatchingTrainer`; the usual `BaseTraining` knobs (`amp: true` / `amp_dtype: bfloat16` wrap the velocity net only), `compile_dynamic: null`, `resume: true`, `val_seed: 0`. |
-| `loss` | `_target_: torch.nn.MSELoss`; configurable scalar latent-space objective. |
-| `optimizer` | `torch.optim.AdamW`, `lr: 1.0e-4`, `weight_decay: 1.0e-2` — handed only the `requires_grad` (velocity-net) parameters. |
-| `batch_sampler` | `TrajectoryBatchSampler` ships **on** (`batch_size: 4`, `cell_budget: 393216`, `shuffle`, `drop_last`, `seed`) because `pyudales_idealized` is multi-geometry; it replaces `dataloader.batch_size` / `shuffle` / `drop_last` (same contract as §29). Set `batch_sampler: null` for a single-geometry corpus; the script refuses a null sampler on a split that mixes grid shapes. |
-| `dataloader` | `torch.utils.data.DataLoader` with `collate_fn: neural_surrogates.snapshot_history_collate` (`_partial_: true`). |
-| `paths` | `output_dir: model_weights`. |
+| `autoencoder_dir` | the AE export (needs a geometry path, §36) |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
+| `latent_stats` | `max_batches: 50` train batches, `seed: 0` |
+| `physical_metadata` | `units` (one entry per state **and** parameter variable), `coordinate_order: [z, y, x]`, `geometry_mask_convention` (must equal `MASK_CONVENTION`, which deployment checks), `notes` |
+| `trainer` | `LatentFlowMatchingTrainer`, `val_seed: 0`; `amp` wraps the velocity net only |
+| `optimizer` | AdamW, `weight_decay: 1.0e-2`, handed only the velocity-net parameters |
 
-Script flow: validate the required inputs → read the AE export's `config.yaml`
-(state variables must match; SDF settings inherited or cross-checked — strict
-weight loading checks tensor shapes, not these physical contracts) → build the
-train/val datasets and loaders (same `param_names` on both splits) → build the
-model with `n_state_channels` / `n_params` from the dataset and
-`pretrained_ae_dir` → `set_normalization` with the split's **param** stats →
-`_check_attention_budget`: for every trajectory, the batch the loader will
-actually form (`TrajectoryBatchSampler._batch_size_for`, else the DataLoader's)
-times `prod(latent_grid_for(grid))` must stay within `max_latent_tokens`, so
-the failure comes before an epoch is burned → build the trainer → install the
-latent statistics → stamp and save `config.yaml` **before** `fit()` (a killed
-run still leaves a loadable schema) → `fit()` → `_verify_export_reloads`
-(rebuild from `config.yaml` + `weights.pt` alone, strict, statistics installed).
+The task takes `state_vars` / `sdf_features` / `sdf_clamp_cells` from the AE
+export (the frozen encoder only understands its own inputs) and forces
+`dataset.dtype: float32`; builds the model with `pretrained_ae_dir`; installs
+the split's **param** stats and the conditioning schema
+(`set_conditioning_schema(param_names, history_dt_seconds)`); stamps the
+architecture with `skip_pretrained_load: true`, `pretrained_ae_dir: null`,
+the resolved `ae_kwargs`, `hidden_size` and `mlp_ratio`, plus the resolved
+`dataset.param_vars`; writes the `generator:` block below; saves `config.yaml`
+**before** `fit()`; and, just before fitting, estimates the latent statistics
+on `max_batches` seeded-shuffle train batches through
+`trainer.prepared_batches`.
 
-Train and validation must agree on ordered parameters, history length and
-physical cadence (within `cadence_rtol`); constant-prehistory provenance is
-verified for both splits. Resume checks run before replacing the artifact
-config: `generator.run_signature`, also stored in checkpoint metadata, binds
-the ordered conditioning schema, dataset/AE identity, normalization, architecture,
-optimizer/scheduler settings and validation objective. Dataset identity includes
-a digest of file paths, sizes and modification times for both splits, so replacing
-files in place invalidates the signature. Changing their meaning requires a fresh `model_name`;
-extending `trainer.num_epochs` is allowed. Legacy artifacts are checked against
-their saved config and checkpoint before continuing. An incompatible checkpoint
-leaves the existing config intact.
-
-**Latent-statistics cache.** The stats are written to `<model_dir>/latent_stats.pt`
-as `{provenance, mean, std}` with a provenance dict (`version`,
-`ae_fingerprint`, `spatial_mode`, `encoder_crop_size`, `halo_size`, `root_dir`,
-`split`, `state_vars`, `sdf_features`, `sdf_clamp_cells`, `time_stride`,
-`precision: fp32`, `latent_mode: mode`, `max_batches`, `seed`). On
-`trainer.resume` a cache whose provenance matches is reused verbatim (the
-checkpoint's buffers agree with it); a cache that does **not** match while a
-`checkpoint.pt` exists, or a checkpoint without any cache, is refused — `fit()`
-would otherwise restore stale buffers over fresh ones without a trace. The stats
-are never recomputed from already-normalised latents.
-
-**Artifact layout** (`model_weights/<model_name>/`):
-
-```
-model_weights/<name>/
-  config.yaml       # architecture stamped skip_pretrained_load: true, pretrained_ae_dir: null,
-                    #   ae_kwargs inline, hidden_size resolved; dataset with param_vars/state_vars
-                    #   resolved; plus the generator: block below
-  weights.pt        # best-val FULL state dict: velocity net + frozen ae.* + every buffer
-  checkpoint.pt, metrics.csv, best_val.json
-  latent_stats.pt   # {provenance, mean, std} cache (see above)
-```
-
-The `generator:` block of `config.yaml`, with the exact keys the script writes
-(and the deploy side reads):
+**Artifact layout** (`model_weights/<name>/`): `config.yaml`, `weights.pt`
+(best-val **full** state dict: velocity net + frozen `ae.*` + every buffer),
+`checkpoint.pt`, `metrics.csv`, `best_val.json`. The `generator:` block, as
+written by `_generator_block` and read by the deploy side:
 
 ```yaml
 generator:
@@ -2572,151 +2024,85 @@ generator:
     param_history_steps: 12
     history_dt_seconds: 5.0               # the split's median saved cadence
     units: {u: m/s, v: m/s, w: m/s, inflow_angle: deg, ...}
-    geometry_mask_convention: "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
     coordinate_order: [z, y, x]
+    geometry_mask_convention: "blanking: 1 = obstacle; model fluid mask = 1 - blanking"
+    boundary_conditions: "<physical_metadata.notes>"
+    constant_forcing_notes: ""
     grid: {nz, ny, nx, dz, dy, dx, bounds: [[x0, x1], [y0, y1], [z0, z1]], dims, first_center}
     # train-split unique geometries; mask_sha256 = sha256 of the uint8 fluid
     # mask in (z, y, x) order, so a relocation of the same obstacles (identical
     # shape AND fluid_cells) is not mistaken for a trained geometry
     supported_geometries: [{shape: [nz, ny, nx], fluid_cells: <int>, mask_sha256: <sha256>, grid: {...}}, ...]
-    boundary_conditions: "<free text>"
-    constant_forcing_notes: "<free text>"
   ae_fingerprint: <sha256 of the AE export's weights.pt>
   ae_dir: <provenance path of the AE export>
-  run_signature: {...}                  # validated before resuming a checkpoint
-  sampling: {num_steps: 50}               # the validated Euler step count
-  data_provenance: {root_dir, split, n_train, n_val, constant_prehistory,
-                    verified_prehistory: {spinup_time, required_seconds, first_saved_time} | null,
-                    cadence_rtol,
-                    training_data_config: {domain, time, time_source}}   # corpus config.yaml provenance; time = generation horizon (training_data.* when present)
-  latent_stats: {max_batches, seed, n_channels}
+  sampling: {num_steps: 50}               # the Euler step count
 ```
 
-Each supported geometry carries its own `grid`, read from the corresponding
-state file's spatial coordinates (spacing = median coordinate step, `bounds`
-= cell edges), rather than the corpus
-`config.yaml` `domain` block, which for a random-geometry corpus is the
-generation *template*, not the grid any trajectory ran on. Identical masks at
-different spacings/bounds remain separate supported entries. The top-level
-`grid` retains the first grid for compatibility with older artifacts; deployment
-selects a matching geometry/grid entry instead of restricting every template to
-that first grid. Legacy entries without their own grid use the top-level grid.
-`dims` and `first_center` record the coordinate provenance. Deployment rebuilds
-with `instantiate(cfg.architecture, n_state_channels=len(state_vars),
-n_params=len(param_vars))` + a strict `load_state_dict(weights.pt)` — no AE dir,
-no data.
+Each supported geometry carries its own `grid`, read from that state file's
+coordinates (spacing = median coordinate step, `bounds` = cell edges) rather
+than the corpus `config.yaml` `domain` block, which for a random-geometry
+corpus is the case template, not the grid any trajectory ran on. The
+top-level `grid` is the first one (legacy artifacts have only that).
+Deployment rebuilds with `instantiate(cfg.architecture,
+n_state_channels=len(state_vars), n_params=len(param_vars))` + a strict
+`load_state_dict(weights.pt)` — no AE dir, no data.
 
 ### 39. Evaluation and acceptance gate
 
-**Statistical acceptance precedes ESMDA integration** (plan 07 §3): before a
-generator is used for production assimilation, held-out real states, the
-frozen-AE reconstructions of those states and generated states must be compared
-under matched geometry and histories — conditional mean/RMS profiles, velocity
-distributions, energy spectra, cross-component / Reynolds-stress statistics,
-diversity across noise seeds, divergence with a stencil-valid fluid mask, and
-rollout transients for all three initial-state sources — with the
-**constant-history cold-start case** (the one ESMDA uses, §40) evaluated
-separately, an Euler step-count sweep (25 / 50 / 100), conditioning ablations
-(shuffled / omitted history) and sampling memory/time at deployment shapes.
-Tolerances are declared relative to held-out sampling variability and the AE
-baseline; a low flow loss alone does not establish a useful spin-up
-distribution, and AE reconstruction error bounds nothing about generation or
-rollout error. The chosen step count and the evaluated geometries/grids are
-recorded in the artifact / report.
+**Statistical acceptance precedes assimilation** (plan 07 §3): a low flow
+loss alone does not establish a useful spin-up distribution, and AE
+reconstruction error bounds nothing about generation or rollout error.
+[scripts/surrogate/evaluate_latent_generator.py](../scripts/surrogate/evaluate_latent_generator.py)
+(block `latent_generator` of [eval.yaml](../configs/surrogate/eval.yaml))
+rebuilds the generator from `model_dir`, reinstalls its conditioning schema,
+and compares, on up to `max_snapshots` held-out snapshots (`split: test`,
+spread over the trajectories) under matched geometry and history:
 
-[test_latent_generator.py](../scripts/neural_surrogate/test_latent_generator.py)
-runs that gate, driven by
-[conf/neural_surrogate/testing_latent_generator.yaml](../conf/neural_surrogate/testing_latent_generator.yaml)
-(`run(cfg)` + a thin `@hydra.main` wrapper, like every other script here):
+* `real` — the held-out states;
+* `ae_recon` — encode/decode through the frozen AE: the best the decoder can
+  do, and the baseline generation error is judged against;
+* `generated` — `sample()` with the true history, `num_noise_seeds` draws;
+* `generated_const_history` — the **cold-start** case deployment uses (the
+  last parameter row repeated `Hp` times);
+* the conditioning probes `generated_shuffled_history` (histories permuted
+  between snapshots) and `generated_omitted_history` (the training-mean
+  parameters), and one `generated_steps<k>` per entry of `num_steps_sweep`.
 
 ```bash
-pixi run -e dev python scripts/neural_surrogate/test_latent_generator.py \
-    model_dir=model_weights/latent_generator_s \
-    output_dir=model_weights/latent_generator_s/acceptance
+pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
+    latent_generator.model_dir=model_weights/latent_generator_s \
+    latent_generator.rollout_stepper_dir=model_weights/dft_s
 ```
 
-`model_dir` (a `train_latent_generator.py` export) and `output_dir` are the two
-required keys; the generator is rebuilt from its `config.yaml` + strict
-`weights.pt` and refused if it carries no latent statistics.
-Acceptance reinstalls the saved conditioning schema and checks the selected
-dataset's parameter order, history length, cadence and prehistory provenance,
-including when `data.root_dir` points at another corpus.
+**Metrics** — fluid cells only, with each trajectory's own `dz/dy/dx`, per
+source and per grid, merged across trajectories on the same grid: mean and
+fluctuation-RMS vertical profiles; pooled per-component histograms and the
+1-Wasserstein distance to `real`; 1-D energy spectra along `x`; Reynolds
+stresses (diagonal and cross terms); divergence on a **stencil-valid** fluid
+mask (cells whose six face neighbours are all fluid); diversity across noise
+seeds against the real pairwise spread; and sampling time per step count.
+With `rollout_stepper_dir` a trained stepper is rolled out `rollout_steps`
+from real, AE and generated fields.
 
-| Block | Keys (defaults) |
-|---|---|
-| `data` | `root_dir: null` → the artifact's own `dataset.root_dir`; `split: test` — a **held-out** split (the script prints a warning if handed the artifact's training split); `max_snapshots: 64` anchors drawn round-robin over the split's trajectories so every geometry is represented and no trajectory group grows beyond its share; `seed: 0` (snapshot choice, the shuffled-history permutation, subsampling and the bootstraps). |
-| `sampling` | `num_steps_sweep: [25, 50, 100]` Euler counts; the artifact's own `generator.sampling.num_steps` stays the **primary** count every other comparison uses (recorded as `chosen_sampling_steps`). `num_noise_seeds: 4` independent draws per conditioning (diversity, and pooled for the distributions); `batch_size: 4` members per `sample()` call — the deployment shape the timing / memory benchmark runs at. |
-| `conditioning` | `constant_history`, `shuffled_history`, `omitted_history` (all `true`): the cold-start case and the two negative controls. |
-| `rollout` | `enabled: false`, `stepper_model_dir: null`, `num_steps: 20` — optional kinetic-energy / RMS transients per initial-state source through a trained stepper whose `dataset.param_vars` must equal the generator's. |
-| `state_plots` | `enabled: true`, `max_trajectories: 4`, `snapshots_per_trajectory: 1`, `num_generated: 2` (capped at `num_noise_seeds`), `z_level: null` → `nz // 4`, `y_level: null` → `ny // 2` — `states_traj<T>_t<t>.png`: rows real / AE recon / generated draws (true and constant history), columns each component and `\|u\|` on the horizontal plane plus `\|u\|` on the vertical x-z plane, in physical units, obstacles grey, colour limits from the real snapshot. |
-| `divergence` | `stencil: central` — the only implemented stencil; anything else is refused up front rather than silently ignored. |
-| `distribution` / `bootstrap` | `max_values: 200000` fluid-cell values kept per source and `n_bins: 64` shared histogram bins; `n_resamples: 200` behind the held-out bootstrap scales. |
-| `acceptance` | The declared tolerance factors — `profile_rmse_factor: 2.0`, `w1_factor: 2.0`, `divergence_factor: 3.0`, `diversity_min_ratio: 0.25`. |
-| (top level) | `device: cpu` (falls back to CPU with a note if CUDA is unavailable); `spatial_mode: null` — decoder spatial processing for AE recon and every generated state: `local` (patches decoded independently), `global` (whole latent grid at once) or `halo`; `null` inherits the AE's trained mode. Encoding and the latent grid stay in the trained mode (`TadpoleLatentGenerator.sample(decode_spatial_mode=...)` / `decode_latents(spatial_mode=...)`); `local`/`halo` refuse a padded grid that is not a multiple of `encoder_crop_size`. Recorded as `decode_spatial_mode` in `summary.json`. |
+**The gate is declared, not eyeballed** (`aggregate_report` in
+[generator_evaluation.py](../libs/neural-surrogates/src/neural_surrogates/generator_evaluation.py)):
+each generated-vs-real number must lie within its `acceptance` factor
+(`profile_rmse_factor`, `w1_factor`, `divergence_factor`) times
+`max(AE baseline, held-out bootstrap variability)` (`bootstrap_resamples`),
+and the diversity must reach `diversity_min_ratio` of the real spread (near
+zero is mode collapse). A non-finite number is a failure. The verdict is
+printed as `PASS` / `FAIL: …` and written to `summary.json`.
 
-**Four initial-state sources**, on the same held-out snapshots under matched
-geometry and parameter history:
+Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
+`states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
+`divergence.png`, `step_sweep.png` and `rollout_transients.png` (with a
+rollout stepper).
 
-* `real` — the held-out states themselves;
-* `ae_recon` — `decode_latents(encode_latents(real))` through the frozen AE: the
-  best the decoder can do, and the baseline generation error is judged against
-  (AE error and generation error remain separate quantities);
-* `generated` — `sample()` with the snapshot's **true** history, `num_noise_seeds`
-  draws per conditioning;
-* `generated_const_history` — the **cold-start** case ESMDA actually uses: the
-  snapshot's last parameter row repeated `Hp` times.
-
-Two further sources score the conditioning probes: `generated_shuffled_history`
-(histories permuted across the evaluated snapshots) and
-`generated_omitted_history` (the history replaced by the training-set mean
-parameter vector, i.e. no conditioning), plus one `generated_steps<N>` source per
-swept Euler count.
-
-**Metrics** — fluid cells only, never zero-filled obstacles, with each trajectory's
-actual `dz/dy/dx` — per source and per grid shape/spacing, merged count-weighted
-across trajectories on the same grid: conditional mean and fluctuation-RMS vertical
-profiles; pooled per-component histograms on shared bins plus the 1-Wasserstein
-distance to `real`; 1-D energy spectra along `x` over fully fluid rows (and their
-log-spectral distance in dB); Reynolds stresses `<u_i' u_j'>` about the per-cell
-sample mean, diagonal **and** cross terms; divergence on a **stencil-valid** fluid
-mask (only cells whose six face neighbours are all fluid — a cell touching an
-obstacle or the domain edge would difference across a missing neighbour and
-report a spurious divergence); diversity across noise seeds under fixed
-conditioning against the real pairwise spread; the conditioning sensitivity
-(true vs shuffled vs omitted, as profile-RMSE / W1 gains); the Euler step sweep
-with wall time and peak memory at the deployment batch shape; and padding
-sensitivity — the last crop block of each padded axis against the interior, or
-`"n/a"` when the grid is already a multiple of the AE's padding multiple.
-
-**The gate is declared, not eyeballed.** Each generated-vs-real number must lie
-within its factor times `max(AE baseline, held-out bootstrap variability)` — the
-AE reconstruction is the best the decoder can do and the bootstrap is the best
-`N` samples can resolve, so a generator inside both is indistinguishable from
-real at this sample size — while the diversity ratio must *reach*
-`diversity_min_ratio` of the real spread (a ratio near zero is mode collapse). A
-non-finite number on either side is a failure, never a pass. `summary.json`
-carries the `tolerances` block, a `checks` entry per criterion (`value`, `bound`,
-`rule`, `passed`) and `acceptance: {passed, failures}`; the same verdict is
-printed as `ACCEPTANCE: PASS` / `FAIL`.
-
-**Artifacts** in `output_dir`: `metrics.csv` (long format —
-`source, metric, component, level, grid, value`), `summary.json` (the per-source
-scalars, the held-out reference scales, the conditioning block, the sweep with
-timings, padding sensitivity, rollout, `chosen_sampling_steps`, the evaluated
-`grids` / `geometries`, and the acceptance block), `report.md` (the same as a
-readable verdict + tables) and the figures `profiles[_<grid>].png`,
-`histograms.png`, `spectra[_<grid>].png`, `divergence.png`, `step_sweep.png`
-(plus `rollout_transients.png` when rollout is enabled).
-
-The metric functions themselves live in
-[generator_evaluation.py](../libs/neural-surrogates/src/neural_surrogates/generator_evaluation.py)
-as pure numpy over `(N, C, nz, ny, nx)` stacks and a fluid mask — no Hydra, no
-files, no model — so each one is unit-tested on analytic fields
-(divergence-free field → zero divergence, constant field → zero Reynolds
-stresses, a known shift → exactly that `W1`, the stencil mask excluding
-obstacle-adjacent cells). They deliberately do not import `libs/evaluation`:
-that library is a leaf the *scripts* depend on and scores time series of
-ensemble runs, while `neural_surrogates` declares only numpy / xarray / torch.
+The metric functions are pure numpy over `(N, C, nz, ny, nx)` stacks and a
+fluid mask — no Hydra, no files, no model — so each is unit-tested on analytic
+fields. They deliberately do not import `libs/evaluation`: that library is a
+leaf the *scripts* depend on, while `neural_surrogates` declares only numpy /
+xarray / torch.
 
 ### 40. Deployment: `spinup_source: generative`
 
@@ -2725,19 +2111,19 @@ provides `GenerativeSpinup`, the reusable loader/sampler both
 `NeuralSurrogateForwardModel` (single member) and
 `NeuralSurrogateEnsembleForwardModel` (batched) call; it is configured by the
 nested `forward_model.generative_spinup` block of
-[conf/model/neural_surrogate.yaml](../conf/model/neural_surrogate.yaml):
+[configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml):
 
 ```yaml
 forward_model:
   spinup_source: generative
   generative_spinup:
-    model_dir: null          # train_latent_generator.py artifact (config.yaml + weights.pt)
+    model_dir: null          # a train_latent_generator export (config.yaml + weights.pt)
     template_path: null      # NetCDF with canonical coords + an explicit `blanking` mask
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
     expected_units: null     # optional {variable: unit} map asserted against the artifact
-    save_diagnostics: false  # run_esmda: write generated snapshots under _generated_states/
+    save_diagnostics: false  # ignored by the current DA scripts (see below)
 ```
 
 `model_dir` / `template_path` default to `null` rather than `???` so every
@@ -2752,7 +2138,7 @@ instance read-only across members.
 | Concern | Behaviour |
 |---|---|
 | **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape, spacing (within `1e-4` relative) and bounds matching the selected supported geometry's `grid` (legacy artifacts fall back to the top-level `grid`); a binary mask; and the geometry fingerprint — shape, fluid-cell count **and** `geometry_fingerprint(fluid)` (sha256 of the uint8 mask in `(z, y, x)`) — present in `supported_geometries`, so an unseen geometry is rejected rather than sampled blindly, including a relocation of the same obstacles, which matches on shape and cell count alone (initial scope is a validated supported geometry/grid; an artifact whose entries predate `mask_sha256` is refused and must be re-exported). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. |
-| **Mask polarity and units** | The schema's `geometry_mask_convention` must equal `MASK_CONVENTION` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`) *exactly* — the same constant the training script refuses to deviate from — and must name the `geometry_var`, so an artifact can never carry a polarity opposite to the `1 - blanking` the deployment applies. The schema's `units` must cover **every** state and parameter variable (the error lists the missing names), and the optional `expected_units` constructor kwarg / config key states the deployment's own convention: every variable listed there must match the artifact's unit, so a generator trained on `deg` cannot be driven with `rad`. |
+| **Mask polarity and units** | The schema's `geometry_mask_convention` must equal `MASK_CONVENTION` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`) *exactly* — the value `train_latent_generator.yaml` writes — and must name the `geometry_var`, so an artifact can never carry a polarity opposite to the `1 - blanking` the deployment applies. The schema's `units` must cover **every** state and parameter variable (the error lists the missing names), and the optional `expected_units` constructor kwarg / config key states the deployment's own convention: every variable listed there must match the artifact's unit, so a generator trained on `deg` cannot be driven with `rad`. |
 | **Conditioning schema on the model** | After the strict `load_state_dict`, the loader calls `model.set_conditioning_schema(param_vars, history_dt_seconds)` from the artifact's `physical_schema`, and every `sample` call restates `param_names` / `history_dt_seconds` for the model to re-check (order-sensitive names, cadence within `1e-6` relative). `params_hist` is a bare `(B, Hp, P)` tensor, so nothing else would catch a reordered conditioning vector or a history saved at another cadence; supplying a claim to a model with **no** schema installed raises rather than passing silently. |
 | **Current-first-knot conditioning** | `current_param_vector(params, member)` reads each member's **current** value of every `param_vars` entry in the saved order: the first knot (`isel(time=0)`) of a time-varying schedule, the scalar of a static one, `default_params` for a variable the params omit — else it raises naming the member and the variable; non-finite values raise. The physical rollout itself still uses the full parameter schedule. |
 | **Constant history** | The cold start has no history, so `constant_history(values, hp)` repeats the current vector `Hp` times, `(Hp, P)` — the `constant_prehistory` convention of the training dataset (§35). This is the case the acceptance study must cover separately (§39). |
@@ -2763,45 +2149,27 @@ instance read-only across members.
 | **No CFD anywhere** | The constructor accepts `generative`; a config-node `spinup_forward_model` is left **un-instantiated** (`None`) so a generator needs no CFD executable, case dir or preprocessing; `dirs` raises `AttributeError` so the ensemble base falls back to its own `temp_dir`; `clone_for_member` shares the backend (none) and the `GenerativeSpinup` handle; `prepare_neural_surrogate` is a no-op (as for `training_data`). |
 | **Diagnostics** | Setting `generator.diagnostics_dir` makes every `generate` call write its snapshots to `<diagnostics_dir>/call_<k>/member_<i>.nc` (`k` restarts at 0 whenever the directory changes). Write-only: nothing ever reads them back as an initial state. |
 
-**ESMDA lifecycle** ([scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py)).
-`_generative_spinup_block(cfg)` is non-`None` exactly when
-`assim_model.forward_model.spinup_source == "generative"`; the script then
-requires the assimilation model to carry the `_generative_spinup` handle and logs
-`describe()`. The lifecycle is the **opposite** of the `training_data` warm
-start (§12):
+**Assimilation lifecycle.** Generation happens on every **cold** forward call
+(`state=None`) and nowhere else, so in the first window every ESMDA iteration
+and the final posterior forecast re-condition the initial state on the
+current parameters, while later windows warm-start from the carried-forward
+state and generate nothing; a supplied restart state also bypasses
+generation. Two things the archived `run_esmda.py` did are not done by the
+current DA scripts: it rejected joint-state smoothers (a Kalman-analysed
+initial state and the regenerated cold start would compete for window 0 with
+no reconciliation policy — use parameter-only smoothers), and it pointed
+`diagnostics_dir` at the results dir when `save_diagnostics: true` (the key
+is now ignored). `H > 1` steppers get the single generated frame repeated
+(the repeat-seeding warning of §12).
 
-- **Window 0 stays a cold start** — `state_input=None`. Nothing is pre-generated
-  to `_initial_states`, the prior is **not** anchored (`anchor_prior_params` is
-  never called) and `pin_initial_from_spinup` stays `False`, so the `t=0` knot
-  stays inferable. Parameter ESMDA re-forecasts with updated parameters from the
-  same (`None`) initial-state argument, so every iteration's forecast and the
-  final posterior forecast invoke generation again on the current parameters.
-- **Later windows warm-start** from the carried-forward posterior state, so no
-  generation occurs; the existing cross-window boundary-knot pinning is
-  unchanged. A supplied restart state bypasses generation even in window 0.
-- **Joint-state smoothers are rejected** before any forecast:
-  `_check_generative_smoother` raises for any `StateAndParameterESMDA` instance
-  (`esmda/smoother=state`, `state_and_parameter`, `state_and_dynamic`), because a
-  Kalman-analysed initial state and the regenerated cold start would compete for
-  window 0 with no reconciliation policy. Use `static` or `dynamic`.
-- **Diagnostics dir**: with `save_diagnostics: true` the handle's
-  `diagnostics_dir` is pointed at `<out_dir>/_generated_states/window_<w>` per
-  window, so every cold forecast of window `w` leaves a `call_<k>/member_<i>.nc`
-  record; later (warm) windows produce none.
-- `H > 1` steppers get the single generated frame repeated (the existing
-  repeat-seeding warning); state-history generation is out of scope (§41).
-
-Tests: [tests/test_generative_spinup.py](../tests/test_generative_spinup.py) —
+Tests: [tests/neural_surrogates/test_generative_spinup.py](../tests/neural_surrogates/test_generative_spinup.py) —
 an instrumented stub generator injected through `GenerativeSpinup._load_model`
 (noise identical across batch sizes and calls, distinct per member, changed
 params rerun the generator, static/default/missing params, first-knot
 conditioning, canonical coords + zero obstacles, every template check), the
-forward-model and ensemble cold/warm paths, a real
-`ParameterESMDA`/`TimeVaryingParameterESMDA` first window asserting a generator
-call per cold forecast with the current first parameter value and no pinning,
-a full `run_esmda.run` smoke run from a disk truth, early rejection of the joint
-smoother, and a real trained (tiny) `TadpoleLatentGenerator` artifact sampled
-through the whole path.
+forward-model and ensemble cold/warm paths, a real ESMDA first window
+asserting a generator call per cold forecast, and a real trained (tiny)
+`TadpoleLatentGenerator` artifact sampled through the whole path.
 
 ### 41. Limitations / deferred
 
@@ -2815,8 +2183,9 @@ through the whole path.
 - **Supported geometries only.** The template geometry must be one of the
   train-split geometries (shape + fluid-cell fingerprint); unseen geometries
   need a held-out geometry evaluation and an explicit supported-domain policy.
-- **Parameter-inference ESMDA only.** Joint-state smoothers are rejected rather
-  than reconciled with conditional regeneration.
+- **Parameter-inference only.** Joint-state smoothers are not reconciled with
+  conditional regeneration (and the current DA scripts do not reject them,
+  §40).
 - **Noise policy.** Common random numbers across ESMDA iterations is the only
   policy; independent noise resampling across iterations is a separate future
   option.
@@ -2848,14 +2217,14 @@ through the whole path.
 | `ParamConditionedSubnetwork` (the velocity net) | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
 | `LatentFlowMatchingTrainer` | [training/flow_matching.py](../libs/neural-surrogates/src/neural_surrogates/training/flow_matching.py) |
 | `BaseTraining._prepare_snapshot_batch` | [training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
-| Training config | [conf/neural_surrogate/train_latent_generator.yaml](../conf/neural_surrogate/train_latent_generator.yaml) |
-| Training script | [scripts/neural_surrogate/train_latent_generator.py](../scripts/neural_surrogate/train_latent_generator.py) |
+| Training config | [configs/surrogate/train_latent_generator.yaml](../configs/surrogate/train_latent_generator.yaml) |
+| Training script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: latent_generator`) |
 | Acceptance metrics (pure numpy) | [generator_evaluation.py](../libs/neural-surrogates/src/neural_surrogates/generator_evaluation.py) |
-| Acceptance config | [conf/neural_surrogate/testing_latent_generator.yaml](../conf/neural_surrogate/testing_latent_generator.yaml) |
-| Acceptance script | [scripts/neural_surrogate/test_latent_generator.py](../scripts/neural_surrogate/test_latent_generator.py) |
+| Acceptance config | [configs/surrogate/eval.yaml](../configs/surrogate/eval.yaml) (block `latent_generator`) |
+| Acceptance script | [scripts/surrogate/evaluate_latent_generator.py](../scripts/surrogate/evaluate_latent_generator.py) |
 | `GenerativeSpinup` (deploy loader/sampler) | [generative_spinup.py](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py) |
 | Forward-model / ensemble integration | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py), [ensemble_forward_model.py](../libs/neural-surrogates/src/neural_surrogates/ensemble_forward_model.py) |
-| Deploy config block | [conf/model/neural_surrogate.yaml](../conf/model/neural_surrogate.yaml) (`forward_model.generative_spinup`) |
-| ESMDA lifecycle | [scripts/esmda/run_esmda.py](../scripts/esmda/run_esmda.py), [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) (`prepare_neural_surrogate`) |
-| Plan | [neural_surrogate_plans/07_latent_flow_matching_spinup.md](neural_surrogate_plans/07_latent_flow_matching_spinup.md) |
-| Tests | [test_snapshot_history_dataset.py](../tests/test_snapshot_history_dataset.py), [test_tadpole_latent_flow.py](../tests/test_tadpole_latent_flow.py), [test_latent_generator_training.py](../tests/test_latent_generator_training.py), [test_latent_generator_evaluation.py](../tests/test_latent_generator_evaluation.py), [test_generative_spinup.py](../tests/test_generative_spinup.py), shared fixtures [_latent_generator_fixtures.py](../tests/_latent_generator_fixtures.py) |
+| Deploy config block | [configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml) (`forward_model.generative_spinup`) |
+| `prepare_neural_surrogate` | [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) |
+| Plan | [07_latent_flow_matching_spinup.md](plans/implemented/neural_surrogates/07_latent_flow_matching_spinup.md) |
+| Tests | [test_snapshot_history_dataset.py](../tests/neural_surrogates/test_snapshot_history_dataset.py), [test_tadpole_latent_flow.py](../tests/neural_surrogates/test_tadpole_latent_flow.py), [test_latent_generator_training.py](../tests/neural_surrogates/test_latent_generator_training.py), [test_latent_generator_evaluation.py](../tests/neural_surrogates/test_latent_generator_evaluation.py), [test_generative_spinup.py](../tests/neural_surrogates/test_generative_spinup.py), shared fixtures [_latent_generator_fixtures.py](../tests/neural_surrogates/_latent_generator_fixtures.py) |

@@ -102,7 +102,7 @@ Key constructor parameters:
 | `inlet_turbulence` | None | Inflow-turbulence forcing dict, e.g. `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (see §7) |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
-The default in [`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml) sets
+The default in [`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml) sets
 `cuda: auto`, `verbose: false`, and `boundary_condition: inflow_outflow`.
 
 #### `compile(compile=True)`
@@ -135,8 +135,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 3. **Inflow settings** — `_apply_inflow_settings(params)` (see below).
 4. **Output cleanup** — `_clean_output()` deletes all `out_*.nc` files in
    `output_dir` to prevent stale files from a prior run being collected.
-5. **Run** — `self.run()` executes the `boltzmann` binary via `subprocess.run`
-   with `check=True` (non-zero exit raises `CalledProcessError`). Stack size is
+5. **Run** — `self.run()` executes the `boltzmann` binary through the shared
+   `pyurbanair.utils.solver_process.run_solver` (non-zero exit raises
+   `CalledProcessError`; the process dies with its Python owner). Stack size is
    raised to `unlimited` / `hard` before launch to handle large
    `nx*ny*nz` automatic arrays.
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
@@ -168,21 +169,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 
 #### `disable_spinup()`
 
-Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
-window 0 when `spinup_first_step_only=True`.
-
-> **One external caller drives these steps itself.**
-> [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py)
-> (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
-> `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
-> → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
-> `run()` — and replaces only its *collection* step: at its 0.25 s default
-> cadence one window's snapshots run to ~100 GB per member on `case=barcelona`,
-> so each file is reduced to the probe points and unlinked instead of being
-> concatenated into one Dataset. It also keeps `spinup_time` on a warm start
-> (which `run_single` zeroes) to trim the restart's
-> transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
-> refactoring `run_single`.
+Sets `self.spinup_time = 0.0`. Its only caller is the neural surrogate's
+`disable_spinup`, which forwards to its `spinup_forward_model`; warm-start
+windows already skip spin-up inside `run_single`.
 
 ### `EnsembleForwardModel`
 
@@ -238,10 +227,18 @@ handles the full build chain:
    failure so the real build starts with both files up to date.
 5. **Make invocation** — always `make -B` (full rebuild); passes
    `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=<build tree>/bin`,
-   `LIBDIR`. Compilation failure raises `RuntimeError`.
+   `LIBDIR`. Compilation failure raises `RuntimeError` with the end of the
+   build output.
 6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
    cuda/netcdf mode, and hashes of the compiled-in sources next to the binary
-   (see §1).
+   (see §1). A failed build writes no stamp, so the next compile retries it.
+
+**Platforms.** The gfortran build runs on Linux and macOS (osx-arm64) with the
+pixi env's compilers, FFTW and NetCDF. On macOS, `LIBDIR` also carries
+`-B/usr/bin/` from the shared `pyurbanair.utils.toolchain.apple_linker_flags`,
+so the link uses Apple's ld: conda's ld64 cannot read a current SDK's
+`libSystem.tbd` (`unknown architecture arm64e.x1`, then missing `expf`,
+`memcpy`). The CUDA build is Linux-only.
 
 `Makefile.set_path` (`makefile_utils.py`) is idempotent: it scans the whole file
 rather than stopping at the first blank line, consumes the line's own newline
@@ -406,9 +403,9 @@ constant is dimensionless and physically distinct from pypalm's `km_constant`
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -460,7 +457,7 @@ m/s. When `params` is `None`, `C_u` defaults to 75.
 
 ## 8. Configuration
 
-[`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml):
+[`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml):
 
 ```yaml
 name: pylbm
@@ -574,7 +571,7 @@ MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1          # 999_999
 restart_file_name(iteration, prefix="restart", tile="0000")
 ```
 
-`tests/test_pylbm_restart_filenames.py` parses the width out of the Fortran
+`tests/pylbm/test_pylbm_restart_filenames.py` parses the width out of the Fortran
 sources and fails if the two ever disagree, so a submodule bump that widens the
 field is caught there rather than in a silently wrong run.
 
@@ -711,7 +708,7 @@ higher than the building-only measurement.
 
 `EnsembleForwardModel` concatenates all member states in memory by default.
 For ensembles of ~96 members at grid sizes ≥ 75³ cells, this exhausts DRAM.
-Fix: set `run.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
+Fix: set `assimilation.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
 model) so per-member files are written and read back individually. At 100³ the
 run remains disk-bound — the per-member file I/O becomes the bottleneck.
 

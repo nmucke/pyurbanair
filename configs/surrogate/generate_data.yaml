@@ -1,0 +1,66 @@
+# @package _global_
+# Generate neural-surrogate training data: many forward runs, each with its own
+# sampled inflow (params/surrogate_training_data.yaml) and, in random geometry mode, its
+# own building layout. Like forward.yaml, with a `data` block on top.
+defaults:
+  - /common
+  - /case: xie_and_castro
+  - /params: surrogate_training_data
+  - /model: pyudales
+  - _self_
+
+paths:
+  results_dir: ${paths.training_data_dir}/${model.name}_${data.geometry.name}
+
+# One training trajectory (overrides the case's assimilation-window times).
+time:
+  simulation_time: 600.0
+  output_frequency: 5.0
+  spinup_time: 300.0
+  seconds_per_knot: 60.0
+
+ensemble:
+  num_parallel_processes: 1
+  failure:
+    policy: raise
+
+data:
+  num_train: 500
+  num_val: 10
+  num_test: 10
+  seed: 0
+  save_vars: [u, v, w]
+  # Constant forcing applied to every trajectory.
+  pressure_gradient_magnitude: 0.0041912
+  # Extend the spin-up until the flow has filled the domain `fill_times` times.
+  adaptive_spinup:
+    enabled: true
+    fill_times: 6.0
+    max_spinup_time: 1500.0
+  # NetCDF compression of the saved states.
+  state_encoding:
+    zlib: true
+    complevel: 1
+    least_significant_digit: 3
+  # Split the work over independent jobs: job `shard_index` (0-based) runs
+  # every `num_shards`-th geometry. Rerunning skips samples already on disk.
+  sharding:
+    num_shards: 1
+    shard_index: 0
+  geometry:
+    # random: draw a building layout per trajectory from `source`;
+    # fixed: use the case geometry for every trajectory.
+    mode: random
+    source: realistic
+    # Suffix of the output folder; set to ${case_name} for mode=fixed.
+    name: ${.source}
+    # STL pool made by scripts/tools/rasters_to_stl.py, and the uDALES/PALM
+    # templates (namoptions.300, _p3d) for that source.
+    stl_dir: geometries/urbantales/processed/${.source}
+    case_dir: geometries/urbantales/${.source}
+    # Grid spacing [m], free space around the buildings [m] and domain height [m].
+    resolution: 4.0
+    upstream_padding: 64.0
+    downstream_padding: 64.0
+    lateral_padding: 64.0
+    z_size: 128.0

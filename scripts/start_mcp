@@ -16,4 +16,4 @@ if [[ ! -x "$repo_root/.pixi/envs/mcp/bin/python" ]]; then
     echo 'Install the MCP environment first: pixi install -e mcp' >&2
     exit 1
 fi
-exec "$pixi_bin" run --locked --manifest-path "$repo_root/pyproject.toml" -e mcp python -m pyurbanair_mcp --repo-root "$repo_root" "$@"
+exec "$pixi_bin" run --locked --manifest-path "$repo_root/pyproject.toml" -e mcp python -m mcp_server --repo-root "$repo_root" "$@"

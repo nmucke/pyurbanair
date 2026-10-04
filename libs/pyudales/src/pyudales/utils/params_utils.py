@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Beyond the inflow trio, the model-error knobs ``vertical_inflow_exponent`` (α)
 # and ``sgs_constant`` must be whitelisted here too — otherwise they are silently
 # dropped before reaching the solver and their ESMDA estimates never take effect
-# (docs/esmda_model_error_parameters.md §6.3).
+# (docs/archive/esmda_model_error_parameters.md §6.3).
 INFLOW_PARAM_NAMES = (
     "inflow_angle",
     "velocity_magnitude",
@@ -231,9 +231,11 @@ def apply_inflow_settings(
     else:
         dpdx, dpdy = angle_to_pressure_gradient(
             inflow_angle,
-            pressure_gradient_magnitude
-            if pressure_gradient_magnitude is not None
-            else 0.0,
+            (
+                pressure_gradient_magnitude
+                if pressure_gradient_magnitude is not None
+                else 0.0
+            ),
         )
 
     namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"

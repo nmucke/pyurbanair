@@ -1,6 +1,6 @@
 """Parameter-efficient fine-tuning (LoRA / PEFT) for neural surrogates.
 
-See ``docs/neural_surrogate_plans/01_lora_finetuning.md``. Public surface:
+See ``docs/plans/implemented/neural_surrogates/01_lora_finetuning.md``. Public surface:
 
 * :func:`inject_lora` -- wrap an architecture with LoRA adapters (PEFT).
 * :func:`merge_to_state_dict` -- fold LoRA into a plain, ESMDA-loadable state dict.

@@ -19,6 +19,7 @@ from pylbm.utils import get_lbm_directory_paths
 
 from pyurbanair.base_ensemble_forward_model import ForwardModelRunFailure
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.solver_process import run_solver
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import (
@@ -120,7 +121,6 @@ class ForwardModel(BaseForwardModel):
                 if temp_dir is not None
                 else pathlib.Path(".temp")
             ),
-            case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
         )
 
@@ -159,7 +159,7 @@ class ForwardModel(BaseForwardModel):
         profile_heights = (np.arange(nz) + 0.5) * dz
         # Cached so _apply_inflow_settings can rewrite uvel_shear.dat per member
         # when an estimated vertical_inflow_exponent (α) overrides the
-        # construction-time shear (docs/esmda_model_error_parameters.md §2.1).
+        # construction-time shear (docs/archive/esmda_model_error_parameters.md §2.1).
         self._profile_heights = profile_heights
         self._zsize = zsize
         if profile_config is not None and profile_config.get("type") not in (
@@ -516,7 +516,7 @@ class ForwardModel(BaseForwardModel):
         """
         # Model-error knobs (α shear exponent, SGS constant) apply identically to
         # the static and time-varying inflow paths, so consume them here, outside
-        # the branch (docs/esmda_model_error_parameters.md §6.2). Each is a no-op
+        # the branch (docs/archive/esmda_model_error_parameters.md §6.2). Each is a no-op
         # when its parameter is absent, keeping single-model/default runs
         # byte-identical.
         override_cfg = resolve_profile_config(params, self.profile_config)
@@ -597,18 +597,15 @@ class ForwardModel(BaseForwardModel):
             f"{self.dirs.executable_path}"
         )
         try:
-            # check=True so a non-zero LBM exit raises CalledProcessError, which
-            # the ensemble runner catches to resample the member from a survivor.
-            # Without it, a crashed member silently produces partial/no output and
-            # later breaks the cross-member concat with an AlignmentError.
-            _ = subprocess.run(
-                shell_cmd,
-                shell=True,
+            # A non-zero LBM exit raises CalledProcessError, which the ensemble
+            # runner catches to resample the member from a survivor. Without it,
+            # a crashed member silently produces partial/no output and later
+            # breaks the cross-member concat with an AlignmentError.
+            run_solver(
+                ["sh", "-c", shell_cmd],
                 env=env,
                 stderr=self.stderr,
                 stdout=self.stdout,
-                text=True,
-                check=True,
             )
         finally:
             # Always return to original directory, even if the run failed.

@@ -1,7 +1,7 @@
 # Scoping: procedural city geometries → STL for multi-geometry training data
 
 *Design record, 2026-07-02. Third piece of the multi-geometry effort (see
-[multi_geometry_surrogate_research.md](../multi_geometry_surrogate_research.md)
+[multi_geometry_surrogate_research.md](../research/multi_geometry_surrogate_research.md)
 phase 3 and [sdf_features_plan.md](sdf_features_plan.md)). Goal: automatically
 generate synthetic urban geometries as `.stl` files consumable by all three
 conventional backends (pylbm, pyudales, pypalm), so `generate_training_data.py`

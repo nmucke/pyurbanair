@@ -1,0 +1,49 @@
+# @package smoother
+# ESMDA smoothers. Pick one with `smoothing.smoother=${smoother.<name>}`.
+# `num_time_points` (dynamic variants) is set by the runner from the sampled
+# prior; `pin_initial_time_point` is re-toggled per window by the runner.
+
+# Parameters only. Pair with params@prior_params=static.
+static:
+  _target_: data_assimilation.smoothing.esmda.ParameterESMDA
+  num_steps: ${smoothing.num_steps}
+  alpha: ${smoothing.alpha}
+  localization: ${smoothing.localization}
+
+# Time-varying parameters (one scalar per time knot). Pair with
+# params@prior_params=dynamic.
+dynamic:
+  _target_: data_assimilation.smoothing.esmda.TimeVaryingParameterESMDA
+  num_steps: ${smoothing.num_steps}
+  alpha: ${smoothing.alpha}
+  pin_initial_time_point: true
+  localization: ${smoothing.localization}
+
+# Window-start state only; static parameters held fixed.
+state:
+  _target_: data_assimilation.smoothing.esmda.StateESMDA
+  num_steps: ${smoothing.num_steps}
+  alpha: ${smoothing.alpha}
+  localization: ${smoothing.localization}
+  state_reduction: ${smoothing.state_reduction}
+  final_time_smoothing: ${smoothing.final_time_smoothing}
+
+# Window-start state + static parameters.
+state_and_parameter:
+  _target_: data_assimilation.smoothing.esmda.StateAndParameterESMDA
+  num_steps: ${smoothing.num_steps}
+  alpha: ${smoothing.alpha}
+  localization: ${smoothing.localization}
+  state_reduction: ${smoothing.state_reduction}
+  final_time_smoothing: ${smoothing.final_time_smoothing}
+
+# Window-start state + time-varying parameters. Pair with
+# params@prior_params=dynamic and params@truth_params=dynamic_truth.
+state_and_dynamic:
+  _target_: data_assimilation.smoothing.esmda.StateAndTimeVaryingParameterESMDA
+  num_steps: ${smoothing.num_steps}
+  alpha: ${smoothing.alpha}
+  pin_initial_time_point: true
+  localization: ${smoothing.localization}
+  state_reduction: ${smoothing.state_reduction}
+  final_time_smoothing: ${smoothing.final_time_smoothing}

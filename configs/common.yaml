@@ -1,0 +1,39 @@
+# Shared by forward.yaml and assimilation.yaml: output and scratch locations,
+# ensemble budget and Hydra's run dir.
+
+# Output and scratch locations. Each entry point adds `paths.results_dir`
+# under `results_root`.
+paths:
+  # Which entry of `scratch` the solvers use: local | snellius | delftblue.
+  # The job scripts set both through the environment (job_scripts/*/env.sh).
+  machine: ${oc.env:PYURBANAIR_MACHINE,local}
+  results_root: ${oc.env:PYURBANAIR_RESULTS_ROOT,.temp}
+  # Absolute scratch dir the solvers chdir into, per machine. The cluster
+  # entries get one dir per SLURM job (`local` outside a job).
+  scratch:
+    local: ${oc.env:PWD}/.temp
+    snellius: /scratch-shared/${oc.env:USER}/urbanair_temp/${oc.env:SLURM_JOB_ID,local}
+    delftblue: /scratch/${oc.env:USER}/urbanair_temp/${oc.env:SLURM_JOB_ID,local}
+  experiment_dir: ${paths.scratch.${paths.machine}}
+  # Neural surrogates: trained weights and generated training data.
+  weights_dir: model_weights
+  training_data_dir: training_data
+
+# Ensemble budget. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`.
+ensemble:
+  ensemble_size: 32
+  num_parallel_processes: 8
+  num_cpus_per_process: 1
+  failure:
+    # raise: a failed member aborts the run (required by the SGS-discrepancy
+    # hybrid). resample_from_successes: replace it with a jittered copy of a
+    # successful member.
+    # policy: resample_from_successes
+    policy: raise
+    jitter_scale: 0.05
+    seed: 0
+
+hydra:
+  run:
+    dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

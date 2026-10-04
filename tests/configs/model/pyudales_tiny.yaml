@@ -1,0 +1,8 @@
+# uDALES on the tiny grid: nudging below the 10 m lid.
+defaults:
+  - pyudales
+  - _self_
+
+forward_model:
+  nudging_config:
+    nnudge_meters: 4.0

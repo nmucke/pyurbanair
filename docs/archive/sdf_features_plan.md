@@ -1,7 +1,7 @@
 # Implementation plan: SDF + ∇SDF geometry features for the P3D surrogate
 
 *Design record, 2026-07-02. Follows from
-[docs/multi_geometry_surrogate_research.md](../multi_geometry_surrogate_research.md)
+[docs/multi_geometry_surrogate_research.md](../research/multi_geometry_surrogate_research.md)
 (§3, phase 1). Scope: add a signed-distance field and its gradient as
 geometry input channels to `P3D`, with dataloader-side computation during
 training and model-side (cached, once-per-rollout) computation at inference.*

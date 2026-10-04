@@ -8,7 +8,7 @@ architecture family plus the resolution logic the fine-tune script uses:
     explicit ``target_modules`` (config) > named ``preset`` > error.
 
 The P3D presets below were derived by enumerating ``P3D(...).net.named_modules()``
-(see ``docs/neural_surrogate_plans/01_lora_finetuning.md`` §0). The module tree
+(see ``docs/plans/implemented/neural_surrogates/01_lora_finetuning.md`` §0). The module tree
 (``p3d_surrogate``'s ``P3D_S/B/L``) is fixed, so the suffixes are stable:
 
     net.model_impl.{encoder_level_N,decoder_level_N,latent}.blocks.N

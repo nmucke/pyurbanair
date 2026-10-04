@@ -95,6 +95,27 @@ def write_ibm_files_using_fortran(
             f"Please ensure DA_TOOLSDIR is set correctly or toolsdir parameter is provided."
         )
 
+    # Upstream's matchFacetsCells.f90 loops a facet over cells up to the one
+    # above its top and clamps that index in x and y, but not in z: geometry
+    # ending in the top cell of the w-grid makes it read past its arrays, so
+    # the facet sections depend on whatever memory follows (a solver STOP in
+    # wallfunmom on macOS). Refuse such geometry instead.
+    in_domain = (
+        (TR.triangles[:, :, 0].max(axis=1) > 0)
+        & (TR.triangles[:, :, 0].min(axis=1) < itot * dx)
+        & (TR.triangles[:, :, 1].max(axis=1) > 0)
+        & (TR.triangles[:, :, 1].min(axis=1) < jtot * dy)
+    )
+    if in_domain.any():
+        roof = float(TR.triangles[in_domain][:, :, 2].max())
+        highest = zgrid_w[-2] + (zgrid_w[-1] - zgrid_w[-2]) / 2 + tol_mypoly
+        if roof > highest:
+            raise ValueError(
+                f"The geometry inside the domain reaches z = {roof:g} m, but uDALES's "
+                f"IBM preprocessing needs it to stay at or below z = {highest:g} m "
+                "(1.5 cells under the domain top). Raise the domain's upper z bound."
+            )
+
     os.chdir(fpath)
 
     # Write input files for Fortran code

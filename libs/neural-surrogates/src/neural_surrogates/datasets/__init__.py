@@ -1,6 +1,6 @@
 """PyTorch datasets over a pyurbanair ``training_data/`` split.
 
-The training-data layout is documented in ``docs/training_data.md``. Two
+The training-data layout is documented in ``docs/archive/training_data.md``. Two
 datasets read the same on-disk split:
 
 * :class:`TransitionDataset` -- flattens every trajectory into full-field

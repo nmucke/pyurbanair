@@ -23,6 +23,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
+from pyurbanair.utils.toolchain import apple_linker_flags
+
 UPSTREAM_COMMIT = "b84916ac60cecd1da54dd09df76c15e30dcaabe9"
 UPSTREAM_URL = "https://github.com/uDALES/u-dales.git"
 # Upstream's CMake downloader otherwise tracks the mutable findFFTW HEAD.
@@ -221,34 +223,12 @@ def _export_source(repository: Path, destination: Path) -> None:
 
 
 def _build_environment(compiler_command: str | None = None) -> dict[str, str]:
-    """Use Apple's linker with a Conda Fortran compiler and the active SDK.
-
-    Conda's ld64 can lag a new macOS SDK's .tbd syntax. The compiler still
-    compiles normally; ``-B/usr/bin/`` makes its link driver select Apple's ld.
-    Respect an explicit linker search prefix supplied by the caller.
-    """
+    """Add the shared macOS linker flags; an explicit ``-B`` from the caller wins."""
     env = os.environ.copy()
-    if platform.system() != "Darwin" or not os.access("/usr/bin/ld", os.X_OK):
-        return env
-    compiler_tokens = shlex.split(compiler_command or env.get("FC", "mpif90"))
-    compiler = (
-        shutil.which(compiler_tokens[0], path=env.get("PATH"))
-        if compiler_tokens
-        else None
-    )
-    if compiler is None:
-        return env
-    compiler_path = Path(compiler)
-    prefix = env.get("CONDA_PREFIX")
-    in_conda = prefix is not None and compiler_path.resolve().is_relative_to(
-        Path(prefix).resolve()
-    )
-    in_pixi = ".pixi" in compiler_path.parts and "envs" in compiler_path.parts
-    if not (in_conda or in_pixi):
-        return env
+    extra = apple_linker_flags(compiler_command or env.get("FC", "mpif90"), env)
     flags = shlex.split(env.get("LDFLAGS", ""))
-    if not any(flag.startswith("-B") for flag in flags):
-        env["LDFLAGS"] = f"{env.get('LDFLAGS', '').strip()} -B/usr/bin/".strip()
+    if extra and not any(flag.startswith("-B") for flag in flags):
+        env["LDFLAGS"] = " ".join([env.get("LDFLAGS", "").strip(), *extra]).strip()
     return env
 
 
@@ -412,7 +392,7 @@ def prepare_solver(
     cache.mkdir(parents=True, exist_ok=True)
     manifest, blobs = _extension() if discrepancy_enabled else ({}, {})
     scripts = _scripts()
-    script_names = ["build_udales_macos.sh", "build_preprocessing_macos.sh"]
+    script_names = ["build_udales.sh", "build_preprocessing.sh"]
     build_env = _build_environment()
     identity = {
         "upstream_commit": UPSTREAM_COMMIT,

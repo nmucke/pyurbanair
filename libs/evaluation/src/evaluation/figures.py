@@ -3,7 +3,7 @@
 Here today (moved in WP0.2): the general state / parameter / sensor plots that
 came out of ``pyurbanair.plotting``. WP1.5 adds the evaluation figure set
 proper -- P1, S1, S5, F1, D1, then D3 and S4 in phases 2--3 — listed in
-``docs/plans/esmda_turbulence_evaluation.md`` §7.
+``docs/research/esmda_turbulence_evaluation.md`` §7.
 
 That new figure set will take time averages or statistics only -- never
 instantaneous fields, which decorrelate after a Lyapunov horizon and measure
@@ -634,7 +634,7 @@ def plot_final_state_with_obs(
 
 # ===========================================================================
 # The WP1.5 evaluation figure set -- P1, S1, F1, S5, D1
-# (docs/plans/esmda_turbulence_evaluation.md section 7)
+# (docs/research/esmda_turbulence_evaluation.md section 7)
 #
 # A different contract from the general plots above, which stay as they are:
 # these take already-opened objects, write the file themselves and return the

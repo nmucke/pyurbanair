@@ -1,0 +1,136 @@
+name: neural_surrogate
+# The surrogate emits on a regular cell-centered grid with coords (z, y, x):
+# pyudales spin-up output is collocated off its staggered C-grid to match the
+# (collocated) training data, and pylbm output is already cell-centered. Either
+# way the regular-grid observation mapping (pylbm) applies.
+solver_name: pylbm
+
+forward_model:
+  _target_: neural_surrogates.NeuralSurrogateForwardModel
+  # Keep nested nodes (spinup_forward_model) as raw config so the surrogate
+  # can fill in n_state_channels / n_params itself and build the spin-up
+  # backend in memory.
+  _recursive_: false
+
+  # --- the trained network -------------------------------------------------
+  # Point at a folder written by scripts/surrogate/train.py. Its
+  # config.yaml supplies the architecture, state_vars and param_vars; the
+  # training-data config it references supplies the trained domain and output
+  # frequency; weights.pt supplies the parameters.
+  # model_dir: model_weights/unet_convnext_small
+  model_dir: model_weights/p3d_barcelona
+  weights_path: null
+  allow_uninitialized_weights: false
+  device: cuda
+  dtype: float32
+  # Constant fallbacks for trained params a caller may omit (e.g. ESMDA only
+  # varies the inflow, but a uDALES-trained net also expects pressure gradient).
+  default_params:
+    pressure_gradient_magnitude: 0.0041912
+
+  # --- requested run settings ----------------------------------------------
+  nx: ${domain.nx}
+  ny: ${domain.ny}
+  nz: ${domain.nz}
+  bounds: ${domain.bounds}
+  simulation_time: ${time.simulation_time}
+  output_frequency: ${time.output_frequency}
+  spinup_time: ${time.spinup_time}
+
+  # Max ensemble members rolled forward through the network in one batched
+  # pass. null rolls the whole ensemble at once; set a positive int to chunk a
+  # large ensemble and cap peak GPU memory (raise it as far as the GPU allows).
+  rollout_batch_size: 10
+
+  # Optional: voxelise this geometry for the network's geometry channel. When
+  # null the fluid mask falls back to the non-zero-state convention used by
+  # TransitionDataset.
+  stl_path: null
+
+  # --- spin-up source ------------------------------------------------------
+  # How the assimilation obtains each member's initial field:
+  #   forward_model  -> run the CFD spin-up backend below (faithful, expensive)
+  #   training_data  -> warm-start from training snapshots loaded by run_esmda
+  #                     (see the model-level `training_data_spinup` block below);
+  #                     the surrogate itself never runs a spin-up in this mode, so
+  #                     a cold start (state is None) is an error.
+  #   generative     -> sample the cold-start field from a trained latent
+  #                     generator (train_latent_generator.py artifact) conditioned
+  #                     on each member's CURRENT parameters; regenerated on every
+  #                     cold forward call, so ESMDA re-conditions the initial
+  #                     state after each parameter update. Needs the
+  #                     `generative_spinup` block below; the CFD backend is
+  #                     neither built nor run.
+  spinup_source: training_data
+
+  # --- generative spin-up (spinup_source: generative) ------------------------
+  # model_dir / template_path default to null rather than ??? so every config
+  # that never uses generative mode still composes; the surrogate validates
+  # them at construction when spinup_source is generative.
+  generative_spinup:
+    model_dir: null          # train_latent_generator.py artifact (config.yaml + weights.pt)
+    template_path: null      # NetCDF with canonical coords + an explicit `blanking` mask
+    seed: 0                  # base seed; member i's noise is seeded by (seed, i)
+    sample_batch_size: 8     # members sampled per generator call (memory bound)
+    num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    # Optional {variable: unit} map asserted against the artifact's own units
+    # (which must already cover every state and param variable): state what this
+    # deployment feeds the generator and a unit change fails loud instead of
+    # silently conditioning on e.g. radians. null = trust the artifact.
+    expected_units: null
+    save_diagnostics: false  # run_esmda: write generated snapshots under _generated_states/
+
+  # --- spin-up backend (produces the cold-start initial condition) ---------
+  spinup_forward_model:
+    _target_: pyudales.forward_model.ForwardModel
+    _convert_: all
+    case_dir: ${geometry.case_dir}
+    # Distinct from the default pyudales experiment ("999") so a co-resident
+    # pyudales truth/assim model never shares (and clobbers) this template's
+    # experiment directory.
+    experiment_name: "899"
+    matlab_bin: null
+    ncpu: 1
+    save_only_last_timestep: false
+    verbose: false
+    boundary_condition: inflow_outflow
+    nudging_config:
+      tnudge: 30.0
+      nnudge: 4
+      profile_config:
+        type: power_law
+        alpha: 0.25
+    nx: ${domain.nx}
+    ny: ${domain.ny}
+    nz: ${domain.nz}
+    bounds: ${domain.bounds}
+    # One post-spin-up frame is enough to seed the surrogate rollout.
+    simulation_time: ${time.output_frequency}
+    output_frequency: ${time.output_frequency}
+    spinup_time: ${time.spinup_time}
+
+# --- training-data warm start (consumed by scripts/esmda/run_esmda.py) -----------
+# Active only when this model is the assimilation model AND
+# forward_model.spinup_source is "training_data". run_esmda then seeds the first
+# assimilation window from training trajectories: each ensemble member starts
+# from the LAST frame of a training sample (streamed one frame at a time to
+# disk, so the full ensemble never sits in RAM) and its prior inflow params are
+# anchored to that sample's final inflow value (the AR2 prior draw's shape is
+# kept; only its level is pinned). Ignored by run_forward_model and by the CFD
+# spin-up source.
+training_data_spinup:
+  root: null          # training_data root; null -> trained model's dataset.root_dir
+  split: train        # which split to draw the initial snapshots from
+  initial_param_jitter_scale: 0.01  # jitter on reused samples when ensemble > split
+
+prepare:
+  _target_: pyurbanair.config.hydra_helpers.prepare_neural_surrogate
+  spinup_backend: pyudales
+  python_or_matlab: python
+
+ensemble_model:
+  _target_: neural_surrogates.NeuralSurrogateEnsembleForwardModel
+  _convert_: all
+  ensemble_size: ${ensemble.ensemble_size}
+  num_parallel_processes: ${ensemble.num_parallel_processes}
+  num_cpus_per_process: ${ensemble.num_cpus_per_process}

@@ -11,6 +11,8 @@ from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
+from pyurbanair.utils.toolchain import apple_linker_flags
+
 from .build_tree_utils import compute_build_signature, write_build_stamp
 from .dir_utils import DirectoryPaths
 from .makefile_utils import Makefile
@@ -423,6 +425,8 @@ def compile_lbm(
                 # resolve to the incompatible conda-forge shared library.
                 link_dirs.append(f"-L{netcdf_lib_dir}")
         link_dirs.append(f"-L{env_lib_dir}")
+        if not cuda:
+            link_dirs.extend(apple_linker_flags("gfortran", env))
 
         # Install the binary into the LBM tree (LBM/bin) instead of the makefile's
         # default $(HOME)/bin (the shared pixi env). Keeps the executable beside

@@ -1,0 +1,23 @@
+# @package _global_
+# One CPU epoch on the tiny training data (`paths.data_dir`, written by the
+# tests' `training_data` fixture). Shared by the train_* overlays.
+paths:
+  data_dir: ${paths.training_data_dir}/tiny
+
+trainer:
+  device: cpu
+  num_epochs: 1
+  amp: false
+  tf32: false
+  cudnn_benchmark: false
+
+batch_sampler:
+  batch_size: 2
+
+dataloader:
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
+dataset:
+  root_dir: ${paths.data_dir}
