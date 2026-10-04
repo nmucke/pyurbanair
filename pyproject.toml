@@ -19,12 +19,21 @@ requires-python = ">= 3.12,<3.13"
 version = "0.1.0"
 
 [tool.pixi.workspace]
-# pixi.lock is written by pixi 0.63; an older pixi rewrites it on install
-# (drops pypi-prerelease-mode, re-adds editable flags), dirtying a fresh clone.
-requires-pixi = ">=0.63"
+# pixi.lock is lock format v7 with a rich `linux-64-cuda` platform. Older pixi
+# can't read it or rewrites it on install (0.72.0 still does), dirtying a fresh
+# clone; every release from 0.72.1 to 0.81 leaves it as is.
+requires-pixi = ">=0.72.1"
 preview = ["pixi-build"]
 channels = ["conda-forge","robostack"]
-platforms = ["osx-arm64","linux-64"]
+platforms = [
+  "osx-arm64",
+  "linux-64",
+  # The `cuda` feature's platform. `cuda` advertises the host's CUDA runtime to
+  # the solver: without it the `__cuda` virtual package is missing and any
+  # conda-forge package gated on CUDA (e.g. the `cuda*_mkl_*` pytorch builds) is
+  # treated as uninstallable.
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.6" },
+]
 conda-pypi-map = { "conda-forge" = "./conda-pypi-mapping.json" }
 
 # conda-pypi-map = { "conda-forge" = "https://raw.githubusercontent.com/prefix-dev/parselmouth/main/files/mapping_as_grayskull.json" }
@@ -81,6 +90,10 @@ fftw = {version=">=3.3.10", channel="conda-forge"}
 openmpi = {version=">=4.1.0", channel="conda-forge"}
 libnetcdf = {version=">=4.9.3", channel="conda-forge"}
 coreutils = {version=">=9.0", channel="conda-forge"}
+
+# Every env but `cuda` has `cpu` or `delftblue`: keep them off `linux-64-cuda`.
+[tool.pixi.feature.delftblue]
+platforms = ["osx-arm64", "linux-64"]
 
 [tool.pixi.feature.delftblue.activation]
 scripts = ["activation_scripts/delftblue_activation.sh"]
@@ -167,6 +180,9 @@ profile = "black"
 multi_line_output = 3
 line_length = 88
 known_first_party = ["pyurbanair"]
+# quiet_jax must be imported before jax: give it its own section ahead of stdlib.
+known_quiet_jax = ["pyurbanair.quiet_jax"]
+sections = ["FUTURE", "QUIET_JAX", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 # Vendored third-party code (kept byte-for-byte upstream; do not reorder imports).
 extend_skip_glob = ["*/_tadpole/*"]
 
@@ -232,13 +248,7 @@ typer = "*"
 # CUDA / GPU JAX wheels exist only for linux-64, so scope the whole feature to
 # it; otherwise pixi tries (and fails) to solve the cuda env for osx-arm64.
 [tool.pixi.feature.cuda]
-platforms = ["linux-64"]
-
-# Advertise the host's CUDA runtime to the solver. Without this, the `__cuda`
-# virtual package is missing and any conda-forge package gated on CUDA (e.g.
-# the `cuda*_mkl_*` pytorch builds) is treated as uninstallable.
-[tool.pixi.feature.cuda.system-requirements]
-cuda = "12.6"
+platforms = ["linux-64-cuda"]  # linux-64 with CUDA, see the workspace platforms
 
 [tool.pixi.feature.cuda.dependencies]
 # NVIDIA CUDA toolkit and drivers are system-level and should be installed from NVIDIA:
@@ -294,6 +304,9 @@ prune-nvhpc = { cmd = "bash activation_scripts/prune_nvhpc.sh", description = "R
 # Both export to subprocesses, so parallel forward-model workers stay quiet
 # too. Kept out of the shared `dev` feature so the GPU-capable `cuda` and
 # `delftblue` environments are not forced onto CPU.
+[tool.pixi.feature.cpu]
+platforms = ["osx-arm64", "linux-64"]
+
 [tool.pixi.feature.cpu.activation.env]
 PYTHONNOUSERSITE = "1"
 JAX_PLATFORMS = "cpu"

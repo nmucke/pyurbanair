@@ -26,7 +26,6 @@ from data_assimilation.observation_operator import (
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
 from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES
 from pyurbanair.config.hydra_helpers import clean_outputs
 

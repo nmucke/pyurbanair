@@ -21,7 +21,7 @@ forward_model:
   verbose: false
   boundary_condition: periodic # inflow_outflow #
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
-  # sampler (conf/params/*.yaml) overrides it, so ESMDA can still estimate it.
+  # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #
   # Deliberately null for PALM. PALM has no Smagorinsky-style multiplier (c_0 is
   # hardcoded), so `sgs_constant` maps to `km_constant` — a CONSTANT EDDY

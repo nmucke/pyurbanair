@@ -7,7 +7,7 @@ and the uDALES param whitelist that previously dropped unknown variables.
 
 These are deliberately solver-free: they exercise the file-writer / sampler
 helpers directly so the suite stays fast (the end-to-end ESMDA smoke runs live in
-test_run_esmda.py).
+tests/scripts/test_assimilation.py).
 """
 
 from __future__ import annotations

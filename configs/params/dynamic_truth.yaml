@@ -1,7 +1,7 @@
 # Time-varying TRUTH parameters. Same AR2RelaxationModel as the dynamic prior,
 # but with distinct external means / seed so the truth trajectory is not drawn
 # from the assimilation prior's generative process (anti-inverse-crime).
-# Mounted as `params@truth_params` by run_esmda.yaml; the assimilation prior is
+# Mounted as `params@truth_params` by assimilation.yaml; the assimilation prior is
 # the separate `params@prior_params=dynamic`.
 _target_: pyurbanair.dynamic_parameters.ar2_relaxation.AR2RelaxationModel
 _convert_: all
@@ -19,13 +19,13 @@ external_parameters:
     min: 0.1
 # Truth-model values for the constant-in-time model-error knobs (Constants so the
 # truth realization is fixed). The truth solver may differ from the assimilation
-# solver, so these need not match conf/params/dynamic.yaml's prior means.
+# solver, so these need not match configs/params/dynamic.yaml's prior means.
 static_parameters:
   vertical_inflow_exponent:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.25
   # sgs_constant is NOT set here on purpose: it now defaults per-backend in
-  # conf/model/*.yaml, because the three solvers' SGS constants are different
+  # configs/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
   # to prescribe the truth value, and only for a single-backend run.
 
@@ -39,6 +39,6 @@ static_parameters:
   sgs_bias_b2:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0
-# See conf/params/dynamic.yaml — knots are spaced `seconds_per_knot` seconds.
+# See configs/params/dynamic.yaml — knots are spaced `seconds_per_knot` seconds.
 simulation_time: ${time.simulation_time}
 seconds_per_knot: ${time.seconds_per_knot}

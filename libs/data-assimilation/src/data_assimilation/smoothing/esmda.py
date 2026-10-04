@@ -212,7 +212,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # via a local analysis driven by the strategy's inflation factors.
         self.localization = localization
 
-        # On-disk peak-storage control, set by the caller (e.g. run_esmda.py)
+        # On-disk peak-storage control, set by the caller (e.g. run_smoother.py)
         # after construction. When ``prune_disk_steps`` is True and the forward
         # model saves on disk, each ESMDA step's per-member forecast directory is
         # deleted as soon as its Kalman update is computed -- the warm-start IC
@@ -225,7 +225,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         self.prune_disk_steps = False
         self.keep_prior_disk_step = True
 
-        # Observation-space diagnostics, set by the caller (e.g. run_esmda.py)
+        # Observation-space diagnostics, set by the caller (e.g. run_smoother.py)
         # after construction, same attribute-plumbing pattern as
         # ``prune_disk_steps``. When ``collect_obs_diagnostics`` is True each
         # ``_one_step`` records the predicted observations it materialized, and

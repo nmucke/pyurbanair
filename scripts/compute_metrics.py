@@ -25,6 +25,8 @@ time; the truth is read one window at a time.
 
 from __future__ import annotations
 
+import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
+
 import argparse
 import pathlib
 import sys

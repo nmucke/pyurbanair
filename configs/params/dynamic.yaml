@@ -20,14 +20,14 @@ external_parameters:
 # Constant-in-time model-error knobs that ride in the same params Dataset and are
 # carry no `time` dim. Drawn once (window 0) and carried across windows — never
 # re-randomized (docs/archive/esmda_model_error_parameters.md §6). Only parameters
-# selected by run_esmda.yaml `params_to_estimate` receive DA updates; all entries
+# selected by `assimilation.params_to_estimate` receive DA updates; all entries
 # here are applied to predictions. Use Constant for prescribed values.
 static_parameters:
   vertical_inflow_exponent:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.25
   # sgs_constant is NOT set here on purpose: it now defaults per-backend in
-  # conf/model/*.yaml, because the three solvers' SGS constants are different
+  # configs/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
   # to prescribe or estimate it, and only for a single-backend run.
 

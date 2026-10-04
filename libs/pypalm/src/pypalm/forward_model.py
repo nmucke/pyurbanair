@@ -415,7 +415,7 @@ class ForwardModel(BaseForwardModel):
         """Build PALM via ``palmbuild`` when ``compile`` is True.
 
         Hydra dispatches to this method via the ``model.prepare._target_``
-        block in ``conf/model/pypalm.yaml``, which instantiates
+        block in ``configs/model/pypalm.yaml``, which instantiates
         ``pyurbanair.config.hydra_helpers.prepare_compile``; this method
         exists to honour that contract.
         """

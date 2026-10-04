@@ -27,6 +27,8 @@ Both parameter files have a `time` dim: the cycles' analysis times.
 
 from __future__ import annotations
 
+import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
+
 import pathlib
 import shutil
 import sys

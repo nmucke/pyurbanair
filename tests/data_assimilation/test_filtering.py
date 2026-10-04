@@ -842,7 +842,7 @@ def test_pred_obs_post_history_parallels_pred_obs_history() -> None:
 def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
     """The same horizon as ONE run() call or as W, identically.
 
-    The window loop in ``scripts/filtering/run_filtering.py`` is computational
+    The window loop in ``scripts/run_filtering.py`` is computational
     chunking: it splits the horizon into ``run()`` calls so RAM and peak disk
     stay bounded, carrying the analyzed state and parameters into the next call
     exactly as ESMDA carries its own, and relying on ``BaseFilter.rng_key``
@@ -998,7 +998,7 @@ class _MultiFrameToyModel(_ToyLinearModel):
 
 
 class _StridedObservationOperator:
-    """``scripts/filtering/run_filtering.py``'s ORIGINAL stride mechanism.
+    """The archived filtering script's ORIGINAL stride mechanism.
 
     Kept here as a fixture — the script drops it in favour of
     ``BaseFilter.assimilate_every_n_step`` — so the library knob can be pinned
@@ -1784,7 +1784,7 @@ def test_donor_substituted_forecast_stays_valid_reduction_input() -> None:
 
 
 def test_shipped_streaming_defaults_run_through_the_filter() -> None:
-    """conf/filtering/state_reduction/svd_streaming.yaml's values, end to end."""
+    """configs/assimilation_settings/state_reduction.yaml's ``svd_streaming``."""
     n_e, n_cycles = 12, 4
     state = _initial_state(jax.random.PRNGKey(49), n_e, np.zeros(4), np.eye(4))
     reduction = StreamingStateReduction(forgetting_factor=0.9, energy_fraction=0.99)

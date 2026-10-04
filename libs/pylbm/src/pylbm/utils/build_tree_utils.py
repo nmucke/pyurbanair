@@ -15,8 +15,8 @@ submodule. Editing them in place meant:
 
 **This narrows the race, it does not eliminate it.** ``build_root`` defaults to
 ``<temp_dir>/lbm_build`` and ``temp_dir`` is ``paths.experiment_dir``, which is a
-*fixed* path per entry point (``$PWD/.temp`` in ``conf/run_esmda.yaml``,
-``$PWD/.temp_<model>`` for forward runs) -- not per-run. So two concurrent runs of
+*fixed* path (``paths.scratch`` in ``configs/common.yaml``, ``$PWD/.temp``
+locally) -- not per-run. So two concurrent runs of
 the same entry point still share one tree, now with this mirror's prune/refresh
 pass racing the other process's ``make``. Concurrent e2e runs must still be
 serialized; give genuinely parallel jobs distinct trees via ``PYLBM_BUILD_ROOT``
