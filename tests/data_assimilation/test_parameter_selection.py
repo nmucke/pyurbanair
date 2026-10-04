@@ -140,7 +140,11 @@ def test_filter_excludes_fixed_fields_from_analysis_inflation_and_evolution(
         mode=mode,
         parameter_names_to_estimate=selection,
         inflation=MultiplicativeInflation(1.3),
-        parameter_evolution=None if mode == "state" else RandomWalkEvolution(2.0),
+        parameter_evolution=(
+            None
+            if mode == "state"
+            else RandomWalkEvolution(std={"a": 2.0, "bias": 2.0})
+        ),
     )
     result = filter.run(
         params=params, observations=jnp.array([[0.0], [1.0]]), return_history=True
@@ -243,7 +247,7 @@ def test_none_selection_matches_explicit_all_values_and_rng(cls: Any) -> None:
                 forward_model=cast(Any, _Forecast()),
                 C_D=jnp.array([0.2]),
                 mode="parameter",
-                parameter_evolution=RandomWalkEvolution(0.1),
+                parameter_evolution=RandomWalkEvolution(std={"a": 0.1, "bias": 0.1}),
                 parameter_names_to_estimate=names,
             )
         else:
@@ -303,7 +307,7 @@ def test_hybrid_retains_unestimated_fields_across_both_phases(
         forward_model=cast(Any, filter_model),
         C_D=jnp.array([0.2]),
         mode="joint",
-        parameter_evolution=RandomWalkEvolution(0.1),
+        parameter_evolution=RandomWalkEvolution(std={"a": 0.1, "bias": 0.1}),
         parameter_names_to_estimate=selection,
     )
     hybrid = FilterSmoothing(smoother=smoother, filter=filter)

@@ -20,7 +20,6 @@ from data_assimilation.filtering import (
     EnsembleKalmanFilter,
     ETKFAnalysis,
     FilterResult,
-    IdentityEvolution,
     LETKFAnalysis,
     ObservationTSVD,
     RandomWalkEvolution,
@@ -301,7 +300,7 @@ def test_parameter_mode_converges_to_truth() -> None:
         forward_model=_ParamOnlyModel(),
         C_D=jnp.array([0.05**2]),
         mode="parameter",
-        parameter_evolution=RandomWalkEvolution(std=0.02),
+        parameter_evolution=RandomWalkEvolution(std={"a": 0.02}),
         rng_key=jax.random.PRNGKey(4),
     )
     result = enkf.run(
@@ -540,7 +539,7 @@ def test_state_mode_with_parameter_evolution_raises() -> None:
     with pytest.raises(ValueError, match="no effect"):
         EnsembleKalmanFilter(
             mode="state",
-            parameter_evolution=RandomWalkEvolution(std=0.1),
+            parameter_evolution=RandomWalkEvolution(std={"a": 0.1}),
             **_dummy_filter_kwargs(),
         )
 
@@ -574,7 +573,7 @@ def test_one_d_observations_rejected() -> None:
 def test_time_varying_params_rejected() -> None:
     enkf = EnsembleKalmanFilter(
         mode="parameter",
-        parameter_evolution=RandomWalkEvolution(std=0.1),
+        parameter_evolution=RandomWalkEvolution(std={"a": 0.1}),
         **_dummy_filter_kwargs(),
     )
     params = xarray.Dataset(
@@ -839,7 +838,17 @@ def test_pred_obs_post_history_parallels_pred_obs_history() -> None:
     assert len(enkf.pred_obs_post_history) == 1
 
 
-def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
+@pytest.mark.parametrize(
+    "spread",
+    [
+        {"parameter_evolution": RandomWalkEvolution(std={"a": 0.05})},
+        {"inflation": RTPS(alpha=0.5)},
+    ],
+    ids=["random_walk", "rtps"],
+)  # type: ignore[misc, unused-ignore]
+def test_windowing_the_cycle_chain_is_mathematically_inert(
+    spread: dict[str, Any],
+) -> None:
     """The same horizon as ONE run() call or as W, identically.
 
     The window loop in ``scripts/run_filtering.py`` is computational
@@ -852,7 +861,9 @@ def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
 
     The observations are built ONCE for the horizon, in global cycle order —
     the script's discipline, and the reason its noise draws do not depend on
-    the window count either.
+    the window count either. The random-walk case pins that the parameter
+    evolution, applied before every forecast after the first analysis, also
+    carries across ``run()`` calls.
     """
     n_e, num_cycles, cycles_per_window = 10, 6, 3
     H = np.array([[1.0, 0.5]])
@@ -875,8 +886,8 @@ def test_windowing_the_cycle_chain_is_mathematically_inert() -> None:
             forward_model=_ToyLinearModel(np.eye(2), param_effect=0.7),
             C_D=jnp.array([0.2]),
             mode="joint",
-            parameter_evolution=RandomWalkEvolution(std=0.05),
             rng_key=jax.random.PRNGKey(64),
+            **spread,
         )
 
     single = _filter()
@@ -1426,7 +1437,9 @@ def test_full_rank_current_reduction_matches_physical_update(
         mode=mode,
         inflation=inflation,
         parameter_evolution=(
-            IdentityEvolution() if mode == "joint" and inflation is None else None
+            RandomWalkEvolution(std={"a": 0.0})
+            if mode == "joint" and inflation is None
+            else None
         ),
         rng_key=jax.random.PRNGKey(22),
     )
@@ -1964,7 +1977,78 @@ def test_random_walk_evolution_adds_configured_noise() -> None:
         np.asarray(evolved["b"].values), np.asarray(params["b"].values)
     )
     with pytest.raises(ValueError, match=">= 0"):
-        RandomWalkEvolution(std=-0.1)
+        RandomWalkEvolution(std={"a": -0.1})
+    # One scalar for every parameter ignores their units: refused.
+    with pytest.raises(ValueError, match="per-parameter"):
+        RandomWalkEvolution(std=0.1)  # type: ignore[arg-type]
+
+
+class _ParamRecordingModel(_ParamOnlyModel):
+    """``_ParamOnlyModel`` that records the parameters of every forecast."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received: list[np.ndarray] = []
+
+    def run_ensemble(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset:
+        assert params is not None
+        self.received.append(np.asarray(params["a"].values))
+        return super().run_ensemble(state=state, params=params)
+
+
+def _evolving_param_filter(std: float) -> EnsembleKalmanFilter:
+    return EnsembleKalmanFilter(
+        observation_operator=_ToyObsOp(np.array([[1.0, 0.0]])),
+        forward_model=_ParamRecordingModel(),
+        C_D=jnp.array([0.05**2]),
+        mode="parameter",
+        parameter_evolution=RandomWalkEvolution(std={"a": std}),
+        rng_key=jax.random.PRNGKey(12),
+    )
+
+
+def test_evolution_is_applied_before_the_next_forecast_not_to_the_posterior() -> None:
+    """Posterior params are pure analyses; the NEXT forecast gets them evolved."""
+    n_e = 20
+    params = _params_dataset(
+        np.asarray(jax.random.normal(jax.random.PRNGKey(13), (n_e,)))
+    )
+    observations = jnp.array([[1.0], [1.2]])
+
+    enkf = _evolving_param_filter(std=0.3)
+    model = cast(_ParamRecordingModel, enkf.forward_model)
+    result = enkf.run(params=params, observations=observations, return_history=True)
+    assert result.params is not None and result.params_history is not None
+    posterior = np.asarray(result.params_history["a"].isel(cycle=1).values)
+
+    # The first forecast uses the prior untouched; the second uses the cycle-0
+    # analysis plus random-walk noise, while the saved analysis carries none.
+    np.testing.assert_array_equal(model.received[0], np.asarray(params["a"].values))
+    assert not np.allclose(model.received[1], posterior)
+    np.testing.assert_array_equal(
+        np.asarray(result.params["a"].values),
+        np.asarray(result.params_history["a"].isel(cycle=-1).values),
+    )
+
+    # Same rng consumption without noise: the first analysis is identical, so
+    # the noise of the evolution never reached it.
+    noiseless = _evolving_param_filter(std=0.0).run(
+        params=params, observations=observations, return_history=True
+    )
+    assert noiseless.params_history is not None
+    np.testing.assert_array_equal(
+        np.asarray(noiseless.params_history["a"].isel(cycle=1).values), posterior
+    )
+
+    # A later run() on the same instance continues the chain: its first
+    # forecast is evolved from the parameters it is handed.
+    enkf.run(params=result.params, observations=observations[:1])
+    assert len(model.received) == 3
+    assert not np.allclose(model.received[2], np.asarray(result.params["a"].values))
 
 
 # ---------------------------------------------------------------------------
@@ -2229,7 +2313,7 @@ def _beta_filter(beta: Optional[float] = None, **overrides: Any) -> Any:
         C_D=jnp.array([0.2, 0.35]),
         mode="joint",
         inflation=RTPS(alpha=0.5),
-        parameter_evolution=RandomWalkEvolution(std=0.05),
+        parameter_evolution=RandomWalkEvolution(std={"a": 0.05}),
         rng_key=jax.random.PRNGKey(71),
     )
     kwargs.update(overrides)

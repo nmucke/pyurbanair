@@ -14,3 +14,4 @@ forward_model:
     enabled: false
   inlet_turbulence:
     enabled: false
+  per_member_irandom: false

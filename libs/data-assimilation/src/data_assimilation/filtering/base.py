@@ -203,13 +203,15 @@ class FilterResult:
     """Return value of :meth:`BaseFilter.run` (no return-type polymorphism).
 
     ``state`` is the analyzed end-of-run state (final frame; the warm start
-    for any continuation) and ``params`` the final analyzed/evolved
-    parameters. Histories are ``cycle``-concatenated Datasets, present only
-    when ``return_history=True`` (``params_history`` additionally holds the
-    prior as its first entry). With explicit ``global_parameter_names``,
+    for any continuation) and ``params`` the final analyzed parameters (pure
+    analyses: the parameter evolution is applied before the next forecast).
+    Histories are ``cycle``-concatenated Datasets, present only when
+    ``return_history=True`` (``params_history`` additionally holds the prior
+    as its first entry). With explicit ``global_parameter_names``,
     ``applied_params_history`` records one accepted forecast parameter vector
-    per cycle, after failure-donor substitution and before analysis. It is
-    absent on the default path and when history collection is disabled.
+    per cycle, after evolution and failure-donor substitution and before
+    analysis. It is absent on the default path and when history collection is
+    disabled.
 
     ``forecast_history`` is the odd one out and deliberately so: it is
     ``time``-concatenated (every output frame of every cycle's segment, not one
@@ -267,10 +269,12 @@ class BaseFilter:
         parameter_names_to_estimate: Parameter fields included in the analysis,
             inflation and evolution. None selects all supplied fields; an empty
             sequence selects none. Every forecast still receives all fields.
-        parameter_evolution: Parameter forecast model applied after each
-            analysis; required (or ``inflation``) for the parameter-updating
-            modes (``"parameter"``/``"joint"``), whose parameter block
-            otherwise collapses silently.
+        parameter_evolution: Parameter forecast model, applied to the
+            estimated parameters before every forecast that follows an
+            analysis (the posterior parameters stay pure analyses); required
+            (or ``inflation``) for the parameter-updating modes
+            (``"parameter"``/``"joint"``), whose parameter block otherwise
+            collapses silently.
         state_reduction: Optional current or streaming SVD/POD representation
             for the physical state block. Supported only by unlocalized
             ``"state"`` and ``"joint"`` analyses.
@@ -519,6 +523,9 @@ class BaseFilter:
                 "cycles and the filter stops learning."
             )
         self.parameter_evolution = parameter_evolution
+        # Set once an analysis has produced parameters; from then on every
+        # forecast, in this run() call or a later one, gets evolved parameters.
+        self._params_analyzed = False
 
         # Default the PRNG key here (not in the signature): a default argument
         # would be evaluated at import time -- initializing the JAX backend as
@@ -1100,6 +1107,17 @@ class BaseFilter:
             )
             self._set_cycle_results_dir(cycle)
 
+            # The parameters' forecast model: evolve the last analysis before
+            # forecasting from it (never before the instance's first forecast).
+            if self.parameter_evolution is not None and self._params_analyzed:
+                assert params is not None
+                self.rng_key, evolve_key = jax.random.split(self.rng_key)
+                evolved = self.parameter_evolution.evolve(
+                    select_parameters(params, self.parameter_names_to_estimate),
+                    evolve_key,
+                )
+                params = merge_parameters(params, evolved)
+
             forecast = self._forecast_step(state=analysis_state, params=params)
             if params is not None:
                 params = self.forward_model.apply_failure_substitutions_to_params(
@@ -1272,8 +1290,8 @@ class BaseFilter:
         order, all of them updating the same end-of-segment augmented state
         through the ensemble cross-covariances. Everything around the sweep
         happens once per cycle — the basis fit, prior and posterior inflation,
-        the localization plumbing, the parameter evolution — because they are
-        properties of the cycle's forecast, not of an individual observation.
+        the localization plumbing — because they are properties of the cycle's
+        forecast, not of an individual observation.
 
         A configured ``state_reduction`` changes only the *analysis
         representation* of the state block: the rows handed to the analysis are
@@ -1482,12 +1500,8 @@ class BaseFilter:
                 coords=flat_params.coords,
                 attrs=updated_flat.attrs,
             )
-            if self.parameter_evolution is not None and n_param:
-                self.rng_key, evolve_key = jax.random.split(self.rng_key)
-                updated_params = self.parameter_evolution.evolve(
-                    updated_params, evolve_key
-                )
             params = merge_parameters(params, updated_params)
+            self._params_analyzed = bool(n_param)
 
         cycle_diag.analysis_time = time.perf_counter() - analysis_started
         if self.state_reduction is not None:

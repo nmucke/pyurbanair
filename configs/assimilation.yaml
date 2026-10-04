@@ -94,6 +94,7 @@ observation:
     _convert_: all
     instrument_std: 0.25
     representation_std: 0.1
+    # representation_time_model: persistent  # correlated within a bin (default independent)
     # How the error std carries over to aggregated observations:
     # propagate_mean reduces it with the mean-bin weights; none keeps the
     # configured std. This does not switch aggregation itself on or off.
@@ -125,7 +126,7 @@ filtering:
   inflation: ${inflation.rtps}
   parameter_evolution: null
     # _target_: data_assimilation.filtering.parameter_evolution.RandomWalkEvolution
-    # std: 0.5
+    # std: {inflow_angle: 2.0, velocity_magnitude: 0.05}  # per parameter, in its units
   # Likelihood tempering: every analysis uses `beta * R`. Finite, >= 1.
   beta: 1.0
 

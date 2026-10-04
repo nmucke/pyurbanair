@@ -1,8 +1,13 @@
 """Physical diagonal observation error for labelled, time-resolved products.
 
 Instrument noise is sampled on raw frames. Representation uncertainty affects
-the likelihood only. The independent time model permits exact propagation of
-both diagonal contributions through a mean aggregation. The explicit ``none``
+the likelihood only. Instrument noise is independent per frame and propagates
+exactly through a mean aggregation. The representation time model sets how the
+representation error propagates: ``independent`` treats it like instrument
+noise (variances combine with the squared bin weights), ``persistent`` treats
+it as fully correlated within an aggregation bin and independent across bins
+(standard deviations combine linearly with the bin weights, so averaging does
+not shrink it). Without aggregation the two coincide. The explicit ``none``
 policy instead assigns the configured variance to each observation product.
 """
 
@@ -154,6 +159,11 @@ class ObservationErrorSpec:
     A standard deviation can be scalar or a mapping with ``default`` and
     optional ``height_bands``, ``components`` and ``sensors`` overrides.
     A height band is ``{min_z, max_z, std}``. Bounds use ``[min_z, max_z)``.
+
+    ``representation_time_model`` is ``independent`` (bin variance
+    ``sum_i w_i**2 sigma_r,i**2``) or ``persistent`` (fully correlated within a
+    bin, independent across bins: bin variance ``(sum_i w_i sigma_r,i)**2``).
+    It only matters under ``propagate_mean`` with multi-frame bins.
     """
 
     instrument_std: float | Mapping[str, Any]
@@ -195,10 +205,9 @@ class ObservationErrorSpec:
         aggregate_observations: AggregateObservations | None = None,
     ) -> ResolvedObservationError:
         """Resolve the physical covariance on the current window's raw times."""
-        if self.representation_time_model != "independent":
+        if self.representation_time_model not in ("independent", "persistent"):
             raise ValueError(
-                "Only independent representation_time_model is supported; "
-                "persistent errors need a calibrated temporal covariance."
+                "representation_time_model must be 'independent' or 'persistent'."
             )
         if self.aggregation not in ("propagate_mean", "none"):
             raise ValueError("aggregation must be 'propagate_mean' or 'none'.")
@@ -285,16 +294,32 @@ class ObservationErrorSpec:
                     for b in bins
                 ]
             )
-            representation_variance = np.stack(
-                [
-                    np.sum(
-                        raw_representation_variance[list(b.frame_ids)]
-                        * np.square(b.weights)[:, None],
-                        axis=0,
-                    )
-                    for b in bins
-                ]
-            )
+            if self.representation_time_model == "persistent":
+                # Fully correlated within a bin: the stds add linearly.
+                raw_representation = np.broadcast_to(representation, observations.shape)
+                representation_variance = np.stack(
+                    [
+                        np.square(
+                            np.sum(
+                                raw_representation[list(b.frame_ids)]
+                                * np.asarray(b.weights)[:, None],
+                                axis=0,
+                            )
+                        )
+                        for b in bins
+                    ]
+                )
+            else:
+                representation_variance = np.stack(
+                    [
+                        np.sum(
+                            raw_representation_variance[list(b.frame_ids)]
+                            * np.square(b.weights)[:, None],
+                            axis=0,
+                        )
+                        for b in bins
+                    ]
+                )
         variance = instrument_variance + representation_variance
         if not np.all(np.isfinite(variance)) or np.any(variance <= 0):
             raise ValueError("Total observation variances must be finite and positive.")
@@ -311,5 +336,8 @@ class ObservationErrorSpec:
             sensor_indices=sensors,
             frame_ids=tuple(b.frame_ids for b in bins),
             weights=tuple(b.weights for b in bins),
-            provenance=f"observation_error.v1:diagonal:independent:{self.aggregation}",
+            provenance=(
+                "observation_error.v1:diagonal:"
+                f"{self.representation_time_model}:{self.aggregation}"
+            ),
         )

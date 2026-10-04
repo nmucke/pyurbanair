@@ -150,41 +150,6 @@ class ColumnBasedFileUpdater:
                 )
 
 
-def _as_profile(value: Optional[float], length: int) -> Optional[np.ndarray]:
-    if value is None:
-        return None
-    return np.full(length, float(value))
-
-
-def update_prof_file(
-    file_path: pathlib.Path,
-    u0: Optional[float] = None,
-    v0: Optional[float] = None,
-) -> None:
-    """
-    Update prof.inp.* file with new u0 and v0 scalars (uniform in z).
-
-    Args:
-        file_path: Path to the prof.inp.* file.
-        u0: New u0 value (column 3). If None, keeps original value.
-        v0: New v0 value (column 4). If None, keeps original value.
-    """
-    if u0 is None and v0 is None:
-        return
-
-    column_formats = ["20.15f", "12.6f", "12.6f", "12.6f", "12.6f", "12.6f"]
-    updates: dict[int, float] = {}
-    if u0 is not None:
-        updates[3] = u0
-    if v0 is not None:
-        updates[4] = v0
-
-    log_message = f"Updated {file_path.name} with u0={u0}, v0={v0}"
-    ColumnBasedFileUpdater(file_path, column_formats).update_columns(
-        updates, log_message=log_message
-    )
-
-
 def update_prof_file_profile(
     file_path: pathlib.Path,
     u_profile: Optional[np.ndarray] = None,
@@ -210,56 +175,6 @@ def update_prof_file_profile(
 
     log_message = f"Updated {file_path.name} with u/v profiles"
     ColumnBasedFileUpdater(file_path, column_formats).update_columns_per_row(
-        updates, log_message=log_message
-    )
-
-
-def update_lscale_file(
-    file_path: pathlib.Path,
-    u0: Optional[float] = None,
-    v0: Optional[float] = None,
-    dpdx: Optional[float] = None,
-    dpdy: Optional[float] = None,
-) -> None:
-    """
-    Update lscale.inp.* file with new u0, v0, dpdx, and dpdy scalars (uniform in z).
-
-    Args:
-        file_path: Path to the lscale.inp.* file.
-        u0: New u0 value (column 1). If None, keeps original value.
-        v0: New v0 value (column 2). If None, keeps original value.
-        dpdx: New dpdx value (column 3). If None, keeps original value.
-        dpdy: New dpdy value (column 4). If None, keeps original value.
-    """
-    if u0 is None and v0 is None and dpdx is None and dpdy is None:
-        return
-
-    column_formats = [
-        "20.15f",  # z
-        "12.6f",  # uq
-        "12.6f",  # vq
-        "12.9f",  # pqx
-        "12.9f",  # pqy
-        "15.9f",  # wfls
-        "12.6f",  # dqtdxls
-        "12.6f",  # dqtdyls
-        "12.6f",  # dqtdtls
-        "17.12f",  # dthlrad
-    ]
-    updates: dict[int, float] = {}
-    if u0 is not None:
-        updates[1] = u0
-    if v0 is not None:
-        updates[2] = v0
-    if dpdx is not None:
-        updates[3] = dpdx
-    if dpdy is not None:
-        updates[4] = dpdy
-
-    log_message = (
-        f"Updated {file_path.name} with u0={u0}, v0={v0}, dpdx={dpdx}, dpdy={dpdy}"
-    )
-    ColumnBasedFileUpdater(file_path, column_formats).update_columns(
         updates, log_message=log_message
     )
 

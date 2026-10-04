@@ -132,6 +132,13 @@ parameter-updating filter modes need inflation or a parameter evolution;
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
 prior parameters; and the SGS-discrepancy rules of §1.7.
 
+A localized state-bearing smoother is also checked for memory. Its update
+holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as
+`3·nx·ny·nz` (a lower bound). `check_config` refuses the run when the estimate
+exceeds the machine's physical memory and warns above half of it. The fix is
+`smoothing.state_reduction` instead of a localization, a larger
+`observation.aggregation.interval_seconds`, or fewer sensors.
+
 ### 1.7 uDALES model discrepancy
 
 `configs/model/pyudales.yaml` has an optional `forward_model.model_discrepancy`

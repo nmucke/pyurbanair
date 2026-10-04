@@ -119,8 +119,8 @@ def test_invalid_labels_and_variance_rejected() -> None:
         )
     with pytest.raises(ValueError, match="positive"):
         ObservationErrorSpec(0.0).resolve(raw, _operator())
-    with pytest.raises(ValueError, match="persistent errors"):
-        ObservationErrorSpec(1.0, representation_time_model="persistent").resolve(
+    with pytest.raises(ValueError, match="'independent' or 'persistent'"):
+        ObservationErrorSpec(1.0, representation_time_model="other").resolve(
             raw, _operator()
         )
 
@@ -222,6 +222,33 @@ def test_none_preserves_configured_errors_across_unequal_mean_bins() -> None:
             raw, _operator()
         )
         np.testing.assert_allclose(frame.variance, [[5, 8, 10, 13]] * 6)
+
+
+def test_persistent_representation_error_does_not_average_down() -> None:
+    raw = _observations([float(t) for t in range(20)])
+    aggregate = AggregateObservations(20.0)
+    settings: dict[str, Any] = dict(instrument_std=2.0, representation_std=0.5)
+    independent = ObservationErrorSpec(**settings).resolve(raw, _operator(), aggregate)
+    persistent = ObservationErrorSpec(
+        **settings, representation_time_model="persistent"
+    ).resolve(raw, _operator(), aggregate)
+    assert persistent.frame_ids == ((tuple(range(20))),)
+    np.testing.assert_allclose(independent.representation_variance, 0.25 / 20)
+    np.testing.assert_allclose(persistent.representation_variance, 0.25)
+    np.testing.assert_array_equal(
+        independent.instrument_variance, persistent.instrument_variance
+    )
+    np.testing.assert_allclose(persistent.variance, 4.0 / 20 + 0.25)
+    assert independent.provenance.endswith(":diagonal:independent:propagate_mean")
+    assert persistent.provenance.endswith(":diagonal:persistent:propagate_mean")
+    # Without aggregation every bin is one frame and the two models coincide.
+    frames = [
+        ObservationErrorSpec(**settings, representation_time_model=model).resolve(
+            raw, _operator()
+        )
+        for model in ("independent", "persistent")
+    ]
+    np.testing.assert_array_equal(frames[0].variance, frames[1].variance)
 
 
 @pytest.mark.parametrize("mode", [None, "invalid"])  # type: ignore[misc, unused-ignore]

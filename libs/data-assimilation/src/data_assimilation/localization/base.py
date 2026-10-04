@@ -234,6 +234,11 @@ class BaseLocalization(ABC):
     #: ``getattr`` guard.
     block_grouping: bool = False
 
+    #: Under ``block_grouping``, whether all time knots of one time-varying
+    #: parameter share one block (``True``) or each knot is its own block
+    #: (``False``), so a knot is not tapered by a strongly correlated sibling.
+    group_parameter_knots: bool = True
+
     @abstractmethod
     def inflation_factors(
         self,

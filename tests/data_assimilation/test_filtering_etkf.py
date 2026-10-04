@@ -828,7 +828,7 @@ def test_etkf_parameter_mode_moves_the_parameter_block() -> None:
         C_D=jnp.array([0.05]),
         analysis=analysis,
         mode="parameter",
-        parameter_evolution=RandomWalkEvolution(std=0.02),
+        parameter_evolution=RandomWalkEvolution(std={"a": 0.02}),
         rng_key=jax.random.PRNGKey(37),
     ).run(params=params, observations=jnp.array([[2.0], [2.0]]))
 
@@ -1119,7 +1119,9 @@ def _beta_etkf_run(
         C_D=C_D,
         analysis=ETKFAnalysis(tsvd=tsvd),
         mode=mode,  # type: ignore[arg-type]
-        parameter_evolution=(None if mode == "state" else RandomWalkEvolution(std=0.0)),
+        parameter_evolution=(
+            None if mode == "state" else RandomWalkEvolution(std={"a": 0.0})
+        ),
         rng_key=jax.random.PRNGKey(43),
         beta=beta,
     )

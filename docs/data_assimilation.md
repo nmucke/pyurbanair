@@ -72,8 +72,7 @@ libs/data-assimilation/src/data_assimilation/
     etkf.py                 # ETKFAnalysis, LETKFAnalysis, ObservationTSVD
     base.py                 # BaseFilter (cycle loop), EnsembleKalmanFilter,
                             #   FilterResult, CycleDiagnostics, validate_beta
-    parameter_evolution.py  # ParameterEvolution, IdentityEvolution,
-                            #   RandomWalkEvolution
+    parameter_evolution.py  # ParameterEvolution, RandomWalkEvolution
   filter_smoothing/
     base.py                 # FilterSmoothing, FilterSmoothingResult,
                             #   trajectory helpers
@@ -190,9 +189,24 @@ component blocks and sensors inside each frame.
 aggregation. It propagates each raw diagonal covariance through the exact bin
 weights: independent variance `σ²` averaged over `m` equally weighted frames
 becomes `σ²/m`. `median`, `min`, and `max` aggregation are rejected because
-they need a calibrated product likelihood. Only the `independent`
-representation-time model is supported; it is an explicit approximation, not
-evidence about cross-frame residual correlation.
+they need a calibrated product likelihood.
+
+`representation_time_model` (default `independent`) sets how the
+representation error is correlated in time:
+
+- `independent`: every raw frame has its own representation error, so mean
+  aggregation shrinks it like instrument noise (`σ_r²/m`). This is an explicit
+  approximation, not evidence about cross-frame residual correlation.
+- `persistent`: fully correlated within an aggregation bin and independent
+  across bins. A mean over the bin does not shrink it: its std combines
+  linearly with the bin weights, `(Σ w_i σ_r,i)²`, which is `σ_r²` for a mean.
+  Instrument noise still shrinks as `σ²/m`. Without aggregation (one frame per
+  bin) it equals `independent`, and under `propagation: none` the two are the
+  same too.
+
+No other time model is accepted: a partially correlated one would need a
+calibrated temporal covariance. The model is part of the
+`observation_error_model` provenance string in `run_info.yaml`.
 
 `propagation: none` keeps both configured standard deviations unchanged for
 each averaged observation: the likelihood variance is
@@ -475,11 +489,22 @@ exact global update.
 `block_grouping=True` (on the localization instance), `_group_inflation`
 takes the per-observation minimum inflation across all rows in a block so
 they share one active-observation set and one transition matrix. Parameter
-blocks group the time knots of one parameter; state blocks group truly
+blocks group the time knots of one parameter (unless
+`group_parameter_knots=False`, below); state blocks group truly
 co-located grid cells (`StateAugmentation.group_ids`: `u/v/w` share blocks on
 pylbm's collocated grid but not on the staggered uDALES/PALM grids).
 Masked/global rows are excluded from the block minimum, then restored to
 all-ones inflation.
+
+**Knot-wise temporal localization** (`group_parameter_knots`, default `true`).
+With one block per parameter, every knot of a time-varying parameter takes the
+taper of its most strongly correlated knot, so an early knot is updated by
+observations only a later knot explains. `CorrelationLocalization(...,
+group_parameter_knots=False)` gives each knot its own block (read in
+`TimeVaryingParameterESMDA._time_varying_group_ids`), while `block_grouping`
+keeps grouping the co-located `u/v/w` state rows. It has no effect without
+`block_grouping` or on static parameters. Distance localization keeps parameter
+rows global, so it has no such argument.
 
 That mask-then-group-then-restore ordering is `resolve_row_inflation` in the
 same module, and the "is this observation active" predicate is
@@ -599,7 +624,7 @@ asynchronous/serial EnKF. Nothing is aggregated. Per cycle:
 - everything that belongs to the cycle rather than to an observation happens
   **once**: the state-reduction basis fit, prior and posterior inflation
   (posterior inflation relaxes toward the pre-sweep prior anomalies), the
-  localization plumbing, and the parameter evolution. `obs_prior_rmse` /
+  localization plumbing. `obs_prior_rmse` /
   `obs_posterior_rmse` / `innovation_chi2` are measured on the stacked
   `(T·N_obs,)` system. The `transform_*` / `local_*` diagnostics report the
   **last** frame's transform;
@@ -880,9 +905,20 @@ reduced or localized runs on it; score the analyzed state against the truth.
   the prior spread/perturbations after it.
 * **Parameter evolution**
   ([filtering/parameter_evolution.py](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)):
-  the parameters' forecast model between cycles — `IdentityEvolution` or
-  `RandomWalkEvolution(std | {name: std})`. Without one, an un-inflated
-  parameter ensemble collapses after a few cycles and stops learning.
+  the parameters' forecast model between cycles,
+  `RandomWalkEvolution(std={name: std})`. The std is per parameter, in its own
+  units (e.g. `{inflow_angle: 2.0, velocity_magnitude: 0.05}`); a scalar is
+  refused, and names left out get no noise. Without an evolution or inflation,
+  an un-inflated parameter ensemble collapses after a few cycles and stops
+  learning.
+
+  The evolution runs **right before each forecast except the filter instance's
+  first**, not after the analysis. The saved posterior parameters are
+  therefore the analyses themselves, and the evolved values are what the next
+  forecast uses (recorded in `applied_params_history` when that history is
+  on). The "first forecast" is tracked on the instance, so the evolution also
+  applies to the first cycle of each later `run()` call: one `run()` and `W`
+  windowed calls give the same chain, as do the hybrid's one-cycle calls.
 
 ### Run script
 

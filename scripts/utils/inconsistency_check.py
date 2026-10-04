@@ -9,7 +9,10 @@ found is reported at once, in a single ValueError.
 
 from __future__ import annotations
 
+import math
+import os
 import pathlib
+import warnings
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
@@ -133,7 +136,52 @@ def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:
             "smoothing.final_time_smoothing needs a state-bearing smoother and "
             "a state_reduction."
         )
+    if state_bearing and s.localization is not None:
+        problems += _localized_update_memory(cfg)
     return problems
+
+
+def _localized_update_memory(cfg: DictConfig) -> list[str]:
+    """The localized ESMDA update vmaps one (N_d, N_d) solve over every
+    augmented row, materialising an (N_aug, N_d, N_d) float32 array. Refuse
+    one larger than physical memory, warn above half of it."""
+    nx, ny, nz, sensors, states, window = (
+        OmegaConf.select(cfg, key)
+        for key in (
+            "domain.nx",
+            "domain.ny",
+            "domain.nz",
+            "obs.x_points",
+            "obs.states",
+            "time.simulation_time",
+        )
+    )
+    interval = OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
+    frequency = OmegaConf.select(cfg, "time.output_frequency")
+    if None in (nx, ny, nz, sensors, states, window) or (interval or frequency) is None:
+        return []
+    # A lower bound: u, v, w on the grid (any other state field or parameter
+    # rows only add).
+    n_aug = 3 * nx * ny * nz
+    # One ESMDA update assimilates the whole window at once: every sensor's
+    # observed states in every aggregation bin (or output frame), stacked into
+    # one vector (BaseSmoothing._get_observations).
+    n_bins = math.ceil(window / interval) if interval else round(window / frequency)
+    n_d = len(sensors) * len(states) * n_bins
+    needed = n_aug * n_d**2 * 4
+    available = _physical_memory()
+    message = (
+        f"The localized smoother update needs ~{needed / 1e9:.1f} GB "
+        f"(N_aug={n_aug} rows x N_d={n_d}^2 float32) of {available / 1e9:.1f} GB "
+        "physical memory: set smoothing.state_reduction instead of "
+        "smoothing.localization, raise observation.aggregation.interval_seconds "
+        "or use fewer sensors."
+    )
+    if needed > available:
+        return [message]
+    if needed > available / 2:
+        warnings.warn(message, stacklevel=2)
+    return []
 
 
 def _filtering(cfg: DictConfig, workflow: str) -> list[str]:
@@ -250,6 +298,11 @@ def _discrepancy(cfg: DictConfig, workflow: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Small readers
 # ---------------------------------------------------------------------------
+
+
+def _physical_memory() -> int:
+    """Bytes of physical memory (Linux and macOS)."""
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
 
 def _class(node: Any) -> str:
