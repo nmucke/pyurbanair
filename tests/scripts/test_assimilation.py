@@ -304,3 +304,23 @@ def test_window_files_on_the_truth_time(
         truth, members = kw["true_sensor"], kw["ensemble_sensor"]
         on_ensemble_time = truth.interp(time=members.time)
         np.testing.assert_allclose(members, on_ensemble_time.broadcast_like(members))
+
+
+def test_a_truth_from_before_the_time_axis_change_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A truth_dir state.nc with a frame at t=0 is on the old axis: it raises."""
+    helpers = load_script("scripts/utils/helper_functions.py")
+    xarray.Dataset(coords={"time": [0.0, 1.0, 2.0]}).to_netcdf(tmp_path / "state.nc")
+    cfg = OmegaConf.create(
+        {
+            "assimilation": {
+                "truth_dir": str(tmp_path),
+                "truth_start_time": None,
+                "num_windows": 1,
+            },
+            "time": {"simulation_time": 2.0},
+        }
+    )
+    with pytest.raises(ValueError, match="frame at t=0"):
+        helpers.open_truth(cfg, tmp_path)

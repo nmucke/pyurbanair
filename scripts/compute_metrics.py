@@ -83,6 +83,8 @@ def run(run_dir: pathlib.Path) -> None:
     run_info = OmegaConf.load(run_dir / "run_info.yaml")
     num_windows = int(cfg.assimilation.num_windows)
     sim_time = float(cfg.time.simulation_time)
+    # Truth frames are matched to the ensemble's by time, within half a frame.
+    tolerance = 0.5 * float(cfg.time.output_frequency)
     windows = run_dir / "windows"
 
     def window_files(name: str) -> list[pathlib.Path]:
@@ -138,7 +140,10 @@ def run(run_dir: pathlib.Path) -> None:
             posterior_series[name].append(series[name])
         state_rmse.append(
             streaming_state_rmse(
-                window_truth.sel(time=mean_state.time, method="nearest"), mean_state
+                window_truth.sel(
+                    time=mean_state.time, method="nearest", tolerance=tolerance
+                ),
+                mean_state,
             )
         )
 

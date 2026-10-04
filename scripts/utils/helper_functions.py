@@ -94,7 +94,16 @@ def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
         return xarray.open_dataset(run_dir / "true_state.nc")
     horizon = cfg.assimilation.num_windows * cfg.time.simulation_time
     start = float(cfg.assimilation.truth_start_time or 0.0)
-    state = xarray.open_dataset(pathlib.Path(truth_dir) / "state.nc")
+    path = pathlib.Path(truth_dir) / "state.nc"
+    state = xarray.open_dataset(path)
+    # Output frames sit in (0, simulation_time], so a frame at t=0 marks a
+    # state.nc written before the backends stamped time that way (PR #163).
+    if start == 0.0 and float(state.time[0]) <= 1e-6:
+        state.close()
+        raise ValueError(
+            f"{path} has a frame at t=0: it predates output on "
+            "(0, simulation_time] and would be read one frame off. Regenerate it."
+        )
     return _time_window(state, start, horizon)
 
 
