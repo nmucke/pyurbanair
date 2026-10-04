@@ -996,8 +996,18 @@ ParamAugmentation` for the flattening semantics.
         self._param_augmentation.check_num_time_points(params)
 
     def _time_varying_group_ids(self, params: xarray.Dataset) -> jnp.ndarray:
-        """Block id per flattened param row, grouping knots of one parameter."""
-        return self._param_augmentation.group_ids(params)
+        """Block id per flattened param row, grouping knots of one parameter.
+
+        With ``localization.group_parameter_knots=False`` every row (each knot)
+        is its own block instead.
+        """
+        group_ids = self._param_augmentation.group_ids(params)
+        if (
+            self.localization is not None
+            and not self.localization.group_parameter_knots
+        ):
+            return jnp.arange(len(group_ids), dtype=int)
+        return group_ids
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars."""

@@ -11,8 +11,8 @@ import xarray as xr
 from data_assimilation.filtering import (
     EnsembleKalmanFilter,
     ETKFAnalysis,
-    IdentityEvolution,
     LETKFAnalysis,
+    RandomWalkEvolution,
 )
 from data_assimilation.localization.correlation import CorrelationLocalization
 from data_assimilation.localization.distance import DistanceLocalization
@@ -225,7 +225,9 @@ def _filter(model: Any = None, **kwargs: Any) -> EnsembleKalmanFilter:
         observation_operator=lambda state: state.u.isel(time=-1).values,
         forward_model=forward_model,
         C_D=jnp.asarray([0.5]),
-        parameter_evolution=IdentityEvolution(),
+        parameter_evolution=RandomWalkEvolution(
+            std={"global_bias": 0.1, "local_bias": 0.1}
+        ),
         rng_key=jax.random.PRNGKey(12),
         **kwargs,
     )

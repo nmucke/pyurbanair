@@ -76,6 +76,7 @@ Key constructor arguments (all wired from
 | `nudging_config` | Nudging tunables dict; see §6 |
 | `inlet_turbulence` | Turbulent-inlet block. `None`/`false` (default) is a strict no-op; `true` switches the inlet to synthetic driver planes (`BCxm=3`) and turns nudging off. See §6.1 |
 | `instability_check` | dt-watchdog config dict; see §7 |
+| `per_member_irandom` | `False` (default) is a no-op. `True` gives each run its own initial-condition seed; see §6.2 |
 | `precomputed_geom_dir` | Skip STL→IBM Fortran step by reusing prior geometry bundle |
 | `verbose` | `False` (default) suppresses all subprocess stdout/stderr |
 
@@ -471,8 +472,8 @@ for pyudales geometry detection — use only the `solid_c.txt`-sourced blanking.
 
 ## 6. Inflow / nudging
 
-pyudales applies inflow via **nudging** (`use_nudging=True` is hardcoded in
-`_apply_inflow_settings`) unless `inlet_turbulence.enabled` is set, which
+pyudales applies inflow via **nudging** (under both boundary conditions)
+unless `inlet_turbulence.enabled` is set, which
 replaces both the nudged inlet face and the interior relaxation with synthetic
 driver planes (§6.1). The nudging generates a
 `timedepnudge.inp.<expnr>` file and enables `&PHYSICS lnudge=.true.`,
@@ -489,7 +490,9 @@ driver planes (§6.1). The nudging generates a
   values is prepended before the time-varying schedule begins.
 - Under inflow-outflow BCs, `dpdx`/`dpdy` are zeroed in namoptions (`&INPS`) so
   the inlet face is the sole streamwise driver (no body-force conflict with pylbm,
-  which has no body force).
+  which has no body force). Under periodic BCs the case template's `dpdx`/`dpdy`
+  are kept: the `pressure_gradient_magnitude` parameter is not written by any
+  uDALES path (it stays in the parameter schema as a neural-surrogate input).
 
 **`profile_config`** (nested under `nudging_config`):
 
@@ -722,6 +725,22 @@ generator: it needs no Fortran changes at all.
 
 ---
 
+### 6.2 Per-member initial-condition seed (`per_member_irandom`)
+
+uDALES perturbs the cold-start velocity field (`&RUN lrandomize`, default
+`.true.`, amplitude `randu`) with the seed `irandom`, which defaults to 43. The
+truth and every member therefore share one realisation, so a laminar or
+periodic ensemble at fixed parameters has no realisation spread.
+`forward_model.per_member_irandom: true` writes
+`irandom = derive_seed(experiment_name) % 134456` into each run's namoptions
+(truth included) through `random_utils.apply_random_initial_condition`, from
+`_apply_inflow_settings`. It uses the same stable per-member digest as the
+inlet-turbulence seed (§6.1). The modulus is uDALES' own generator period
+(`randomnize`: `ir = mod(ir*8121 + 28411, 134456)` in 32-bit integers); a
+larger seed overflows `ir*8121` and biases the perturbations. It only matters on a cold start: a warm-started
+run inherits its copied state, and uDALES does not re-randomize. Off by
+default, so default runs are unchanged.
+
 ## 7. Instability watchdog
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
@@ -822,7 +841,7 @@ compensation knobs".
 | [`ncpu_utils.py`](../libs/pyudales/src/pyudales/utils/ncpu_utils.py) | `validate_and_sync_ncpu` — sets `nprocx=ncpu, nprocy=1` and checks divisibility |
 | [`nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py) | `apply_time_varying_inflow`, `compute_nudging_profiles`, `write_timedepnudge_file`, `enable_nudging_in_namoptions` (see §6) |
 | [`params_utils.py`](../libs/pyudales/src/pyudales/utils/params_utils.py) | `INFLOW_PARAM_NAMES` whitelist, `extract_inflow_params`, `merge_params`, `apply_inflow_settings`, `get_param_value`, `is_time_varying_params` |
-| [`random_utils.py`](../libs/pyudales/src/pyudales/utils/random_utils.py) | `apply_random_initial_condition` — sets `irandom`/`randu`/`lrandomize` in `&RUN` |
+| [`random_utils.py`](../libs/pyudales/src/pyudales/utils/random_utils.py) | `apply_random_initial_condition` — sets `irandom`/`randu`/`lrandomize` in `&RUN` (used by `per_member_irandom`, §6.2) |
 | [`rollout_utils.py`](../libs/pyudales/src/pyudales/utils/rollout_utils.py) | `collect_rollout_results` — concatenate per-window result files along time |
 | [`run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py) | `run_with_dt_watchdog`, `InstabilityCheck` (see §7) |
 | [`save_frequency_utils.py`](../libs/pyudales/src/pyudales/utils/save_frequency_utils.py) | `apply_output_frequency` (writes `tfielddump`), `apply_save_only_last_timestep` (sets `tfielddump=runtime`) |
@@ -851,6 +870,7 @@ forward_model:
   ncpu: 1
   boundary_condition: inflow_outflow
   closure: vreman             # smagorinsky | vreman | null (keep template)
+  per_member_irandom: false   # true -> one cold-start seed per run (§6.2)
   nudging_config:
     tnudge: 15.0
     nnudge_meters: 16.0         # skip nudging below this height (m)

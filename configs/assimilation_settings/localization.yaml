@@ -17,6 +17,7 @@ correlation:
   max_inflation: 8.0
   # Co-located state rows (u/v/w at one cell) share one selection.
   block_grouping: true
+  # group_parameter_knots: false gives each time knot its own block.
 
 # Physical-distance localization. Needs a state-bearing method and point
 # observations; applies to state rows only.

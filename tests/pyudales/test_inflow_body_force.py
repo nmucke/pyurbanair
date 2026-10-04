@@ -18,7 +18,6 @@ import xarray
 from pyudales.utils.dir_utils import DirectoryPaths
 from pyudales.utils.namoptions_utils import NamoptionsFile
 from pyudales.utils.nudging_utils import apply_time_varying_inflow
-from pyudales.utils.params_utils import apply_inflow_settings
 
 # Non-zero body force inherited from the case namoptions (matches the
 # xie_and_castro example values).
@@ -109,33 +108,6 @@ class TestNudgingPath:
         nf = NamoptionsFile(tmp_path / "namoptions.999")
         np.testing.assert_allclose(nf.get_value_as_float("INPS", "dpdx"), CASE_DPDX)
         np.testing.assert_allclose(nf.get_value_as_float("INPS", "dpdy"), CASE_DPDY)
-
-
-class TestStaticPath:
-    """``apply_inflow_settings`` honours the same contract for consistency."""
-
-    def test_inflow_outflow_zeroes_body_force(self, tmp_path: pathlib.Path) -> None:
-        dirs = _make_experiment(tmp_path)
-        apply_inflow_settings(
-            _scalar_params(), dirs, boundary_condition="inflow_outflow"
-        )
-
-        nf = NamoptionsFile(tmp_path / "namoptions.999")
-        assert nf.get_value_as_float("INPS", "dpdx") == 0.0
-        assert nf.get_value_as_float("INPS", "dpdy") == 0.0
-
-    def test_periodic_writes_pressure_gradient(self, tmp_path: pathlib.Path) -> None:
-        dirs = _make_experiment(tmp_path)
-        # angle=0 with magnitude 0.0041912 -> dpdx = magnitude, dpdy = 0.
-        apply_inflow_settings(_scalar_params(), dirs, boundary_condition="periodic")
-
-        nf = NamoptionsFile(tmp_path / "namoptions.999")
-        np.testing.assert_allclose(
-            nf.get_value_as_float("INPS", "dpdx"), 0.0041912, atol=1e-7
-        )
-        np.testing.assert_allclose(
-            nf.get_value_as_float("INPS", "dpdy"), 0.0, atol=1e-7
-        )
 
 
 class TestInteriorNudgingSwitch:

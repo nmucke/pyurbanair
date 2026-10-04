@@ -54,7 +54,7 @@ observation.aggregation.interval_seconds=30
 | Key | Holds |
 |---|---|
 | `assimilation.*` | `num_windows`, `seed`, `params_to_estimate`, `truth_dir`, `truth_start_time`, `ensemble_save_on_disk`, smoothing-only `save_prior_state`, filtering-only `assimilate_every_n_step`, `save_history`, filtering and hybrid `save_forecast_history` |
-| `observation.*` | `operator`, `aggregation`, `error` (`instrument_std`, `representation_std`, `propagation`) |
+| `observation.*` | `operator`, `aggregation`, `error` (`instrument_std`, `representation_std`, `propagation`, optional `representation_time_model`) |
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |
 | `hybrid.*` | `likelihood_allocation` (tempering is `filtering.beta`) |

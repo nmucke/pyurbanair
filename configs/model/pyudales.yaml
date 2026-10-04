@@ -153,6 +153,11 @@ forward_model:
     # ((jtot+2)*(ktot+2)*driverstore*8 B each) by reading the files in chunks.
     # lchunkread: true
     # chunkread_size: 100
+  # One &RUN irandom (uDALES' initial-perturbation seed, otherwise 43 for every
+  # run) per member, truth included, derived from the experiment name. Matters
+  # only on cold starts: warm starts inherit the copied state, and the inlet
+  # turbulence above is already seeded per member.
+  per_member_irandom: false
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

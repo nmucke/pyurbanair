@@ -41,7 +41,6 @@ from data_assimilation.filtering.etkf import (
     ObservationTSVD,
 )
 from data_assimilation.filtering.parameter_evolution import (
-    IdentityEvolution,
     ParameterEvolution,
     RandomWalkEvolution,
 )
@@ -53,7 +52,6 @@ __all__ = [
     "ETKFAnalysis",
     "EnsembleKalmanFilter",
     "FilterResult",
-    "IdentityEvolution",
     "LETKFAnalysis",
     "ObservationTSVD",
     "ParameterEvolution",

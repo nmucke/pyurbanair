@@ -624,6 +624,93 @@ def test_time_varying_params_reach_the_plane_means(tmp_path: pathlib.Path) -> No
 
 
 # ---------------------------------------------------------------------------
+# Per-member initial-perturbation seed (&RUN irandom)
+# ---------------------------------------------------------------------------
+
+
+def _apply_inflow_settings_for(
+    tmp_path: pathlib.Path,
+    experiment_name: str,
+    per_member_irandom: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> pathlib.Path:
+    """Run the real ``_apply_inflow_settings`` on a staged member; return its namoptions.
+
+    The nudging writer and the SGS write are stubbed so the namoptions shows
+    only what the irandom switch adds.
+    """
+    import pyudales.forward_model as forward_model_module
+    from pyudales.forward_model import ForwardModel
+
+    model = ForwardModel.__new__(ForwardModel)
+    model.dirs = _make_dirs(tmp_path, experiment_name)
+    model.params = _params()
+    model._nudging_config = {}
+    model.inlet_turbulence = {}
+    model.boundary_condition = "inflow_outflow"
+    model.spinup_time = 0.0
+    model._simulation_time = 10.0
+    model.per_member_irandom = per_member_irandom
+    monkeypatch.setattr(model, "_apply_sgs_setting", lambda params: None)
+    monkeypatch.setattr(
+        forward_model_module, "apply_time_varying_inflow", lambda **kwargs: None
+    )
+    model._apply_inflow_settings(params=None)
+    return model.dirs.experiment_dir / f"namoptions.{experiment_name}"
+
+
+def test_per_member_irandom_differs_only_in_the_seed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pyudales.forward_model import IRANDOM_MODULUS
+    from pyudales.utils.inlet_turbulence_utils import derive_seed
+    from pyudales.utils.namoptions_utils import NamoptionsFile
+
+    texts, seeds = [], []
+    for name in ("000", "001"):
+        path = _apply_inflow_settings_for(tmp_path, name, True, monkeypatch)
+        seed = NamoptionsFile(path).get_value_as_int("RUN", "irandom")
+        assert seed == derive_seed(name) % IRANDOM_MODULUS
+        seeds.append(seed)
+        texts.append(
+            [line for line in path.read_text().splitlines() if "irandom" not in line]
+        )
+
+    assert seeds[0] != seeds[1]
+    assert texts[0] == texts[1]
+
+
+def test_per_member_irandom_off_writes_nothing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _apply_inflow_settings_for(tmp_path, "000", False, monkeypatch)
+    assert path.read_text() == NAMOPTIONS_TEMPLATE
+
+
+@pytest.mark.integration  # type: ignore[misc]
+def test_e2e_per_member_irandom_changes_the_cold_start(
+    tmp_path: pathlib.Path,
+) -> None:
+    """uDALES reads the seed: the same cold start differs only through irandom."""
+    from hydra.utils import instantiate
+
+    states = []
+    for enabled in (False, True):
+        cfg = _smoke_cfg(
+            tmp_path / str(enabled),
+            "model.forward_model.inlet_turbulence.enabled=false",
+            f"model.forward_model.per_member_irandom={str(enabled).lower()}",
+        )
+        fm = instantiate(cfg.model.forward_model)
+        instantiate(cfg.model.prepare, forward_model=fm)
+        states.append(fm.run_single())
+
+    off, on = states
+    assert np.isfinite(on["u"].values).all()
+    assert not np.array_equal(off["u"].values, on["u"].values)
+
+
+# ---------------------------------------------------------------------------
 # No-op guarantee
 # ---------------------------------------------------------------------------
 

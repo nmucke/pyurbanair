@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+import warnings
+from typing import Any
 
 import pytest
 from omegaconf import OmegaConf
@@ -183,7 +185,8 @@ def test_check_config_accepts_discrepancy(tmp_path: pathlib.Path) -> None:
             [
                 *STATIC_COEFFICIENT_FILTER,
                 "filtering.parameter_evolution={_target_:data_assimilation."
-                "filtering.parameter_evolution.RandomWalkEvolution,std:0.1}",
+                "filtering.parameter_evolution.RandomWalkEvolution,"
+                "std:{sgs_bias_b0:0.1}}",
             ],
             "parameter_evolution=null",
         ),
@@ -204,3 +207,55 @@ def test_check_config_rejects_discrepancy(
     cfg = compose("assimilation", *DISCREPANCY, *overrides, root=tmp_path)
     with pytest.raises(ValueError, match=message):
         check(cfg, workflow)
+
+
+# A localized state smoother whose update holds N_aug x N_d^2 float32 values:
+# N_aug = 3 * 20 * 20 * 6 = 7200 rows, N_d = 4 sensors * 2 states * 10 bins = 80,
+# so 7200 * 80**2 * 4 bytes = 184.32 MB.
+LOCALIZED_STATE_SMOOTHER = [
+    "+test=assimilation",
+    "assim_model.forward_model.model_discrepancy.enabled=false",
+    "assimilation.params_to_estimate=null",
+    "params@truth_params=dynamic_sine",
+    "params@prior_params=dynamic",
+    "smoothing.smoother=${smoother.state_and_dynamic}",
+    "smoothing.localization=${localization.correlation}",
+    "smoothing.state_reduction=null",
+    "domain.nx=20",
+    "domain.ny=20",
+    "domain.nz=6",
+    "obs.x_points=[1.0,2.0,3.0,4.0]",
+    "obs.states=[u,v]",
+    "time.simulation_time=10.0",
+    "observation.aggregation.interval_seconds=1.0",
+]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "memory, outcome", [(100e6, "fails"), (300e6, "warns"), (1e12, "passes")]
+)
+def test_check_config_guards_localized_update_memory(
+    memory: float, outcome: str, tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    module = load_script("scripts/utils/inconsistency_check.py")
+    monkeypatch.setattr(module, "_physical_memory", lambda: int(memory))
+    cfg = compose("assimilation", *LOCALIZED_STATE_SMOOTHER, root=tmp_path)
+    if outcome == "fails":
+        with pytest.raises(ValueError, match="0.2 GB.*state_reduction"):
+            module.check_config(cfg, "smoother")
+    elif outcome == "warns":
+        with pytest.warns(UserWarning, match="interval_seconds"):
+            module.check_config(cfg, "smoother")
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            module.check_config(cfg, "smoother")
+
+
+def test_check_config_skips_memory_guard_for_parameter_smoother(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    module = load_script("scripts/utils/inconsistency_check.py")
+    monkeypatch.setattr(module, "_physical_memory", lambda: 1)
+    overrides = [*LOCALIZED_STATE_SMOOTHER, "smoothing.smoother=${smoother.dynamic}"]
+    module.check_config(compose("assimilation", *overrides, root=tmp_path), "smoother")

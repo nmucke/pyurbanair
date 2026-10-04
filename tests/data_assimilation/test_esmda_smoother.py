@@ -349,6 +349,7 @@ def _make_time_varying_smoother(
     smoother = TimeVaryingParameterESMDA.__new__(TimeVaryingParameterESMDA)
     smoother.num_time_points = num_time_points
     smoother.pin_initial_time_point = pin
+    smoother.localization = None
     return smoother
 
 
@@ -397,6 +398,50 @@ def test_time_varying_group_ids_group_knots_not_unrelated_params(pin: bool) -> N
     assert len(by_group[angle_group.pop()]) == knots
     static_group = [gid for gid, ns in by_group.items() if ns == ["sensor_2"]]
     assert len(static_group) == 1
+
+
+def test_ungrouped_parameter_knots_get_one_block_each() -> None:
+    params = _time_varying_params(num_time=3)
+    smoother = _make_time_varying_smoother(3, pin=False)
+    smoother.localization = CorrelationLocalization(
+        block_grouping=True, group_parameter_knots=False
+    )
+    np.testing.assert_array_equal(smoother._time_varying_group_ids(params), range(7))
+
+
+def test_ungrouped_knot_keeps_its_own_taper() -> None:
+    """A knot uncorrelated with the data is not pulled along by its sibling."""
+    n_e = 40
+    signal = jax.random.normal(jax.random.PRNGKey(50), (n_e,))
+    nuisance = jax.random.normal(jax.random.PRNGKey(51), (n_e,))
+    params = xarray.Dataset(
+        {"a": (("time", "ensemble"), jnp.stack([signal, nuisance]))},
+        coords={"time": [0.0, 1.0], "ensemble": np.arange(n_e)},
+    )
+
+    def update(**kwargs: Any) -> np.ndarray:
+        smoother = TimeVaryingParameterESMDA(
+            observation_operator=_dummy_obs_op(),
+            forward_model=cast(Any, _forward_model()),
+            C_D=jnp.array([0.1]),
+            num_steps=1,
+            num_time_points=2,
+            rng_key=jax.random.PRNGKey(52),
+            localization=CorrelationLocalization(truncation_correlation=0.5, **kwargs),
+        )
+        updated = smoother.update_params_from_pred_obs(
+            params, signal[None, :], jnp.array([2.0])
+        )
+        return np.asarray(updated.a.values)
+
+    grouped = update(block_grouping=True)
+    per_knot = update(block_grouping=True, group_parameter_knots=False)
+    per_row = update(block_grouping=False)
+
+    # Grouped, the nuisance knot shares the signal knot's full update.
+    assert not np.allclose(grouped[1], params.a.values[1])
+    np.testing.assert_allclose(per_knot[1], params.a.values[1], atol=1e-6)
+    np.testing.assert_allclose(per_knot, per_row, atol=1e-6)
 
 
 def test_time_varying_flatten_rejects_time_size_mismatch() -> None:

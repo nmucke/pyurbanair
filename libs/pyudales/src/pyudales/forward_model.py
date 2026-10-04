@@ -26,6 +26,7 @@ from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
     apply_inlet_turbulence,
+    derive_seed,
     is_inlet_turbulence_enabled,
     read_elapsed_time,
     reset_elapsed_time,
@@ -35,12 +36,7 @@ from .utils.inlet_turbulence_utils import (
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.nudging_utils import apply_time_varying_inflow
-from .utils.params_utils import (
-    apply_inflow_settings,
-    get_param_value,
-    is_time_varying_params,
-    merge_params,
-)
+from .utils.params_utils import get_param_value, is_time_varying_params, merge_params
 from .utils.random_utils import apply_random_initial_condition
 from .utils.run_monitor import InstabilityCheck, run_with_dt_watchdog
 from .utils.save_frequency_utils import (
@@ -78,6 +74,10 @@ PRECOMPUTED_GEOM_PATTERNS = (
 # — not False — is what the solver actually runs with.
 UDALES_DEFAULT_LSMAGORINSKY = False
 UDALES_DEFAULT_LVREMAN = True
+
+# Modulus of the LCG in u-dales/src/modstartup.f90::randomnize, which advances
+# &RUN irandom as `mod(ir*8121 + 28411, 134456)` in 32-bit integers.
+IRANDOM_MODULUS = 134456
 
 # SGS closure name -> the mutually exclusive &NAMSUBGRID switch set it implies.
 # These are exactly the three closure switches uDALES declares in the NAMSUBGRID
@@ -297,7 +297,6 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
         output_dir: Optional[pathlib.Path] = None,
-        random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
         closure: Optional[str] = None,
         sgs_constant: Optional[float] = None,
@@ -307,6 +306,7 @@ class ForwardModel(BaseForwardModel):
         instability_check: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
         model_discrepancy: Optional[dict] = None,
+        per_member_irandom: bool = False,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -382,6 +382,12 @@ class ForwardModel(BaseForwardModel):
                 ``intensity``, ``length_scale_x/y/z``, ``time_step``,
                 ``driverjobnr``, ``seed``, ``lchunkread``, ``chunkread_size`` —
                 see :mod:`.utils.inlet_turbulence_utils`.
+            per_member_irandom: If True, write a per-member ``&RUN irandom``
+                (the seed of uDALES' initial-velocity perturbation, otherwise
+                hard-coded to 43 for every run) derived from the experiment
+                name, so a cold-started ensemble gets realisation spread at
+                fixed parameters. Only cold starts randomize; warm starts
+                inherit the copied state. Default False writes nothing.
         """
         self.model_discrepancy = validate_model_discrepancy(model_discrepancy)
         self._discrepancy_defaults = extract_discrepancy_coefficients(
@@ -465,6 +471,7 @@ class ForwardModel(BaseForwardModel):
             inlet_turbulence, boundary_condition, self.dirs.experiment_name
         )
         self.inlet_turbulence = dict(inlet_turbulence or {})
+        self.per_member_irandom = per_member_irandom
 
         # Seconds of synthetic turbulence history this member has consumed,
         # used to pick the slice each window gets (see
@@ -542,9 +549,6 @@ class ForwardModel(BaseForwardModel):
             apply_save_only_last_timestep(self.dirs)
         elif self.output_frequency is not None:
             apply_output_frequency(self.dirs, self.output_frequency)
-
-        if random_initial_condition_args is not None:
-            apply_random_initial_condition(self.dirs, random_initial_condition_args)
 
         logger.info(f"Experiment name: {self.dirs.experiment_name}")
         logger.info(f"Case dir: {self.dirs.case_dir}")
@@ -738,19 +742,6 @@ class ForwardModel(BaseForwardModel):
         nudging_config = self._resolve_nudging_config(self.params)
         self._apply_sgs_setting(self.params)
 
-        # NOTE (pre-existing): the computed value is immediately overwritten with
-        # True, so pyudales always nudges when inlet turbulence is off and the
-        # `else` branch below (static/periodic `apply_inflow_settings`) is dead
-        # code. Documented in docs/pyudales.md §6 as "nudging is hardcoded".
-        # Left as-is deliberately — untangling it is a behaviour change to the
-        # periodic path and does not belong in the inlet-turbulence commit — but
-        # flagged here because a third branch now sits in front of it.
-        use_nudging = (
-            is_time_varying_params(self.params)
-            or self.boundary_condition == "inflow_outflow"
-        )
-        use_nudging = True
-
         if is_inlet_turbulence_enabled(self.inlet_turbulence):
             # Synthetic driver planes replace BOTH the nudged inlet face and the
             # interior relaxation: under BCxm=3 the west face reads the planes,
@@ -775,7 +766,7 @@ class ForwardModel(BaseForwardModel):
                 ),
                 window_start_time=self._elapsed_time,
             )
-        elif use_nudging:
+        else:
             logger.info(
                 "Applying inflow via nudging (time_varying=%s, BC=%s, nudging_config=%s)",
                 is_time_varying_params(self.params),
@@ -793,13 +784,14 @@ class ForwardModel(BaseForwardModel):
                 boundary_condition=self.boundary_condition,
                 **nudging_config,
             )
-        else:
-            logger.info("Applying inflow via static settings (periodic BC)")
-            apply_inflow_settings(
-                params=self.params,
-                dirs=self.dirs,
-                boundary_condition=self.boundary_condition,
-            )
+
+        if self.per_member_irandom:
+            # uDALES seeds its initial-velocity perturbation with irandom=43 in
+            # every run. randomnize() advances it with a 32-bit LCG modulo
+            # IRANDOM_MODULUS, so a seed outside [0, IRANDOM_MODULUS) overflows
+            # the first step and biases the perturbation.
+            irandom = derive_seed(self.dirs.experiment_name) % IRANDOM_MODULUS
+            apply_random_initial_condition(self.dirs, {"irandom": irandom})
 
     def _resolve_nudging_config(self, params: xarray.Dataset) -> dict:
         """Return a nudging-config copy with α overridden from ``params``.

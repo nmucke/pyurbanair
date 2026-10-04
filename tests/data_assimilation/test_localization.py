@@ -406,6 +406,18 @@ def test_masked_row_cannot_disable_localization_for_shared_group() -> None:
     assert not np.allclose(global_result[0], augmented[0])
 
 
+def test_parameter_knots_grouped_by_default() -> None:
+    from data_assimilation.localization.correlation import CorrelationLocalization
+    from data_assimilation.localization.distance import DistanceLocalization
+
+    assert CorrelationLocalization().group_parameter_knots
+    assert not CorrelationLocalization(
+        group_parameter_knots=False
+    ).group_parameter_knots
+    # Distance localization never localizes parameter rows; it keeps the default.
+    assert DistanceLocalization(localization_radius=1.0).group_parameter_knots
+
+
 def test_invalid_parameters_raise() -> None:
     from data_assimilation.localization.correlation import CorrelationLocalization
 

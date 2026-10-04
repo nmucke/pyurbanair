@@ -967,8 +967,9 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         call, which is what makes this loop a re-arrangement of the filter
         rather than a different filter. Verified against ``BaseFilter.run``:
         it never resets ``self.rng_key`` (the key is only split, inside
-        ``_analysis_cycle`` and the parameter evolution, and the split state
-        persists on the instance across calls), and the analyzed
+        ``_analysis_cycle`` and before each evolved forecast, and the split
+        state persists on the instance across calls, as does whether the next
+        forecast's parameters are evolved), and the analyzed
         ``result.state`` it returns is exactly the warm start the next cycle
         would have received — carried here as ``carry_state``. The only
         per-call reset is of the pred-obs histories, which is why they are

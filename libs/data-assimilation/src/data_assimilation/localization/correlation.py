@@ -50,6 +50,9 @@ class CorrelationLocalization(BaseLocalization):
             observation selection and transition matrix.  The smoother builds
             the block ids from the augmented-state layout; this flag only
             selects which behaviour it asks for.
+        group_parameter_knots: Under ``block_grouping``, ``True`` (default)
+            puts all time knots of one parameter in one block; ``False`` gives
+            each knot its own block, so it keeps its own taper.
     """
 
     def __init__(
@@ -58,6 +61,7 @@ class CorrelationLocalization(BaseLocalization):
         tapering_beta: float = 0.5,
         max_inflation: float = 8.0,
         block_grouping: bool = False,
+        group_parameter_knots: bool = True,
     ) -> None:
         if truncation_correlation is not None and not (
             0.0 < truncation_correlation < 1.0
@@ -72,6 +76,7 @@ class CorrelationLocalization(BaseLocalization):
         self.tapering_beta = tapering_beta
         self.max_inflation = max_inflation
         self.block_grouping = block_grouping
+        self.group_parameter_knots = group_parameter_knots
 
     def _truncation_correlation(self, N_e: int) -> float:
         """Resolve the truncation threshold, defaulting to ``3 / sqrt(N_e)``."""
@@ -109,6 +114,4 @@ class CorrelationLocalization(BaseLocalization):
         # Correlation distance d_c = 1 - |rho| (Eq. 7); tapered/excluded by the
         # shared distance taper against the truncation distance d_t = 1 - rho_t.
         d_c = 1.0 - jnp.abs(rho)
-        return taper_inflation(
-            d_c, d_t, self.tapering_beta, self.max_inflation
-        )
+        return taper_inflation(d_c, d_t, self.tapering_beta, self.max_inflation)
