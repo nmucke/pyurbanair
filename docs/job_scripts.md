@@ -89,6 +89,10 @@ sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
 
 ## Machine notes
 
+- **pixi** must be 0.72.1 or newer (`requires-pixi` in `pyproject.toml`). An
+  older one fails on every `pixi run`, often with a manifest parse error
+  (`expected a string, found table`) rather than a version message. Run
+  `pixi self-update` once per cluster account.
 - **Scratch** is per job, removed on success and kept on failure for
   debugging.
 - **Snellius:** scratch must be on `/scratch-shared`, not `$TMPDIR`

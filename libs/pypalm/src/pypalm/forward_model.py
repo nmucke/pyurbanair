@@ -6,7 +6,7 @@ import pathlib
 import shutil
 import subprocess
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import xarray
@@ -279,7 +279,7 @@ class ForwardModel(BaseForwardModel):
         p3d.set_string(section, key, value)
         p3d.write()
 
-    def _p3d_set_array(self, section: str, key: str, values) -> None:
+    def _p3d_set_array(self, section: str, key: str, values: Iterable[float]) -> None:
         p3d = P3DFile(self.p3d_path)
         p3d.set_array(section, key, values)
         p3d.write()
@@ -973,7 +973,7 @@ class ForwardModel(BaseForwardModel):
             rename_map["zu_3d"] = "z"
         if "zw_3d" in state.dims:
             rename_map["zw_3d"] = "zw"
-        if "zs_3d" in state.dims and "zs_3d" != "z":
+        if "zs_3d" in state.dims:
             rename_map["zs_3d"] = "zs"
         if rename_map:
             state = state.rename(rename_map)

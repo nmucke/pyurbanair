@@ -156,7 +156,10 @@ def _parameter_metrics(
     """RMSE and CRPS per parameter, posterior and prior, and the reduction."""
     out = {}
     for name, m in compute_parameter_metrics(posterior, truth, prior).items():
-        entry = {"rmse": series_stats(m["rmse"]), "crps": series_stats(m["crps"])}
+        entry: dict[str, object] = {
+            "rmse": series_stats(m["rmse"]),
+            "crps": series_stats(m["crps"]),
+        }
         for score in ("rmse", "crps"):
             if f"prior_{score}" in m:
                 post = float(np.nanmean(m[score]))

@@ -28,7 +28,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from pyurbanair.utils.solver_process import run_solver
 
@@ -243,7 +243,7 @@ def run_direct(
     combine step logs its captured tail, so failures are still diagnosable.
     """
     capture = not verbose
-    _quiet = (
+    _quiet: dict[str, Any] = (
         {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
         if capture
         else {}
