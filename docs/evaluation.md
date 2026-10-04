@@ -93,8 +93,10 @@ loaded whole.
   reading only the levels it needs) after masking, so an open-air cell whose
   interpolation stencil touches a building cell drops out of the RMSE too.
   An ensemble level outside the truth's height range raises a `ValueError`
-  naming the levels, so it can't silently drop out. `select_z_plane` selects
-  one level of a state.
+  naming the levels, so it can't silently drop out. A level within
+  `SURFACE_TOLERANCE` times the truth's level spacing of an end level counts
+  as on it (float32 coordinates). `select_z_plane` selects one level of a
+  state.
 - `stl_solid_mask(stl_path, z, y, x)`: the building cells of the case STL
   (`read_binary_stl`) on a grid of cell centres, in the STL's frame (every
   backend writes its state in it). A cell is solid when its centre is at or

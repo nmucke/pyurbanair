@@ -173,3 +173,27 @@ def test_state_rmse_refuses_ensemble_levels_above_the_truth(tmp_path):
             _state(ones * z_member[:, None, None], z_member, y, x),
             stl,
         )
+
+
+def test_state_rmse_takes_a_level_a_sliver_above_the_truth_as_its_top(tmp_path):
+    # The truth's top level 1e-6 below the ensemble's, as float32 coordinates
+    # give: it is the same level, and it must not drop out as NaN. The error
+    # grows with height, so a dropped level changes the RMSE.
+    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
+    y = x = np.arange(4.0) + 0.5
+    # z = 1.25 lies between truth levels, so the truth is interpolated.
+    z_member = np.array([0.5, 1.25, 2.5, 3.5])
+    z_truth = np.arange(7.0) / 2 + 0.5
+    z_truth[-1] -= 1e-6
+
+    def u_equals_z(z):
+        return np.broadcast_to(z[None, :, None, None], (2, z.size, 4, 4))
+
+    rmse = streaming_state_rmse(
+        _state(u_equals_z(z_truth), z_truth, y, x),
+        _state(1.1 * u_equals_z(z_member), z_member, y, x),
+        stl,
+    )
+
+    expected = np.sqrt(np.mean((0.1 * z_member) ** 2))
+    assert rmse == pytest.approx([expected, expected], abs=1e-5)
