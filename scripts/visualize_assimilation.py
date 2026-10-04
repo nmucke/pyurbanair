@@ -369,8 +369,10 @@ def _plot_slices(
 def _plot_profiles(
     columns: dict[str, Collector], stations: np.ndarray, path: pathlib.Path
 ) -> None:
-    """Rows: time-mean u, TKE. Columns: sensor columns. Ensembles as min-max bands."""
-    z = columns["truth"].grid["z"]
+    """Rows: time-mean u, TKE. Columns: sensor columns. Ensembles as min-max bands.
+
+    Each collector is drawn on its own levels: a cross-solver truth has others.
+    """
     colors = {"prior": "grey", "posterior": "tab:blue"}
     fig, axes = plt.subplots(
         2, len(stations), figsize=(2.6 * len(stations), 6), squeeze=False, sharey=True
@@ -380,6 +382,7 @@ def _plot_profiles(
     ):
         for name, collector in columns.items():
             values = collector.moments("col")[quantity]  # (member, z, station)
+            z = collector.grid["z"]
             for s in range(len(stations)):
                 ax = axes[row, s]
                 if name == "truth":

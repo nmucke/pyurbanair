@@ -168,9 +168,14 @@ RUN_INFO: dict[str, dict[str, Any]] = {
 }
 
 
-def _window_run_dir(method: str, root: pathlib.Path) -> pathlib.Path:
+def _window_run_dir(
+    method: str, root: pathlib.Path, truth_dz: float = 1.0
+) -> pathlib.Path:
     """A run dir whose window files are the truth's own frames, stamped in time
     the way run_<method>.py stamps them.
+
+    The ensemble is on the levels z = 0..5; a ``truth_dz`` below 1 puts the
+    truth on finer levels over the same heights, as a cross-solver run does.
 
     The model's output frames sit in (0, sim_time] of their window (a truth
     read from a truth_dir is cut the same way), the truth on (0, horizon].
@@ -200,8 +205,9 @@ def _window_run_dir(method: str, root: pathlib.Path) -> pathlib.Path:
 
     # Truth: u = t, v = 2t, w = -t everywhere; one parameter linear in time.
     times = dt * (np.arange(num_windows * frames) + 1)
-    grid = {"z": np.arange(6.0), "y": np.arange(20.0), "x": np.arange(20.0)}
-    ones = np.ones((len(times), 6, 20, 20))
+    z = np.arange(0.0, 5.0 + truth_dz / 2, truth_dz)
+    grid = {"z": z, "y": np.arange(20.0), "x": np.arange(20.0)}
+    ones = np.ones((len(times), z.size, 20, 20))
     t = times[:, None, None, None]
     dims = ("time", "z", "y", "x")
     truth = xarray.Dataset(
@@ -231,7 +237,9 @@ def _window_run_dir(method: str, root: pathlib.Path) -> pathlib.Path:
 
     n_sensors = len(cfg.obs.x_points)
     for w in range(num_windows):
-        window = truth.isel(time=slice(w * frames, (w + 1) * frames))
+        window = truth.isel(time=slice(w * frames, (w + 1) * frames)).sel(
+            z=np.arange(6.0)
+        )
         cycle_times = window.time.values  # cycle_observations: one per frame
         if method == "filtering":
             # run_filtering.py: the analysis per cycle, on the cycles' truth times.
@@ -304,6 +312,19 @@ def test_window_files_on_the_truth_time(
         truth, members = kw["true_sensor"], kw["ensemble_sensor"]
         on_ensemble_time = truth.interp(time=members.time)
         np.testing.assert_allclose(members, on_ensemble_time.broadcast_like(members))
+
+
+def test_a_truth_on_other_levels_than_the_ensemble(tmp_path: pathlib.Path) -> None:
+    """A cross-solver run (11 truth levels, 6 ensemble levels) scores the
+    ensemble's heights and draws every figure."""
+    run_dir = _window_run_dir("smoother", tmp_path, truth_dz=0.5)
+    load_script("scripts/compute_metrics.py").run(run_dir)
+    load_script("scripts/visualize_assimilation.py").run(run_dir)
+
+    metrics = yaml.safe_load((run_dir / "metrics.yaml").read_text())
+    rmse = metrics["state"]["vel_magnitude_rmse"]
+    assert rmse["max"] == pytest.approx(0.0, abs=1e-9), rmse
+    assert (run_dir / "figures" / "station_profiles.png").exists()
 
 
 def test_a_truth_from_before_the_time_axis_change_is_refused(

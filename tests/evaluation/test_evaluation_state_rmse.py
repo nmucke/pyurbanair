@@ -157,3 +157,19 @@ def test_state_rmse_takes_the_truth_at_the_ensembles_heights(tmp_path):
     )
 
     assert rmse == pytest.approx([0.1, 0.1])
+
+
+def test_state_rmse_refuses_ensemble_levels_above_the_truth(tmp_path):
+    # Interpolated, the truth would be NaN at z = 3.5 and the level would drop
+    # out of the mean unnoticed.
+    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
+    y = x = np.arange(4.0) + 0.5
+    z_member, z_truth = np.arange(4.0) + 0.5, np.arange(3.0) + 0.5
+    ones = np.ones((2, 1, 4, 4))
+
+    with pytest.raises(ValueError, match=r"z = \[3\.5\].*\[0\.5, 2\.5\]"):
+        streaming_state_rmse(
+            _state(ones * z_truth[:, None, None], z_truth, y, x),
+            _state(ones * z_member[:, None, None], z_member, y, x),
+            stl,
+        )
