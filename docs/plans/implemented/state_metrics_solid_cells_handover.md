@@ -1,5 +1,13 @@
 # Handover: keep building cells out of the state metrics
 
+**Outcome:** implemented with the STL mask (option 2), but with the
+highest-crossing rule rather than parity: the backends write no zeros inside
+buildings (only PALM does), and on Barcelona's mesh, whose internal faces give
+even crossing counts inside buildings, parity opens fluid holes. The mask equals
+pylbm's voxelisation on Xie & Castro (1368 cells on the canonical grid, not the
+"392 at z = 2 m" below, which came from the flawed parity count). The same PR
+also takes the truth at the ensemble's heights. See `docs/evaluation.md`.
+
 State metrics average over every grid cell, building interiors included. Inside
 a building both truth and ensemble are (near) zero, so those cells add zero error
 and dilute the RMSE. This PR excludes solid cells, and fixes or deletes the
@@ -77,10 +85,10 @@ show the change in state RMSE.
 
 ## Done when
 
-- [ ] Step 1 findings and the chosen mask approved by the user.
-- [ ] State metrics exclude solid cells; tests pass; dead helpers fixed or
+- [x] Step 1 findings and the chosen mask approved by the user.
+- [x] State metrics exclude solid cells; tests pass; dead helpers fixed or
       deleted.
-- [ ] `docs/evaluation.md` updated; changed results listed in the PR.
-- [ ] `tests/evaluation`, `tests/scripts`, `pre-commit` pass; CI green on Linux
+- [x] `docs/evaluation.md` updated; changed results listed in the PR.
+- [x] `tests/evaluation`, `tests/scripts`, `pre-commit` pass; CI green on Linux
       and macOS.
-- [ ] This file moved to `docs/plans/implemented/`.
+- [x] This file moved to `docs/plans/implemented/`.
