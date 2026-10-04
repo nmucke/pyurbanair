@@ -93,13 +93,14 @@ in the next). `streaming_state_rmse` now gets the truth frames at the mean
 state's times, not the first n by position (wrong for a filter with
 `assimilate_every_n_step > 1`). Truths, forward runs and surrogate training
 corpora written before this by pylbm, PALM or spun-up uDALES are one frame off
-and need rerunning.
+and need rerunning; `open_truth` refuses such a `truth_dir` (a frame at
+t=0). The surrogate's train/inference parameter-time offset is issue #164.
 
 - [x] The step 1 test fails on `main` and passes after the fix, for all three
       methods.
 - [x] One helper, used everywhere a window file goes onto the global axis.
 - [x] The Desroziers / χ² sentence is in `docs/evaluation.md`.
 - [x] Changed values listed in the PR.
-- [ ] `tests/scripts`, `tests/evaluation`, `pre-commit` pass; CI green on Linux
+- [x] `tests/scripts`, `tests/evaluation`, `pre-commit` pass; CI green on Linux
       and macOS.
 - [x] This file moved to `docs/plans/implemented/`.
