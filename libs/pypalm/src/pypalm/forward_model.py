@@ -1029,16 +1029,13 @@ class ForwardModel(BaseForwardModel):
 
         state = self._fit_output_window(state)
 
-        # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than bare
-        # frame indices, matching pylbm/pyudales. Without this the rollout
-        # window-concat in run_forward_model.py (which re-bases each window by
-        # ``w * simulation_time``) and the temporal observation binning (which
-        # bins by the ``time`` coordinate in seconds) see an axis spaced by 1
-        # instead of ``output_frequency`` — a wrong, backend-specific clock.
+        # Store the time coordinate in seconds (dt, 2·dt, …, simulation_time)
+        # rather than bare frame indices: the frames are the outputs in
+        # (0, simulation_time], the same axis as every other backend.
         if state.sizes.get("time", 0) > 0:
             n = state.sizes["time"]
             step = float(self.output_frequency) if self.output_frequency else 1.0
-            state = state.assign_coords(time=np.arange(n, dtype=float) * step)
+            state = state.assign_coords(time=(np.arange(n, dtype=float) + 1) * step)
 
         return state
 

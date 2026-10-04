@@ -64,6 +64,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     concat_windows,
+    global_time,
     open_truth,
     sensor_series,
     sensor_sets,
@@ -78,6 +79,8 @@ def run(run_dir: pathlib.Path) -> None:
     assert isinstance(cfg, DictConfig)
     num_windows = int(cfg.assimilation.num_windows)
     sim_time = float(cfg.time.simulation_time)
+    # Truth frames are matched to the ensemble's by time, within half a frame.
+    tolerance = 0.5 * float(cfg.time.output_frequency)
     out = run_dir / "figures"
     out.mkdir(exist_ok=True)
 
@@ -102,11 +105,18 @@ def run(run_dir: pathlib.Path) -> None:
         window_truth = truth.isel(time=slice(w * frames, (w + 1) * frames))
         truth_c.add_window(window_truth, None)
         with xarray.open_dataset(window_files("posterior_state")[w]) as ds:
-            mean_state = post_c.add_window(ds, w * sim_time)
-        rmse.append(streaming_state_rmse(window_truth, mean_state))
+            mean_state = post_c.add_window(ds, global_time(ds.time, w, sim_time))
+        rmse.append(
+            streaming_state_rmse(
+                window_truth.sel(
+                    time=mean_state.time, method="nearest", tolerance=tolerance
+                ),
+                mean_state,
+            )
+        )
         if has_prior:
             with xarray.open_dataset(prior_files[w]) as ds:
-                prior_c.add_window(ds, w * sim_time)
+                prior_c.add_window(ds, global_time(ds.time, w, sim_time))
     truth.close()
 
     # --- Parameters ----------------------------------------------------------------
@@ -226,16 +236,15 @@ class Collector:
         self.columns: tuple[np.ndarray, np.ndarray] = (np.array([]), np.array([]))
         self.is_ensemble = True
 
-    def add_window(self, ds: xarray.Dataset, t_start: float | None) -> xarray.Dataset:
+    def add_window(self, ds: xarray.Dataset, time: np.ndarray | None) -> xarray.Dataset:
         """Add one window; return its ensemble-mean (u, v, w) state.
 
-        `t_start` rebases the window's time axis onto the global one (an
-        ensemble window file starts at its own t=0); None keeps it as is.
+        `time` is the window's global time axis (see `global_time`); None keeps
+        the file's own.
         """
         ds = ds[["u", "v", "w"]]
-        if t_start is not None:
-            time = ds.time.values.astype(float)
-            ds = ds.assign_coords(time=time - time[0] + t_start)
+        if time is not None:
+            ds = ds.assign_coords(time=time)
         self.is_ensemble = "ensemble" in ds.dims
         n_members = ds.sizes.get("ensemble", 1)
         self.n_members = n_members

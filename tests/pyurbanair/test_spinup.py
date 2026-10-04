@@ -57,5 +57,11 @@ def test_spinup_trims_output(model: str, tmp_path: pathlib.Path) -> None:
     assert state_spinup is not None
     # Output is trimmed to simulation_time
     assert state_spinup.sizes["time"] == expected_steps
-    # Time coordinate is rebased to start at 0
-    assert int(state_spinup.time.values[0]) == 0
+    # Time is rebased past the spinup: frames sit in (0, simulation_time], like
+    # the run without spinup (uDALES's own output times jitter around tf).
+    tf = cfg.time.output_frequency
+    for state in (state_no_spinup, state_spinup):
+        assert state.time.values[0] == pytest.approx(tf, abs=0.5 * tf)
+        assert state.time.values[-1] == pytest.approx(
+            cfg.time.simulation_time, abs=0.5 * tf
+        )

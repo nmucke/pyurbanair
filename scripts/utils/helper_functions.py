@@ -94,7 +94,16 @@ def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
         return xarray.open_dataset(run_dir / "true_state.nc")
     horizon = cfg.assimilation.num_windows * cfg.time.simulation_time
     start = float(cfg.assimilation.truth_start_time or 0.0)
-    state = xarray.open_dataset(pathlib.Path(truth_dir) / "state.nc")
+    path = pathlib.Path(truth_dir) / "state.nc"
+    state = xarray.open_dataset(path)
+    # Output frames sit in (0, simulation_time], so a frame at t=0 marks a
+    # state.nc written before the backends stamped time that way (PR #163).
+    if start == 0.0 and float(state.time[0]) <= 1e-6:
+        state.close()
+        raise ValueError(
+            f"{path} has a frame at t=0: it predates output on "
+            "(0, simulation_time] and would be read one frame off. Regenerate it."
+        )
     return _time_window(state, start, horizon)
 
 
@@ -348,17 +357,29 @@ def last_frames(files: list[pathlib.Path]) -> xarray.Dataset:
 # ---------------------------------------------------------------------------
 
 
+def global_time(time: Any, window: int, sim_time: float) -> np.ndarray:
+    """Window `window`'s time stamps on the run's global time axis.
+
+    Every window file ends on its window's end, (window + 1) * sim_time, whether
+    it is stamped on the window's own clock (model output on (0, sim_time],
+    parameter knots on [0, sim_time]) or already on the global one (a filter's
+    cycle times).
+    """
+    time = np.asarray(time, dtype=float)
+    return time - time[-1] + (window + 1) * sim_time
+
+
 def concat_windows(paths: list[pathlib.Path], sim_time: float) -> xarray.Dataset:
     """Stack per-window parameter files into one dataset.
 
-    Time-varying parameters go on one global time axis (window w starts at
-    w * sim_time); static ones get one entry per window.
+    Time-varying parameters go on one global time axis; static ones get one
+    entry per window.
     """
     pieces = [xarray.load_dataset(p) for p in paths]
     if "time" not in pieces[0].dims:
         return xarray.concat(pieces, dim="window")
     pieces = [
-        ds.assign_coords(time=ds.time - ds.time[0] + w * sim_time)
+        ds.assign_coords(time=global_time(ds.time, w, sim_time))
         for w, ds in enumerate(pieces)
     ]
     return xarray.concat(pieces, dim="time")

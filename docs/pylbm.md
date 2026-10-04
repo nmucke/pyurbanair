@@ -143,7 +143,8 @@ The public entry point (called by `BaseForwardModel.__call__`):
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
    with `xarray.concat`, assigns physical coordinates, scales velocity from
    lattice units (`* C_u`), trims spin-up outputs, trims to `simulation_time /
-   output_frequency` outputs, and assigns a seconds-based `time` coordinate.
+   output_frequency` outputs, and assigns a seconds-based `time` coordinate
+   (`dt, 2·dt, …, simulation_time`).
 7. **Prune restarts** — `remove_old_restart_files` keeps only the latest
    restart, preventing unbounded accumulation.
 
