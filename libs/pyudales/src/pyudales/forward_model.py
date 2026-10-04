@@ -1405,8 +1405,9 @@ class ForwardModel(BaseForwardModel):
             spinup_outputs = int(self.spinup_time / self.output_frequency)
             if state.sizes.get("time", 0) > spinup_outputs:
                 state = state.isel(time=slice(spinup_outputs, None))
-                if "time" in state.coords and state.sizes["time"] > 0:
-                    state = state.assign_coords(time=state.time - state.time.values[0])
+                # Frames after the spinup sit in (0, simulation_time].
+                if "time" in state.coords:
+                    state = state.assign_coords(time=state.time - self.spinup_time)
 
         if (
             self._simulation_time is not None

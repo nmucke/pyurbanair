@@ -864,8 +864,8 @@ def test_e2e_solver_reads_and_interpolates_the_driver_planes(
     ktot = cfg.domain.nz
     times, u_driver, _, _ = read_driver_files(fm.dirs.experiment_dir, 998, jtot, ktot)
 
-    # The returned state's time coordinate is rebased to 0 by the spinup trim,
-    # so read the raw fielddump, which still carries absolute solver time.
+    # The returned state's time coordinate is rebased past the spinup, so
+    # read the raw fielddump, which still carries absolute solver time.
     raw = fm._read_fielddump()
     face = raw["u"].isel(xm=0).values  # (time, zt, yt)
     assert face.std() > 0.0, "inlet face is uniform — no turbulence reached it"

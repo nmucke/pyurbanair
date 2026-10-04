@@ -80,11 +80,26 @@ anything already reported from older runs that used this code (ask the user).
 
 ## Done when
 
-- [ ] The step 1 test fails on `main` and passes after the fix, for all three
-      methods (or the plan is rejected because it passes on `main`).
-- [ ] One helper, used everywhere a window file goes onto the global axis.
-- [ ] The Desroziers / χ² sentence is in `docs/evaluation.md`.
-- [ ] Changed values listed in the PR.
+Outcome: the offset was real, but the cause was the backends, not only the
+reader. pylbm and pypalm stamped output `0 … T−tf`, uDALES did on a cold start
+with spinup (`time - time[0]`), the surrogate and a `truth_dir` truth
+`tf … T`. The first-frame anchor was right for some backend/truth pairs by
+accident and one frame (filter: one cycle) off for the others, so end-anchoring
+alone would have broken pylbm, PALM and uDALES. Fixed where the time is
+written: every backend now stamps `(0, T]`, `global_time` puts every window
+file on the global axis by its end, and `window_masks` bins
+`(w·T, (w+1)·T]` (it binned `[w·T, (w+1)·T)`, scoring each window's last frame
+in the next). `streaming_state_rmse` now gets the truth frames at the mean
+state's times, not the first n by position (wrong for a filter with
+`assimilate_every_n_step > 1`). Truths, forward runs and surrogate training
+corpora written before this by pylbm, PALM or spun-up uDALES are one frame off
+and need rerunning.
+
+- [x] The step 1 test fails on `main` and passes after the fix, for all three
+      methods.
+- [x] One helper, used everywhere a window file goes onto the global axis.
+- [x] The Desroziers / χ² sentence is in `docs/evaluation.md`.
+- [x] Changed values listed in the PR.
 - [ ] `tests/scripts`, `tests/evaluation`, `pre-commit` pass; CI green on Linux
       and macOS.
-- [ ] This file moved to `docs/plans/implemented/`.
+- [x] This file moved to `docs/plans/implemented/`.

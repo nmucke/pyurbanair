@@ -702,12 +702,12 @@ class ForwardModel(BaseForwardModel):
         if state.sizes["time"] > expected_outputs:
             state = state.isel(time=slice(-expected_outputs, None))
 
-        # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than
-        # bare step indices, so downstream consumers (e.g. the temporal
-        # observation operator's seconds-based interval binning) see a real
-        # time axis consistent with the other backends.
+        # Store the time coordinate in seconds (dt, 2·dt, …, simulation_time)
+        # rather than bare step indices: the frames are the outputs in
+        # (0, simulation_time], the same axis as every other backend.
         state = state.assign_coords(
-            time=np.arange(state.sizes["time"], dtype=float) * self.output_frequency
+            time=(np.arange(state.sizes["time"], dtype=float) + 1)
+            * self.output_frequency
         )
 
         remove_old_restart_files(self.dirs)

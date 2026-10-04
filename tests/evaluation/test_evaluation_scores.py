@@ -24,6 +24,7 @@ or pinned ensemble produces constantly.
 import numpy as np
 import xarray
 from evaluation.scores import compute_parameter_metrics, crps_ensemble, per_knot_in_band
+from evaluation.sensors import window_masks
 
 
 def _param_datasets(
@@ -149,3 +150,12 @@ def test_per_knot_in_band_widens_with_alpha() -> None:
 
     assert per_knot_in_band(ens, truth, alpha=0.5).tolist() == [False]  # [5, 15]
     assert per_knot_in_band(ens, truth, alpha=0.9).tolist() == [True]  # [1, 19]
+
+
+def test_window_masks_put_a_boundary_frame_in_the_window_it_closes() -> None:
+    sim_time, num_windows, frames = 10.76, 20, 200
+    times = sim_time / frames * (np.arange(num_windows * frames) + 1)
+    masks = window_masks(times, sim_time, num_windows)
+    for w, mask in enumerate(masks):
+        np.testing.assert_array_equal(np.flatnonzero(mask) // frames, w)
+        assert mask.sum() == frames

@@ -66,7 +66,10 @@ coordinate. Extraction needs the observation operator, so it lives in
 
 - `sensor_magnitude`: `|U|` from the `component` dim.
 - `window_masks`: bins frames into assimilation windows by time coordinate,
-  so truth and ensemble may have different output cadences.
+  so truth and ensemble may have different output cadences. Window `w` holds
+  the frames in `(w·sim_time, (w+1)·sim_time]`: every backend stamps its
+  output on `(0, sim_time]`, and the scripts put each window file on the
+  global axis by its end (`global_time` in `scripts/utils/helper_functions.py`).
 - `window_statistics`: per-window mean and variance (`ddof=1`) of `u`, `v`, `w`
   and `|U|`, each `(window, quantity, [ensemble,] sensor)`.
 - `window_sampling_std`: block-bootstrap sampling std of each of those
@@ -173,6 +176,10 @@ Read these with their limits:
 - **Desroziers needs both residuals from the same update.** For an ESMDA
   smoother the "analysis" is the posterior forecast after all steps.
   `obs_std_estimated` is `null` when `mean(d_a·d_f) ≤ 0`.
+- **Desroziers and χ² assume consistent error statistics.** With a collapsed
+  spread the gain is about 0, so `d_a ≈ d_f` and Desroziers returns the
+  innovation RMS, which says nothing about R. Read both only where
+  `spread_skill.ratio` and `innovation_chi2_diag` are near 1.
 - **The held-out sensors have no observations**, so `observation` and
   `desroziers` cover the assimilated sensors only.
 

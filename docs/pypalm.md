@@ -237,8 +237,8 @@ PALM writes `u`/`v` on `zu_3d` and `w` on `zw_3d`. The
 7. **Clips or pads** to the expected `simulation_time / output_frequency` count
    (PALM's adaptive timestep occasionally produces one fewer output; missing
    frames are padded by repeating the last).
-8. **Assigns a seconds-based `time` coord** (`0, dt, 2·dt, …`) matching
-   pylbm/pyudales convention.
+8. **Assigns a seconds-based `time` coord** (`dt, 2·dt, …, simulation_time`),
+   the `(0, simulation_time]` axis every backend uses.
 
 A `_assert_combine_succeeded` guard checks that `u/v/w` are not identically
 zero with no fill values — the sentinel for a missing `combine_plot_fields.x`

@@ -163,7 +163,9 @@ def test_cold_start_complete_run_is_not_a_failure(tmp_path: pathlib.Path) -> Non
     state = _run(model)
 
     assert state.sizes["time"] == 8
-    np.testing.assert_allclose(state["time"].values, np.arange(8) * OUTPUT_FREQUENCY)
+    np.testing.assert_allclose(
+        state["time"].values, (np.arange(8) + 1) * OUTPUT_FREQUENCY
+    )
 
 
 def test_cold_start_with_spinup_is_not_a_failure(tmp_path: pathlib.Path) -> None:

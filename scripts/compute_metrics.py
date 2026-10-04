@@ -69,6 +69,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
     concat_windows,
+    global_time,
     open_truth,
     save_yaml,
     sensor_series,
@@ -130,16 +131,21 @@ def run(run_dir: pathlib.Path) -> None:
             window_files("posterior_state")[w],
             sets,
             cfg.assim_model.solver_name,
-            w * sim_time,
+            w,
+            sim_time,
         )
         for name in sets:
             posterior_series[name].append(series[name])
-        state_rmse.append(streaming_state_rmse(window_truth, mean_state))
+        state_rmse.append(
+            streaming_state_rmse(
+                window_truth.sel(time=mean_state.time, method="nearest"), mean_state
+            )
+        )
 
         times = posterior_series[next(iter(sets))][-1].time.values
         for kind, files in extra_files.items():
             series, _ = _read_ensemble(
-                files[w], sets, cfg.assim_model.solver_name, w * sim_time, times
+                files[w], sets, cfg.assim_model.solver_name, w, sim_time, times
             )
             for name in sets:
                 extra_series[kind][name].append(series[name])
@@ -331,24 +337,21 @@ def _read_ensemble(
     path: pathlib.Path,
     sets: dict,
     solver_name: str,
-    t_start: float,
+    window: int,
+    sim_time: float,
     times: np.ndarray | None = None,
 ) -> tuple[dict[str, xarray.DataArray], xarray.Dataset]:
     """Sensor series and ensemble-mean state of one window file, member by member.
 
-    The sensor series get a global time axis starting at `t_start`. Given the
-    global `times` of another file of the same window (the posterior's), only
-    the frames at those times are read and they take that axis. Files differ in
-    how they stamp time, but every one ends on the window's end, so frames are
-    matched by their time before it.
+    The series take the run's global time axis. Given the global `times` of
+    another file of the same window (the posterior's), only the frames at
+    those times are read.
     """
     with xarray.open_dataset(path) as ds:
+        ds = ds.assign_coords(time=global_time(ds.time, window, sim_time))
         if times is not None:
-            before_end = ds.time.values.astype(float)
-            before_end = before_end - before_end[-1]
-            wanted = times - times[-1]
-            frames = np.abs(before_end[None, :] - wanted[:, None]).argmin(axis=1)
-            assert np.allclose(before_end[frames], wanted, atol=1e-6), path
+            frames = np.abs(ds.time.values[None, :] - times[:, None]).argmin(axis=1)
+            assert np.allclose(ds.time.values[frames], times, atol=1e-6), path
             ds = ds.isel(time=frames)
         n_members = ds.sizes["ensemble"]
         series: dict[str, list] = {name: [] for name in sets}
@@ -362,14 +365,9 @@ def _read_ensemble(
                 if total is None
                 else total + member.isel(ensemble=0)
             )
-        time = ds.time.values.astype(float)
     assert total is not None
-    global_time = time - time[0] + t_start if times is None else times
     return (
-        {
-            name: xarray.concat(parts, dim="ensemble").assign_coords(time=global_time)
-            for name, parts in series.items()
-        },
+        {name: xarray.concat(parts, dim="ensemble") for name, parts in series.items()},
         total / n_members,
     )
 
