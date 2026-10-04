@@ -14,8 +14,7 @@ probes and the log-spectral distance).
 """
 
 # mypy: ignore-errors
-# Moved in WP0.2 from ``scripts/esmda/_esmda_common.py``, which carries a
-# file-level mypy waiver; kept here rather than annotated during a pure
+# The file-level mypy waiver was kept rather than annotating during a pure
 # refactor. The phase-3 spectrum section below is annotated.
 
 from __future__ import annotations
@@ -553,7 +552,7 @@ def block_bootstrap_std(
 # same axes, restated here because this library may not import that one.
 #
 # An empty tuple means "already co-located": pylbm writes one uniform grid, and
-# ``conf/model/neural_surrogate.yaml`` sets ``solver_name: pylbm``, so the
+# ``configs/model/neural_surrogate.yaml`` sets ``solver_name: pylbm``, so the
 # surrogate reaches this table under its spin-up backend's name and needs no
 # entry of its own. ``palm``'s ``w`` is listed although pypalm's
 # postprocess already interpolates it from ``zw_3d`` onto ``z``; a pair whose
@@ -1272,8 +1271,8 @@ SPECTRUM_SEGMENTS = 8
 # the cutoff itself, against the 1-3 dB the LSD reports -- and truth and members
 # are sampled alike, so most of it is common-mode. But that is a property of the
 # CADENCE the probe re-run was configured with, not of this constant. Sizing a
-# cadence is `conf/run_probe_series.yaml`'s job (and `run_probe_series.py`'s
-# pre-flight check), and it has to be sized from the band wanted, never from here.
+# cadence is the probe run's job, and it has to be sized from the band wanted,
+# never from here.
 SPECTRUM_CUTOFF_FRACTION = 0.25
 
 # Fewest frequency bins below the cutoff for a comparison to mean anything. Not a

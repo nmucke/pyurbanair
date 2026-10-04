@@ -15,8 +15,7 @@ those are the identifiable quantities and the thing worth scoring.
 Populated in WP0.2 (move), extended in WP1.3.
 """
 
-# WP0.2 moved this module out of ``scripts/esmda/_esmda_common.py`` under a
-# file-level ``# mypy: ignore-errors``. The waiver is gone: every function here
+# The module-level ``# mypy: ignore-errors`` waiver is gone: every function here
 # is annotated and the module passes the repo's strict config on its own.
 
 from __future__ import annotations

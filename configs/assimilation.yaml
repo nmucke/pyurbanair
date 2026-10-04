@@ -1,8 +1,7 @@
 # Data assimilation: the single config for all three DA scripts
-# (scripts/esmda/run_esmda.py, scripts/filtering/run_filtering.py,
-# scripts/filter_smoothing/run_filter_smoothing.py). Each script reads the
-# blocks it needs: smoothing -> `smoothing`; filtering -> `filtering`;
-# hybrid -> `smoothing`, `filtering` and `hybrid`.
+# (scripts/run_smoother.py, scripts/run_filtering.py, scripts/run_hybrid.py).
+# Each script reads the blocks it needs: smoothing -> `smoothing`;
+# filtering -> `filtering`; hybrid -> `smoothing`, `filtering` and `hybrid`.
 defaults:
   - common
   - case: xie_and_castro

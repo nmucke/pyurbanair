@@ -156,7 +156,11 @@ class P3DFile:
                 output_lines.append(line)
                 current_section = None
                 continue
-            if current_section is not None and "=" in stripped and not stripped.startswith("!"):
+            if (
+                current_section is not None
+                and "=" in stripped
+                and not stripped.startswith("!")
+            ):
                 key = stripped.split("=", 1)[0].strip()
                 if key in self.sections.get(current_section, {}):
                     value = self.sections[current_section][key]
@@ -166,9 +170,9 @@ class P3DFile:
             output_lines.append(line)
 
         existing_sections = {
-            _SECTION_START_RE.match(line.strip()).group(1)
+            match.group(1)
             for line in self.raw_lines
-            if _SECTION_START_RE.match(line.strip() or "")
+            if (match := _SECTION_START_RE.match(line.strip()))
         }
         for section in self.section_order:
             if section not in existing_sections:

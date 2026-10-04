@@ -68,7 +68,7 @@ def build_root(tmp_path: pathlib.Path) -> pathlib.Path:
 
 
 class TestWrapperOwnedSourcesSurviveRemirroring:
-    """The regression that broke test_run_esmda[state_and_param] in CI."""
+    """The regression that once broke the ESMDA state-and-param test in CI."""
 
     def test_grid_survives_ensemble_member_creation(
         self, tmp_path: pathlib.Path

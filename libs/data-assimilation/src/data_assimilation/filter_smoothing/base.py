@@ -22,7 +22,7 @@ One ``run()`` call is one window:
    the operator produced (``filtering/base.py``, module docstring).
 
    * ``theta`` **static**: one ``filter.run(...)`` over the whole window, which
-     is exactly how ``scripts/filtering/run_filtering.py`` drives the filter.
+     is exactly how ``scripts/run_filtering.py`` drives the filter.
      Nothing hybrid-specific happens, and in joint mode the phase reduces
      *exactly* to a standard joint EnKF over those cycles.
    * ``theta`` **dynamic**: the filter's forward model is instantiated with a
@@ -736,8 +736,7 @@ resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
         delete, the same ``cycle_0/`` under the filter's results root. The
         segments are renumbered onto the window's global cycle index as they
         finish (:meth:`_collect_segment_dir`), which is the layout the
-        downstream ``forecast`` state source expects. Same pattern as
-        ``scripts/filtering/run_filtering.py``'s per-window staging.
+        downstream ``forecast`` state source expects.
 
         ``None`` in memory mode: nothing is written and nothing to stage.
         """

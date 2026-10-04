@@ -874,10 +874,8 @@ inflation_factors`, exactly as it does for the stochastic localized update, and
        roughly 5 percent of blocks with an active observation — both recorded
        in ``docs/plans/implemented/filtering_state_reduction_and_transforms.md`` §6,
        corrections #1 and #4. How far the distinct-inflation dedup collapses
-       the block count on a real run is one of the quantities
-       ``docs/plans/filtering_ensemble_transform_benchmark.md`` exists to
-       measure; it has not been measured yet.) Bounded chunking is a safety
-       bound on top of that, not the mechanism.
+       the block count on a real run has not been measured.) Bounded
+       chunking is a safety bound on top of that, not the mechanism.
 
     ``localization_policy = "required"``: without a strategy this is just a
     slower global ETKF, so :class:`~data_assimilation.filtering.base.BaseFilter`

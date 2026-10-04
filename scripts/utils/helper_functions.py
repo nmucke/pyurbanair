@@ -26,7 +26,6 @@ from data_assimilation.observation_operator import (
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
 from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES
 from pyurbanair.config.hydra_helpers import clean_outputs
 
@@ -130,7 +129,8 @@ def make_observation_error(cfg: DictConfig) -> ObservationErrorSpec:
     error = dict(OmegaConf.to_container(cfg.observation.error, resolve=True))  # type: ignore[arg-type, unused-ignore]
     # TODO: drop once ObservationErrorSpec.aggregation is renamed to `propagation`.
     error["aggregation"] = error.pop("propagation", "propagate_mean")
-    return instantiate(error)
+    spec: ObservationErrorSpec = instantiate(error)
+    return spec
 
 
 def make_aggregation(cfg: DictConfig) -> AggregateObservations | None:
@@ -138,7 +138,7 @@ def make_aggregation(cfg: DictConfig) -> AggregateObservations | None:
     aggregation = cfg.observation.aggregation
     if aggregation is None or aggregation.get("interval_seconds") is None:
         return None
-    aggregator = instantiate(aggregation)
+    aggregator: AggregateObservations = instantiate(aggregation)
     # Windows may hold a different number of intervals (e.g. a shorter last one).
     aggregator.allow_interval_count_change = True
     return aggregator

@@ -20,8 +20,8 @@ Populated in WP0.2 (move), extended through phase 1.
 """
 
 # WP0.2 moved this module out of ``src/pyurbanair/utils/da_metrics.py``,
-# ``scripts/figspec/metrics.py``, ``src/pyurbanair/plotting.py`` and
-# ``scripts/esmda/_esmda_common.py`` under a file-level
+# ``scripts/figspec/metrics.py``, ``src/pyurbanair/plotting.py`` and the old
+# ESMDA script helpers under a file-level
 # ``# mypy: ignore-errors``. The waiver is gone: every function here is
 # annotated and the module passes the repo's strict config on its own. The
 # summary builders return a bare ``dict`` -- these are heterogeneous YAML

@@ -13,7 +13,7 @@ parameters:
     min: 0.1
   # Model-error compensation knobs (docs/archive/esmda_model_error_parameters.md). Tight
   # priors: each extra free parameter risks an underdetermined inverse / ensemble
-  # collapse with few sensors. run_esmda.yaml `params_to_estimate` selects DA
+  # collapse with few sensors. `assimilation.params_to_estimate` selects DA
   # updates only; all entries here are sampled and applied to predictions.
   # Use Constant for prescribed values, or omit an entry to use model defaults.
   # Power-law shear exponent α: u(z) = u_ref (z/z_ref)^α.

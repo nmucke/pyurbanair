@@ -828,7 +828,7 @@ def _truth_is_static(truth: np.ndarray | None) -> bool:
 
     The discriminator between the two knot pairings P1 can draw. A *static*
     parameter estimated over ``W`` windows still arrives with ``K = W`` knots
-    (``run_esmda.py`` stacks one point per window along ``time``), so the knot
+    (``concat_windows`` stacks one point per window along ``time``), so the knot
     count alone cannot tell the two apart -- but a constant truth can.
 
     Two finite knots are the minimum evidence for that claim: ``np.allclose``

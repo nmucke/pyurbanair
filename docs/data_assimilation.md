@@ -687,8 +687,8 @@ Selected with `'filtering.analysis=${analysis.<name>}'`
 
 > **Status.** The ensemble-transform schemes are tested but **not yet
 > benchmarked**: no accuracy, memory or speed claim is made. The campaign
-> record [plans/filtering_ensemble_transform_benchmark.md](plans/filtering_ensemble_transform_benchmark.md)
-> is deliberately unpopulated.
+> template [plans/rejected/filtering_ensemble_transform_benchmark.md](plans/rejected/filtering_ensemble_transform_benchmark.md)
+> was never run and has been dropped.
 
 `StochasticEnKFAnalysis` draws perturbed observations, sharing its
 implementation with the ESMDA smoother's per-step update, so the posterior

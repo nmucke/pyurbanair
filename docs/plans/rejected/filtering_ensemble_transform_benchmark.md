@@ -10,7 +10,7 @@
 ## Purpose and acceptance order
 
 This campaign covers PR 2 of
-[`docs/plans/filtering_state_reduction_and_transforms.md`](implemented/filtering_state_reduction_and_transforms.md):
+[`docs/plans/filtering_state_reduction_and_transforms.md`](../implemented/filtering_state_reduction_and_transforms.md):
 the global ETKF (step 4), the reusable observation-space TSVD (step 5), and the
 LETKF (step 6). It answers two separate questions that must not be merged into
 one ranking.

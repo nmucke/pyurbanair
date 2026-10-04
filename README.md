@@ -32,7 +32,7 @@ sensor data.
 Everything runs through [Pixi](https://pixi.sh):
 
 ```bash
-curl -fsSL https://pixi.sh/install.sh | sh   # once
+curl -fsSL https://pixi.sh/install.sh | sh   # once (or `pixi self-update`: needs >= 0.72.1)
 pixi run setup-dev                           # install the dev environment
 pixi shell -e dev                            # activate it
 ```

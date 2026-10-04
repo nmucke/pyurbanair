@@ -5,7 +5,7 @@ compile: true
 forward_model:
   _target_: pylbm.forward_model.ForwardModel
   _convert_: all
-  # STL geometry follows the selected `case` (conf/case/<name>/geometry.yaml).
+  # STL geometry follows the selected `case` (configs/case/<name>.yaml).
   stl_path: ${geometry.stl_path}
   # Base scratch dir shared across models; pylbm nests <temp_dir>/experiment/runcase.
   temp_dir: ${paths.experiment_dir}
@@ -20,7 +20,7 @@ forward_model:
   boundary_condition: inflow_outflow
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
   # forms const = 2.5*smagorinsky**2 (m_vreman.F90). This is the DEFAULT: a
-  # `sgs_constant` in the params sampler (conf/params/*.yaml) overrides it, so
+  # `sgs_constant` in the params sampler (configs/params/*.yaml) overrides it, so
   # ESMDA can still estimate it. null -> leave the infile template's value.
   #
   # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
