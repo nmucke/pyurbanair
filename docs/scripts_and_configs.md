@@ -210,7 +210,7 @@ state (`window_{w}_filter_obs.nc`, and `window_{w}_filter_params.nc` in
 
 | Script | Input | Writes |
 |---|---|---|
-| `compute_metrics.py <run dir>` | a DA run dir | `metrics.yaml`: parameter RMSE/CRPS (+ prior and reduction), ensemble-mean \|U\| RMSE, per sensor set (assimilated and validation) RMSE and energy score, per-window sensor statistics |
+| `compute_metrics.py <run dir>` | a DA run dir | `metrics.yaml`: parameter RMSE/CRPS (+ prior and reduction), ensemble-mean \|U\| RMSE, per sensor set (assimilated and validation) RMSE and energy score, spread–skill, climatology baseline, per-window sensor statistics; observation-space fit and Desroziers per stage |
 | `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the rank histogram) | `figures/`: parameter evolution, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
 | `visualize_forward.py <run dir>` | a forward run dir | `figures/`: field snapshot, animation, parameters (with inlet-recovered angle/speed) |
 

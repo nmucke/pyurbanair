@@ -721,6 +721,36 @@ def test_pred_obs_histories_are_accumulated_over_the_window() -> None:
     assert hybrid.pred_obs_history[0].shape == (_CYCLE_FRAMES * _N_SENSORS, _N_E)
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_forecast_history_is_passed_through_over_the_window(dynamic: bool) -> None:
+    """Every forecast frame of every cycle, time-concatenated, only on request."""
+    knots = np.array([0.0, 10.0])
+    smoother_model = _ToyEnsembleModel(num_frames=_WINDOW_FRAMES)
+    enkf = _filter(_ToyEnsembleModel(num_frames=_CYCLE_FRAMES), "state")
+    hybrid = FilterSmoothing(
+        smoother=(
+            _dynamic_smoother(smoother_model, num_knots=knots.size)
+            if dynamic
+            else _static_smoother(smoother_model)
+        ),
+        filter=enkf,
+    )
+
+    def run() -> Any:
+        return hybrid.run(
+            state=_initial_state(),
+            params=_trajectory_prior(knots) if dynamic else _static_prior(),
+            observations=_observation_batches(),
+        )
+
+    assert run().forecast_history is None
+    enkf.collect_forecast_frames = True
+    forecast = run().forecast_history
+    assert forecast is not None
+    assert forecast.sizes["time"] == _WINDOW_FRAMES
+    assert forecast.sizes["ensemble"] == _N_E
+
+
 # ---------------------------------------------------------------------------
 # (h) The dynamic path: one segment per cycle
 # ---------------------------------------------------------------------------

@@ -24,6 +24,9 @@ Outputs, in `<paths.results_dir>/hybrid/`:
                                             forecast, 1 the analysis
             window_{w}_filter_params.nc     the filter's corrected parameters
                                             per cycle (only in mode=joint)
+            window_{w}_forecast_state.nc    the filter's every forecast frame
+                                            (only with
+                                            assimilation.save_forecast_history)
 """
 
 from __future__ import annotations
@@ -170,6 +173,7 @@ def run(cfg: DictConfig) -> None:
         global_parameter_names=global_names,
     )
     enkf.collect_pred_obs = True
+    enkf.collect_forecast_frames = bool(da.save_forecast_history)
     enkf.prune_disk_cycles = True
     enkf.keep_first_disk_cycle = False
     hybrid = FilterSmoothing(smoother=smoother, filter=enkf, tempering=policy)
@@ -201,6 +205,13 @@ def run(cfg: DictConfig) -> None:
         if result.params_history is not None:  # filtering.mode=joint
             cycles_to_time(result.params_history, window["times"]).to_netcdf(
                 windows_dir / f"window_{w}_filter_params.nc"
+            )
+        if result.forecast_history is not None:
+            frames = cycles_per_window * stride
+            result.forecast_history.assign_coords(
+                time=w * sim_time + cycle_seconds / stride * (np.arange(frames) + 1)
+            ).transpose("ensemble", "time", ...).to_netcdf(
+                windows_dir / f"window_{w}_forecast_state.nc"
             )
         noisy = xarray.concat(window["noisy"], dim="time", join="override")
         clean = xarray.concat(window["clean"], dim="time", join="override")

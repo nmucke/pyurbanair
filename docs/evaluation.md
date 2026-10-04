@@ -33,18 +33,25 @@ no registries. The only class with state is
   broken at random with a fixed seed), `spread_skill`, `z_score_stats` /
   `calibrated_z_std`, `hit_rate` (VDI 3783/9 `q`), `data_mismatch` and
   `data_mismatch_summary` (normalized data mismatch `O_N` against the ½ target
-  band).
+  band), `observation_fit` (forecast/analysis RMSE against the noisy
+  observations, the diagonal innovation χ² `innovation_chi2_diag`, and the
+  Desroziers estimate `sqrt(mean(d_a·d_f))` of the observation error std, for
+  one update).
 - **Field / parameter metrics**: `field_rmse`, `field_rmse_timeseries`,
   `normalized_field_rmse`, `param_metrics`, `compute_parameter_metrics`
   (per-parameter RMSE and CRPS series of posterior and prior),
   `parameter_bundle` / `compute_parameter_bundles` / `parameter_metric_summary`
   (z-score, normalized error, contraction ratio per knot).
-- **Sensor metrics**: `vector_sensor_metrics` (RMSE and energy score of the
-  `(u, v, w)` vector per time step), `compute_sensor_metrics`, `sensor_rmse`.
+- **Sensor metrics**: `vector_sensor_metrics` (RMSE, energy score and
+  ensemble spread of the `(u, v, w)` vector per time step; the spread uses the
+  same vector norm as the RMSE, so `spread_skill` compares like with like),
+  `compute_sensor_metrics`, `sensor_rmse`.
 - **Window statistics**: `window_statistics_summary` scores every
   `statistic x quantity` pair (`mean_u`, `variance_magnitude`, ...) with CRPS,
-  z-score and rank, posterior and (when given) prior, and returns the
-  `sensor_statistics` block including the `rank_counts` the rank histogram reads.
+  z-score and rank, posterior and (when given) a reference ensemble, and
+  returns the `sensor_statistics` block including the `rank_counts` the rank
+  histogram reads. `reference` names the reference block and its skill keys
+  (`prior` by default, `forecast` for a filter's forecasts).
 - `series_stats` reduces a 1-D series to `{mean, final, max, min}`.
 
 `METRICS_VERSION = 2` marks the switch to the fair (`M(M-1)`) estimators;
@@ -126,21 +133,56 @@ cells. Check the mask before relying on it.
 
 | Script | Uses |
 |---|---|
-| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `series_stats`, `vector_sensor_metrics`, `window_statistics_summary`, `window_statistics`, `window_sampling_std`, `streaming_state_rmse` |
+| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `series_stats`, `vector_sensor_metrics`, `spread_skill`, `_skill_score`, `window_statistics_summary`, `window_statistics`, `window_sampling_std`, `observation_fit`, `data_mismatch`, `data_mismatch_summary`, `streaming_state_rmse` |
 | [scripts/visualize_assimilation.py](../scripts/visualize_assimilation.py) | `plot_rollout_time_evolution`, `plot_final_state_with_obs`, `plot_sensor_timeseries`, `plot_tke_time_evolution`, `plot_rank_histogram`, `sensor_magnitude`, `colocate_components`, `select_z_plane`, `sensor_tke_evolution`, `streaming_state_rmse` |
 | [scripts/visualize_forward.py](../scripts/visualize_forward.py) | `colocate_components` |
 
 Both assimilation scripts take a finished run directory (`config.yaml`,
-`true_params.nc`, the truth state and
-`windows/window_{w}_{prior,posterior}_{params,state}.nc`).
-`compute_metrics.py` writes `metrics.yaml` with the blocks `parameters`,
-`state`, `sensors` and `sensor_statistics`; `visualize_assimilation.py`
+`run_info.yaml`, `true_params.nc`, the truth state and
+`windows/window_{w}_{prior,posterior}_{params,state}.nc`, `window_{w}_obs.nc`).
+`compute_metrics.py` writes `metrics.yaml` with these blocks (each series
+summarised as `{mean, final, max, min}`):
+
+| Block | Holds |
+|---|---|
+| `parameters` | per parameter: posterior and prior RMSE and CRPS against the truth, and the reduction |
+| `state` | RMSE of the ensemble-mean \|U\| over time |
+| `sensors` | per sensor set (`assimilation`, `validation`): RMSE and energy score of the `(u, v, w)` vector |
+| `spread_skill` | per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
+| `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
+| `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank; posterior, plus `prior` (`assimilation.save_prior_state`, smoother) and `forecast` (`assimilation.save_forecast_history`, filter and hybrid) when their states were saved, scored on the posterior's time stamps |
+| `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N) |
+| `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation) and their `ratio` |
+
+A hybrid has both stages, the smoother's from `window_{w}_obs.nc` and the
+filter's from `window_{w}_filter_obs.nc`. Its smoother stops before the
+posterior forecast, so its `smoother` stage has `data_mismatch` only, over the
+forecasts before each ESMDA update.
+
+Read these with their limits:
+
+- **`prior` and `forecast` are different baselines.** The prior is the free run
+  with the prior parameters; a filter forecast already contains every earlier
+  analysis, so it does not compare across methods the way the prior does.
+- **The climatology is in-sample.** The time mean comes from the record it is
+  scored on, so it is a reference level, not a forecast any method could have
+  issued.
+- **`innovation_chi2_diag` ignores correlations.** It is the diagonal of the
+  normalised innovation χ² (`d_f² / (var_ens + σ²)`, `ddof=1`), not the
+  full-matrix χ² of `CycleDiagnostics`.
+- **Desroziers needs both residuals from the same update.** For an ESMDA
+  smoother the "analysis" is the posterior forecast after all steps.
+  `obs_std_estimated` is `null` when `mean(d_a·d_f) ≤ 0`.
+- **The held-out sensors have no observations**, so `observation` and
+  `desroziers` cover the assimilated sensors only.
+
+`visualize_assimilation.py`
 writes PNGs into `<run dir>/figures/` and reads `rank_counts` from
 `metrics.yaml` for `rank_histogram.png`, so run `compute_metrics.py` first.
 [workflows/assimilation_workflow.sh](../workflows/assimilation_workflow.sh)
 runs both after the assimilation run.
 
-The other functions (`hit_rate`, `data_mismatch*`, spectra, `MomentAccumulator`,
+The other functions (`hit_rate`, spectra, `MomentAccumulator`,
 the P1/S1/S5/F1/S4/D3 figures, `stl_solid_mask`) have no caller in `scripts/`
 today; only the tests exercise them.
 

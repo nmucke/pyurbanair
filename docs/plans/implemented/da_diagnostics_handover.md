@@ -62,9 +62,14 @@ directory) unless it falls out in a few lines; list it in the PR as next steps.
 
 ## Done when
 
-- [ ] `metrics.yaml` has the five additions for all three methods.
-- [ ] Default runs byte-identical (only the metrics output grows).
+Outcome: the hybrid's ESMDA prior state was not added (it needs ESMDA to keep
+the step-0 state when `final_forecast=False`); the filter and hybrid forecasts
+are scored as `forecast`, separate from the free-run `prior`.
+
+- [x] `metrics.yaml` has the five additions for all three methods (item 5
+      as revised: `forecast` for filter and hybrid, the hybrid `prior` left).
+- [x] Default runs byte-identical (only the metrics output grows).
 - [ ] `tests/evaluation`, `tests/data_assimilation`, `tests/scripts`,
       `pre-commit` pass; CI green on Linux and macOS.
-- [ ] The PR shows the new blocks for one tiny run of each method.
-- [ ] This file moved to `docs/plans/implemented/`.
+- [x] The PR shows the new blocks for one tiny run of each method.
+- [x] This file moved to `docs/plans/implemented/`.
