@@ -85,12 +85,14 @@ Everything streams; window state files `(ensemble, time, z, y, x)` are never
 loaded whole.
 
 - `streaming_state_rmse`: per-time RMSE of `|U|` between truth and an
-  ensemble-mean state on a few z-levels, building cells left out;
-  `select_z_plane`, `evenly_spaced_levels` pick the levels. The building cells
-  are NaN on each grid before anything else, and the mean skips NaN. When the
-  truth and ensemble grids differ, the truth is interpolated onto the ensemble
-  grid after masking, so an open-air cell whose interpolation stencil touches a
-  building cell drops out of the RMSE too.
+  ensemble-mean state, building cells left out, on a few z-levels of the
+  ensemble grid (`evenly_spaced_levels`); the truth is taken at the same
+  heights. The building cells are NaN on each grid before anything else, and
+  the mean skips NaN. When the truth and ensemble grids differ, the truth is
+  interpolated linearly onto the ensemble's cell centres (in z as in x and y,
+  reading only the levels it needs) after masking, so an open-air cell whose
+  interpolation stencil touches a building cell drops out of the RMSE too.
+  `select_z_plane` selects one level of a state.
 - `stl_solid_mask(stl_path, z, y, x)`: the building cells of the case STL
   (`read_binary_stl`) on a grid of cell centres, in the STL's frame (every
   backend writes its state in it). A cell is solid when its centre is at or

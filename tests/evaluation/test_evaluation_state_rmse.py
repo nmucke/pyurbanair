@@ -138,3 +138,22 @@ def test_state_rmse_is_the_fluid_only_rmse(tmp_path):
     expected = np.sqrt(((truth - member)[:, ~solid] ** 2).mean(axis=1))
     assert solid.any()
     assert rmse == pytest.approx(expected)
+
+
+def test_state_rmse_takes_the_truth_at_the_ensembles_heights(tmp_path):
+    # The truth has twice the levels: picked by index, its 4 levels would sit
+    # at other heights than the ensemble's.
+    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
+    y = x = np.arange(4.0) + 0.5
+    z_member, z_truth = np.arange(4.0) + 0.5, np.arange(8.0) / 2 + 0.25
+
+    def u_equals_z(z):
+        return np.broadcast_to(z[None, :, None, None], (2, z.size, 4, 4))
+
+    rmse = streaming_state_rmse(
+        _state(u_equals_z(z_truth), z_truth, y, x),
+        _state(u_equals_z(z_member) + 0.1, z_member, y, x),
+        stl,
+    )
+
+    assert rmse == pytest.approx([0.1, 0.1])
