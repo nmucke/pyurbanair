@@ -251,6 +251,12 @@ def streaming_state_rmse(true_state, esmda_state, stl_path, n_z_slices=4):
     nodes). When the grids differ, the truth is interpolated linearly onto the
     ensemble's cell centres (only the levels it needs are read), and a cell
     whose interpolation reaches a building cell drops out too.
+
+    Raises:
+        ValueError: If an ensemble level lies outside the truth's height range,
+            where the truth can't be interpolated to it. A level within
+            ``SURFACE_TOLERANCE`` times the truth's level spacing of an end
+            level counts as on it (float32 coordinates).
     """
     true_s = (
         true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
@@ -264,15 +270,22 @@ def streaming_state_rmse(true_state, esmda_state, stl_path, n_z_slices=4):
     n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
 
     esmda_z = _centre_coord(esmda_s, ("zt", "z"))
-    esmda_vel = _vel_levels(
-        esmda_s, n_time, evenly_spaced_levels(esmda_z.size, n_z_slices), stl_path
-    )
+    esmda_idx = evenly_spaced_levels(esmda_z.size, n_z_slices)
     true_z = _centre_coord(true_s, ("zt", "z"))
-    true_vel = _vel_levels(
-        true_s, n_time, _bracketing_levels(true_z, esmda_vel["z"].values), stl_path
-    )
+    heights = esmda_z[esmda_idx]
+    tol = SURFACE_TOLERANCE * min(np.diff(true_z), default=1.0)
+    outside = heights[(heights < true_z[0] - tol) | (heights > true_z[-1] + tol)]
+    if outside.size:
+        raise ValueError(
+            f"ensemble levels z = {outside.tolist()} lie outside the truth's "
+            f"height range [{true_z[0]:g}, {true_z[-1]:g}]"
+        )
+    esmda_vel = _vel_levels(esmda_s, n_time, esmda_idx, stl_path)
+    # Onto the end level, or interp gives NaN a sliver outside it.
+    at = np.clip(heights, true_z[0], true_z[-1])
+    true_vel = _vel_levels(true_s, n_time, _bracketing_levels(true_z, at), stl_path)
 
-    diff = _on_grid(true_vel, esmda_vel).values - esmda_vel.values
+    diff = _on_grid(true_vel, esmda_vel.assign_coords(z=at)).values - esmda_vel.values
     return np.sqrt(np.nanmean(diff**2, axis=(1, 2, 3)))
 
 
