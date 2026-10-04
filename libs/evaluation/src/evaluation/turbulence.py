@@ -20,6 +20,7 @@ probes and the log-spectral distance).
 from __future__ import annotations
 
 import logging
+import pathlib
 import warnings
 from typing import NamedTuple
 
@@ -82,6 +83,95 @@ _BLOCK_TIME_SCALES = 3
 _BOOTSTRAP_CHUNK_BYTES = 32 << 20
 
 
+# ---------------------------------------------------------------------------
+# Building cells from the case STL
+# ---------------------------------------------------------------------------
+
+# How close, as a fraction of the smallest cell size, a cell centre must be to
+# the building surface to count as on it.
+SURFACE_TOLERANCE = 1e-3
+
+_STL_RECORD = np.dtype(
+    [("normal", "<f4", 3), ("vertices", "<f4", (3, 3)), ("attribute", "<u2")]
+)
+
+
+def read_binary_stl(path: pathlib.Path | str) -> np.ndarray:
+    """Triangles of a binary STL as an ``(n_tri, 3, 3)`` array (vertex, xyz)."""
+    data = pathlib.Path(path).read_bytes()
+    n = int(np.frombuffer(data, "<u4", count=1, offset=80)[0])
+    return np.frombuffer(data, _STL_RECORD, count=n, offset=84)["vertices"].astype(
+        float
+    )
+
+
+def stl_solid_mask(stl_path, z, y, x) -> np.ndarray:
+    """``(z, y, x)`` mask of the cells whose centre is inside a building or on it.
+
+    ``z``, ``y``, ``x`` are the cell-centre coordinates, in the STL's frame:
+    every backend writes its state in the STL's coordinates. A vertical ray
+    through each column centre meets the mesh, and a cell is solid when its
+    centre is at or below the highest crossing. That is pylbm's voxelisation
+    and PALM's topography, so the mask is the solvers' own notion of solid.
+
+    The geometry is taken as 2.5-D: everything below the highest crossing is
+    solid, so the space under an overhang or a bridge counts as solid, as in
+    pylbm and PALM. In exchange the rule does not care how the mesh is built:
+    open-bottomed buildings, internal faces and overlapping parts all give the
+    same mask, and a ray through an edge shared by several triangles (a roof
+    diagonal) hits them all at one height, which changes nothing.
+
+    "On" means within ``SURFACE_TOLERANCE`` times the smallest cell size. A ray
+    that close to a triangle's edge hits the triangle, and a centre that close
+    below a roof is under it, so a centre on a wall or a roof is solid -- as
+    pylbm voxelises it and PALM and uDALES leave it (near) still.
+    """
+    tris = read_binary_stl(stl_path)
+    z, y, x = (np.asarray(c, dtype=float) for c in (z, y, x))
+    spacing = [np.diff(c).min() for c in (z, y, x) if c.size > 1]
+    tol = SURFACE_TOLERANCE * min(spacing, default=1.0)
+
+    # Walls have no area in the xy plane, and a vertical ray never crosses them.
+    a, b, c = tris[:, 0], tris[:, 1], tris[:, 2]
+    area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (
+        c[:, 0] - a[:, 0]
+    )
+    flat = np.abs(area) > tol**2
+    a, b, c, area = a[flat], b[flat], c[flat], area[flat]
+
+    # Candidate (triangle, column) pairs: the columns inside each triangle's
+    # xy bounding box, widened by the tolerance.
+    corners = np.stack([a, b, c], axis=1)[..., :2]
+    lo, hi = corners.min(axis=1) - tol, corners.max(axis=1) + tol
+    ix0, ix1 = np.searchsorted(x, lo[:, 0]), np.searchsorted(x, hi[:, 0], "right")
+    iy0, iy1 = np.searchsorted(y, lo[:, 1]), np.searchsorted(y, hi[:, 1], "right")
+    n_x = ix1 - ix0
+    n_pairs = n_x * (iy1 - iy0)
+    tri = np.repeat(np.arange(len(area)), n_pairs)
+    offset = np.arange(n_pairs.sum()) - np.repeat(np.cumsum(n_pairs) - n_pairs, n_pairs)
+    jy, jx = np.divmod(offset, n_x[tri])
+    jy, jx = jy + iy0[tri], jx + ix0[tri]
+    px, py = x[jx], y[jy]
+    a, b, c, area = a[tri], b[tri], c[tri], area[tri]
+
+    # Hit: on the inner side of every edge, or within the tolerance of it.
+    hit = np.ones(len(tri), dtype=bool)
+    for p, q in ((a, b), (b, c), (c, a)):
+        ex, ey = q[:, 0] - p[:, 0], q[:, 1] - p[:, 1]
+        cross = ex * (py - p[:, 1]) - ey * (px - p[:, 0])
+        hit &= np.sign(area) * cross >= -tol * np.hypot(ex, ey)
+    weight_b = (
+        (px - a[:, 0]) * (c[:, 1] - a[:, 1]) - (py - a[:, 1]) * (c[:, 0] - a[:, 0])
+    ) / area
+    weight_c = (
+        (b[:, 0] - a[:, 0]) * (py - a[:, 1]) - (b[:, 1] - a[:, 1]) * (px - a[:, 0])
+    ) / area
+    z_hit = a[:, 2] + weight_b * (b[:, 2] - a[:, 2]) + weight_c * (c[:, 2] - a[:, 2])
+    roof = np.full(y.size * x.size, -np.inf)
+    np.maximum.at(roof, (jy * x.size + jx)[hit], z_hit[hit])
+    return (z[:, None] <= roof + tol).reshape(z.size, y.size, x.size)
+
+
 def select_z_plane(ds, z_level):
     """Select a single z-layer (kept as a size-1 dim) on every z-like dim present.
 
@@ -93,25 +183,21 @@ def select_z_plane(ds, z_level):
     return ds.isel(sel) if sel else ds
 
 
-def _horizontal_coord(ds, names):
+def _centre_coord(ds, names):
     for n in names:
         if n in ds.coords:
             return np.asarray(ds[n].values, dtype=float)
     return None
 
 
-def _vel_field_4z(state, n_time, n_z_slices=4):
-    """Velocity-magnitude field on ``n_z_slices`` evenly-spaced z-levels.
+def _vel_levels(state, n_time, z_idx, stl_path):
+    """Velocity magnitude on the levels ``z_idx``, NaN in the building cells.
 
-    Returns a ``(time, zlev, y, x)`` DataArray on nominal cell-centre coords.
-    Only the selected z-slices (across all time) are read from disk, bounding
-    memory to a small fraction of the full 3-D field. The components are combined
-    by index (matching ``get_velocity_magnitude_field``).
+    Returns a ``(time, z, y, x)`` DataArray on the cell centres. Only those
+    levels (across all time) are read from disk, bounding memory to a small
+    fraction of the full 3-D field. The components are combined by index
+    (matching ``get_velocity_magnitude_field``).
     """
-    zdim = next((d for d in _Z_DIMS if d in state.dims), None)
-    nz = state.sizes[zdim] if zdim is not None else 1
-    z_idx = evenly_spaced_levels(nz, n_z_slices)
-
     s = state.isel(time=slice(0, n_time))
 
     def _sel_var(name):
@@ -124,23 +210,47 @@ def _vel_field_4z(state, n_time, n_z_slices=4):
 
     vel = np.sqrt(_sel_var("u") ** 2 + _sel_var("v") ** 2 + _sel_var("w") ** 2)
 
-    coords = {}
-    y = _horizontal_coord(state, ("yt", "y"))
-    x = _horizontal_coord(state, ("xt", "x"))
-    if y is not None and y.size == vel.shape[2]:
-        coords["y"] = y
-    if x is not None and x.size == vel.shape[3]:
-        coords["x"] = x
-    return xarray.DataArray(vel, dims=("time", "zlev", "y", "x"), coords=coords)
+    z = _centre_coord(state, ("zt", "z"))[z_idx]
+    y = _centre_coord(state, ("yt", "y"))
+    x = _centre_coord(state, ("xt", "x"))
+    vel[:, stl_solid_mask(stl_path, z, y, x)] = np.nan
+    return xarray.DataArray(
+        vel, dims=("time", "z", "y", "x"), coords={"z": z, "y": y, "x": x}
+    )
 
 
-def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
+def _bracketing_levels(levels, heights):
+    """Indices of the ``levels`` that linear interpolation to ``heights`` reads:
+    the level at a height where there is one, else the levels around it."""
+    above = np.clip(np.searchsorted(levels, heights), 0, levels.size - 1)
+    below = np.clip(above - 1, 0, levels.size - 1)
+    on_level = np.isclose(levels[above], heights)
+    return np.unique(np.concatenate([above, below[~on_level]]))
+
+
+def _on_grid(field, grid):
+    """``field`` on the cell centres of ``grid``, interpolated linearly along
+    each axis whose centres differ (NaN reaches every point it touches)."""
+    for dim in ("z", "y", "x"):
+        if field.sizes[dim] == grid.sizes[dim] and np.allclose(field[dim], grid[dim]):
+            field = field.assign_coords({dim: grid[dim]})
+        else:
+            field = field.interp({dim: grid[dim]})
+    return field
+
+
+def streaming_state_rmse(true_state, esmda_state, stl_path, n_z_slices=4):
     """Per-timestep RMSE of |U| between truth and the ensemble-mean state.
 
-    Streams over ``n_z_slices`` evenly-spaced z-levels and all time steps rather
-    than materialising the full 4-D velocity field. When the truth and
-    assimilation grids differ, the truth planes are interpolated onto the
-    assimilation grid before differencing.
+    Streams over ``n_z_slices`` evenly-spaced z-levels of the ensemble grid and
+    all time steps rather than materialising the full 4-D velocity field; the
+    truth is read at the same heights. Building cells (:func:`stl_solid_mask`
+    of the case STL at ``stl_path``) are NaN on each grid before anything else,
+    so they never enter the mean: inside a building the backends write zeros
+    (PALM), near-zero leftovers (uDALES) or arbitrary values (pylbm's solid
+    nodes). When the grids differ, the truth is interpolated linearly onto the
+    ensemble's cell centres (only the levels it needs are read), and a cell
+    whose interpolation reaches a building cell drops out too.
     """
     true_s = (
         true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
@@ -153,28 +263,17 @@ def streaming_state_rmse(true_state, esmda_state, n_z_slices=4):
 
     n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
 
-    true_vel = _vel_field_4z(true_s, n_time, n_z_slices)
-    esmda_vel = _vel_field_4z(esmda_s, n_time, n_z_slices)
+    esmda_z = _centre_coord(esmda_s, ("zt", "z"))
+    esmda_vel = _vel_levels(
+        esmda_s, n_time, evenly_spaced_levels(esmda_z.size, n_z_slices), stl_path
+    )
+    true_z = _centre_coord(true_s, ("zt", "z"))
+    true_vel = _vel_levels(
+        true_s, n_time, _bracketing_levels(true_z, esmda_vel["z"].values), stl_path
+    )
 
-    have_coords = all(
-        "y" in da.coords and "x" in da.coords for da in (true_vel, esmda_vel)
-    )
-    grids_match = (
-        have_coords
-        and true_vel.sizes.get("y") == esmda_vel.sizes.get("y")
-        and true_vel.sizes.get("x") == esmda_vel.sizes.get("x")
-        and np.allclose(true_vel["y"], esmda_vel["y"])
-        and np.allclose(true_vel["x"], esmda_vel["x"])
-    )
-    if not grids_match and have_coords:
-        # Coordinates don't line up -> interpolate the truth onto the assim grid.
-        true_vel = true_vel.interp(y=esmda_vel["y"], x=esmda_vel["x"])
-
-    nz_common = min(true_vel.sizes["zlev"], esmda_vel.sizes["zlev"])
-    diff = np.asarray(true_vel.isel(zlev=slice(0, nz_common)).values) - np.asarray(
-        esmda_vel.isel(zlev=slice(0, nz_common)).values
-    )
-    return np.sqrt(np.nanmean(diff**2, axis=tuple(range(1, diff.ndim))))
+    diff = _on_grid(true_vel, esmda_vel).values - esmda_vel.values
+    return np.sqrt(np.nanmean(diff**2, axis=(1, 2, 3)))
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +862,7 @@ def extrapolated_centre_dims(ds, solver_name):
 def evenly_spaced_levels(n_levels, n_wanted):
     """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
 
-    Shared with :func:`_vel_field_4z` -- one implementation, so the accumulated
+    Shared with :func:`streaming_state_rmse` -- one implementation, so the accumulated
     slabs and the z-levels the ``|U|`` RMSE is streamed over cannot drift apart.
     """
     if n_levels < 1:

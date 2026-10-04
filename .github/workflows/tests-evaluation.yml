@@ -10,6 +10,8 @@ on:
     paths:
       - "libs/evaluation/**"
       - "tests/evaluation/**"
+      - "libs/pylbm/src/pylbm/stl_to_lbm.py"
+      - "geometries/xie_and_castro/**"
       - "src/**"
       - "pyproject.toml"
       - "pixi.lock"
