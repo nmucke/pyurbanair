@@ -36,13 +36,15 @@ device/dtype whenever the shape, device or dtype changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence, cast
 
 import torch
 import torch.nn.functional as F
 
 
-def _hann_taper(taper: int, *, device, dtype) -> torch.Tensor:
+def _hann_taper(
+    taper: int, *, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
     """1-D ramp rising over ``taper`` cells, flat ``1`` over the interior, and
     falling over ``taper`` cells, for a window of length ``n + 2*taper``.
 
@@ -58,7 +60,9 @@ def _hann_taper(taper: int, *, device, dtype) -> torch.Tensor:
     return 0.5 * (1.0 - torch.cos(torch.pi * k / (taper + 1)))
 
 
-def _window_1d(n: int, taper: int, *, device, dtype) -> torch.Tensor:
+def _window_1d(
+    n: int, taper: int, *, device: torch.device, dtype: torch.dtype
+) -> torch.Tensor:
     """Separable 1-D PoU factor of length ``n + 2*taper``: rising ramp, flat
     interior, falling ramp. Strictly positive everywhere."""
     ramp = _hann_taper(taper, device=device, dtype=dtype)
@@ -177,7 +181,11 @@ class DomainDecomposition:
     # Plan construction / caching
     # ------------------------------------------------------------------ #
     def _build_plan(
-        self, grid: tuple[int, int, int], *, device, dtype
+        self,
+        grid: tuple[int, int, int],
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> _Plan:
         n = self.interior_size
         h = self.halo
@@ -199,30 +207,26 @@ class DomainDecomposition:
                 pad_list.append(0)
             else:
                 pad_list.append((n - g % n) % n)
-        pad = tuple(pad_list)
-        padded = tuple(g + p for g, p in zip(grid, pad))
-        counts = tuple(p // n for p in padded)
+        pad = cast(tuple[int, int, int], tuple(pad_list))
+        padded = cast(tuple[int, int, int], tuple(g + p for g, p in zip(grid, pad)))
+        counts = cast(tuple[int, int, int], tuple(p // n for p in padded))
         num_patches = counts[0] * counts[1] * counts[2]
 
         # Coarse grid: pad the *original* grid up to a multiple of r, then pool.
-        coarse_pad = tuple((r - g % r) % r for g in grid)
-        coarse = tuple((g + p) // r for g, p in zip(grid, coarse_pad))
+        coarse_pad = cast(tuple[int, int, int], tuple((r - g % r) % r for g in grid))
+        coarse = cast(
+            tuple[int, int, int], tuple((g + p) // r for g, p in zip(grid, coarse_pad))
+        )
 
         # Separable PoU window over the (n + 2t) merge footprint.
         w1 = _window_1d(n, t, device=device, dtype=dtype)
-        window = (
-            w1.view(-1, 1, 1)
-            * w1.view(1, -1, 1)
-            * w1.view(1, 1, -1)
-        ).view(1, 1, n + 2 * t, n + 2 * t, n + 2 * t)
+        window = (w1.view(-1, 1, 1) * w1.view(1, -1, 1) * w1.view(1, 1, -1)).view(
+            1, 1, n + 2 * t, n + 2 * t, n + 2 * t
+        )
 
-        positional = self._build_positional(
-            grid, counts, device=device, dtype=dtype
-        )
+        positional = self._build_positional(grid, counts, device=device, dtype=dtype)
         neighbors = self._build_neighbors(counts, device=device)
-        merge_index = self._build_merge_index(
-            counts, padded, device=device
-        )
+        merge_index = self._build_merge_index(counts, padded, device=device)
 
         return _Plan(
             grid=grid,
@@ -239,7 +243,7 @@ class DomainDecomposition:
         )
 
     def _build_neighbors(
-        self, counts: tuple[int, int, int], *, device
+        self, counts: tuple[int, int, int], *, device: torch.device
     ) -> torch.Tensor:
         """Patch adjacency table ``(M, 6)``: flat indices of the
         ``(-z, +z, -y, +y, -x, +x)`` neighbours, ``-1`` where a face is on the
@@ -271,7 +275,7 @@ class DomainDecomposition:
         counts: tuple[int, int, int],
         padded: tuple[int, int, int],
         *,
-        device,
+        device: torch.device,
     ) -> torch.Tensor:
         """Flat destination indices for the vectorised merge scatter-add.
 
@@ -304,8 +308,8 @@ class DomainDecomposition:
         grid: tuple[int, int, int],
         counts: tuple[int, int, int],
         *,
-        device,
-        dtype,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> torch.Tensor:
         """Per-patch positional encoding of shape ``(M, n_pos, n+2h³)``.
 
@@ -328,8 +332,13 @@ class DomainDecomposition:
         ext = n + 2 * h
         if self.n_pos == 0:
             return torch.zeros(
-                counts[0] * counts[1] * counts[2], 0, ext, ext, ext,
-                device=device, dtype=dtype,
+                counts[0] * counts[1] * counts[2],
+                0,
+                ext,
+                ext,
+                ext,
+                device=device,
+                dtype=dtype,
             )
 
         # Global coordinate (in fine-cell units) of every cell of every
@@ -338,9 +347,9 @@ class DomainDecomposition:
         per_axis = []  # list of (count_a, ext) per-axis encodings
         for a in range(3):
             local = torch.arange(ext, device=device, dtype=dtype) - h
-            starts = (
-                torch.arange(counts[a], device=device, dtype=dtype) * n
-            ).view(-1, 1)
+            starts = (torch.arange(counts[a], device=device, dtype=dtype) * n).view(
+                -1, 1
+            )
             coords = starts + local.view(1, -1)  # (count_a, ext) global coords
             g = grid[a]
             if self.periodic[a]:
@@ -361,9 +370,24 @@ class DomainDecomposition:
         x = per_axis[2]  # (cx, ext)
 
         # patch index ordering: (pz, py, px) flattened row-major (z slowest).
-        pz = torch.arange(cz, device=device).view(cz, 1, 1).expand(cz, cy, cx).reshape(-1)
-        py = torch.arange(cy, device=device).view(1, cy, 1).expand(cz, cy, cx).reshape(-1)
-        px = torch.arange(cx, device=device).view(1, 1, cx).expand(cz, cy, cx).reshape(-1)
+        pz = (
+            torch.arange(cz, device=device)
+            .view(cz, 1, 1)
+            .expand(cz, cy, cx)
+            .reshape(-1)
+        )
+        py = (
+            torch.arange(cy, device=device)
+            .view(1, cy, 1)
+            .expand(cz, cy, cx)
+            .reshape(-1)
+        )
+        px = (
+            torch.arange(cx, device=device)
+            .view(1, 1, cx)
+            .expand(cz, cy, cx)
+            .reshape(-1)
+        )
 
         zc = z[pz]  # (M, ext)
         yc = y[py]  # (M, ext)
@@ -382,7 +406,7 @@ class DomainDecomposition:
     def plan(self, x: torch.Tensor) -> _Plan:
         """Return the cached :class:`_Plan` for ``x``'s spatial shape, building
         (and caching) it on ``x``'s device/dtype if needed."""
-        grid = tuple(int(s) for s in x.shape[-3:])
+        grid = cast(tuple[int, int, int], tuple(int(s) for s in x.shape[-3:]))
         key = (grid, x.device, x.dtype)
         if self._cache_key != key:
             self._plan = self._build_plan(grid, device=x.device, dtype=x.dtype)
@@ -433,9 +457,7 @@ class DomainDecomposition:
             x = F.pad(x, (0, 0, 0, 0, loz, hiz), mode=mode)
         return x
 
-    def _unfold_blocks(
-        self, x: torch.Tensor, plan: _Plan, edge: int
-    ) -> torch.Tensor:
+    def _unfold_blocks(self, x: torch.Tensor, plan: _Plan, edge: int) -> torch.Tensor:
         """Extract a uniform ``(B*M, C, edge, edge, edge)`` batch from the
         padded grid ``x`` via strided slicing (stride = interior_size).
 
@@ -448,9 +470,7 @@ class DomainDecomposition:
         cz, cy, cx = plan.counts
         # unfold creates a strided view of overlapping windows.
         blocks = (
-            x.unfold(2, edge, n)
-            .unfold(3, edge, n)
-            .unfold(4, edge, n)
+            x.unfold(2, edge, n).unfold(3, edge, n).unfold(4, edge, n)
         )  # (B, C, cz, cy, cx, edge, edge, edge)
         blocks = blocks.permute(0, 2, 3, 4, 1, 5, 6, 7).contiguous()
         return blocks.view(b * cz * cy * cx, c, edge, edge, edge)
@@ -489,15 +509,11 @@ class DomainDecomposition:
             return (pooled > 0).to(m.dtype)
         return (pooled >= 1.0 - 1e-6).to(m.dtype)
 
-    def prolong(
-        self, coarse: torch.Tensor, x_like: torch.Tensor
-    ) -> torch.Tensor:
+    def prolong(self, coarse: torch.Tensor, x_like: torch.Tensor) -> torch.Tensor:
         """Trilinearly upsample a coarse field back to the fine grid of
         ``x_like`` (shape ``(B, C, Nz, Ny, Nx)``)."""
         grid = tuple(int(s) for s in x_like.shape[-3:])
-        return F.interpolate(
-            coarse, size=grid, mode="trilinear", align_corners=False
-        )
+        return F.interpolate(coarse, size=grid, mode="trilinear", align_corners=False)
 
     def positional(self, x: torch.Tensor) -> torch.Tensor:
         """Per-patch positional encoding ``(M, n_pos, n+2h, n+2h, n+2h)`` for
@@ -541,9 +557,7 @@ class DomainDecomposition:
 
         # Crop the extended (n+2h) blocks down to the (n+2t) merge footprint.
         lo = h - t
-        merge_blocks = blocks[
-            :, :, lo : lo + edge, lo : lo + edge, lo : lo + edge
-        ]
+        merge_blocks = blocks[:, :, lo : lo + edge, lo : lo + edge, lo : lo + edge]
         # apply window
         win = plan.window  # (1, 1, edge, edge, edge), already on device/dtype
         merge_blocks = merge_blocks * win  # (B*M, C, edge, edge, edge)
@@ -563,7 +577,7 @@ class DomainDecomposition:
         # the interior, cancelled by the `taper` left-pad).
         idx = plan.merge_index  # (m * edge**3,) long
         src = merge_blocks.reshape(b, m, c, edge, edge, edge)
-        src = src.permute(0, 2, 1, 3, 4, 5).reshape(b, c, m * edge ** 3)
+        src = src.permute(0, 2, 1, 3, 4, 5).reshape(b, c, m * edge**3)
         acc = torch.zeros(b, c, acc_vol, device=device, dtype=dtype)
         acc.index_add_(2, idx, src)
         acc = acc.view(b, c, acc_z, acc_y, acc_x)
@@ -572,9 +586,9 @@ class DomainDecomposition:
         # It is batch-independent, so accumulate once (b=1) and broadcast in the
         # division below. The window is tiled across the m patches.
         win_src = (
-            win.reshape(1, 1, 1, edge ** 3)
-            .expand(1, 1, m, edge ** 3)
-            .reshape(1, 1, m * edge ** 3)
+            win.reshape(1, 1, 1, edge**3)
+            .expand(1, 1, m, edge**3)
+            .reshape(1, 1, m * edge**3)
         )
         norm = torch.zeros(1, 1, acc_vol, device=device, dtype=dtype)
         norm.index_add_(2, idx, win_src)

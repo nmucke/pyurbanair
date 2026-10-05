@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 import torch
+from neural_surrogates.decomposition import DomainDecomposition
 from torch import nn
 
 
@@ -79,8 +80,12 @@ class DomainDecompositionLoss(nn.Module):
         super().__init__()
         # ``None`` disables a term: it is neither computed nor logged. A bare
         # float keeps it active with that weight.
-        self.lambda_interface = None if lambda_interface is None else float(lambda_interface)
-        self.lambda_divergence = None if lambda_divergence is None else float(lambda_divergence)
+        self.lambda_interface = (
+            None if lambda_interface is None else float(lambda_interface)
+        )
+        self.lambda_divergence = (
+            None if lambda_divergence is None else float(lambda_divergence)
+        )
         self.lambda_coarse = None if lambda_coarse is None else float(lambda_coarse)
         self.velocity_channels = tuple(int(c) for c in velocity_channels)
         self.mask_loss = bool(mask_loss)
@@ -92,7 +97,7 @@ class DomainDecompositionLoss(nn.Module):
         state_next: torch.Tensor,
         target_next: torch.Tensor,
         geometry: torch.Tensor,
-        dd=None,
+        dd: DomainDecomposition | None = None,
     ) -> tuple[torch.Tensor, dict]:
         """Return ``(total_loss, terms)``.
 
@@ -164,7 +169,7 @@ class DomainDecompositionLoss(nn.Module):
         return diff.pow(2).mean()
 
     # ------------------------------------------------------------------ #
-    def _interface_term(self, info: dict, dd) -> torch.Tensor:
+    def _interface_term(self, info: dict, dd: DomainDecomposition) -> torch.Tensor:
         """Penalise disagreement between adjacent patches on their overlap.
 
         ``patch_pred`` is ``(B*M, C, blk, blk, blk)`` with ``blk = n + 2*taper``;
@@ -221,7 +226,9 @@ class DomainDecompositionLoss(nn.Module):
         return total_sq / total_elems
 
     @staticmethod
-    def _neighbor_indices(info: dict, dd, blocks: torch.Tensor) -> torch.Tensor:
+    def _neighbor_indices(
+        info: dict, dd: DomainDecomposition, blocks: torch.Tensor
+    ) -> torch.Tensor:
         """``(M, 6)`` neighbour table. Built from the model's grid via the
         cached plan; ``dd.plan`` was populated during the forward pass on the
         same grid, so a probe of that grid reuses the cache."""
@@ -271,7 +278,7 @@ class DomainDecompositionLoss(nn.Module):
 
     # ------------------------------------------------------------------ #
     def _coarse_term(
-        self, info: dict, target_next: torch.Tensor, dd
+        self, info: dict, target_next: torch.Tensor, dd: DomainDecomposition
     ) -> torch.Tensor:
         """MSE(coarse_pred, restrict_coarse(target_next))."""
         coarse_pred = info["coarse_pred"]

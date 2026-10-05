@@ -60,13 +60,14 @@ def snapshot_collate(batch: list[dict]) -> dict:
     geometry = batch[0]["geometry"]
     shared = all(item["geometry"] is geometry for item in batch)
     if not shared:
-        return default_collate(batch)
+        stacked: dict[str, torch.Tensor] = default_collate(batch)
+        return stacked
     keys_shared = {"geometry"}
     has_features = "geom_features" in batch[0]
     if has_features:
         keys_shared.add("geom_features")
     rest = [{k: v for k, v in item.items() if k not in keys_shared} for item in batch]
-    collated = default_collate(rest)
+    collated: dict[str, torch.Tensor] = default_collate(rest)
     collated["geometry"] = geometry.unsqueeze(0)
     if has_features:
         collated["geom_features"] = batch[0]["geom_features"].unsqueeze(0)

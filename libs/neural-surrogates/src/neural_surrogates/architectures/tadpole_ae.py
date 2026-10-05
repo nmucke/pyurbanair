@@ -75,6 +75,9 @@ The heavy vendored stack (``diffusers`` / ``timm``) is imported lazily inside
 
 from __future__ import annotations
 
+from typing import Literal
+
+import numpy.typing as npt
 import torch
 from neural_surrogates.architectures._tadpole_crop import CropSize, normalize_crop_size
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
@@ -155,8 +158,8 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         self,
         n_state_channels: int,
         n_params: int = 0,
-        size: str = "S",
-        latent_type: str = "sample",
+        size: Literal["S", "B", "L"] = "S",
+        latent_type: Literal["sample", "mode"] = "sample",
         encoder_crop_size: CropSize = 64,
         max_internal_batchsize: int | None = None,
         pretrained: str | dict = "none",
@@ -270,7 +273,9 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
     # -- pretrained-weight resolution -------------------------------------- #
 
     @staticmethod
-    def _resolve_pretrained(pretrained: str | dict, size: str):
+    def _resolve_pretrained(
+        pretrained: str | dict, size: str
+    ) -> tuple[str | None, str | None]:
         """Map the ``pretrained`` knob to ``(weight_encoder, weight_decoder)``.
 
         ``"none"`` -> ``(None, None)`` (random init). A mapping ``{"encoder",
@@ -302,13 +307,13 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
 
     # -- normalisation ----------------------------------------------------- #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean=None,
-        param_std=None,
+        state_mean: npt.ArrayLike,
+        state_std: npt.ArrayLike,
+        param_mean: npt.ArrayLike | None = None,
+        param_std: npt.ArrayLike | None = None,
         eps: float = 1e-6,
     ) -> None:
         """Install per-channel state standardisation statistics.

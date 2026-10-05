@@ -351,7 +351,8 @@ class GenerativeSpinup:
         )
         model.load_state_dict(torch.load(weights, map_location="cpu"), strict=True)
         dt = schema.get("history_dt_seconds")
-        model.set_conditioning_schema(  # type: ignore[operator]
+        # nn.Module attribute; torch is untyped in the pre-commit mypy env.
+        model.set_conditioning_schema(  # type: ignore[operator, unused-ignore]
             schema["param_vars"], None if dt is None else float(dt)
         )
         return model

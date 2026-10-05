@@ -495,7 +495,7 @@ class TadpoleLatentGenerator(nn.Module):
 
     # -- normalisation ------------------------------------------------------ #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_normalization(
         self,
         state_mean: Any = None,
@@ -535,7 +535,7 @@ class TadpoleLatentGenerator(nn.Module):
             t = t.clamp_min(eps)
         return t
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_latent_normalization(
         self, mean: Any, std: Any, *, eps: float | None = None
     ) -> None:
@@ -546,7 +546,7 @@ class TadpoleLatentGenerator(nn.Module):
         self.latent_std.copy_(self._to_buffer(self.latent_std, std, eps))
         self.latent_stats_installed.fill_(True)
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def compute_latent_normalization(
         self,
         batches: Iterable[Sequence[Any]],
@@ -682,7 +682,7 @@ class TadpoleLatentGenerator(nn.Module):
         geom_raw = latent.reshape(b, self.geom_latent_dim, *latent.shape[2:])
         return None, None, geom_raw
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _encode_raw(
         self,
         state: torch.Tensor,
@@ -1089,7 +1089,7 @@ class TadpoleLatentGenerator(nn.Module):
 
     # -- sampling ----------------------------------------------------------- #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def sample(
         self,
         params_hist: torch.Tensor,

@@ -184,7 +184,7 @@ class LatentFlowMatchingTrainer(BaseTraining):
         device = getattr(self._eager_model, "_device", self.device)
         return torch.Generator(device=device).manual_seed(self.val_seed)
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _validate(self) -> float:
         """Validation with fixed examples, order, noise and flow times.
 
@@ -202,7 +202,7 @@ class LatentFlowMatchingTrainer(BaseTraining):
             total = total + self._forward(batch, generator=generator).detach()
             n += 1
         self._val_terms = {}
-        return (total / max(n, 1)).item()
+        return float((total / max(n, 1)).item())
 
     # ------------------------------------------------------ checkpoint/resume #
     def fit(self) -> dict:

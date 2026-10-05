@@ -263,6 +263,9 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             trained_domain=trained_domain,
             model_dir=model_dir,
         )
+        # Guaranteed by _require_resolved; narrows the Optionals for mypy.
+        assert state_vars is not None and param_vars is not None
+        assert trained_output_frequency is not None and trained_domain is not None
 
         self.nx, self.ny, self.nz = int(nx), int(ny), int(nz)
         self.bounds = bounds

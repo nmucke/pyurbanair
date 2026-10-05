@@ -25,7 +25,9 @@ Alkin); see ``_upt/LICENSE``.
 from __future__ import annotations
 
 import inspect
+from typing import Any, Callable
 
+import numpy.typing as npt
 import torch
 from kappamodules.attention import (
     DotProductAttention1d,
@@ -52,8 +54,15 @@ ATTENTION_TYPES = {
     "transsolver": TranssolverAttention,
 }
 
+# (fluid_idx, input_pos, supernode_local, nbr_idx, nbr_mask) of one geometry.
+_PointGeometry = tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]
 
-def _build_attn_ctor(attention_type, seqlen, extra):
+
+def _build_attn_ctor(
+    attention_type: str | None, seqlen: int, extra: dict[str, Any] | None
+) -> Callable[..., nn.Module] | None:
     """Return an ``attn_ctor(**block_kwargs)`` for ``attention_type``, or ``None``.
 
     ``None`` is the sentinel for the default dot-product attention: the
@@ -91,7 +100,7 @@ def _build_attn_ctor(attention_type, seqlen, extra):
 
     accepted = set(inspect.signature(base.__init__).parameters)
 
-    def attn_ctor(**block_kwargs):
+    def attn_ctor(**block_kwargs: Any) -> nn.Module:
         merged = {**block_kwargs, **fixed}
         return base(**{k: v for k, v in merged.items() if k in accepted})
 
@@ -339,13 +348,17 @@ class UPT(nn.Module):
         )
 
         # lazy per-(D,H,W,device,dtype) coordinate cache (no giant buffers)
-        self._coords_cache: dict = {}
+        self._coords_cache: dict[
+            tuple[int, int, int, torch.device, torch.dtype], torch.Tensor
+        ] = {}
         # lazy cache of the (fluid_idx, positions, supernodes, neighbour graph)
         # derived from a geometry. The graph is a pure function of the (fixed)
         # geometry, so caching it turns the per-step ``cdist`` over every fluid
         # cell into a one-off cost -- important now that the supernode count is
         # large enough to resolve these dense grids.
-        self._geom_cache: dict = {}
+        self._geom_cache: dict[
+            tuple[int, int, torch.device, torch.dtype], _PointGeometry
+        ] = {}
 
     # -- normalisation -----------------------------------------------------
 
@@ -362,13 +375,13 @@ class UPT(nn.Module):
             return buffer
         return buffer.repeat(self.num_history_steps)
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean=None,
-        param_std=None,
+        state_mean: npt.ArrayLike,
+        state_std: npt.ArrayLike,
+        param_mean: npt.ArrayLike | None = None,
+        param_std: npt.ArrayLike | None = None,
         eps: float = 1e-6,
     ) -> None:
         """Install per-channel standardisation statistics (see ``normalize``).
@@ -380,7 +393,7 @@ class UPT(nn.Module):
         rather than dividing by zero.
         """
 
-        def _to(buf, value):
+        def _to(buf: torch.Tensor, value: npt.ArrayLike) -> torch.Tensor:
             t = torch.as_tensor(value, dtype=buf.dtype, device=buf.device)
             if t.shape != buf.shape:
                 raise ValueError(
@@ -398,7 +411,9 @@ class UPT(nn.Module):
 
     # -- geometry-derived helpers ------------------------------------------
 
-    def _grid_coords(self, d: int, h: int, w: int, device, dtype) -> torch.Tensor:
+    def _grid_coords(
+        self, d: int, h: int, w: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         """Integer ``(z, y, x)`` cell coordinates, ``(D*H*W, ndim)``, cached."""
         key = (d, h, w, device, dtype)
         coords = self._coords_cache.get(key)
@@ -415,7 +430,7 @@ class UPT(nn.Module):
             self._coords_cache[key] = coords
         return coords
 
-    def _select_supernodes(self, n: int, device) -> torch.Tensor:
+    def _select_supernodes(self, n: int, device: torch.device) -> torch.Tensor:
         """Deterministic strided supernode selection over ``[0, N)``.
 
         No randomness (required for ``test_rollout_batched_matches_per_member``),
@@ -426,7 +441,9 @@ class UPT(nn.Module):
         idx = torch.arange(0, n, stride, device=device)[:s]
         return idx
 
-    def _build_point_geometry(self, mask: torch.Tensor, coords: torch.Tensor):
+    def _build_point_geometry(
+        self, mask: torch.Tensor, coords: torch.Tensor
+    ) -> _PointGeometry:
         """Build fluid indices, positions, supernodes and neighbour tensors.
 
         ``mask`` is a single ``(D, H, W)`` geometry; ``coords`` are the grid cell

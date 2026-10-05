@@ -190,7 +190,7 @@ class SnapshotHistoryDataset(SnapshotDataset):
 
         # -- per-sample validation: times, params, lengths ------------------- #
         wanted = tuple(param_vars)
-        self.param_names = ()
+        self.param_names = tuple()
         self._params = []
         self._times: list[np.ndarray] = []
         hp = self.param_history_steps
