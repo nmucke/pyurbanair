@@ -32,8 +32,9 @@ tiling plan is rebuilt lazily by :class:`DomainDecomposition`).
 from __future__ import annotations
 
 import inspect
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
+import numpy.typing as npt
 import torch
 from neural_surrogates.decomposition import DomainDecomposition
 from torch import nn
@@ -117,8 +118,8 @@ class DomainDecomposed(nn.Module):
         n_state_channels: int,
         n_params: int,
         decomposition: dict,
-        fine_net,
-        coarse_net,
+        fine_net: nn.Module | Mapping[str, Any],
+        coarse_net: nn.Module | Mapping[str, Any],
         divergence_projection: bool = False,
         periodic_axes: Sequence[str] | None = None,
         fine_chunk_size: int | None = None,
@@ -197,7 +198,14 @@ class DomainDecomposed(nn.Module):
 
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _build_subnet(node, n_state_channels, n_params, *, extra_in_channels, role):
+    def _build_subnet(
+        node: nn.Module | Mapping[str, Any],
+        n_state_channels: int,
+        n_params: int,
+        *,
+        extra_in_channels: int,
+        role: str,
+    ) -> nn.Module:
         """Instantiate a sub-net from a Hydra ``_target_`` node (or pass an
         already-built ``nn.Module`` through), injecting the channel/param counts
         and the few keys the decomposition fixes.
@@ -221,7 +229,10 @@ class DomainDecomposed(nn.Module):
 
         target = node["_target_"]
         accepts = inspect.signature(get_class(target)).parameters
-        overrides = {"n_state_channels": n_state_channels, "n_params": n_params}
+        overrides: dict[str, object] = {
+            "n_state_channels": n_state_channels,
+            "n_params": n_params,
+        }
         if extra_in_channels:
             if "extra_in_channels" not in accepts:
                 raise ValueError(
@@ -242,10 +253,10 @@ class DomainDecomposed(nn.Module):
     # ------------------------------------------------------------------ #
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean,
-        param_std,
+        state_mean: npt.ArrayLike,
+        state_std: npt.ArrayLike,
+        param_mean: npt.ArrayLike,
+        param_std: npt.ArrayLike,
     ) -> None:
         """Forward training-split standardisation statistics to whichever inner
         nets support it (a no-op for nets without ``set_normalization`` or built
@@ -272,7 +283,9 @@ class DomainDecomposed(nn.Module):
         n = state_blocks.shape[0]
         chunk = self.fine_chunk_size or n
 
-        def call(s, p, g, e):
+        def call(
+            s: torch.Tensor, p: torch.Tensor, g: torch.Tensor, e: torch.Tensor
+        ) -> torch.Tensor:
             if self.fine_checkpoint and self.training and torch.is_grad_enabled():
                 from torch.utils.checkpoint import checkpoint
 

@@ -15,16 +15,17 @@ checkpoints trained before these options existed still load.
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 
 def _circular_spec(
-    pads: tuple[int, int, int],
+    pads: tuple[int, ...],
 ) -> tuple[int, int, int, int, int, int] | None:
     """``F.pad`` spec (last dim first) circularly padding the given (z, y, x)
     amounts, or ``None`` when nothing needs wrapping."""
@@ -53,7 +54,7 @@ class _ConvNeXtBlock3d(nn.Module):
             # receptive field; for k=7 this is ~16x fewer MACs in the
             # depthwise step, which dominates block cost at low channel
             # counts in 3D.
-            kernels = (
+            kernels: tuple[tuple[int, int, int], ...] = (
                 (kernel_size, 1, 1),
                 (1, kernel_size, 1),
                 (1, 1, kernel_size),
@@ -326,7 +327,7 @@ class UNetConvNeXt(nn.Module):
 
         self.encoder_stages = nn.ModuleList()
         self.downsamples = nn.ModuleList()
-        stage_kwargs = dict(
+        stage_kwargs: dict[str, Any] = dict(
             kernel_size=kernel_size,
             expansion=expansion,
             separable_dwconv=separable_dwconv,
@@ -374,10 +375,10 @@ class UNetConvNeXt(nn.Module):
 
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean,
-        param_std,
+        state_mean: npt.ArrayLike,
+        state_std: npt.ArrayLike,
+        param_mean: npt.ArrayLike,
+        param_std: npt.ArrayLike,
     ) -> None:
         """Install training-split standardisation statistics into the buffers.
 
@@ -390,7 +391,7 @@ class UNetConvNeXt(nn.Module):
             print("UNetConvNeXt(normalize=False): ignoring normalization stats")
             return
 
-        def _fill(buffer: torch.Tensor, values) -> None:
+        def _fill(buffer: torch.Tensor, values: npt.ArrayLike) -> None:
             vals = torch.as_tensor(
                 np.asarray(values), dtype=buffer.dtype, device=buffer.device
             ).reshape(-1)

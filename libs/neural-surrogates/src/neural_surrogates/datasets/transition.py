@@ -59,7 +59,7 @@ def transition_collate(batch: list[dict]) -> dict:
     if has_features:
         shared.add("geom_features")
     rest = [{k: v for k, v in item.items() if k not in shared} for item in batch]
-    collated = default_collate(rest)
+    collated: dict[str, torch.Tensor] = default_collate(rest)
     collated["geometry"] = geometry.unsqueeze(0)
     if has_features:
         collated["geom_features"] = batch[0]["geom_features"].unsqueeze(0)
@@ -191,7 +191,9 @@ class TransitionDataset(Dataset):
             )
 
         self._params: list[torch.Tensor] = []
-        self.param_names: tuple[str, ...] = ()
+        # tuple(), not (): mypy narrows () to tuple[()] and then treats the
+        # names-mismatch check below as unreachable.
+        self.param_names: tuple[str, ...] = tuple()
         self._traj_lengths: list[int] = []
 
         for state_path, param_path in zip(self._state_files, param_files):

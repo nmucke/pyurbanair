@@ -54,6 +54,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
@@ -317,13 +318,13 @@ class P3D(nn.Module):
             return buffer
         return buffer.repeat(self.num_history_steps)
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean=None,
-        param_std=None,
+        state_mean: npt.ArrayLike,
+        state_std: npt.ArrayLike,
+        param_mean: npt.ArrayLike | None = None,
+        param_std: npt.ArrayLike | None = None,
         eps: float = 1e-6,
     ) -> None:
         """Install per-channel standardisation statistics (see ``normalize``).
@@ -337,7 +338,7 @@ class P3D(nn.Module):
             print("P3D(normalize=False): ignoring normalization stats")
             return
 
-        def _to(buf: torch.Tensor, value) -> torch.Tensor:
+        def _to(buf: torch.Tensor, value: npt.ArrayLike) -> torch.Tensor:
             t = torch.as_tensor(
                 np.asarray(value), dtype=buf.dtype, device=buf.device
             ).reshape(-1)
@@ -530,7 +531,8 @@ class P3D(nn.Module):
                 feat = feat.expand(state.shape[0], *feat.shape[1:])
             pieces.append(feat)
         if self.param_conditioning == "channels" and self.n_params > 0:
-            b, d, h, w = state.shape[0], *state.shape[-3:]
+            b = state.shape[0]
+            d, h, w = state.shape[-3:]
             params_b = params[:, :, None, None, None].expand(b, self.n_params, d, h, w)
             pieces.append(params_b.to(dtype=x.dtype))
         elif self.param_conditioning == "native" and self.n_params > 0:

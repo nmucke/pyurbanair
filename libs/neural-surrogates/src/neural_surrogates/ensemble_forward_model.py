@@ -61,7 +61,9 @@ class NeuralSurrogateEnsembleForwardModel(BaseEnsembleForwardModel):
         # steps (ESMDA calls run_ensemble once per iteration).
         self._spinup_ensemble: Optional[BaseEnsembleForwardModel] = None
 
-    def _create_new_forward_model(  # type: ignore[override]
+    # Narrows the base's BaseForwardModel argument; pyurbanair is unresolved in the
+    # pre-commit mypy env, so the ignore is unused there.
+    def _create_new_forward_model(  # type: ignore[override, unused-ignore]
         self,
         forward_model: NeuralSurrogateForwardModel,
         experiment_base_dir: pathlib.Path,

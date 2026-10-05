@@ -160,7 +160,7 @@ class PatchTransitionDataset(TransitionDataset):
             (traj, t, p) for (traj, t) in self._index for p in range(self._num_patches)
         ]
 
-    def _read_spatial_grid(self, state_path: Path) -> tuple[int, int, int]:
+    def _read_spatial_grid(self, state_path: Path) -> tuple[int, ...]:
         """``(Nz, Ny, Nx)`` of the first state variable in ``state_path``."""
         import xarray as xr
 

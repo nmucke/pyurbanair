@@ -112,15 +112,11 @@ def solid_c_fluid_mask(
     try:
         nx, ny, nz = sizes["x"], sizes["y"], sizes["z"]
     except KeyError as exc:  # pragma: no cover - defensive
-        raise ValueError(
-            f"template_var must have x, y and z dims; got {dims}"
-        ) from exc
+        raise ValueError(f"template_var must have x, y and z dims; got {dims}") from exc
 
     idx = np.loadtxt(solid_c_path, skiprows=1, dtype=int)
     if idx.ndim != 2 or idx.shape[1] != 3:
-        raise ValueError(
-            f"{solid_c_path}: expected (n, 3) indices, got {idx.shape}"
-        )
+        raise ValueError(f"{solid_c_path}: expected (n, 3) indices, got {idx.shape}")
     if (
         idx.min() < 1
         or idx[:, 0].max() > nx
@@ -152,7 +148,5 @@ def nonzero_fluid_mask(
     when a backend ships no obstacle indicator. ``template`` must be a
     single snapshot (no ``time`` dimension).
     """
-    stacked = np.stack(
-        [np.asarray(template[v].values) for v in state_vars], axis=0
-    )
+    stacked = np.stack([np.asarray(template[v].values) for v in state_vars], axis=0)
     return (np.abs(stacked).sum(axis=0) != 0).astype(np.float32)

@@ -201,10 +201,13 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 
-# Vendored third-party autoencoder (neural_surrogates.architectures._tadpole):
-# kept byte-for-byte upstream, so it does not satisfy this repo's strict mypy.
+# Vendored third-party code (neural_surrogates.architectures._tadpole and
+# _upt): kept upstream, so it does not satisfy this repo's strict mypy.
 [[tool.mypy.overrides]]
-module = "neural_surrogates.architectures._tadpole.*"
+module = [
+  "neural_surrogates.architectures._tadpole.*",
+  "neural_surrogates.architectures._upt.*",
+]
 ignore_errors = true
 
 
