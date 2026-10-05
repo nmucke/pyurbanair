@@ -445,10 +445,17 @@ writes two ASCII files into `INPUT/`:
   at every fluid grid point, interpolating the target linearly in time.
 - `<name>_lsf` → `LSF_DATA`, physically **inert**. PALM requires
   `large_scale_forcing = .T.` whenever `nudging = .T.` (LSF0001), so this file
-  exists only to satisfy that constraint. All of its times sit past `end_time`,
-  which disables both halves via non-fatal paths — confirmed in a smoke run:
-  `LSF0012` (warning, `lsf_surf = FALSE`) and `LSF0016` (info,
-  `lsf_vert = FALSE`). The nudging term is then the only large-scale forcing.
+  exists only to satisfy that constraint. Its single surface row sits past
+  `end_time`, which turns `lsf_surf` off (`LSF0012`, warning); otherwise
+  `ls_forcing_surf` would overwrite `pt_surface` and `surface_pressure` with the
+  file's zeros. Its profile half is one all-zero block per NUDGING_DATA time:
+  it must share that time axis because of a PALM bug (below, #165). That keeps
+  `lsf_vert` on, but with zero content, so `ug`/`vg` are set to 0 (felt only
+  through Coriolis, off with `omega = 0`), `w_subs` is unused without
+  `large_scale_subsidence`, and the large-scale `pt`/`q` tendencies add zero.
+  Confirmed bit-for-bit (below). The nudging term is then the only large-scale
+  forcing. If a periodic run ever turns Coriolis on, `ug = vg = 0` is no
+  longer inert.
 
 **u and v only.** The `w`/`pt`/`q` columns carry PALM's `-999999` sentinel in
 every row, which switches nudging off for those quantities — PALM confirms with
@@ -478,33 +485,39 @@ Costs and limitations:
   `ValueError` naming the conflict rather than letting PALM abort mid-run. If
   PALM-side pollutant dispersion is needed, run under `inflow_outflow`.
 - `lsf_exception = .T.` disables an upstream guard; LSF-with-topography is not
-  an upstream-supported combination. Our use is benign (the LSF file is inert;
+  an upstream-supported combination. Our use is benign (the LSF content is zero;
   only the nudging term is active), but it is the feature's main external risk.
-- **Periodic runs read the nudging profiles out of bounds (issue #165), a
-  PALM bug that our inert LSF_DATA triggers.** `nudge_ref`
+- **PALM's `nudge_ref` reads the nudging profiles on the LSF time axis
+  (issue #165, fixed on our side).** `nudge_ref`
   (`large_scale_forcing_nudging_mod.f90:1457-1485`, called every step from
   `time_integration.f90:754`) interpolates the NUDGING_DATA profiles on
   `time_vert`, the LSF_DATA time axis, instead of `timenudge` (which `nudge`
-  uses correctly). Our inert LSF_DATA puts its only time past `end_time`, so
-  for every run time `nt` ends at 0 and `nudge_ref` fills `u_init`/`v_init`
-  from `unudge(:,0)`/`vnudge(:,0)`, one column before the arrays (allocated
-  `1:ntnudge`).
-  - **Correctness (the real problem):** `u_init`/`v_init` are the reference
-    for the top boundary condition and the Rayleigh damping layer, so **every
-    periodic run may depend on uninitialised memory**. Crash-free runs from
-    identical inputs are bit-identical here, but that only shows the values
-    are reproducible for one heap layout, not that they are inert; they may
-    differ across machines, allocators or PALM builds. How much past periodic
-    results were affected is not yet measured.
-  - **Symptom:** when that memory is unmapped (heap layout, so ASLR) the run
-    dies with SIGBUS at the first step: about 1 run in 20 on the 30×40×16
-    Xie & Castro grid on macOS. It crashes at once under lldb with ASLR on,
-    never with it off (lldb's default), and never in 60 runs with nudging
-    off. Not the stack (a heap read, with 64 MB of stack) and not our build
-    flags. Not checked on Linux.
-  - **Open:** a setup-side fix (give LSF_DATA the NUDGING_DATA time axis so
-    `time_vert == timenudge`, keeping its content zero, after checking the
-    then-active LSF forcing stays inert) and an upstream report.
+  uses correctly), and writes them into `u_init`/`v_init`. Before the fix our
+  LSF_DATA had only one time, past `end_time`, so `nt` ended at 0 and
+  `nudge_ref` read `unudge(:,0)`/`vnudge(:,0)`, one column before the arrays
+  (allocated `1:ntnudge`). When that memory was unmapped (heap layout, so
+  ASLR) the run died with SIGBUS, about 1 run in 20 on the 30×40×16 Xie &
+  Castro grid on macOS. LSF_DATA's profile half now shares NUDGING_DATA's time
+  axis, so `time_vert == timenudge` and the read stays in bounds. The
+  upstream report is drafted in the #165 PR.
+  - **What it did to past results.** `u_init`/`v_init` enter the run only
+    through the top Dirichlet boundary (`u_p(nzt+1) = u_init(nzt+1)`,
+    `dynamics_mod.f90:1110`); Rayleigh damping would use them too, but
+    `rayleigh_damping_factor` is 0 (PALM's default, never set by pypalm). On
+    macOS the out-of-bounds column held zeros, so old periodic runs had a
+    **u = v = 0 lid** instead of the nudging target (4.8 m/s at the top
+    of the default periodic Xie & Castro run). Fixing it changes the 180 s mean
+    profile by +1.7 m/s at z = 31 m, +0.2 m/s at 27 m, +0.03 m/s at 23 m and
+    ≤ 0.003 m/s at or below 19 m (canopy included); the time-mean u at the
+    z = 2 m sensors moves ≤ 0.01 m/s. Results that use the upper quarter of
+    the domain (full-state metrics, profiles) need rerunning; results built
+    from near-ground sensors barely change. This holds only for the macOS
+    build: elsewhere the column may hold other values or crash.
+  - **Inertness check** (scratch PALM build with `nudge_ref` patched to
+    `timenudge`, same inputs): patched build with the old LSF_DATA (nudging
+    only) and with the new one give bit-identical 3D and time-series output,
+    for static and time-varying params, and so does the stock build with the
+    new LSF_DATA.
 
 **Escape hatch.** `nudging_config.enabled: false` restores the old un-driven
 periodic staging exactly.

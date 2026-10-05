@@ -143,6 +143,48 @@ def test_periodic_time_varying_block_count(tmp_path: pathlib.Path) -> None:
     assert _nudge_block_count(fm) == len(times) + 2
 
 
+def _block_times(path: pathlib.Path) -> list[float]:
+    """Times of the ``# <t>`` profile markers (skips header and bare ``#``)."""
+    times = []
+    for ln in path.read_text().splitlines():
+        if ln.startswith("#"):
+            try:
+                times.append(float(ln.lstrip("#").strip()))
+            except ValueError:
+                pass
+    return times
+
+
+@pytest.mark.parametrize("time_varying", [False, True], ids=["static", "varying"])
+def test_periodic_lsf_shares_nudging_time_axis(
+    tmp_path: pathlib.Path, time_varying: bool
+) -> None:
+    """LSF_DATA's profiles share NUDGING_DATA's time axis; its surface stays off.
+
+    PALM's ``nudge_ref`` interpolates the nudging profiles on the LSF time axis,
+    so any other axis reads them out of bounds (issue #165). The surface row
+    must stay past ``end_time`` so ``lsf_surf`` remains disabled.
+    """
+    fm = _make_model(tmp_path, *_PERIODIC)
+    params = (
+        _time_varying_params([0.0, 50.0, 100.0], [0.0, 30.0, 60.0])
+        if time_varying
+        else _static_params()
+    )
+    fm._apply_inflow_settings(params)
+
+    nudge_times = _block_times(fm.nudge_driver_path)
+    assert _block_times(fm.lsf_driver_path) == nudge_times
+
+    lines = fm.lsf_driver_path.read_text().splitlines()
+    surface_time = float(lines[3].split()[0])  # first row after the 3 headers
+    assert surface_time > nudge_times[-1]
+    profile_rows = [ln.split() for ln in lines[5:] if not ln.startswith("#")]
+    assert profile_rows and all(
+        float(v) == 0.0 for row in profile_rows for v in row[1:]
+    )
+
+
 # --- inflow_outflow (driver-table rows 2 & 3) -------------------------------
 
 
