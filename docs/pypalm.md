@@ -480,23 +480,31 @@ Costs and limitations:
 - `lsf_exception = .T.` disables an upstream guard; LSF-with-topography is not
   an upstream-supported combination. Our use is benign (the LSF file is inert;
   only the nudging term is active), but it is the feature's main external risk.
-- **Intermittent SIGBUS at the first time step (issue #165), a PALM bug.**
-  `nudge_ref` (`large_scale_forcing_nudging_mod.f90:1457-1485`, called every
-  step from `time_integration.f90:754`) interpolates the NUDGING_DATA profiles
-  on `time_vert`, the LSF_DATA time axis, instead of `timenudge` (which `nudge`
+- **Periodic runs read the nudging profiles out of bounds (issue #165), a
+  PALM bug that our inert LSF_DATA triggers.** `nudge_ref`
+  (`large_scale_forcing_nudging_mod.f90:1457-1485`, called every step from
+  `time_integration.f90:754`) interpolates the NUDGING_DATA profiles on
+  `time_vert`, the LSF_DATA time axis, instead of `timenudge` (which `nudge`
   uses correctly). Our inert LSF_DATA puts its only time past `end_time`, so
-  for every run time `nt` ends at 0 and `nudge_ref` reads
-  `unudge(:,0)`/`vnudge(:,0)`, one column before the arrays (allocated
-  `1:ntnudge`), into `u_init`/`v_init`. If that memory is unmapped the run
-  dies with SIGBUS. That depends on the heap layout and so on ASLR: about 1 run
-  in 20 on the 30×40×16 Xie & Castro grid on macOS. It crashes at once under
-  lldb with ASLR on, never with it off (lldb's default), and never in 60 runs
-  with nudging off. Crash-free runs from identical inputs are bit-identical,
-  but the `u_init`/`v_init` values they use (top boundary, damping reference)
-  come from out-of-bounds memory. It is not the stack (the fault is a heap
-  read, with 64 MB of stack available) and not our build flags. Not checked on
-  Linux, where the same out-of-bounds read happens but may land in mapped
-  memory.
+  for every run time `nt` ends at 0 and `nudge_ref` fills `u_init`/`v_init`
+  from `unudge(:,0)`/`vnudge(:,0)`, one column before the arrays (allocated
+  `1:ntnudge`).
+  - **Correctness (the real problem):** `u_init`/`v_init` are the reference
+    for the top boundary condition and the Rayleigh damping layer, so **every
+    periodic run may depend on uninitialised memory**. Crash-free runs from
+    identical inputs are bit-identical here, but that only shows the values
+    are reproducible for one heap layout, not that they are inert; they may
+    differ across machines, allocators or PALM builds. How much past periodic
+    results were affected is not yet measured.
+  - **Symptom:** when that memory is unmapped (heap layout, so ASLR) the run
+    dies with SIGBUS at the first step: about 1 run in 20 on the 30×40×16
+    Xie & Castro grid on macOS. It crashes at once under lldb with ASLR on,
+    never with it off (lldb's default), and never in 60 runs with nudging
+    off. Not the stack (a heap read, with 64 MB of stack) and not our build
+    flags. Not checked on Linux.
+  - **Open:** a setup-side fix (give LSF_DATA the NUDGING_DATA time axis so
+    `time_vert == timenudge`, keeping its content zero, after checking the
+    then-active LSF forcing stays inert) and an upstream report.
 
 **Escape hatch.** `nudging_config.enabled: false` restores the old un-driven
 periodic staging exactly.
