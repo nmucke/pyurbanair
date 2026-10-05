@@ -34,6 +34,7 @@ from neural_surrogates import (
 )
 from neural_surrogates import ensemble_forward_model as ens_mod
 from neural_surrogates import forward_model as fm_mod
+from neural_surrogates.datasets.transition import TransitionDataset
 from neural_surrogates.geometry import stl_to_fluid_mask
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -725,3 +726,42 @@ def test_training_data_clone_shares_spinup_backend(tmp_path) -> None:
 
     clone = template.clone_for_member(tmp_path / "exp", "000")
     assert clone.spinup_forward_model is template.spinup_forward_model
+
+
+def test_training_and_inference_params_agree(tmp_path) -> None:
+    """A step is driven by the parameters at its start, in training and inference.
+
+    The corpus is stamped like ``generate_data.py`` writes it after #163: frames
+    on ``tf … T`` and the parameters interpolated from the knots onto those
+    times. Rolling the surrogate from frame ``t`` must see the same ``K``
+    parameter rows as the training sample anchored at ``t``.
+    """
+    tf, t_len, K, t = 2.0, 6, 3, 1
+    knots = xr.Dataset(
+        {
+            "inflow_angle": ("time", [10.0, 40.0, 0.0]),
+            "velocity_magnitude": ("time", [3.0, 5.0, 4.0]),
+        },
+        coords={"time": [0.0, 5.0, t_len * tf]},
+    )
+    times = tf * np.arange(1, t_len + 1)
+    state_dir, param_dir = tmp_path / "state" / "train", tmp_path / "param" / "train"
+    state_dir.mkdir(parents=True)
+    param_dir.mkdir(parents=True)
+    xr.Dataset(
+        {
+            v: (("time", "z", "y", "x"), np.ones((t_len, NZ, NY, NX)))
+            for v in STATE_VARS
+        },
+        coords={"time": times},
+    ).to_netcdf(state_dir / "sample_0000.nc")
+    knots.interp(time=times).to_netcdf(param_dir / "sample_0000.nc")
+
+    item = TransitionDataset(
+        tmp_path, "train", param_vars=PARAM_VARS, geometry_var=None, pushforward_steps=K
+    )[t]
+
+    model = _make_model(output_frequency=tf, trained_output_frequency=tf)
+    window = knots.assign_coords(time=knots.time - times[t])  # frame t at time 0
+    schedule = model._param_schedule(window, K)
+    np.testing.assert_allclose(schedule.cpu().numpy(), item["params_n"].numpy())

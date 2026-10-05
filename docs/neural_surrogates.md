@@ -48,7 +48,21 @@ training_data/<model>_<name>/
 Every state file has a parameter file at the same relative path under
 `param/`: the time-varying parameters linearly interpolated onto the state's
 output times, scalar parameters (pyudales `pressure_gradient_magnitude`) kept
-as scalars. State files carry the attrs `geometry` (the STL stem, or the case
+as scalars.
+
+**Parameter time convention.** A network step from frame `t` to `t+1` is
+driven by the parameters at its start, the time of frame `t`: training pairs
+frame `t` with param row `t`, and inference
+(`NeuralSurrogateForwardModel._param_schedule`) interpolates the parameters
+onto `k · tf` for step `k` (#164). This needs the frames stamped at their
+physical times, `tf … T`. Compatible corpora are those whose state `time`
+starts at `output_frequency`: pylbm, PALM and spun-up uDALES corpora generated
+after #163, and uDALES corpora without spin-up of any version. pylbm, PALM and
+spun-up uDALES corpora from before #163 start at `time = 0`; their param row
+`t` is one `tf` before the step's start, and models trained on them see a
+one-`tf` offset at inference.
+
+State files carry the attrs `geometry` (the STL stem, or the case
 name) and `spinup_time_s` (the spin-up actually used). `data.save_vars` lists
 the time-varying variables kept; time-independent ones such as `blanking` are
 always kept.
@@ -750,7 +764,7 @@ Key behaviours:
 | **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
 | **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the caller must supply warm-start states (see below), so a cold start (`state is None`) raises. With `spinup_source: generative` a cold start is **sampled** from a trained latent generator conditioned on the member's current parameters (Part I, §40); the CFD backend is neither built nor run. |
 | **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
-| **Parameters** | Time-varying inflow params are interpolated onto the internal step times in the trained `param_vars` order; scalar params are broadcast. |
+| **Parameters** | Time-varying inflow params are interpolated onto the start of each internal step, `k · trained_output_frequency` (§1, parameter time convention), in the trained `param_vars` order; scalar params are broadcast. |
 | **State history** | `num_history_steps` (`H`) is read **off the built network** — there is no forward-model config knob. The rollout buffer is `(B, H·C, *grid)`, oldest first; each step feeds it to the net, appends the `(B, C, *grid)` prediction, drops the oldest frame, and **emits the prediction** rather than the wider buffer. `_output_schedule()` (`n_internal`, `emit_steps`) is unchanged, so a history rollout emits exactly as many frames as an `H=1` one and substepping stays orthogonal. At `H=1` it is the historic loop, tensor for tensor. Seeding policy below. |
 
 `NeuralSurrogateEnsembleForwardModel`
