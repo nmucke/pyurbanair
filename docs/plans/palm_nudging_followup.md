@@ -7,7 +7,8 @@ What is left is outside the code.
 
 PALM's `nudge_ref` interpolates the NUDGING_DATA profiles on the LSF_DATA time
 axis (`time_vert`) instead of `timenudge`. Our inert LSF_DATA had its only time
-past `end_time`, so every **periodic** PALM run before #173 read
+past `end_time`, so every **periodic** PALM run with the nudging driver
+(`nudging_config.enabled`, the default) before #173 read
 `unudge(:,0)`/`vnudge(:,0)` out of bounds into `u_init`/`v_init`, which set the
 top boundary (Rayleigh damping is off, `rayleigh_damping_factor = 0`).
 

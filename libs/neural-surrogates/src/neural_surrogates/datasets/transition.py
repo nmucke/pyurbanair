@@ -191,6 +191,8 @@ class TransitionDataset(Dataset):
             )
 
         self._params: list[torch.Tensor] = []
+        # tuple(), not (): mypy narrows () to tuple[()] and then treats the
+        # names-mismatch check below as unreachable.
         self.param_names: tuple[str, ...] = tuple()
         self._traj_lengths: list[int] = []
 

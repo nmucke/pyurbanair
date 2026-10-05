@@ -12,9 +12,10 @@ alike. That only holds if the frames carry their physical times. Corpora
 generated before #163 by pylbm, PALM or spun-up uDALES don't: their frames are
 labelled one output interval early (`0 … T−tf` instead of `tf … T`), so each
 frame's parameter row is the value from one `tf` too early. The current
-training corpora are spun-up uDALES (`configs/surrogate/generate_data.yaml`,
-300 s spin-up, `tf = 5 s`), so they are affected, and so are the weights trained
-on them: inference now runs with a one-`tf` (5 s) parameter lag.
+training corpora are spun-up uDALES (`configs/surrogate/generate_data.yaml`:
+an adaptive spin-up of at least 300 s, `tf = 5 s`), so they are affected, and
+so are the weights trained on them: inference now runs with a one-`tf` (5 s)
+parameter lag.
 
 The effect is small: the training parameters are AR(2) series with a 300 s
 correlation length (`configs/params/surrogate_training_data.yaml`). It only
@@ -29,9 +30,10 @@ one starting at `output_frequency` is fine (`docs/neural_surrogates.md`,
 1. **Relabel the existing corpus (no solver runs).** The flow fields are
    correct; only the labels are off. Per sample: `state.time += tf`; parameter
    row `t` ← old row `t+1`; drop the last frame, whose correct parameter isn't
-   stored. Scalar parameters are unchanged. A short script in `scripts/tools/`,
-   run once per corpus, with a test on a tiny corpus that the relabelled pairs
-   equal those of a freshly generated one.
+   stored (the datasets expect a parameter row for every frame). Scalar
+   parameters are unchanged. A short script in `scripts/tools/`, run once per
+   corpus, with a test on a tiny corpus that the relabelled pairs equal those of
+   a freshly generated one.
 2. **Regenerate** with `scripts/surrogate/generate_data.py`. Worth it if the
    corpus changes anyway (new geometries, parameter ranges).
 

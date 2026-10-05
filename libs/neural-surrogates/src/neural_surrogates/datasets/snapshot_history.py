@@ -190,6 +190,8 @@ class SnapshotHistoryDataset(SnapshotDataset):
 
         # -- per-sample validation: times, params, lengths ------------------- #
         wanted = tuple(param_vars)
+        # tuple(), not (): mypy narrows () to tuple[()] and then treats the
+        # names-mismatch check below as unreachable.
         self.param_names = tuple()
         self._params = []
         self._times: list[np.ndarray] = []
