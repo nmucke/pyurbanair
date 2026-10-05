@@ -69,7 +69,7 @@ def test_write_warmstart_driver_static_case(tmp_path):
     assert ds["init_atmosphere_w"].dims == ("zw", "y", "x")
 
     # lod=2 attribute on every init field (the reader gates LOD=2 on this).
-    for name in ("u", "v", "w", "pt"):
+    for name in ("u", "v", "w", "pt", "qv"):
         assert int(ds[f"init_atmosphere_{name}"].attrs["lod"]) == 2
 
     # Constant input fields round-trip through interpolation unchanged.
@@ -77,6 +77,7 @@ def test_write_warmstart_driver_static_case(tmp_path):
     assert np.allclose(ds["init_atmosphere_v"].values, V_CONST, atol=1e-4)
     assert np.allclose(ds["init_atmosphere_w"].values, W_CONST, atol=1e-4)
     assert np.allclose(ds["init_atmosphere_pt"].values, 300.0)
+    assert np.all(ds["init_atmosphere_qv"].values == 0.0)
 
 
 def test_vertical_axes_are_zero_based(tmp_path):
@@ -98,7 +99,7 @@ def test_no_fill_or_nan_values(tmp_path):
     driver = tmp_path / "urban_run_dynamic"
     write_warmstart_driver(driver, _make_state(), BOUNDS, NX, NY, NZ, pt_surface=300.0)
     ds = xarray.open_dataset(driver, mask_and_scale=False)
-    for name in ("u", "v", "w", "pt"):
+    for name in ("u", "v", "w", "pt", "qv"):
         vals = ds[f"init_atmosphere_{name}"].values
         assert np.all(np.isfinite(vals))
         assert not np.any(vals == _FILL)

@@ -90,8 +90,12 @@ The single-run entry point called by `BaseForwardModel.__call__`.
 - **Cold start** (`state is None`): PALM initialises from analytic profiles
   (`initializing_actions = 'set_constant_profiles'`).
 - **Warm start** (`state` provided): calls `_apply_warmstart(state)`, which
-  writes `init_atmosphere_u/v/w/pt` (LOD=2) into the `_dynamic` NetCDF via
+  writes `init_atmosphere_u/v/w/pt/qv` (LOD=2) into the `_dynamic` NetCDF via
   `write_warmstart_driver` and sets `initializing_actions = 'read_from_file'`.
+  PALM then needs an initial field for every prognostic quantity it carries
+  (`DRV0006`): `pt` unless `neutral`, `qv` whenever `humidity` is on, which the
+  periodic nudging driver forces (see §8). Both are always written; `qv = 0`
+  is exact because q stays identically 0 in these runs.
   The initial velocity-perturbation kick is suppressed (`create_disturbances =
   .false.`) to avoid shocking the injected field — mirroring what PALM's own
   restart path does. **No SGS-TKE is carried** across windows; PALM re-derives
@@ -465,7 +469,10 @@ an upstream bypass slated for revision), and `humidity` (LSF0003).
 Costs and limitations:
 
 - `humidity = .T.` on all periodic runs: one extra prognostic equation,
-  physically inert at q ≡ 0 with zero fluxes.
+  physically inert at q ≡ 0 with zero fluxes (`q_surface = 0`, no surface or
+  wall water flux, q nudging off; a cold-start `q` output is exactly 0). A warm
+  start must still supply `init_atmosphere_qv` (`DRV0006`); the driver writes
+  zeros.
 - **Passive scalars are unavailable** under the nudging driver — PALM forbids
   `large_scale_forcing` with `passive_scalar` (LSF0004). Staging raises a
   `ValueError` naming the conflict rather than letting PALM abort mid-run. If
@@ -473,6 +480,31 @@ Costs and limitations:
 - `lsf_exception = .T.` disables an upstream guard; LSF-with-topography is not
   an upstream-supported combination. Our use is benign (the LSF file is inert;
   only the nudging term is active), but it is the feature's main external risk.
+- **Periodic runs read the nudging profiles out of bounds (issue #165), a
+  PALM bug that our inert LSF_DATA triggers.** `nudge_ref`
+  (`large_scale_forcing_nudging_mod.f90:1457-1485`, called every step from
+  `time_integration.f90:754`) interpolates the NUDGING_DATA profiles on
+  `time_vert`, the LSF_DATA time axis, instead of `timenudge` (which `nudge`
+  uses correctly). Our inert LSF_DATA puts its only time past `end_time`, so
+  for every run time `nt` ends at 0 and `nudge_ref` fills `u_init`/`v_init`
+  from `unudge(:,0)`/`vnudge(:,0)`, one column before the arrays (allocated
+  `1:ntnudge`).
+  - **Correctness (the real problem):** `u_init`/`v_init` are the reference
+    for the top boundary condition and the Rayleigh damping layer, so **every
+    periodic run may depend on uninitialised memory**. Crash-free runs from
+    identical inputs are bit-identical here, but that only shows the values
+    are reproducible for one heap layout, not that they are inert; they may
+    differ across machines, allocators or PALM builds. How much past periodic
+    results were affected is not yet measured.
+  - **Symptom:** when that memory is unmapped (heap layout, so ASLR) the run
+    dies with SIGBUS at the first step: about 1 run in 20 on the 30×40×16
+    Xie & Castro grid on macOS. It crashes at once under lldb with ASLR on,
+    never with it off (lldb's default), and never in 60 runs with nudging
+    off. Not the stack (a heap read, with 64 MB of stack) and not our build
+    flags. Not checked on Linux.
+  - **Open:** a setup-side fix (give LSF_DATA the NUDGING_DATA time axis so
+    `time_vert == timenudge`, keeping its content zero, after checking the
+    then-active LSF forcing stays inert) and an upstream report.
 
 **Escape hatch.** `nudging_config.enabled: false` restores the old un-driven
 periodic staging exactly.
