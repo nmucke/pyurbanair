@@ -732,14 +732,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
     ) -> torch.Tensor:
         """Per-internal-step parameter vectors of shape ``(n_internal, P)``.
 
-        Time-varying params are linearly interpolated onto the network's
-        internal step times ``(k+1) * trained_output_frequency``; scalar
+        Step ``k`` advances the state from ``k * trained_output_frequency`` to
+        ``(k+1) * trained_output_frequency`` and is driven by the parameters at
+        its start, ``k * trained_output_frequency``, as in training (the
+        ``TransitionDataset`` pairs frame ``t`` with param row ``t``).
+        Time-varying params are linearly interpolated onto those times; scalar
         params are broadcast.
         """
         if params is None:
             raise ValueError("NeuralSurrogateForwardModel requires params.")
 
-        target_times = (np.arange(n_internal) + 1) * self.trained_output_frequency
+        target_times = np.arange(n_internal) * self.trained_output_frequency
         columns: list[np.ndarray] = []
         for name in self.param_vars:
             if name not in params:
