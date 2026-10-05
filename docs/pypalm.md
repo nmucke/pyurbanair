@@ -90,8 +90,12 @@ The single-run entry point called by `BaseForwardModel.__call__`.
 - **Cold start** (`state is None`): PALM initialises from analytic profiles
   (`initializing_actions = 'set_constant_profiles'`).
 - **Warm start** (`state` provided): calls `_apply_warmstart(state)`, which
-  writes `init_atmosphere_u/v/w/pt` (LOD=2) into the `_dynamic` NetCDF via
+  writes `init_atmosphere_u/v/w/pt/qv` (LOD=2) into the `_dynamic` NetCDF via
   `write_warmstart_driver` and sets `initializing_actions = 'read_from_file'`.
+  PALM then needs an initial field for every prognostic quantity it carries
+  (`DRV0006`): `pt` unless `neutral`, `qv` whenever `humidity` is on, which the
+  periodic nudging driver forces (see §8). Both are always written; `qv = 0`
+  is exact because q stays identically 0 in these runs.
   The initial velocity-perturbation kick is suppressed (`create_disturbances =
   .false.`) to avoid shocking the injected field — mirroring what PALM's own
   restart path does. **No SGS-TKE is carried** across windows; PALM re-derives
@@ -465,7 +469,10 @@ an upstream bypass slated for revision), and `humidity` (LSF0003).
 Costs and limitations:
 
 - `humidity = .T.` on all periodic runs: one extra prognostic equation,
-  physically inert at q ≡ 0 with zero fluxes.
+  physically inert at q ≡ 0 with zero fluxes (`q_surface = 0`, no surface or
+  wall water flux, q nudging off; a cold-start `q` output is exactly 0). A warm
+  start must still supply `init_atmosphere_qv` (`DRV0006`); the driver writes
+  zeros.
 - **Passive scalars are unavailable** under the nudging driver — PALM forbids
   `large_scale_forcing` with `passive_scalar` (LSF0004). Staging raises a
   `ValueError` naming the conflict rather than letting PALM abort mid-run. If

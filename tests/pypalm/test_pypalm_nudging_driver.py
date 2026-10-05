@@ -277,3 +277,28 @@ def test_warmstart_periodic_nudging_ordering(tmp_path: pathlib.Path) -> None:
     assert _switch(fm, "initializing_actions") == "'read_from_file'"
     # Warm window sees spinup_time=0 -> static nudging still exactly two blocks.
     assert _nudge_block_count(fm) == 2
+
+
+@pytest.mark.parametrize("bc", [_PERIODIC, _INFLOW_OUTFLOW], ids=["periodic", "io"])
+def test_warmstart_driver_holds_every_initial_field(
+    tmp_path: pathlib.Path, bc: list[str]
+) -> None:
+    """The warm-start driver carries every field PALM's read_from_file needs.
+
+    Mirrors netcdf_data_input_mod.f90:2364-2546 (DRV0006): u/v/w always,
+    ``pt`` unless ``neutral``, ``qv`` when ``humidity`` is on (the nudging
+    driver forces it on, LSF0003).
+    """
+    fm = _make_model(tmp_path, *bc)
+    fm.disable_spinup()
+    fm._apply_inflow_settings(_static_params())
+    fm._apply_warmstart(_make_state())
+
+    required = {"u", "v", "w"}
+    if _switch(fm, "neutral") != ".true.":
+        required.add("pt")
+    if _switch(fm, "humidity") == ".true.":
+        required.add("qv")
+    with xarray.open_dataset(fm.dynamic_driver_path) as driver:
+        missing = {n for n in required if f"init_atmosphere_{n}" not in driver}
+    assert not missing
