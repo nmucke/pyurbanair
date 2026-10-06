@@ -8,7 +8,9 @@ launch exactly as before. The unit tests mock ``make`` and the launch; the
 """
 
 import pathlib
+import re
 import subprocess
+import sys
 from typing import Any, Optional
 
 import numpy as np
@@ -17,7 +19,7 @@ import xarray
 from hydra.utils import instantiate
 from pylbm import forward_model as forward_model_module
 from pylbm.forward_model import ForwardModel
-from pylbm.utils import compile_utils
+from pylbm.utils import compile_utils, infile_utils
 from pylbm.utils.build_tree_utils import (
     compute_build_signature,
     read_build_stamp,
@@ -212,6 +214,37 @@ def test_run_sets_omp_num_threads_only_above_one(
         assert env["OMP_NUM_THREADS"] == str(ncpu)
 
 
+@pytest.mark.parametrize("openmp", [False, True])  # type: ignore[misc]
+def test_create_infile_runs_openmp_build_on_one_thread(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, openmp: bool
+) -> None:
+    model = _make_model(tmp_path, ncpu=2 if openmp else 1)
+    model.dirs.executable_path.parent.mkdir(parents=True, exist_ok=True)
+    model.dirs.executable_path.touch()
+    envs: list[dict[str, str]] = []
+
+    def fake_run(args: list[str], *, env: dict, **_: Any) -> Any:
+        envs.append(dict(env))
+        pathlib.Path("infile.in").touch()  # cwd is the experiment dir
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(infile_utils.subprocess, "run", fake_run)
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    infile_utils.create_infile(dirs=model.dirs, verbose=False, openmp=openmp)
+
+    [env] = envs
+    assert env.get("OMP_NUM_THREADS") == ("1" if openmp else None)
+
+
+def _links_openmp_runtime(binary: pathlib.Path) -> bool:
+    """Whether ``binary`` links an OpenMP runtime (libomp or libgomp)."""
+    tool = ["otool", "-L"] if sys.platform == "darwin" else ["ldd"]
+    listing = subprocess.run(
+        [*tool, str(binary)], capture_output=True, text=True, check=True
+    ).stdout
+    return re.search(r"lib(g)?omp\b", listing) is not None
+
+
 def _tiny_run(
     root: pathlib.Path, ncpu: int, seed: Optional[str]
 ) -> tuple[xarray.Dataset, str]:
@@ -233,6 +266,8 @@ def _tiny_run(
     instantiate(cfg.model.prepare, forward_model=model)
     stamp = read_build_stamp(model.dirs.lbm_src_path.parent)
     assert stamp is not None and stamp.get("openmp", False) == (ncpu > 1)
+    # The stamp only says what was asked for; the binary shows MP=1 took effect.
+    assert _links_openmp_runtime(model.dirs.executable_path) == (ncpu > 1)
     seed_file = model.dirs.experiment_dir / "seed_0000.orig"
     if seed is not None:
         seed_file.write_text(seed)
@@ -249,5 +284,5 @@ def test_openmp_run_matches_serial(tmp_path: pathlib.Path) -> None:
     assert serial.sizes == threaded.sizes
     for name in ("u", "v", "w"):
         assert np.isfinite(serial[name]).all()
-        # Bit for bit, inflow turbulence included (checked at 1/2/4 threads).
+        # Bit for bit, inflow turbulence included (checked at 1/2/4/8 threads).
         np.testing.assert_array_equal(threaded[name], serial[name], err_msg=name)

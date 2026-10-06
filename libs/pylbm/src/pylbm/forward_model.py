@@ -264,6 +264,12 @@ class ForwardModel(BaseForwardModel):
                 f"the wrong (serial vs OpenMP) build for ncpu={self.ncpu}. {remedy}"
             )
 
+        if self.ncpu > 1 and recorded.get("cuda") is True:
+            logger.warning(
+                "ncpu=%d is ignored: the prebuilt LBM binary is a CUDA build, to "
+                "which OpenMP does not apply.",
+                self.ncpu,
+            )
         logger.info(
             "Reusing LBM binary at %s (build stamp matches current sources)",
             self.dirs.executable_path,
@@ -291,7 +297,7 @@ class ForwardModel(BaseForwardModel):
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
-            create_infile(dirs=self.dirs, verbose=self.verbose)
+            create_infile(dirs=self.dirs, verbose=self.verbose, openmp=self.ncpu > 1)
         elif self.verbose:
             logger.info(
                 "infile.in already exists at %s, skipping creation.",

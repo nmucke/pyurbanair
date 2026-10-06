@@ -191,9 +191,11 @@ it deep-copies the template `ForwardModel`, copies all files from the template's
 
 Parallel dispatch, failure policy, CPU pinning, and forkserver context are all
 in `BaseEnsembleForwardModel` (see codebase_guide.md §3). With `ncpu > 1` each
-member runs `ncpu` OpenMP threads, so set `ensemble.num_cpus_per_process` to
-`ncpu`: on Linux each worker is pinned to that many cores, and more threads than
-pinned cores just oversubscribe them.
+member runs `ncpu` OpenMP threads, so set `ensemble.num_cpus_per_process` to at
+least `ncpu`. That is advice, not checked anywhere: on Linux each worker is pinned
+to `num_cpus_per_process` cores, and more threads than pinned cores just
+oversubscribe them. macOS has no CPU pinning, so there the OS schedules all
+`num_parallel_processes * ncpu` threads freely.
 
 ---
 

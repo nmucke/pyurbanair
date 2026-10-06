@@ -266,7 +266,9 @@ class Infile:
             self._parse_file()
 
 
-def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
+def create_infile(
+    dirs: "DirectoryPaths", verbose: bool = True, openmp: bool = False
+) -> None:
     """
     Create infile.in by running the boltzmann executable.
 
@@ -278,6 +280,8 @@ def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
         dirs: DirectoryPaths object containing all relevant paths (including experiment_dir
               and executable_path).
         verbose: If True, print output. If False, suppress output.
+        openmp: True for an OpenMP build: it then runs on one thread, since it
+              only writes infile.in (unset, OpenMP would start one per core).
 
     Raises:
         FileNotFoundError: If executable doesn't exist.
@@ -303,6 +307,8 @@ def create_infile(dirs: "DirectoryPaths", verbose: bool = True) -> None:
     if "PIXI_ENVIRONMENT" not in env:
         env["PIXI_ENVIRONMENT"] = str(dirs.pixi_env_path)
     _augment_runtime_library_paths(env=env, pixi_env_path=dirs.pixi_env_path)
+    if openmp:
+        env["OMP_NUM_THREADS"] = "1"
 
     # Change to experiment directory and run executable
     original_cwd = pathlib.Path.cwd()
