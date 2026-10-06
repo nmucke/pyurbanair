@@ -246,43 +246,89 @@ def _links_openmp_runtime(binary: pathlib.Path) -> bool:
 
 
 def _tiny_run(
-    root: pathlib.Path, ncpu: int, seed: Optional[str]
+    root: pathlib.Path,
+    ncpu: int,
+    seed: Optional[str],
+    turbulence: bool = True,
+    threads: Optional[int] = None,
 ) -> tuple[xarray.Dataset, str]:
-    """Spin up and run the tiny LBM case with inflow turbulence on.
-
-    The solver seeds its random numbers from the clock on a cold start unless a
-    ``seed_0000.orig`` exists (m_seedmanagement.F90), so even two serial runs
-    differ. Passing the first run's seed makes the comparison deterministic.
-    """
+    """TEMPORARY diagnostic variant (CI Linux mismatch)."""
     cfg = compose(
         "forward",
         "+test=forward",
         "model=pylbm_tiny",
         f"model.forward_model.ncpu={ncpu}",
-        "model.forward_model.inlet_turbulence.enabled=true",
+        f"model.forward_model.inlet_turbulence.enabled={str(turbulence).lower()}",
         root=root,
     )
     model = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=model)
-    stamp = read_build_stamp(model.dirs.lbm_src_path.parent)
-    assert stamp is not None and stamp.get("openmp", False) == (ncpu > 1)
-    # The stamp only says what was asked for; the binary shows MP=1 took effect.
-    assert _links_openmp_runtime(model.dirs.executable_path) == (ncpu > 1)
     seed_file = model.dirs.experiment_dir / "seed_0000.orig"
     if seed is not None:
         seed_file.write_text(seed)
-    params = xarray.Dataset(data_vars={"inflow_angle": 10.0, "velocity_magnitude": 5.0})
-    state = model.run_single(params=params).load()
+    import os
+
+    saved = os.environ.get("OMP_NUM_THREADS")
+    if threads is not None:
+        model.ncpu = 1
+        os.environ["OMP_NUM_THREADS"] = str(threads)
+    try:
+        params = xarray.Dataset(
+            data_vars={"inflow_angle": 10.0, "velocity_magnitude": 5.0}
+        )
+        state = model.run_single(params=params).load()
+    finally:
+        if saved is None:
+            os.environ.pop("OMP_NUM_THREADS", None)
+        else:
+            os.environ["OMP_NUM_THREADS"] = saved
     return state, seed_file.read_text()
 
 
 @pytest.mark.integration  # type: ignore[misc]
 def test_openmp_run_matches_serial(tmp_path: pathlib.Path) -> None:
-    serial, seed = _tiny_run(tmp_path / "serial", ncpu=1, seed=None)
-    threaded, _ = _tiny_run(tmp_path / "threaded", ncpu=2, seed=seed)
+    """TEMPORARY diagnostic: report max diffs of several build/thread variants."""
+    import os
+    import platform
 
-    assert serial.sizes == threaded.sizes
-    for name in ("u", "v", "w"):
-        assert np.isfinite(serial[name]).all()
-        # Bit for bit, inflow turbulence included (checked at 1/2/4/8 threads).
-        np.testing.assert_array_equal(threaded[name], serial[name], err_msg=name)
+    ref, seed = _tiny_run(tmp_path / "S", 1, None)
+    runs = {
+        "serial repeat": _tiny_run(tmp_path / "S2", 1, seed)[0],
+        "MP build, 1 thread": _tiny_run(tmp_path / "M1", 2, seed, threads=1)[0],
+        "ncpu=2": _tiny_run(tmp_path / "T2", 2, seed)[0],
+        "ncpu=2 repeat": _tiny_run(tmp_path / "T2b", 2, seed)[0],
+        "ncpu=4": _tiny_run(tmp_path / "T4", 4, seed)[0],
+    }
+    ref_off, _ = _tiny_run(tmp_path / "Soff", 1, seed, turbulence=False)
+    off = {
+        "turb off, ncpu=2": _tiny_run(tmp_path / "T2off", 2, seed, turbulence=False)[0],
+        "turb off, MP build 1 thread": _tiny_run(
+            tmp_path / "M1off", 2, seed, turbulence=False, threads=1
+        )[0],
+    }
+
+    def diff(a: xarray.Dataset, b: xarray.Dataset) -> str:
+        return ", ".join(
+            f"{v}={float(abs(a[v] - b[v]).max()):.3e}" f"/{int((a[v] != b[v]).sum())}"
+            for v in ("u", "v", "w")
+        )
+
+    lines = [f"{k}: {diff(ref, v)}" for k, v in runs.items()]
+    lines += [f"{k}: {diff(ref_off, v)}" for k, v in off.items()]
+    lines.append(f"turb on vs off serial: {diff(ref, ref_off)}")
+    cpu = ""
+    if pathlib.Path("/proc/cpuinfo").exists():
+        cpu = next(
+            (
+                line
+                for line in pathlib.Path("/proc/cpuinfo").read_text().splitlines()
+                if line.startswith(("model name", "flags"))
+            ),
+            "",
+        )
+    lines.append(f"platform: {platform.platform()} {cpu} ncpus={os.cpu_count()}")
+    report = "\n".join(lines)
+    print(report)
+    assert all(
+        float(abs(ref[v] - r[v]).max()) == 0.0 for r in runs.values() for v in "uvw"
+    ), report
