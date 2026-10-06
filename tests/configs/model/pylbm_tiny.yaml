@@ -5,3 +5,4 @@ defaults:
 
 forward_model:
   cuda: false
+  ncpu: 1

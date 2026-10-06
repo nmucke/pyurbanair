@@ -38,7 +38,8 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             temp_dir: Temporary directory for ensemble experiments.
             results_dir: Directory where results will be saved.
             num_parallel_processes: Number of parallel processes to use.
-            num_cpus_per_process: Number of CPUs per process (not used for LBM).
+            num_cpus_per_process: Number of CPUs each worker is pinned to; set it
+                to the forward model's ``ncpu`` (its OpenMP thread count).
             failure: Failure-handling policy mapping (see
                 ``BaseEnsembleForwardModel``).
         """
@@ -52,9 +53,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             failure=failure,
         )
 
-    def _create_new_forward_model(  # type: ignore[override]
+    def _create_new_forward_model(  # type: ignore[override, unused-ignore]
         self,
-        forward_model: ForwardModel,  # type: ignore[override]
+        forward_model: ForwardModel,  # type: ignore[override, unused-ignore]
         experiment_base_dir: pathlib.Path,
         experiment_name: str,
     ) -> ForwardModel:

@@ -16,6 +16,11 @@ forward_model:
   # rather than silently drop to a far slower CPU build); `cuda: false` forces
   # gfortran.
   cuda: auto
+  # OpenMP threads per run. >1 builds with MP=1 and runs with OMP_NUM_THREADS;
+  # ignored (with a warning) by a CUDA build. In an ensemble, set
+  # ensemble.num_cpus_per_process to match, and mind that the hardware is
+  # DRAM-bandwidth-bound: little gain beyond the physical performance cores.
+  ncpu: 1
   verbose: false
   boundary_condition: inflow_outflow
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
