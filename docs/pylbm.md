@@ -245,8 +245,8 @@ handles the full build chain:
    needs no rebuild; going between 1 and >1 does. Compilation failure raises
    `RuntimeError` with the end of the build output.
 6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
-   cuda/netcdf mode, `openmp: true` when built with `MP=1`, and hashes of the compiled-in sources next to the binary
-   (see §1). A failed build writes no stamp, so the next compile retries it.
+   cuda/netcdf mode, `openmp: true` when built with `MP=1`, and hashes of the
+   compiled-in sources next to the binary (see §1). A failed build writes no stamp, so the next compile retries it.
 
 **Platforms.** The gfortran build runs on Linux and macOS (osx-arm64) with the
 pixi env's compilers, FFTW and NetCDF. On macOS, `LIBDIR` also carries
@@ -567,8 +567,15 @@ compares the build stamp and raises instead of running.
 
 ### OpenMP thread scaling, and why two runs never match
 
-`ncpu > 1` reproduces the serial run bit for bit (checked at 1/2/4/8 threads,
-with inflow turbulence on) — but only with the same random seed. On a cold start
+With the same random seed (below), `ncpu > 1` reproduces the serial run bit
+for bit on macOS arm64 (checked at 1/2/4/8 threads, inflow turbulence on). On
+x86-64 Linux it does too without inflow turbulence, but with it the OpenMP build
+differs from the serial build by up to 2e-5 m/s on the tiny case. That
+difference is the same at 1, 2 and 4 threads (with `OMP_NUM_THREADS=1` too) and
+reproducible run to run, so it is code generation: the inflow-turbulence loops
+compiled with `-fopenmp` under `-Ofast -march=native` round differently, not
+thread scheduling, the RNG (drawn outside parallel regions) or reductions (none).
+The thread count never changes the result. Seeds matter far more: on a cold start
 `m_seedmanagement.F90` seeds `RANDOM_NUMBER` from the clock unless
 `seed_0000.orig` exists in the experiment dir, and `compile()` wipes the seed
 files, so two serial runs of one config already differ (~4e-5 m/s on the tiny
@@ -579,8 +586,11 @@ other's experiment dir before comparing them
 Speed-up on an Apple M-series laptop (4 performance + 6 efficiency cores):
 ~3.2x at 4 threads (3.3x on 120x120x24, 3.1x on 400x400x32), only 3.9x at 8 —
 little gain beyond the physical performance cores, as the solver is
-DRAM-bandwidth-bound. The default thread stack sufficed up to 400x400x32, so no
-`OMP_STACKSIZE` is set. For an ensemble, weigh `ncpu` against
+DRAM-bandwidth-bound. `ulimit -s` in `run()` raises only the main thread's
+stack; the OpenMP worker threads get the runtime's default (`OMP_STACKSIZE`).
+That default sufficed up to 400x400x32 on macOS (not measured on Linux), so no
+`OMP_STACKSIZE` is set; if large grids segfault only with `ncpu > 1`, export a
+bigger one. For an ensemble, weigh `ncpu` against
 `ensemble.num_parallel_processes` on the same budget of cores.
 
 ### Silent CUDA failures (`verbose=false`)

@@ -38,8 +38,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
             temp_dir: Temporary directory for ensemble experiments.
             results_dir: Directory where results will be saved.
             num_parallel_processes: Number of parallel processes to use.
-            num_cpus_per_process: Number of CPUs each worker is pinned to; set it
-                to the forward model's ``ncpu`` (its OpenMP thread count).
+            num_cpus_per_process: Number of CPUs each worker is pinned to (Linux
+                only); set it to at least the forward model's ``ncpu`` (its
+                OpenMP thread count). Advice only, not checked.
             failure: Failure-handling policy mapping (see
                 ``BaseEnsembleForwardModel``).
         """
