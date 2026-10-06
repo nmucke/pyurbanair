@@ -285,7 +285,11 @@ def render(
     if opts.cmap not in colormaps:
         raise ValueError(f"Unknown matplotlib color map {opts.cmap!r}")
     reader = ArtifactReader(
-        run_root, member=opts.member, reduction=opts.reduction, max_cells=opts.max_cells
+        run_root,
+        member=opts.member,
+        reduction=opts.reduction,
+        max_cells=opts.max_cells,
+        geometry=opts.geometry,
     )
     probe_times = [
         time

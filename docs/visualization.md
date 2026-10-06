@@ -3,7 +3,7 @@
 The `visualization` library (`libs/visualization`, import `visualization`)
 renders a completed forward run into a standalone HTML viewer bundle without
 importing or running a CFD backend. It depends on neither `pyurbanair` nor the
-MCP server; MCP queues the same service as a separate visualization job, and a
+MCP server, only on `evaluation` for the buildings' solid mask; MCP queues the same service as a separate visualization job, and a
 failed render never changes the simulation's numerical artifacts. It is an
 editable dependency of the `dev`, `mcp` and `rendering` Pixi environments.
 
@@ -26,6 +26,17 @@ print(url)
 # Keep the process/server alive while browsing. Close explicitly when finished.
 # server.close()
 ```
+
+From the command line, `python -m visualization <run dir> <bundle dir>`
+renders with the default options, the ensemble mean velocity for an ensemble
+and the smallest stride that fits `max_frames`, plus the 3D view when a child
+process can render offscreen with PyVista/VTK (2D only otherwise, e.g. in
+`dev`); `workflows/forward_workflow.sh` runs it in the `rendering` environment
+into `<run dir>/viewer`.
+`python -m visualization --serve <bundle dir>` serves a bundle through
+`BundleAssetServer` and prints its URL. Don't use `python -m http.server`: it
+ignores HTTP byte ranges, so the viewer cannot seek in the movies and every
+panel stays on its first frame.
 
 The output directory must be new. `viewer_manifest.json` appears atomically only
 after completion. Interrupted/failed directories contain partial products and
@@ -63,7 +74,11 @@ Components shown under `mean_speed` are still mean components; the derived speed
 fields are the mean of member magnitudes. Spatially changing grids are rejected.
 
 `blanking != 0` means solid; no buildings are inferred from velocity zeros.
-Missing masks produce a warning. Slices and virtual probes use the nearest cell
+No backend writes `blanking`, so without it the reader takes the solid cells
+from the buildings' STL, `geometry` or else the run config's
+`geometry.stl_path` (resolved from the run dir upwards, then the working
+directory), through `evaluation.turbulence.stl_solid_mask`: the mask the state
+metrics use. Without either the reader warns. Slices and virtual probes use the nearest cell
 centre and retain requested and actual coordinates. Requests outside the
 cell-centre domain are errors. Solid/missing probe samples are JSON `null` and
 CSV empty cells. Valid zero velocity remains valid data. Probes are simulated
@@ -141,8 +156,9 @@ synchronizes every visible panel and the probe cursor through each view's own
 time mapping. Panels show their actual held sample times. Downloads are offered
 per panel, with responsive charts and fullscreen support.
 Metadata is inserted as text, never HTML. Native controls remain until the
-custom controller initializes. Serve an exported bundle using a local static
-server; direct `file://` JSON fetches are not supported.
+custom controller initializes. Serve an exported bundle with a server that
+supports HTTP byte ranges (`python -m visualization --serve`); playback seeks
+in the movies, and direct `file://` JSON fetches are not supported.
 
 ## Optional 3D
 
@@ -160,11 +176,11 @@ pixi run -e rendering python -c \
 ```
 
 Set `render_3d: true` for a speed-colored slice with instantaneous streamlines,
-optionally displaying a matching STL through `geometry`. Geometry uses the same
+showing the buildings' STL (`geometry`, or the run config's). Geometry uses the same
 metre coordinates, unit scale and no vertical exaggeration. Nonoverlapping STL
 bounds are rejected; overlapping bounds alone cannot establish precise alignment,
-so users must supply the matching geometry. With STL geometry an explicit state
-mask is required to prevent lines crossing buildings. The regular 2D products
+so the STL must match the run. With STL geometry a mask (saved or derived from
+that STL) is required to prevent lines crossing buildings. The regular 2D products
 remain available if the optional 3D render raises a recoverable error. If 3D
 frames were completed before encoding fails or times out, the viewer retains
 their PNG sequence and records the movie failure in its warnings. A partial 3D
@@ -179,7 +195,9 @@ in flattened data. Nonuniform axes are supported. Every interpolation cell
 touching a masked or invalid point is removed, so streamline integration stops
 at the conservative fluid mesh boundary. Seeds are deterministic; explicit
 seeds outside fluid interpolation cells are rejected. The default inlet grid
-filters invalid seeds. Limits are 128 seeds and 2,000 integration steps.
+(12 across, at 0, 10, 25 and 50% of the height) filters invalid seeds. The
+default camera looks from upstream-left and above, so +x flow runs left to
+right. Limits are 128 seeds and 2,000 integration steps.
 `camera` is `[position, focal_point, up_vector]`. These are instantaneous
 streamlines, not particle trajectories. Contexts close in `finally` blocks.
 

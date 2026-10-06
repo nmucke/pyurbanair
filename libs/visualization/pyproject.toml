@@ -4,10 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
-# Leaf library: reads a forward run's state.nc and renders the HTML viewer.
-# Deliberately no pyurbanair, no backend, no MCP server. PyVista/VTK (3D) are
-# optional and imported lazily; they come from the `rendering` pixi env.
+# Reads a forward run's state.nc and renders the HTML viewer. Deliberately no
+# pyurbanair, no backend, no MCP server; `evaluation` only for the buildings'
+# solid mask. PyVista/VTK (3D) are optional and imported lazily; they come from
+# the `rendering` pixi env.
 dependencies = [
+    "evaluation",
     "numpy>=2.3.5,<3",
     "xarray>=2025.12.0,<2026",
     "netcdf4>=1.7.3,<2",
@@ -41,3 +43,4 @@ pyyaml = ">=6.0.2,<7"
 
 [tool.pixi.pypi-dependencies]
 visualization = { path = ".", editable = true }
+evaluation = { path = "../evaluation", editable = true }
