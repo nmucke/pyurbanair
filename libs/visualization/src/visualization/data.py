@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import xarray as xr
 import yaml
+from evaluation.turbulence import stl_solid_mask
 
 AXES = {
     "x": ("x", "xt", "xm", "xu"),
@@ -31,6 +32,15 @@ def contained(root: Path, relative: str) -> Path:
     if not path.is_relative_to(root.resolve()):
         raise ValueError(f"Artifact path escapes its root: {relative}")
     return path
+
+
+def _locate(path: str | Path, root: Path) -> Path | None:
+    """A run config's repository-relative path, from the run dir up or the cwd."""
+    path = Path(path)
+    if path.is_absolute():
+        return path if path.is_file() else None
+    candidates = [parent / path for parent in root.parents] + [Path.cwd() / path]
+    return next((c.resolve() for c in candidates if c.is_file()), None)
 
 
 def _coordinates(ds: xr.Dataset) -> dict[str, np.ndarray]:
@@ -139,6 +149,10 @@ class ArtifactReader:
     ``run_root`` is a forward run directory (``scripts/run_forward.py``): one
     ``state.nc`` with numeric ``time`` in seconds and an ``ensemble`` dimension
     only for ensembles. Its ``config.yaml``, when present, names backend and case.
+
+    Without a ``blanking`` variable the solid cells come from the buildings' STL:
+    ``geometry`` or else the config's ``geometry.stl_path``, through
+    ``evaluation.turbulence.stl_solid_mask``, the mask the metrics use.
     """
 
     def __init__(
@@ -148,6 +162,7 @@ class ArtifactReader:
         member: Any = None,
         reduction: str | None = None,
         max_cells: int = 8_000_000,
+        geometry: str | Path | None = None,
     ):
         self.root = Path(run_root).resolve()
         self.member = member
@@ -163,6 +178,14 @@ class ArtifactReader:
         config = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
         self.backend = str((config.get("model") or {}).get("name", "unknown"))
         self.case = str(config.get("case_name", self.root.name))
+        stl = geometry or (config.get("geometry") or {}).get("stl_path")
+        self.geometry = _locate(stl, self.root) if stl else None
+        if geometry and self.geometry is None:
+            raise ValueError(f"Geometry STL not found: {geometry}")
+        self.solid = None
+        self.warnings = []
+        if stl and self.geometry is None:
+            self.warnings.append(f"Case STL {stl} not found; buildings not masked")
         with xr.open_dataset(self.path, decode_times=False) as ds:
             if "time" not in ds.coords:
                 raise ValueError("State artifacts require an explicit time coordinate")
@@ -178,6 +201,18 @@ class ArtifactReader:
             if not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
                 raise ValueError("State times must be finite and strictly increasing")
             members = list(ds.ensemble.values) if "ensemble" in ds.dims else [None]
+            if self.geometry is not None and "blanking" not in ds:
+                coords = _coordinates(ds)
+                solid = stl_solid_mask(
+                    self.geometry, coords["z"], coords["y"], coords["x"]
+                )
+                self.solid = xr.DataArray(
+                    solid.astype(np.int8), dims=("z", "y", "x"), coords=coords
+                )
+        if self.geometry is not None:
+            self.sources.append(
+                {"path": str(self.geometry), "sha256": fingerprint(self.geometry)}
+            )
         self.ensemble = len(members) > 1
         if self.ensemble and member is None and reduction is None:
             raise ValueError(
@@ -195,12 +230,14 @@ class ArtifactReader:
 
     def frame(self, time: float) -> xr.Dataset:
         frames = []
-        warnings = set()
+        warnings = set(self.warnings)
         with xr.open_dataset(self.path, decode_times=False) as source:
             snapshot = source.isel(time=self.positions[time], drop=True)
             snapshot = snapshot[
                 [name for name in ("u", "v", "w", "blanking") if name in snapshot]
             ]
+            if self.solid is not None:
+                snapshot["blanking"] = self.solid
             cells = sum(snapshot[name].size for name in ("u", "v", "w"))
             if "ensemble" in snapshot.dims:
                 cells //= snapshot.sizes["ensemble"]

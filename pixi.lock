@@ -2233,6 +2233,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/wmctrl-0.5-pyh707e725_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/xarray-2025.12.0-pyhcf101f3_0.conda
       - pypi: ./
+      - pypi: ./libs/evaluation
       - pypi: ./libs/mcp-server
       - pypi: ./libs/visualization
       - pypi: https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -2425,6 +2426,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-h31dac16_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda
       - pypi: ./
+      - pypi: ./libs/evaluation
       - pypi: ./libs/mcp-server
       - pypi: ./libs/visualization
       - pypi: https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl
@@ -2782,6 +2784,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/wslink-2.5.7-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/xarray-2025.12.0-pyhcf101f3_0.conda
       - pypi: ./
+      - pypi: ./libs/evaluation
       - pypi: ./libs/visualization
       - pypi: https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://download-r2.pytorch.org/whl/cpu/torchvision-0.27.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -3051,6 +3054,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zlib-ng-2.3.3-h31dac16_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda
       - pypi: ./
+      - pypi: ./libs/evaluation
       - pypi: ./libs/visualization
       - pypi: https://files.pythonhosted.org/packages/23/cd/066e86230ae37ed0be70aae89aabf03ca8d9f39c8aea0dec8029455b5540/opt_einsum-3.4.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/66/28/6ec4f751be1b5868964eb92925da789c985efdaff5f0a5f85b47cbd87428/manifold3d-3.5.4-cp312-cp312-macosx_11_0_arm64.whl
@@ -13989,6 +13993,7 @@ packages:
 - pypi: ./libs/visualization
   name: visualization
   requires_dist:
+  - evaluation
   - numpy>=2.3.5,<3
   - xarray>=2025.12.0,<2026
   - netcdf4>=1.7.3,<2

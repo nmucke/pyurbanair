@@ -326,8 +326,9 @@ torch = { version = "==2.12.1+cpu", index = "https://download.pytorch.org/whl/cp
 torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
 
-# Forward-run HTML viewer and PNG/MP4 renderer. Leaf library: numpy, xarray,
-# matplotlib; PyVista/VTK only through the optional `visualization-3d` feature.
+# Forward-run HTML viewer and PNG/MP4 renderer: numpy, xarray, matplotlib and
+# `evaluation` (solid mask); PyVista/VTK only through the optional
+# `visualization-3d` feature.
 [tool.pixi.feature.visualization.pypi-dependencies]
 visualization = { path = "libs/visualization", editable = true }
 
@@ -352,5 +353,5 @@ delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilat
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "visualization", "dev", "py312", "cpu"] }
-rendering = { features = ["visualization", "visualization-3d", "dev", "py312", "cpu"] }
+mcp = { features = ["mcp", "visualization", "evaluation", "dev", "py312", "cpu"] }
+rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }

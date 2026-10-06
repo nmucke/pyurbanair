@@ -245,7 +245,7 @@ wrote.
 
 | Workflow | Args | Runs |
 |---|---|---|
-| `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` |
+| `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
 
 ```bash

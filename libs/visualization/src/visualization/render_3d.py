@@ -63,12 +63,10 @@ def render_3d(
     frame_dir.mkdir()
     geometry = None
     geometry_metadata = None
-    if opts.geometry:
-        path = Path(opts.geometry).resolve()
-        if path.suffix.lower() != ".stl" or not path.is_file():
-            raise ValueError(
-                "3D geometry must be an existing STL in the state coordinate frame"
-            )
+    if reader.geometry is not None:
+        path = reader.geometry
+        if path.suffix.lower() != ".stl":
+            raise ValueError("3D geometry must be an STL in the state coordinate frame")
         geometry = pv.read(path)
         geometry_metadata = {
             "path": str(path),
@@ -109,12 +107,14 @@ def render_3d(
         geometry_metadata["clipping"] = "saved field cell-face domain; no rescaling"
     seeds = np.asarray(opts.seeds, dtype=float)
     if not len(seeds):
-        # Deterministic inlet seeds; invalid ones are explicitly removed below.
+        # Deterministic inlet seeds, most of them low down where the buildings
+        # turn the flow; invalid (solid) ones are explicitly removed below.
+        z_min, z_max = float(first.z.min()), float(first.z.max())
         seeds = np.array(
             [
-                [float(first.x.values[0]), float(y), float(z)]
-                for y in np.linspace(float(first.y.min()), float(first.y.max()), 5)
-                for z in np.linspace(float(first.z.min()), float(first.z.max()), 4)
+                [float(first.x.values[0]), float(y), z_min + f * (z_max - z_min)]
+                for y in np.linspace(float(first.y.min()), float(first.y.max()), 12)
+                for f in (0.0, 0.1, 0.25, 0.5)
             ]
         )
     seeds_source = pv.PolyData(seeds)
@@ -187,7 +187,8 @@ def render_3d(
             if opts.camera is not None:
                 plotter.camera_position = opts.camera
             else:
-                plotter.view_isometric()
+                # From the upstream-left, above: the flow (+x) runs left to right.
+                plotter.view_vector((-0.35, -1.0, 0.8), viewup=(0, 0, 1))
             plotter.show(auto_close=False)
             plotter.screenshot(frame_dir / f"{index:05d}.png")
         finally:

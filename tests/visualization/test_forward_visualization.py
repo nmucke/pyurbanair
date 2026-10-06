@@ -1,6 +1,7 @@
 """Scientific visualization contracts use synthetic fields, never CFD setup."""
 
 import json
+import shutil
 import subprocess
 from importlib.resources import files
 from pathlib import Path
@@ -11,8 +12,15 @@ from urllib.request import Request, urlopen
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
+from evaluation.turbulence import stl_solid_mask
 from visualization import ArtifactReader, BundleAssetServer, normalize, render
+from visualization.__main__ import main
 from visualization.data import fingerprint
+
+XIE_CASTRO = (
+    Path(__file__).parents[2] / "geometries/xie_and_castro/xie_castro_2008_STL.stl"
+)
 
 
 def regular(times: Sequence[float] = (0.0, 2.5, 7.0)) -> xr.Dataset:
@@ -147,6 +155,43 @@ def test_ensemble_quantity_reduction_order(tmp_path: Path) -> None:
     assert np.all(ArtifactReader(root, member=8).frame(0).speed == 13)
     assert np.all(ArtifactReader(root, reduction="mean_velocity").frame(0).speed == 0)
     assert np.all(ArtifactReader(root, reduction="mean_speed").frame(0).speed == 13)
+
+
+def test_cli_reduces_ensembles_and_fits_frames(tmp_path: Path) -> None:
+    times = [float(t) for t in range(130)]
+    root = save_run(tmp_path, regular(times).expand_dims(ensemble=[0, 1]))
+    bundle = tmp_path / "viewer"
+    main(root, bundle)
+    manifest = json.loads((bundle / "viewer_manifest.json").read_text())
+    resolved = yaml.safe_load((bundle / "render_config.resolved.yaml").read_text())
+    assert manifest["selection"]["reduction"] == "mean_velocity"
+    assert resolved["stride"] == 3  # 130 saved times in max_frames=60
+
+
+def test_reader_masks_buildings_from_the_config_stl(tmp_path: Path) -> None:
+    # A repository-relative stl_path resolves from the run dir upwards.
+    (tmp_path / "geometries").mkdir()
+    shutil.copy(XIE_CASTRO, tmp_path / "geometries" / "blocks.stl")
+    ds = regular().assign_coords(
+        x=[-10, 5, 10, 15, 30], y=[2, 10, 25, 40], z=[1, 5, 25]
+    )
+    root = save_run(tmp_path / "results", ds)
+    (root / "config.yaml").write_text("geometry:\n  stl_path: geometries/blocks.stl\n")
+    frame = ArtifactReader(root).frame(0)
+    solid = stl_solid_mask(XIE_CASTRO, ds.z.values, ds.y.values, ds.x.values)
+    assert solid.sum() == 18 and not solid[-1].any()  # blocks below the top level
+    np.testing.assert_array_equal(frame.blanking.values, solid)
+    assert np.isnan(frame.speed.values[solid]).all()
+    assert not np.isnan(frame.speed.values[~solid]).any()
+    assert frame.attrs["warnings"] == []
+
+    (root / "config.yaml").write_text("geometry:\n  stl_path: missing.stl\n")
+    frame = ArtifactReader(root).frame(0)
+    assert "blanking" not in frame
+    assert (
+        "Case STL missing.stl not found; buildings not masked"
+        in frame.attrs["warnings"]
+    )
 
 
 def test_reader_reads_state_nc_and_config_metadata(tmp_path: Path) -> None:
