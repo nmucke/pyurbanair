@@ -13,6 +13,8 @@ config's `task` (tasks.py), then fit with the configured `trainer`,
 Outputs, in `<paths.weights_dir>/<name>/`: config.yaml (everything needed to
 rebuild the model), weights.pt (best validation weights) and the trainer's
 checkpoint; plus encoder.pt/decoder.pt for an autoencoder and adapter/ for LoRA.
+An autoencoder with `prechunk.output_root` trains on a re-chunked copy of the
+data; `prechunk.prepare_only=true` only makes that copy.
 """
 
 from __future__ import annotations
@@ -27,11 +29,16 @@ from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
-from tasks import TASKS  # noqa: E402
+from tasks import TASKS, prechunked_root  # noqa: E402
 
 
 def run(cfg: DictConfig) -> None:
     OmegaConf.set_struct(cfg, False)  # tasks record derived settings in cfg
+    if cfg.get("prechunk") is not None and cfg.prechunk.prepare_only:
+        if cfg.prechunk.output_root is None:
+            raise ValueError("prechunk.prepare_only needs prechunk.output_root")
+        print(f"Prepared {prechunked_root(cfg)}")
+        return
     out_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
     out_dir.mkdir(parents=True, exist_ok=True)
     if int(cfg.dataloader.num_workers) == 0:

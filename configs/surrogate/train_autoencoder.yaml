@@ -49,3 +49,9 @@ dataset:
   _target_: neural_surrogates.SnapshotDataset
   time_stride: 1
   random_crop_size: 64
+# Optional lossless re-chunked copy of the training states (storage only:
+# every split, frame and value kept), made or validated before training.
+# null: read dataset.root_dir as is. Use a separate dir, e.g. on scratch.
+prechunk:
+  output_root: null
+  prepare_only: false   # prepare, then exit (a CPU job before the GPU run)

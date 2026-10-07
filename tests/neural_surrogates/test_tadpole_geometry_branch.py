@@ -328,15 +328,18 @@ def test_gradients_reach_branch_and_all_projections() -> None:
 
 def test_max_internal_batchsize_chunks_geometry_alongside_state() -> None:
     """Chunking the folded batch must chunk the features with it: the chunked and
-    unchunked forwards agree (deterministic latent)."""
+    unchunked reconstruction and encoding agree (deterministic latent)."""
     torch.manual_seed(11)
     ae = _branch_ae()
     state, geom = _inputs(b=2)
     with torch.no_grad():
         whole = ae(state, geom)
+        whole_latent = ae.encode(state, geom, latent_type="mode")
         ae.ae.max_internal_batchsize = 3  # < the 2*C*U*V*W folded crops
         chunked = ae(state, geom)
+        chunked_latent = ae.encode(state, geom, latent_type="mode")
     torch.testing.assert_close(whole, chunked)
+    torch.testing.assert_close(whole_latent, chunked_latent)
 
 
 def test_frozen_branch_features_are_cached() -> None:

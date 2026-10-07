@@ -1,7 +1,8 @@
 # Job scripts (SLURM)
 
 SLURM wrappers for running the scripts in `scripts/` and the pipelines in
-`workflows/` on the clusters. CPU only for now.
+`workflows/` on the clusters. CPU by default; a GPU run passes its resources
+as sbatch flags (see the Tadpole example below).
 
 **Status:** not yet tested on SLURM. Checked only with `bash -n`,
 `tests/scripts/test_job_scripts.py` and a local dry run.
@@ -87,6 +88,52 @@ sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
   ensemble.ensemble_size=96 smoothing.num_steps=3 'smoothing.localization=${localization.none}'
 ```
 
+## Example: Tadpole AE (B) on the realistic corpus (GPU)
+
+The size-B field autoencoder on the realistic uDALES corpus, trained on a
+re-chunked copy of the data on scratch (`prechunk`, see
+[neural_surrogates.md](neural_surrogates.md) §29). First an optional CPU job
+that only makes the copy, then the GPU training once it succeeded:
+
+```bash
+args=(--config-name surrogate/train_autoencoder name=tadpole_ae_b_realistic
+  paths.weights_dir=/projects/urbanair/model_weights
+  paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
+  architecture.size=B batch_sampler.batch_size=48 batch_sampler.cell_budget=null
+  batch_sampler.drop_last=false dataloader.num_workers=12 trainer.checkpoint_every=1
+  prechunk.output_root=/scratch/$USER/training_data/pyudales_realistic_rechunked)
+prep=$(sbatch --parsable --account=research-ceg-gse --cpus-per-task=1 --mem-per-cpu=3900M \
+  job_scripts/delftblue/surrogate_train.slurm "${args[@]}" prechunk.prepare_only=true)
+sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gse \
+  --gpus-per-task=1 --cpus-per-task=16 --mem-per-cpu=4G --time=48:00:00 \
+  job_scripts/delftblue/surrogate_train.slurm "${args[@]}"
+```
+
+Without the CPU job the GPU job makes the copy itself; with a complete copy it
+only validates it. **Resuming:** submit the same GPU command again. It
+continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is
+the total, not the epochs to add; `checkpoint_every=1` loses at most one epoch
+to the time limit, and `encoder.pt` / `decoder.pt` / `geometry_branch.pt` are
+refreshed with every new best `weights.pt`. Each submission rewrites
+`config.yaml` from the current config (in this layout, also for a run started
+with the earlier one), so keep the overrides. `cell_budget`
+counts full trajectory grids, not the 64-cell crops, hence `null` here and the
+batch size tuned directly. Evaluate on a GPU slice:
+
+```bash
+sbatch --partition=gpu-a100-small --account=research-ceg-gse --gpus-per-task=1 \
+  --cpus-per-task=2 --mem-per-cpu=4G --time=04:00:00 \
+  job_scripts/delftblue/surrogate_evaluate_autoencoder.slurm \
+  autoencoder.model_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic \
+  autoencoder.batch_size=1 autoencoder.max_internal_batchsize=2
+```
+
+The evaluation, the latent generator (`autoencoder_dir=<model dir>`) and the
+DFT stepper (`pretrained_dir=<model dir>`) read only `architecture` and
+`dataset` from the autoencoder's `config.yaml`, so artifacts trained with the
+earlier layout load as they are; a DFT on this one also needs
+`architecture.size=B` and the autoencoder's SDF and `geometry_branch` settings.
+
 ## Machine notes
 
 - **pixi** must be 0.72.1 or newer (`requires-pixi` in `pyproject.toml`). An
@@ -107,6 +154,16 @@ sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
   drops PALM's stale CMake caches and nvhpc's compiler variables, so PALM is
   built with conda's gfortran.
 - The MPI `pml`/`btl` settings live in `activation_scripts/*_activation.sh`.
+- **DelftBlue OpenMPI:** the `delftblue` env pins OpenMPI below 5: 5.0.x
+  segfaults uDALES in `MPI_Finalize` (exit 139 after a clean run).
+- **DelftBlue GPUs:** `gpu-a100` gives a full 80 GB A100 for up to 48 h;
+  `gpu-a100-small` a 10 GB slice with 2 CPUs for up to 4 h.
+- **DelftBlue accounts:** `innovation` allows a user 1 running and 10 queued
+  jobs; submit long series under `research-ceg-gse`.
+- **DelftBlue throughput:** uDALES data generation costs about 1.6–2.1 µs per
+  grid cell per simulated second.
+- **DelftBlue BeeGFS** can intermittently report hard-linked pixi env files as
+  missing when many jobs import at once; resubmit the failed job.
 
 The previous job scripts (sweep launchers, `submit.sh`, figure jobs, PALM
 debugging) are in `archive/job_scripts/`.

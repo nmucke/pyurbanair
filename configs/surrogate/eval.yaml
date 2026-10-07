@@ -38,6 +38,9 @@ autoencoder:
   # Snapshots the metrics are computed on.
   num_metric_samples: 48
   batch_size: 8
+  # Cap on the crops the encoder/decoder run at once (null: the model's own),
+  # to fit large grids in GPU memory.
+  max_internal_batchsize: null
 
 latent_generator:
   model_dir: ${paths.weights_dir}/latent_generator_s
