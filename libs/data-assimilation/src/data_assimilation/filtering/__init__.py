@@ -33,6 +33,7 @@ from data_assimilation.filtering.base import (
     CycleDiagnostics,
     EnsembleKalmanFilter,
     FilterResult,
+    validate_beta,
 )
 from data_assimilation.filtering.etkf import (
     ETKFAnalysis,
@@ -40,7 +41,6 @@ from data_assimilation.filtering.etkf import (
     ObservationTSVD,
 )
 from data_assimilation.filtering.parameter_evolution import (
-    IdentityEvolution,
     ParameterEvolution,
     RandomWalkEvolution,
 )
@@ -52,11 +52,11 @@ __all__ = [
     "ETKFAnalysis",
     "EnsembleKalmanFilter",
     "FilterResult",
-    "IdentityEvolution",
     "LETKFAnalysis",
     "ObservationTSVD",
     "ParameterEvolution",
     "RandomWalkEvolution",
     "StochasticEnKFAnalysis",
     "stochastic_enkf_update",
+    "validate_beta",
 ]

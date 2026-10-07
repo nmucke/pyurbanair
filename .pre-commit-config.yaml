@@ -1,17 +1,22 @@
 # Vendored third-party code is kept byte-for-byte upstream: skip every hook
 # (black/isort/mypy reformat + type-check explicitly-passed files, which
-# tool-config excludes don't cover). Currently just the vendored Tadpole
-# autoencoder subtree (neural_surrogates.architectures._tadpole).
-exclude: '(^|/)_tadpole/'
+# tool-config excludes don't cover): the Tadpole and UPT subtrees
+# (neural_surrogates.architectures._tadpole and _upt). archive/ holds
+# the retired conf/, scripts/ and tests/: unmaintained, never passed the hooks.
+exclude: '(^|/)_(tadpole|upt)/|^archive/'
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
       - id: trailing-whitespace
+        # Unified diff context lines contain intentional leading/trailing spaces;
+        # changing them also invalidates the checked solver resource hashes.
+        exclude: 'solver_extensions/discrepancy/discrepancy\.patch$'
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-added-large-files
+        exclude: ^pixi\.lock$
       - id: check-merge-conflict
 
   - repo: https://github.com/psf/black
@@ -31,3 +36,7 @@ repos:
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]
+        additional_dependencies: [types-PyYAML]
+        # The library tests carried over from the old test suite never passed
+        # mypy; check each folder again once its tests are rewritten.
+        exclude: ^tests/(pylbm|pyudales|pypalm|data_assimilation|neural_surrogates|evaluation|pyurbanair)/

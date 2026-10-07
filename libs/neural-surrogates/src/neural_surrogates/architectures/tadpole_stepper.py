@@ -54,8 +54,9 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import numpy.typing as npt
 import torch
 from neural_surrogates.architectures._tadpole_crop import CropSize, normalize_crop_size
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
@@ -451,7 +452,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         sub_module: nn.Module | None = None
         if subnetwork == "default":
             table = _SUBNET_SIZES[size]
-            cfg = dict(
+            cfg: dict[str, Any] = dict(
                 n_layers=table["n_layers"],
                 num_heads=table["num_heads"],
                 hidden_size=table["hidden_size"],
@@ -479,14 +480,14 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             weight_decoder = os.path.join(pretrained_ae_dir, "decoder.pt")
 
         self.dft = TadpoleDFT(
-            size=size,
+            size=cast(Literal["S", "B", "L"], size),  # validated against _SIZES above
             input_channels=input_channels,
             subnetwork=sub_module,
             weight_encoder=weight_encoder,
             weight_decoder=weight_decoder,
             encoder_ft_state="frozen",
             decoder_ft_state="frozen",
-            latent_type=latent_type,
+            latent_type=cast(Literal["sample", "mode"], latent_type),  # validated above
             encoder_crop_size=self.encoder_crop_size,
             max_internal_batchsize=max_internal_batchsize,
             geom_in_dims=geom_in_dims,
@@ -624,7 +625,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
     # -- pretrained state-stat inheritance --------------------------------- #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _load_ae_state_stats(
         self, pretrained_ae_dir: str, require: bool = True
     ) -> None:
@@ -673,13 +674,13 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
     # -- normalisation ----------------------------------------------------- #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_normalization(
         self,
-        state_mean,
-        state_std,
-        param_mean=None,
-        param_std=None,
+        state_mean: npt.ArrayLike | None,
+        state_std: npt.ArrayLike | None,
+        param_mean: npt.ArrayLike | None = None,
+        param_std: npt.ArrayLike | None = None,
         eps: float = 1e-6,
     ) -> None:
         """Install per-channel state and per-param standardisation statistics.
@@ -718,7 +719,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         geom_features: torch.Tensor | None = None,
         *,
         latent_type: str | None = None,
-    ):
+    ) -> tuple[torch.Tensor, list | SpatialResiduals]:
         """Folded latent + skip residuals for one working-space input.
 
         Global/halo mode returns a full-grid latent of shape
@@ -752,9 +753,10 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         # the subnetwork's business (and the subnetwork is bypassed here).
         branch = self._geom_branch_kwargs(state, geometry, geom_features)
         enc_kwargs = {k: v for k, v in branch.items() if k == "geom_feats"}
-        return self.dft.encoder(
+        encoded: tuple[torch.Tensor, list] = self.dft.encoder(
             folded, latent_type=latent_type or self.latent_type, **enc_kwargs
         )
+        return encoded
 
     def decode(
         self,
@@ -869,7 +871,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
 
     # -- identity-at-init reference ---------------------------------------- #
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _ae_reference_recon(
         self,
         state: torch.Tensor,

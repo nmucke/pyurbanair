@@ -1,0 +1,261 @@
+"""configs/ composes, resolves and passes the consistency check, and the
+test overlays make it tiny."""
+
+from __future__ import annotations
+
+import pathlib
+import re
+import warnings
+from typing import Any
+
+import pytest
+from omegaconf import OmegaConf
+
+from tests.conftest import CONFIGS, REPO, TEST_CONFIGS, compose, load_script
+
+ENTRY_POINTS = [
+    "forward",
+    "assimilation",
+    *(f"surrogate/{p.stem}" for p in sorted((CONFIGS / "surrogate").glob("*.yaml"))),
+]
+ENTRY_POINTS.remove("surrogate/architectures")  # entries, not a run config
+ENTRY_POINTS.remove("surrogate/training")  # shared defaults, not a run config
+# Every option of the groups forward.yaml picks from, incl. the tiny test backends.
+OPTIONS = {
+    group: sorted(
+        p.stem for d in (CONFIGS, TEST_CONFIGS) for p in (d / group).glob("*.yaml")
+    )
+    for group in ("model", "params", "case")
+}
+
+
+@pytest.mark.parametrize("name", ENTRY_POINTS)  # type: ignore[misc]
+def test_entry_point_resolves(name: str, tmp_path: pathlib.Path) -> None:
+    OmegaConf.to_container(compose(name, root=tmp_path), resolve=True)
+
+
+@pytest.mark.parametrize("group", OPTIONS)  # type: ignore[misc]
+def test_every_option_resolves(group: str, tmp_path: pathlib.Path) -> None:
+    for option in OPTIONS[group]:
+        cfg = compose("forward", f"{group}={option}", root=tmp_path)
+        OmegaConf.to_container(cfg, resolve=True)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "name", ["forward", "assimilation", "surrogate/generate_data"]
+)
+def test_test_overlay_is_tiny(name: str, tmp_path: pathlib.Path) -> None:
+    overlay = "+test=" + name.split("/")[-1]
+    cfg = compose(name, overlay, root=tmp_path)
+    assert (cfg.domain.nx, cfg.domain.ny, cfg.domain.nz) == (20, 20, 6)
+    assert cfg.ensemble.ensemble_size == 2
+
+
+@pytest.mark.parametrize("case", OPTIONS["case"])  # type: ignore[misc]
+def test_case_geometry_paths_exist(case: str, tmp_path: pathlib.Path) -> None:
+    geometry = compose("forward", f"case={case}", root=tmp_path).geometry
+    case_dir = REPO / geometry.case_dir
+    assert (case_dir / "namoptions.300").is_file()
+    assert (case_dir / "_p3d").is_file()
+    assert (REPO / geometry.stl_path).is_file()
+    # uDALES reads the STL that namoptions names from its case folder.
+    name = re.escape(pathlib.Path(geometry.stl_path).name)
+    namoptions = (case_dir / "namoptions.300").read_text()
+    assert re.search(rf"^\s*stl_file\s*=\s*{name}\s*$", namoptions, re.M)
+    if geometry.get("udales_precomputed_geom_dir"):
+        assert (
+            REPO / geometry.udales_precomputed_geom_dir / "geom_meta.json"
+        ).is_file()
+
+
+@pytest.mark.parametrize("source", ["idealized", "realistic"])  # type: ignore[misc]
+def test_random_geometry_templates_exist(source: str, tmp_path: pathlib.Path) -> None:
+    cfg = compose(
+        "surrogate/generate_data", f"data.geometry.source={source}", root=tmp_path
+    )
+    case_dir = REPO / cfg.data.geometry.case_dir
+    assert (case_dir / "namoptions.300").is_file()
+    assert (case_dir / "_p3d").is_file()
+
+
+# Workflow -> overrides that make the production assimilation config valid for it.
+# filtering.mode=state needs filtering.parameter_evolution=null; set it here so the
+# test doesn't depend on the value in configs/assimilation.yaml.
+VALID: dict[str, list[str]] = {
+    "smoother": [],
+    "filtering": ["params@prior_params=static", "filtering.parameter_evolution=null"],
+    "hybrid": ["filtering.parameter_evolution=null"],
+}
+
+
+@pytest.mark.parametrize("workflow", ["forward", *VALID])  # type: ignore[misc]
+def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    name = "forward" if workflow == "forward" else "assimilation"
+    check(compose(name, *VALID.get(workflow, []), root=tmp_path), workflow)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("filtering", [], "static prior_params"),
+        ("smoother", ["params@prior_params=static"], "smoothing.smoother is"),
+        ("smoother", ["assimilation.params_to_estimate=[nope]"], "does not define"),
+        (
+            "smoother",
+            ["domain.nx=30", "assim_model.forward_model.ncpu=7"],
+            "must divide nx",
+        ),
+        (
+            "smoother",
+            [
+                "model@assim_model=pypalm",
+                "assim_model.forward_model.boundary_condition=periodic",
+                "domain.nx=31",
+            ],
+            "even nx and ny",
+        ),
+    ],
+)
+def test_check_config_rejects(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    with pytest.raises(ValueError, match=message):
+        check(compose("assimilation", *overrides, root=tmp_path), workflow)
+
+
+# A valid smoother run estimating the SGS-discrepancy coefficients; set
+# explicitly so the test doesn't depend on configs/assimilation.yaml's tuning.
+DISCREPANCY = [
+    "assim_model.forward_model.model_discrepancy.enabled=true",
+    "params@truth_params=dynamic_sine",
+    "params@prior_params=dynamic",
+    "smoothing.smoother=${smoother.dynamic}",
+    "smoothing.localization=null",
+    "smoothing.state_reduction=null",
+    "smoothing.final_time_smoothing=false",
+    "assimilation.params_to_estimate=null",
+    "filtering.mode=state",
+    "filtering.parameter_evolution=null",
+    "ensemble.failure.policy=raise",
+]
+STATIC_COEFFICIENT_FILTER = [
+    "params@prior_params=static",
+    "filtering.mode=parameter",
+    "assimilation.params_to_estimate=[sgs_bias_b0]",
+]
+
+
+def test_check_config_accepts_discrepancy(tmp_path: pathlib.Path) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    check(compose("assimilation", *DISCREPANCY, root=tmp_path), "smoother")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("smoother", ["assim_model.name=pylbm"], "needs pyudales with vreman"),
+        (
+            "smoother",
+            ["assim_model.forward_model.closure=smagorinsky"],
+            "needs pyudales with vreman",
+        ),
+        (
+            "smoother",
+            [
+                "+prior_params.external_parameters.sgs_bias_b0="
+                "{_target_:pyurbanair.static_parameters.Normal,mean:0.0,std:0.1}"
+            ],
+            "must be static parameters",
+        ),
+        (
+            "smoother",
+            ["smoothing.smoother=${smoother.state_and_dynamic}"],
+            "smoother must be TimeVaryingParameterESMDA",
+        ),
+        ("hybrid", ["filtering.mode=joint"], "needs filtering.mode=state"),
+        (
+            "hybrid",
+            ["ensemble.failure.policy=resample_from_successes"],
+            "needs ensemble.failure.policy=raise",
+        ),
+        (
+            "filtering",
+            [
+                *STATIC_COEFFICIENT_FILTER,
+                "filtering.parameter_evolution={_target_:data_assimilation."
+                "filtering.parameter_evolution.RandomWalkEvolution,"
+                "std:{sgs_bias_b0:0.1}}",
+            ],
+            "parameter_evolution=null",
+        ),
+        (
+            "filtering",
+            [
+                *STATIC_COEFFICIENT_FILTER,
+                "filtering.localization=${localization.distance}",
+            ],
+            "cannot use distance localization",
+        ),
+    ],
+)
+def test_check_config_rejects_discrepancy(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", *DISCREPANCY, *overrides, root=tmp_path)
+    with pytest.raises(ValueError, match=message):
+        check(cfg, workflow)
+
+
+# A localized state smoother whose update holds N_aug x N_d^2 float32 values:
+# N_aug = 3 * 20 * 20 * 6 = 7200 rows, N_d = 4 sensors * 2 states * 10 bins = 80,
+# so 7200 * 80**2 * 4 bytes = 184.32 MB.
+LOCALIZED_STATE_SMOOTHER = [
+    "+test=assimilation",
+    "assim_model.forward_model.model_discrepancy.enabled=false",
+    "assimilation.params_to_estimate=null",
+    "params@truth_params=dynamic_sine",
+    "params@prior_params=dynamic",
+    "smoothing.smoother=${smoother.state_and_dynamic}",
+    "smoothing.localization=${localization.correlation}",
+    "smoothing.state_reduction=null",
+    "domain.nx=20",
+    "domain.ny=20",
+    "domain.nz=6",
+    "obs.x_points=[1.0,2.0,3.0,4.0]",
+    "obs.states=[u,v]",
+    "time.simulation_time=10.0",
+    "observation.aggregation.interval_seconds=1.0",
+]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "memory, outcome", [(100e6, "fails"), (300e6, "warns"), (1e12, "passes")]
+)
+def test_check_config_guards_localized_update_memory(
+    memory: float, outcome: str, tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    module = load_script("scripts/utils/inconsistency_check.py")
+    monkeypatch.setattr(module, "_physical_memory", lambda: int(memory))
+    cfg = compose("assimilation", *LOCALIZED_STATE_SMOOTHER, root=tmp_path)
+    if outcome == "fails":
+        with pytest.raises(ValueError, match="0.2 GB.*state_reduction"):
+            module.check_config(cfg, "smoother")
+    elif outcome == "warns":
+        with pytest.warns(UserWarning, match="interval_seconds"):
+            module.check_config(cfg, "smoother")
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            module.check_config(cfg, "smoother")
+
+
+def test_check_config_skips_memory_guard_for_parameter_smoother(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    module = load_script("scripts/utils/inconsistency_check.py")
+    monkeypatch.setattr(module, "_physical_memory", lambda: 1)
+    overrides = [*LOCALIZED_STATE_SMOOTHER, "smoothing.smoother=${smoother.dynamic}"]
+    module.check_config(compose("assimilation", *overrides, root=tmp_path), "smoother")

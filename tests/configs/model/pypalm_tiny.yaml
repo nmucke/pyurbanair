@@ -1,0 +1,9 @@
+# PALM on the tiny grid: one rank, the default direct (no palmrun) launch.
+# PALM refuses nz < 14 (PAC0264), so it gets 16 levels over the same height.
+defaults:
+  - pypalm
+  - _self_
+
+forward_model:
+  ncpu: 1
+  nz: 16

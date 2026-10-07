@@ -30,7 +30,6 @@ class DirectoryPaths:
         pathlib.Path
     )  # Specific experiment directory (e.g., {experiment_base_dir}/{experiment_name})
     output_dir: pathlib.Path
-    case_dir: pathlib.Path  # Original case directory provided by user
     experiment_name: str
     infile_path: pathlib.Path
     main_f90_path: pathlib.Path
@@ -43,7 +42,6 @@ class DirectoryPaths:
 
 def get_lbm_directory_paths(
     temp_dir: pathlib.Path,
-    case_dir: pathlib.Path,
     experiment_name: str,
     experiment_base_dir: Optional[pathlib.Path] = None,
     results_dir: Optional[pathlib.Path] = None,
@@ -58,7 +56,6 @@ def get_lbm_directory_paths(
         experiment_base_dir: Base directory for experiments. If None, uses {temp_dir}/experiment.
         experiment_dir: Specific experiment directory (e.g. {experiment_base_dir}/{experiment_name}).
         output_dir: Output directory.
-        case_dir: Original case directory provided by the user.
         experiment_name: Name of the experiment.
         pixi_env_path: Path to the pixi/conda environment (HOME for build and run).
         results_dir: Optional results directory.
@@ -111,7 +108,6 @@ def get_lbm_directory_paths(
         experiment_base_dir=experiment_base_dir,
         experiment_dir=experiment_dir,
         output_dir=output_dir,
-        case_dir=case_dir,
         experiment_name=experiment_name,
         results_dir=results_dir,
         infile_path=infile_path,

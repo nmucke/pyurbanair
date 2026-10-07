@@ -1,6 +1,6 @@
 """Warm-start for pypalm via PALM's dynamic-driver ``init_atmosphere_*`` fields.
 
-PALM 25.10 initializes the full 3D interior from ``init_atmosphere_u/v/w[/pt/qv]``
+PALM 25.10 initializes the full 3D interior from ``init_atmosphere_u/v/w/pt/qv``
 (level-of-detail 2) variables in the PIDS_DYNAMIC NetCDF when
 ``initializing_actions = 'read_from_file'`` (``init_3d_model.f90:478`` →
 ``netcdf_data_input_mod.f90:2095-2690``). This is pypalm's warm-start
@@ -28,7 +28,14 @@ Grid contract (verified against the bundled PALM source):
   (``DRV0004``); their values are never read, so any offset is harmless.
 * Staggering (file dim order is NetCDF/C order): ``init_atmosphere_u(z,y,xu)``,
   ``init_atmosphere_v(z,yv,x)``, ``init_atmosphere_w(zw,y,x)``,
-  ``init_atmosphere_pt(z,y,x)``.
+  ``init_atmosphere_pt(z,y,x)``, ``init_atmosphere_qv(z,y,x)``.
+* PALM requires ``pt`` unless ``neutral`` and ``qv`` when ``humidity`` is on
+  (``DRV0006``, ``netcdf_data_input_mod.f90:2460-2546``); both are always
+  written and read only when needed. The periodic nudging driver forces
+  ``humidity = .T.`` (``LSF0003``), but with zero surface/wall moisture flux,
+  ``q_surface = 0`` and q nudging off, q stays exactly 0 for the whole run
+  (checked on a cold-start ``q`` output), so ``qv = 0`` is exact, not an
+  approximation.
 * Dim lengths, for pypalm's ``nx``/``ny``/``nz`` grid-point counts (PALM
   namelist ``nx=self.nx-1``, ``ny=self.ny-1``, ``nz=self.nz``):
   ``x=nx``, ``xu=nx-1``, ``y=ny``, ``yv=ny-1``, ``z=nz``, ``zw=nz-1``.
@@ -141,10 +148,11 @@ def build_init_atmosphere_dataset(
     z_phys = z_file + zmin
     zw_phys = zw_file + zmin
 
-    u = _interp_to(state["u"], xu_phys, y_phys, z_phys)   # (z, y, xu)
-    v = _interp_to(state["v"], x_phys, yv_phys, z_phys)   # (z, yv, x)
-    w = _interp_to(state["w"], x_phys, y_phys, zw_phys)   # (zw, y, x)
+    u = _interp_to(state["u"], xu_phys, y_phys, z_phys)  # (z, y, xu)
+    v = _interp_to(state["v"], x_phys, yv_phys, z_phys)  # (z, yv, x)
+    w = _interp_to(state["w"], x_phys, y_phys, zw_phys)  # (zw, y, x)
     pt = np.full((nz, ny, nx), float(pt_surface), dtype=np.float32)  # (z, y, x)
+    qv = np.zeros((nz, ny, nx), dtype=np.float32)  # (z, y, x)
 
     lod = {"lod": np.int32(2)}
     ds = xarray.Dataset(
@@ -153,6 +161,7 @@ def build_init_atmosphere_dataset(
             "init_atmosphere_v": (("z", "yv", "x"), v, {**lod, "units": "m s-1"}),
             "init_atmosphere_w": (("zw", "y", "x"), w, {**lod, "units": "m s-1"}),
             "init_atmosphere_pt": (("z", "y", "x"), pt, {**lod, "units": "K"}),
+            "init_atmosphere_qv": (("z", "y", "x"), qv, {**lod, "units": "kg kg-1"}),
         },
         coords={
             "x": ("x", x_file.astype(np.float32), {"units": "m"}),
@@ -192,9 +201,7 @@ def write_warmstart_driver(
         # join/compat="override": the inflow file already carries 0-based
         # z/zw/y of matching length, so align positionally and keep its coords
         # (and the new xu/x/yv from init_ds).
-        merged = xarray.merge(
-            [existing, init_ds], join="override", compat="override"
-        )
+        merged = xarray.merge([existing, init_ds], join="override", compat="override")
     else:
         merged = init_ds
 

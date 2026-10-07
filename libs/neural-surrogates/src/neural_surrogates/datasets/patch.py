@@ -2,7 +2,7 @@
 
 This module exposes :class:`PatchTransitionDataset`, a sibling of
 :class:`neural_surrogates.datasets.transition.TransitionDataset` that reads the **same**
-on-disk ``training_data/`` split (see ``docs/training_data.md``) but yields
+on-disk ``training_data/`` split (see ``docs/archive/training_data.md``) but yields
 one sample *per spatial patch* of a two-level overlapping domain
 decomposition (companion PDF §2 + §5, Eq 9). It subclasses
 ``TransitionDataset`` purely to reuse its file-walking, parameter loading,
@@ -160,7 +160,7 @@ class PatchTransitionDataset(TransitionDataset):
             (traj, t, p) for (traj, t) in self._index for p in range(self._num_patches)
         ]
 
-    def _read_spatial_grid(self, state_path: Path) -> tuple[int, int, int]:
+    def _read_spatial_grid(self, state_path: Path) -> tuple[int, ...]:
         """``(Nz, Ny, Nx)`` of the first state variable in ``state_path``."""
         import xarray as xr
 

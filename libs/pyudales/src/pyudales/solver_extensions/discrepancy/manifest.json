@@ -1,0 +1,21 @@
+{
+  "upstream_commit": "b84916ac60cecd1da54dd09df76c15e30dcaabe9",
+  "capability": "sgs_strain_rotation_v1",
+  "patch": "discrepancy.patch",
+  "copies": {
+    "modsgsdiscrepancy.f90": "src/modsgsdiscrepancy.f90"
+  },
+  "resources": {
+    "discrepancy.patch": "0d1933c430d4509f219c658fc630f1b619e53a7d0e131fbb879a6cc8d1b1d01d",
+    "modsgsdiscrepancy.f90": "2c00c7f27230f0ea570f0f8493d2358e30d66cdf997b1f04914e53db92ae4d54"
+  },
+  "inputs": {
+    "src/modsubgrid.f90": "a839970686148d64bdde48a3ff40309a51db65b227a6a245a2cc6371fd697dee",
+    "src/program.f90": "5e90e09c0d0375a3fe8c893a375e2a7be1ac52a4c3fc2f76610796424da18901"
+  },
+  "outputs": {
+    "src/modsubgrid.f90": "f792e51e208e3f961ee23a887eea3f8da4a5acbc6a11823b1918571d40547cca",
+    "src/program.f90": "e4355d87bd0eddcf8fd1b3706b3ac5416dcea2a611ed16ff685a24281898a7ae",
+    "src/modsgsdiscrepancy.f90": "2c00c7f27230f0ea570f0f8493d2358e30d66cdf997b1f04914e53db92ae4d54"
+  }
+}

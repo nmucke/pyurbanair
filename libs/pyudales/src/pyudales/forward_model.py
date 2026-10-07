@@ -12,14 +12,21 @@ import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
 
-from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH
+from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH, _script_dir
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
 from .utils.config_utils import create_config_sh
 from .utils.dir_utils import get_project_root, get_udales_directory_paths
+from .utils.discrepancy_utils import (
+    extract_discrepancy_coefficients,
+    validate_discrepancy_sgs_constant,
+    validate_model_discrepancy,
+    write_model_discrepancy,
+)
 from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
     apply_inlet_turbulence,
+    derive_seed,
     is_inlet_turbulence_enabled,
     read_elapsed_time,
     reset_elapsed_time,
@@ -29,18 +36,14 @@ from .utils.inlet_turbulence_utils import (
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
 from .utils.nudging_utils import apply_time_varying_inflow
-from .utils.params_utils import (
-    apply_inflow_settings,
-    get_param_value,
-    is_time_varying_params,
-    merge_params,
-)
+from .utils.params_utils import get_param_value, is_time_varying_params, merge_params
 from .utils.random_utils import apply_random_initial_condition
 from .utils.run_monitor import InstabilityCheck, run_with_dt_watchdog
 from .utils.save_frequency_utils import (
     apply_output_frequency,
     apply_save_only_last_timestep,
 )
+from .utils.solver_build import prepare_solver, solver_source_dir, validate_solver
 from .utils.warm_start_utils import (
     clean_output_except_warmstart_files,
     clear_carry,
@@ -49,14 +52,14 @@ from .utils.warm_start_utils import (
     remove_old_warmstart_files,
     set_trestart,
     set_warm_start,
+    stage_discrepancy_warmstart,
     store_carry,
     update_warmstart_file_from_xarray,
 )
+from .utils.window_checkpoint import WindowCheckpoint, validate_carry
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-DEFAULT_MATLAB_BIN = pathlib.Path("/Applications/MATLAB_R2025b.app/bin/matlab")
 
 # Glob patterns for the grid-dependent IBM geometry files that the STL->IBM
 # Fortran step produces and that a precomputed bundle reuses.
@@ -71,6 +74,10 @@ PRECOMPUTED_GEOM_PATTERNS = (
 # — not False — is what the solver actually runs with.
 UDALES_DEFAULT_LSMAGORINSKY = False
 UDALES_DEFAULT_LVREMAN = True
+
+# Modulus of the LCG in u-dales/src/modstartup.f90::randomnize, which advances
+# &RUN irandom as `mod(ir*8121 + 28411, 134456)` in 32-bit integers.
+IRANDOM_MODULUS = 134456
 
 # SGS closure name -> the mutually exclusive &NAMSUBGRID switch set it implies.
 # These are exactly the three closure switches uDALES declares in the NAMSUBGRID
@@ -281,7 +288,7 @@ class ForwardModel(BaseForwardModel):
         ny: int | None = None,
         nz: int | None = None,
         bounds: DomainBounds | None = None,
-        matlab_bin: pathlib.Path = DEFAULT_MATLAB_BIN,
+        matlab_bin: Optional[pathlib.Path] = None,
         save_only_last_timestep: bool = False,
         output_frequency: Optional[float] = None,
         params: Optional[xarray.Dataset] = None,
@@ -290,7 +297,6 @@ class ForwardModel(BaseForwardModel):
         temp_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
         output_dir: Optional[pathlib.Path] = None,
-        random_initial_condition_args: Optional[dict] = None,
         boundary_condition: str = "periodic",
         closure: Optional[str] = None,
         sgs_constant: Optional[float] = None,
@@ -299,6 +305,8 @@ class ForwardModel(BaseForwardModel):
         precomputed_geom_dir: Optional[str] = None,
         instability_check: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        model_discrepancy: Optional[dict] = None,
+        per_member_irandom: bool = False,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -315,7 +323,7 @@ class ForwardModel(BaseForwardModel):
             bounds: Domain bounds in the form
                 ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
                 Domain lengths are written to xlen/ylen/zsize in namoptions.
-            matlab_bin: The path to the MATLAB binary.
+            matlab_bin: The path to the MATLAB binary; only MATLAB preprocessing needs it.
             save_only_last_timestep: If True, only the last timestep will be saved. Overwrites save_frequency.
             output_frequency: The frequency at which the output will be saved.
             params: The parameters of the forward model.
@@ -359,6 +367,9 @@ class ForwardModel(BaseForwardModel):
                 (default 20), ``poll_interval_s`` (default 2.0). When the
                 timestep collapses the run is killed early and reported as a
                 failure, so the ensemble resamples it from a successful donor.
+            model_discrepancy: Opt-in native Vreman strain/rotation correction.
+                Requires explicit height band, gradient regularization and cap.
+                Static sgs_bias_b0/b1/b2 Dataset fields default to zero.
             inlet_turbulence: Optional dict enabling the turbulent inlet,
                 sharing the ``{"enabled": bool, ...}`` schema used by the other
                 backends. ``None``/``{}``/``{"enabled": False}`` (the default) is
@@ -371,7 +382,20 @@ class ForwardModel(BaseForwardModel):
                 ``intensity``, ``length_scale_x/y/z``, ``time_step``,
                 ``driverjobnr``, ``seed``, ``lchunkread``, ``chunkread_size`` —
                 see :mod:`.utils.inlet_turbulence_utils`.
+            per_member_irandom: If True, write a per-member ``&RUN irandom``
+                (the seed of uDALES' initial-velocity perturbation, otherwise
+                hard-coded to 43 for every run) derived from the experiment
+                name, so a cold-started ensemble gets realisation spread at
+                fixed parameters. Only cold starts randomize; warm starts
+                inherit the copied state. Default False writes nothing.
         """
+        self.model_discrepancy = validate_model_discrepancy(model_discrepancy)
+        self._discrepancy_defaults = extract_discrepancy_coefficients(
+            params if self.model_discrepancy["enabled"] else None
+        )
+        self._discrepancy_metadata: dict | None = None
+        self._prepared_variant: bool | None = None
+        self._prepared_tools = False
         super().__init__(results_dir=results_dir)
 
         # Verbose flag for controlling output
@@ -385,7 +409,7 @@ class ForwardModel(BaseForwardModel):
         self.dirs = get_udales_directory_paths(
             case_dir=case_dir,
             experiment_name=experiment_name,
-            udales_root_path=UDALES_PATH,  # type: ignore[arg-type]
+            udales_root_path=UDALES_PATH,
             temp_dir=temp_dir,
             experiment_base_dir=experiment_base_dir,
             output_dir=output_dir,
@@ -447,6 +471,7 @@ class ForwardModel(BaseForwardModel):
             inlet_turbulence, boundary_condition, self.dirs.experiment_name
         )
         self.inlet_turbulence = dict(inlet_turbulence or {})
+        self.per_member_irandom = per_member_irandom
 
         # Seconds of synthetic turbulence history this member has consumed,
         # used to pick the slice each window gets (see
@@ -473,6 +498,8 @@ class ForwardModel(BaseForwardModel):
         validate_closure(closure)
         self.closure = closure
         self._apply_closure()
+        # Validate the effective template closure before preparation or launch.
+        self._apply_discrepancy_settings(params)
 
         # Per-backend default for the SGS constant, overridden by a `sgs_constant`
         # in the params Dataset when one is supplied. None leaves the case
@@ -522,9 +549,6 @@ class ForwardModel(BaseForwardModel):
             apply_save_only_last_timestep(self.dirs)
         elif self.output_frequency is not None:
             apply_output_frequency(self.dirs, self.output_frequency)
-
-        if random_initial_condition_args is not None:
-            apply_random_initial_condition(self.dirs, random_initial_condition_args)
 
         logger.info(f"Experiment name: {self.dirs.experiment_name}")
         logger.info(f"Case dir: {self.dirs.case_dir}")
@@ -699,7 +723,7 @@ class ForwardModel(BaseForwardModel):
         return simulation_time if warm_start else simulation_time + self.spinup_time
 
     def _apply_inflow_settings(
-        self, params: xarray.Dataset, warm_start: bool = False
+        self, params: Optional[xarray.Dataset], warm_start: bool = False
     ) -> None:
         """Apply the inflow settings to the forward model."""
         if params is not None:
@@ -709,7 +733,7 @@ class ForwardModel(BaseForwardModel):
             raise ValueError("ForwardModel parameters are unexpectedly unset.")
 
         # Model-error knobs apply identically to both inflow branches, so resolve
-        # them here, outside the branch (docs/esmda_model_error_parameters.md §6.2).
+        # them here, outside the branch (docs/archive/esmda_model_error_parameters.md §6.2).
         # When ``vertical_inflow_exponent`` (α) is estimated it overrides the
         # construction-time shear; ``sgs_constant`` is written to the &NAMSUBGRID
         # key of whichever closure is active (``cs`` or ``c_vreman``).
@@ -717,19 +741,6 @@ class ForwardModel(BaseForwardModel):
         # byte-identical.
         nudging_config = self._resolve_nudging_config(self.params)
         self._apply_sgs_setting(self.params)
-
-        # NOTE (pre-existing): the computed value is immediately overwritten with
-        # True, so pyudales always nudges when inlet turbulence is off and the
-        # `else` branch below (static/periodic `apply_inflow_settings`) is dead
-        # code. Documented in docs/pyudales.md §6 as "nudging is hardcoded".
-        # Left as-is deliberately — untangling it is a behaviour change to the
-        # periodic path and does not belong in the inlet-turbulence commit — but
-        # flagged here because a third branch now sits in front of it.
-        use_nudging = (
-            is_time_varying_params(self.params)
-            or self.boundary_condition == "inflow_outflow"
-        )
-        use_nudging = True
 
         if is_inlet_turbulence_enabled(self.inlet_turbulence):
             # Synthetic driver planes replace BOTH the nudged inlet face and the
@@ -755,7 +766,7 @@ class ForwardModel(BaseForwardModel):
                 ),
                 window_start_time=self._elapsed_time,
             )
-        elif use_nudging:
+        else:
             logger.info(
                 "Applying inflow via nudging (time_varying=%s, BC=%s, nudging_config=%s)",
                 is_time_varying_params(self.params),
@@ -773,20 +784,21 @@ class ForwardModel(BaseForwardModel):
                 boundary_condition=self.boundary_condition,
                 **nudging_config,
             )
-        else:
-            logger.info("Applying inflow via static settings (periodic BC)")
-            apply_inflow_settings(
-                params=self.params,
-                dirs=self.dirs,
-                boundary_condition=self.boundary_condition,
-            )
+
+        if self.per_member_irandom:
+            # uDALES seeds its initial-velocity perturbation with irandom=43 in
+            # every run. randomnize() advances it with a 32-bit LCG modulo
+            # IRANDOM_MODULUS, so a seed outside [0, IRANDOM_MODULUS) overflows
+            # the first step and biases the perturbation.
+            irandom = derive_seed(self.dirs.experiment_name) % IRANDOM_MODULUS
+            apply_random_initial_condition(self.dirs, {"irandom": irandom})
 
     def _resolve_nudging_config(self, params: xarray.Dataset) -> dict:
         """Return a nudging-config copy with α overridden from ``params``.
 
         ``vertical_inflow_exponent`` overrides the power-law ``alpha`` inside the
         nudging config's ``profile_config`` so the inlet shear is per-member and
-        ESMDA-estimable (docs/esmda_model_error_parameters.md §2.1). Falls back to
+        ESMDA-estimable (docs/archive/esmda_model_error_parameters.md §2.1). Falls back to
         the construction-time config when the parameter is absent.
         """
         alpha = get_param_value(params, "vertical_inflow_exponent")
@@ -818,7 +830,7 @@ class ForwardModel(BaseForwardModel):
         not False.
 
         No-op when ``sgs_constant`` is absent, preserving the template value
-        (docs/esmda_model_error_parameters.md §2.2).
+        (docs/archive/esmda_model_error_parameters.md §2.2).
         """
         # Precedence: an estimated/sampled `sgs_constant` in ``params`` wins; the
         # model config's ``sgs_constant`` is the per-backend fallback; absent in
@@ -857,6 +869,8 @@ class ForwardModel(BaseForwardModel):
             )
             return
 
+        if getattr(self, "model_discrepancy", {}).get("enabled", False):
+            validate_discrepancy_sgs_constant(namoptions, value=sgs)
         namoptions.set_value("NAMSUBGRID", key, f"{float(sgs):.4f}")
         namoptions.write()
         logger.info(
@@ -952,9 +966,66 @@ class ForwardModel(BaseForwardModel):
                 "to run preprocessing from the STL."
             )
 
+    def _apply_discrepancy_settings(self, params: xarray.Dataset | None) -> None:
+        # Always resolve against construction-time defaults, never the last call.
+        values = dict(self._discrepancy_defaults)
+        if self.model_discrepancy.get("enabled", False) and params is not None:
+            supplied = extract_discrepancy_coefficients(params)
+            values.update(
+                {name: value for name, value in supplied.items() if name in params}
+            )
+        self._discrepancy_metadata = write_model_discrepancy(
+            self.dirs.experiment_dir / f"namoptions.{self.dirs.experiment_name}",
+            self.model_discrepancy,
+            xarray.Dataset(values),
+        )
+
+    def prepare_solver(self, *, prepare_tools: bool = False) -> None:
+        """Prepare one verified solver variant before dispatching member workers."""
+        enabled = bool(self.model_discrepancy.get("enabled", False))
+        if (
+            self._prepared_variant == enabled
+            and (not prepare_tools or self._prepared_tools)
+            and self.dirs.solver_executable is not None
+            and validate_solver(self.dirs.solver_executable, enabled)
+        ):
+            return
+        executable = prepare_solver(
+            discrepancy_enabled=enabled,
+            source_dir=UDALES_PATH,
+            prepare_tools=prepare_tools,
+        )
+        self.dirs.solver_executable = executable
+        self.dirs.udales_root_path = solver_source_dir(executable)
+        self._prepared_variant = enabled
+        self._prepared_tools = prepare_tools
+        create_config_sh(self.dirs, self.matlab_bin, self.ncpu)
+
+    def _record_discrepancy(self, result: xarray.Dataset) -> None:
+        if self._discrepancy_metadata is None:
+            return
+        metadata = dict(self._discrepancy_metadata)
+        diagnostics = (
+            self.dirs.output_dir
+            / self.dirs.experiment_name
+            / f"sgs_discrepancy.{self.dirs.experiment_name}.txt"
+        )
+        if diagnostics.exists():
+            metadata["native_diagnostics"] = diagnostics.read_text()
+        if self.dirs.solver_executable is not None:
+            metadata["solver_executable"] = str(self.dirs.solver_executable)
+            provenance = self.dirs.solver_executable.parent.parent / "capability.json"
+            if provenance.exists():
+                metadata["build_provenance"] = json.loads(provenance.read_text())
+        payload = json.dumps(metadata, sort_keys=True)
+        result.attrs["model_discrepancy"] = payload
+        (self.dirs.experiment_dir / "model_discrepancy.json").write_text(payload)
+
     def run_preprocessing(self, python_or_matlab: str = "python") -> None:
         """Run preprocessing."""
 
+        self._apply_discrepancy_settings(None)
+        self.prepare_solver(prepare_tools=True)
         logger.info("Running preprocessing...")
 
         clean_temp_dir(self.dirs)
@@ -962,11 +1033,7 @@ class ForwardModel(BaseForwardModel):
 
         if python_or_matlab == "python":
             # Use Python-based preprocessing script
-            script_path = (
-                pathlib.Path(__file__).parent.parent.parent
-                / "shell_scripts"
-                / "write_inputs.sh"
-            )
+            script_path = _script_dir / "write_inputs.sh"
 
             command = [
                 "bash",
@@ -982,6 +1049,11 @@ class ForwardModel(BaseForwardModel):
             _augment_runtime_library_paths(env)
 
         elif python_or_matlab == "matlab":
+            if self.matlab_bin is None:
+                raise ValueError(
+                    "MATLAB preprocessing needs matlab_bin (the path to your MATLAB "
+                    "binary); set model.forward_model.matlab_bin."
+                )
             # Use MATLAB-based preprocessing script
             command = [
                 "bash",
@@ -998,9 +1070,24 @@ class ForwardModel(BaseForwardModel):
             env["PATH"] = f"{matlab_bin_dir}:{env.get('PATH', '')}"
             _augment_runtime_library_paths(env)
 
-        subprocess.run(
-            command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
-        )
+        try:
+            subprocess.run(
+                command, check=True, env=env, stdout=self.stdout, stderr=self.stderr
+            )
+        except subprocess.CalledProcessError as exc:
+            if python_or_matlab != "python":
+                raise
+            log_path = self.dirs.experiment_dir / (
+                f"write_inputs.{self.dirs.experiment_name}.log"
+            )
+            details = (
+                "\n".join(log_path.read_text().splitlines()[-60:])
+                if log_path.is_file()
+                else ""
+            )
+            raise RuntimeError(
+                f"uDALES preprocessing failed; see {log_path}\n{details}"
+            ) from exc
 
         # Wait for MATLAB preprocessing to complete if using MATLAB
         if python_or_matlab == "matlab":
@@ -1008,7 +1095,76 @@ class ForwardModel(BaseForwardModel):
 
         logger.info("Preprocessing completed.")
 
+    @property
+    def forecast_window_replay_enabled(self) -> bool:
+        return bool(self.model_discrepancy.get("enabled", False))
+
+    def begin_forecast_window(self) -> None:
+        """Pin native hidden state and mutable inputs for an assimilation window."""
+        if not self.forecast_window_replay_enabled:
+            return
+        if getattr(self, "_forecast_window_original", None) is not None:
+            raise RuntimeError("A discrepancy forecast window is already active")
+        checkpoint = WindowCheckpoint.capture(self)
+        self._forecast_window_original: WindowCheckpoint | None = checkpoint
+        self._forecast_window_start: WindowCheckpoint | None = checkpoint
+
+    def restore_forecast_window(self) -> None:
+        checkpoint = getattr(self, "_forecast_window_start", None)
+        if checkpoint is not None:
+            checkpoint.restore(self)
+            clean_output_dir(self.dirs)
+
+    def _prepare_end_forecast_window(self, commit: bool) -> None:
+        original = getattr(self, "_forecast_window_original", None)
+        if original is None:
+            return
+        if commit:
+            validate_carry(self, required=True)
+            self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
+        else:
+            original.restore(self)
+            clean_output_dir(self.dirs)
+
+    def _release_forecast_window(self) -> None:
+        original = getattr(self, "_forecast_window_original", None)
+        if original is None:
+            return
+        self._forecast_window_original = None
+        self._forecast_window_start = None
+        if original is not None:
+            try:
+                original.remove()
+            except OSError:
+                # The endpoint is already accepted (or rollback complete).
+                # Scratch cleanup must never turn a successful transaction into
+                # an unrollbackable half-commit across ensemble members.
+                logger.warning(
+                    "Could not remove window checkpoint %s",
+                    original.root,
+                    exc_info=True,
+                )
+
+    def end_forecast_window(self, commit: bool) -> None:
+        self._prepare_end_forecast_window(commit)
+        self._release_forecast_window()
+
     def run_single(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        sim_name: Optional[str] = "state",
+    ) -> xarray.Dataset:
+        # Also restore inside workers: retries must never inherit a prior
+        # attempt's endpoint, even when the caller already restored the parent.
+        self.restore_forecast_window()
+        try:
+            return self._run_single(state=state, params=params, sim_name=sim_name)
+        except BaseException:
+            self.restore_forecast_window()
+            raise
+
+    def _run_single(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
@@ -1039,6 +1195,8 @@ class ForwardModel(BaseForwardModel):
         # This must happen here, before fetch_carry/_prepare_warmstart stage a
         # restart in the execution directory. Moving it into _run_executable
         # would delete that staged restart and break warm starts.
+        self._apply_discrepancy_settings(params)
+        self.prepare_solver()
         clean_output_dir(self.dirs)
 
         warm_start = state is not None
@@ -1058,12 +1216,14 @@ class ForwardModel(BaseForwardModel):
                 set_trestart(self.dirs)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                self._record_discrepancy(result)
                 store_carry(self.dirs)
             else:
                 self.spinup_time = 0.0
                 self._rewrite_runtime(self._simulation_time)
                 set_trestart(self.dirs)
                 carry_file = fetch_carry(self.dirs)
+                template_file: pathlib.Path | None
                 if carry_file is not None:
                     template_file = carry_file
                 else:
@@ -1072,6 +1232,7 @@ class ForwardModel(BaseForwardModel):
                 self._prepare_warmstart(state, template_file=template_file)
                 self._run_executable()
                 result = self._load_and_postprocess_state()
+                self._record_discrepancy(result)
                 # Capture the carry (newest restart by mtime) before the
                 # timestamp-based cleanup, which would otherwise keep the
                 # restored carry over the freshly written one when the cold
@@ -1093,10 +1254,15 @@ class ForwardModel(BaseForwardModel):
             # the two stay in step (without that the substituted member would be
             # permanently offset from the state it is carrying).
             self._elapsed_time += window_runtime
-            if is_inlet_turbulence_enabled(self.inlet_turbulence):
+            if self.forecast_window_replay_enabled:
+                validate_carry(self, required=True)
+            if (
+                is_inlet_turbulence_enabled(self.inlet_turbulence)
+                or self.forecast_window_replay_enabled
+            ):
                 # Guarded: with the knob off nothing reads the clock, and the
                 # disabled path must not drop a file into the experiment dir
-                # (CLAUDE.md strict no-op rule).
+                # (AGENTS.md strict no-op rule).
                 write_elapsed_time(self.dirs, self._elapsed_time)
             return result
         finally:
@@ -1231,8 +1397,9 @@ class ForwardModel(BaseForwardModel):
             spinup_outputs = int(self.spinup_time / self.output_frequency)
             if state.sizes.get("time", 0) > spinup_outputs:
                 state = state.isel(time=slice(spinup_outputs, None))
-                if "time" in state.coords and state.sizes["time"] > 0:
-                    state = state.assign_coords(time=state.time - state.time.values[0])
+                # Frames after the spinup sit in (0, simulation_time].
+                if "time" in state.coords:
+                    state = state.assign_coords(time=state.time - self.spinup_time)
 
         if (
             self._simulation_time is not None
@@ -1308,15 +1475,18 @@ class ForwardModel(BaseForwardModel):
             state_for_warmstart = state_for_warmstart.isel(time=-1)
         if "time" in state_for_warmstart.coords:
             state_for_warmstart = state_for_warmstart.drop_vars("time")
-        update_warmstart_file_from_xarray(
-            state_for_warmstart,
-            self.dirs,
-            warmstart_file=template_file,
-        )
-        dest = self.dirs.output_dir / self.dirs.experiment_name / template_file.name
-        if template_file.resolve() != dest.resolve():
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(template_file, dest)
+        if self.model_discrepancy.get("enabled", False):
+            stage_discrepancy_warmstart(state_for_warmstart, self.dirs, template_file)
+        else:
+            update_warmstart_file_from_xarray(
+                state_for_warmstart,
+                self.dirs,
+                warmstart_file=template_file,
+            )
+            dest = self.dirs.output_dir / self.dirs.experiment_name / template_file.name
+            if template_file.resolve() != dest.resolve():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(template_file, dest)
         set_warm_start(self.dirs)
 
     def clear_warmstart_carry(self) -> None:
@@ -1360,6 +1530,14 @@ class ForwardModel(BaseForwardModel):
         template_path.unlink(missing_ok=True)
         src = self.dirs.output_dir / self.dirs.experiment_name / filename
         shutil.copy(src, template_path)
+        if self.model_discrepancy.get("enabled", False):
+            # Keep every rank's hidden fields for state-only warm starts too.
+            prefix = filename.split("_", 1)[0]
+            for rank_file in src.parent.glob(f"{prefix}_*_*.*"):
+                if rank_file.name != filename:
+                    shutil.copy(
+                        rank_file, self._warmstart_template_dir / rank_file.name
+                    )
         self.warmstart_template_file = template_path
 
     def disable_spinup(self) -> None:

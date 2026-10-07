@@ -1,7 +1,7 @@
 """Reductions of pre-extracted sensor and probe series to window statistics.
 
 Consumes ``(ensemble, time, sensor)`` arrays a script has already pulled out of
-the state files. Extraction itself stays in ``scripts/esmda/_esmda_common.py``:
+the state files. Extraction itself stays in ``scripts/utils/helper_functions.py``:
 it needs ``data_assimilation``'s observation operator (jax) and the run-dir
 layout, both forbidden here.
 
@@ -15,8 +15,7 @@ those are the identifiable quantities and the thing worth scoring.
 Populated in WP0.2 (move), extended in WP1.3.
 """
 
-# WP0.2 moved this module out of ``scripts/esmda/_esmda_common.py`` under a
-# file-level ``# mypy: ignore-errors``. The waiver is gone: every function here
+# The module-level ``# mypy: ignore-errors`` waiver is gone: every function here
 # is annotated and the module passes the repo's strict config on its own.
 
 from __future__ import annotations
@@ -37,7 +36,7 @@ logger = logging.getLogger(__name__)
 QUANTITIES = ("u", "v", "w", "magnitude")
 
 # Slack, in units of windows, on the window-boundary test. See :func:`window_masks`
-# for why a bare ``floor`` puts a boundary frame in the wrong window.
+# for why a bare ``ceil`` puts a boundary frame in the wrong window.
 _BOUNDARY_TOLERANCE = 1e-9
 
 
@@ -66,33 +65,29 @@ def window_masks(
 
     Binning by the *time coordinate* rather than by frame count is what lets the
     truth and the ensemble be reduced by the same function: both series carry a
-    global time axis on which window ``w`` starts at ``w*sim_time`` (the
-    extraction rebases them), but they need not have the same output cadence --
-    a truth pre-simulated at one interval against an assimilation writing at
-    another is the normal case, not the exception.
+    global time axis on which window ``w`` ends at ``(w+1)*sim_time``, but they
+    need not have the same output cadence -- a truth pre-simulated at one
+    interval against an assimilation writing at another is the normal case,
+    not the exception.
 
-    A frame exactly on a boundary belongs to the window it opens, matching the
-    run's own ``[w*sim_time, (w+1)*sim_time)`` convention; anything past the
-    last boundary (float drift on the final frame) falls in the last window.
+    A run's frames sit in ``(w*sim_time, (w+1)*sim_time]``, so a frame exactly
+    on a boundary belongs to the window it closes; anything outside the run
+    (float drift) falls in the first or last window.
 
-    The ``+_BOUNDARY_TOLERANCE`` is what makes the first half of that true. The
-    extraction rebases window ``w`` to start at exactly ``w*sim_time``, but
-    ``(w*sim_time)/sim_time`` is not exactly ``w`` in IEEE double for most
-    values of ``sim_time`` -- at ``sim_time = 10.76`` (200 frames at pylbm's
-    default 0.0538 s cadence) windows 7 and 14 come out a ULP short, and a bare
-    ``floor`` scores their opening frame into the *previous* window. Roughly a
-    fifth of two-decimal ``sim_time`` values misbin at least one boundary in
-    the first ten windows, and the truth's global axis drifts independently of
-    the ensemble's, so the two need not even misbin the same frame. The
-    tolerance is in units of windows: 1e-9 of a window is a nanosecond at
-    ``sim_time = 1``, orders of magnitude below any output cadence.
+    The ``-_BOUNDARY_TOLERANCE`` is what makes the first half of that true:
+    ``((w+1)*sim_time)/sim_time`` is not exactly ``w+1`` in IEEE double for
+    most values of ``sim_time`` (at ``sim_time = 10.76`` windows 7 and 14 come
+    out a ULP off), and a bare ``ceil`` would score a window's closing frame
+    into the *next* window. The tolerance is in units of windows: 1e-9 of a
+    window is a nanosecond at ``sim_time = 1``, orders of magnitude below any
+    output cadence.
     """
     t = np.asarray(times, dtype=float)
     if not sim_time > 0:
         raise ValueError(f"sim_time must be positive, got {sim_time}")
     if num_windows < 1:
         raise ValueError(f"num_windows must be at least 1, got {num_windows}")
-    index = np.floor(t / sim_time + _BOUNDARY_TOLERANCE).astype(int)
+    index = np.ceil(t / sim_time - _BOUNDARY_TOLERANCE).astype(int) - 1
     index = np.clip(index, 0, num_windows - 1)
     return [index == w for w in range(num_windows)]
 

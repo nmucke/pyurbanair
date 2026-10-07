@@ -36,12 +36,12 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 
+from pyurbanair.static_parameters.distributions import Distribution
+
 from .base import ParameterTimeSeries
 
 
-def build_knot_times(
-    start: float, end: float, seconds_per_knot: float
-) -> jnp.ndarray:
+def build_knot_times(start: float, end: float, seconds_per_knot: float) -> jnp.ndarray:
     """Knot times spaced ``seconds_per_knot`` over ``[start, end]``.
 
     Regular knots fall on ``start, start + s, start + 2s, …`` up to the last
@@ -70,12 +70,12 @@ class AR2RelaxationModel(ParameterTimeSeries):
 
     def __init__(
         self,
-        external_parameters: dict[str, dict[str, float]],
+        external_parameters: dict[str, Distribution],
         simulation_time: float,
         seconds_per_knot: float,
         correlation_length: float,
         seed: int = 0,
-        static_parameters: Optional[dict[str, object]] = None,
+        static_parameters: Optional[dict[str, Distribution]] = None,
     ) -> None:
         # The knots are the trajectory's time coordinates: the parameter takes a
         # new value every ``seconds_per_knot`` seconds. When the window length is
@@ -95,8 +95,8 @@ class AR2RelaxationModel(ParameterTimeSeries):
         # drawn once in sample() (window 0) and thereafter carried forward via the
         # ESMDA-updated posterior in extrapolate(), so they are estimated jointly
         # but never re-randomized per window
-        # (docs/esmda_model_error_parameters.md §6.1).
-        self.static_parameters: dict[str, object] = static_parameters or {}
+        # (docs/archive/esmda_model_error_parameters.md §6.1).
+        self.static_parameters: dict[str, Distribution] = static_parameters or {}
 
         # Carried state: per-parameter terminal (z, w) of the most
         # recent draw.  ``None`` triggers a stationary cold start.
@@ -146,7 +146,10 @@ class AR2RelaxationModel(ParameterTimeSeries):
         lam = self.lam
         lam2 = lam * lam
 
-        def advance_interval(state, scan_input):
+        def advance_interval(
+            state: tuple[jnp.ndarray, jnp.ndarray],
+            scan_input: tuple[jnp.ndarray, jnp.ndarray],
+        ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
             z, w = state
             dt, eps_pair = scan_input
             e = jnp.exp(-lam * dt)
@@ -227,9 +230,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
         for i, name in enumerate(self.param_names):
             init_key, integ_key = keys[2 * i], keys[2 * i + 1]
             z0, w0 = self._stationary_init(init_key, ensemble_size)
-            z_traj, z_end, w_end = self._integrate(
-                reg_times, z0, w0, integ_key
-            )
+            z_traj, z_end, w_end = self._integrate(reg_times, z0, w0, integ_key)
             # z_traj is the unit-variance AR(2) anomaly; apply the (possibly
             # time-varying) external envelope x_ext(t) + Σ_ext(t)·z.
             mean_t, std_t = self._ext_profile(name, reg_times)
@@ -244,9 +245,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
             arrays, time_coords, ensemble_size, passthrough=statics
         )
 
-    def _sample_statics(
-        self, ensemble_size: int
-    ) -> dict[str, tuple[str, jnp.ndarray]]:
+    def _sample_statics(self, ensemble_size: int) -> dict[str, tuple[str, jnp.ndarray]]:
         """Draw each static parameter once into an ``(ensemble,)`` array.
 
         Returned as ``{name: ("ensemble", values)}`` so it merges into the prior
@@ -286,9 +285,7 @@ class AR2RelaxationModel(ParameterTimeSeries):
         reg_times, end_time = self._split_endpoint(prediction_times)
         ensemble_size = posterior.sizes["ensemble"]
         t0 = reg_times[0]
-        alpha = jnp.exp(
-            -(reg_times - t0) / max(self.correlation_length, 1e-6)
-        )
+        alpha = jnp.exp(-(reg_times - t0) / max(self.correlation_length, 1e-6))
 
         keys = jax.random.split(rng_key, len(self.param_names))
         arrays: dict[str, jnp.ndarray] = {}
@@ -329,15 +326,13 @@ class AR2RelaxationModel(ParameterTimeSeries):
                 z0, w0 = self._stationary_init(init_key, ensemble_size)
                 mu_end = jnp.asarray(x_ext)
 
-            z_traj, z_end, w_end = self._integrate(
-                reg_times, z0, w0, key
-            )
+            z_traj, z_end, w_end = self._integrate(reg_times, z0, w0, key)
             new_state[name] = (z_end, w_end)
 
             ar2_part = mu_end + std * z_traj  # (N_reg, N_e)
             ext_part = jnp.full_like(ar2_part, x_ext)
-            vals = (
-                alpha[:, None] * ar2_part + (1.0 - alpha[:, None]) * (ext_part + std * z_traj)
+            vals = alpha[:, None] * ar2_part + (1.0 - alpha[:, None]) * (
+                ext_part + std * z_traj
             )
             if end_time is not None:
                 vals = self._append_linear_endpoint(vals, reg_times, end_time)

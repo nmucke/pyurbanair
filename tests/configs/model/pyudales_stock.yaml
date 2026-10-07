@@ -1,0 +1,17 @@
+# uDALES on the tiny grid as the library tests expect it: one rank, Vreman at
+# its stable constant, and the optional extensions (inlet turbulence, SGS
+# discrepancy) off, so each test switches on what it tests.
+defaults:
+  - pyudales_tiny
+  - _self_
+
+forward_model:
+  ncpu: 1
+  boundary_condition: inflow_outflow
+  closure: vreman
+  sgs_constant: 0.24
+  model_discrepancy:
+    enabled: false
+  inlet_turbulence:
+    enabled: false
+  per_member_irandom: false

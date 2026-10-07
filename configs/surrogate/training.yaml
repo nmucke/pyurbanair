@@ -1,0 +1,73 @@
+# @package _global_
+# Training defaults shared by every neural-surrogate training config
+# in this folder (train_stepper, train_autoencoder, train_latent_generator,
+# train_dft, finetune_stepper).
+# Not an entry point: each of those lists it first and overrides what differs.
+defaults:
+  - /common
+  - architectures
+  - _self_
+
+paths:
+  results_dir: ${paths.weights_dir}
+  data_dir: ${paths.training_data_dir}/pyudales_idealized
+
+trainer:
+  device: cuda
+  num_epochs: 200
+  patience: 20
+  resume: true
+  checkpoint_every: 5
+  # Speed
+  amp: true
+  amp_dtype: bfloat16
+  compile_model: false
+  channels_last: false
+  cudnn_benchmark: true
+  tf32: true
+  # Learning-rate schedule and stability
+  lr_warmup_epochs: 5
+  lr_warmup_start: 1.0e-6
+  lr_min: 1.0e-6
+  grad_clip_norm: 1.0
+  # Ignore solid (building) cells in the loss.
+  mask_loss: true
+
+# Training loss; a training config replaces it if its model needs another.
+loss:
+  _target_: torch.nn.MSELoss
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  weight_decay: 1.0e-6
+
+# Batching. The sampler groups every batch by trajectory (needed for
+# multi-geometry data, whose grids cannot be stacked) and caps it at
+# `cell_budget` grid cells, so batches of large domains shrink below
+# `batch_size`.
+batch_sampler:
+  _target_: neural_surrogates.TrajectoryBatchSampler
+  batch_size: 4
+  cell_budget: 4194304
+  shuffle: true
+  drop_last: true
+  seed: 0
+
+# batch_size / shuffle / drop_last come from the sampler.
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  # How samples are stacked into a batch; set by each training config.
+  collate_fn: null
+
+dataset:
+  root_dir: ${paths.data_dir}
+  state_vars: [u, v, w]
+  # Geometry input: signed distance to the buildings and/or its gradient.
+  sdf_features: both  # none | sdf | grad | both
+  sdf_clamp_cells: 32
+  cache: false
+  dtype: float32

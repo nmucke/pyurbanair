@@ -1,0 +1,61 @@
+# @package _global_
+# Fine-tune a pretrained next-step surrogate, typically on new data (another
+# case or geometry). The architecture comes from the pretrained model.
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts/surrogate/train.py builds.
+task: finetune_stepper
+name: p3d_idealized_finetuned
+# A train_stepper.yaml output folder (weights + config).
+pretrained_dir: ${paths.weights_dir}/p3d_idealized
+
+# full: train every weight, starting from the pretrained ones;
+# lora: freeze them and train low-rank adapters (`lora`) only.
+method: lora
+lora:
+  variant: standard  # standard | balora
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  target_preset: attention
+  target_modules: null
+  modules_to_save: []
+
+# Recompute the input/output normalization on the new data (false: keep the
+# pretrained model's).
+recompute_normalization: false
+
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 50
+  patience: 10
+  lr_warmup_epochs: 3
+  pushforward_epochs_per_step: 5
+  pushforward_start_steps: 1
+  grad_unroll_steps: 2
+
+optimizer:
+  lr: 5.0e-5
+  weight_decay: 0.0
+
+batch_sampler:
+  batch_size: 2
+  cell_budget: 393216
+
+dataloader:
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  # The new data to fine-tune on.
+  root_dir: ${paths.training_data_dir}/pyudales_realistic
+  param_vars: null
+  # null: take these from the pretrained model.
+  num_history_steps: null
+  pushforward_steps: 5

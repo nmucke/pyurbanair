@@ -1,366 +1,189 @@
-import itertools
+"""Shared helpers and fixtures for tests/ (see README.md).
+
+The script tests (scripts/) use the real configs in configs/, made tiny by
+an overlay from tests/configs/ (`+test=<name>`), e.g.
+
+    cfg = compose("forward", "+test=forward", root=tmp_path)
+
+Every run writes under `root`. The solver-free tests run the scripts on the
+neural-surrogate backend: `training_data` writes a small synthetic dataset and
+`trained` trains every surrogate on it once per session. Tests that run a
+compiled CFD solver are marked `integration`.
+"""
+
+from __future__ import annotations
+
+import importlib.util
 import os
 import pathlib
+import sys
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from types import ModuleType
+from typing import Any
 
+# On macOS the native loader can abort if torch initializes before NumPy.
+import numpy as np
 import pytest
-from hydra import compose, initialize
-from omegaconf import DictConfig
+import xarray
+from hydra import compose as hydra_compose
+from hydra import initialize_config_dir
+from omegaconf import DictConfig, OmegaConf
 
 os.environ.setdefault("MPLBACKEND", "Agg")
-
-# Test smoke shape: the smallest, fastest run the solvers accept — a tiny
-# [0,20]^2 x [0,10] domain, a 3 s window and a 2-member ensemble. Applied to
-# every composed test config so the suite exercises the code paths without
-# producing a meaningful flow (formerly the deleted `+scale=test` overlay).
-#
-# DO NOT shrink this further expecting the suite to get faster — that was
-# measured and it does not. At this size the e2e suite is dominated by FIXED
-# per-test overhead (process spawn, imports, JAX/solver setup, the per-model
-# compile check, NetCDF round-trips), not by the flow solve, which is already
-# only a few thousand cell-updates. A/B on three representative tests with a
-# warm build tree: halving nx/ny to 10 and cutting spinup_time to 1.0 moved the
-# uDALES case 16.6s -> 16.3s (noise) and the whole 3-test subset 131s -> 115s,
-# while the FULL suite came out SLOWER (672s -> 772s) — i.e. inside this
-# machine's run-to-run spread. The coarser grid also costs real coverage: at
-# dx=2 m the Xie & Castro blocks in this corner of the array (5–10 m across, x
-# edges at 5/15, y edges every 5 m) are down to ~2 cells, close to voxelizing
-# away entirely and leaving an empty channel. Not worth it.
-#
-# Each knob is at a floor for a reason:
-#
-# * ``bounds`` are fixed by the TESTS, not the physics — test_run_esmda and
-#   test_run_filtering place sensors at x=18, so a narrower domain would put
-#   the observations outside the grid.
-# * ``nx``/``ny`` must stay EVEN (PALM's poisfft rejects an odd number of grid
-#   points along a cyclic direction, PAC0071/PAC0072).
-# * ``simulation_time`` is pinned to 3.0 by the e2e tests' own
-#   ``<algorithm>.interval_seconds=3.0`` (esmda/filtering); one
-#   interval is the minimum the aggregator can score.
-# * ``output_frequency`` 1.0 -> 4 frames per window. Time interpolation and the
-#   temporal observation operator need more than a single frame.
-# * ``ensemble_size`` 2 — the ESMDA update needs >=2 members.
-# * ``spinup_time`` is only prepended to the FIRST window (see
-#   base_rollout_forward_model.disable_spinup); it keeps the spin-up-and-trim
-#   path alive.
-_SMOKE_OVERRIDES = [
-    "domain.nx=20",
-    "domain.ny=20",
-    "domain.nz=4",
-    "domain.bounds=[[0.0,20.0],[0.0,20.0],[0.0,10.0]]",
-    "time.simulation_time=3.0",
-    "time.output_frequency=1.0",
-    "time.spinup_time=3.0",
-    "time.seconds_per_knot=1.5",
-    "ensemble.ensemble_size=2",
-    "ensemble.num_parallel_processes=1",
-    # The case's held-out sensors sit at the real geometry's coordinates, all of
-    # which fall OUTSIDE the 20x20x10 smoke box, so the validation sensor set was
-    # present but scored nothing inside the domain. Pin one held-out sensor into
-    # the smoke box — (16, 18) is a fluid street-level cell just downstream of the
-    # single block the smoke domain crops (x=[5,15], y=[5,15], roof at the domain
-    # top) — so the validation branches (sensor_statistics.validation, the S5
-    # validation columns, the D1 held-out histograms) run under CI.
-    # ``++`` because these keys exist only in the xie_and_castro case: barcelona
-    # defines no held-out sensors, and a plain assignment would make any
-    # ``compose_test_cfg(["case=barcelona"])` die with a Hydra "no match in
-    # config" error instead of composing.
-    "++obs.validation_x_points=[16.0]",
-    "++obs.validation_y_points=[18.0]",
-    "++obs.validation_z_points=[2.0]",
-]
-
-
-# run_esmda.yaml is the one entry point that gets retuned for whatever
-# production run is in flight — it has shipped machine-specific scratch roots
-# (/export/...) and ``case: barcelona``, whose precomputed uDALES geometry
-# bundle only matches the Barcelona grid, not the smoke domain above. Pin the
-# test-friendly xie_and_castro case (the default of the other entry points) so
-# the suite never inherits it.
-_ESMDA_OVERRIDES = [
-    "case=xie_and_castro",
-]
-
-
-# --- Output isolation -----------------------------------------------------------
-#
-# EVERY entry point defaults its output roots to a scratch directory INSIDE the
-# repo, and those are the exact directories a real run writes to:
-#
-#   run_esmda.yaml      results_dir=.temp/${truth_model.name}_to_${assim_model.name}
-#                       experiment_dir=$PWD/.temp   base_results_dir=.temp_lbm
-#   run_forward_model   results_dir=results/${model.name}
-#                       experiment_dir=$PWD/.temp_${model.name}
-#                       base_results_dir=.temp_${model.name}
-#   run_filtering.yaml  results_dir=.temp/filtering_${truth}_to_${assim}
-#                       experiment_dir=$PWD/.temp   base_results_dir=.temp_lbm
-#
-# A default pyudales→pyudales test run therefore lands on the SAME path as the
-# production run of the same shape, and the suite overwrites a 32-member
-# production output with 2-member smoke artifacts — silently, because the
-# scripts only ever mkdir(exist_ok=True) and write. This has already destroyed a
-# real run directory.
-#
-# So every composed config gets all three roots rewritten into a pytest-managed
-# temp tree, and a FRESH subdirectory per compose call so two tests composing the
-# same config cannot collide with each other either. The values are literal
-# absolute paths, which also sidesteps the ${model.name} / ${truth_model.name}
-# interpolations the defaults carry.
-_OUTPUT_ROOT: pathlib.Path | None = None
-_RUN_COUNTER = itertools.count()
-
-# The pylbm build tree is deliberately NOT isolated per run. It lives at
-# ``<experiment_dir>/lbm_build`` by default, so isolating ``experiment_dir``
-# alone would force a full Fortran rebuild for every single test. ``pylbm``
-# supports pointing the tree elsewhere via ``PYLBM_BUILD_ROOT``; we park it at a
-# stable per-user location OUTSIDE the repo, which keeps the compiled binary
-# cached across tests *and* across sessions (what ``.temp/lbm_build`` used to do)
-# while still writing nothing into the repository. Set PYLBM_BUILD_ROOT yourself
-# to override; concurrent pytest sessions must still be serialized (they share
-# this tree, exactly as they used to share ``.temp``).
-_LBM_BUILD_CACHE = (
-    pathlib.Path(tempfile.gettempdir()) / f"pyurbanair-pytest-lbm-build-{os.getuid()}"
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+# One LBM build per user, shared by every test, instead of one per run dir.
+os.environ.setdefault(
+    "PYLBM_BUILD_ROOT",
+    str(
+        pathlib.Path(tempfile.gettempdir())
+        / f"pyurbanair-pytest-lbm-build-{os.getuid()}"
+    ),
 )
 
-
-def _output_root() -> pathlib.Path:
-    """Session-wide root every composed test config writes under.
-
-    ``_compose_test_cfg`` is a plain function shared by a function-scoped and a
-    **module-scoped** fixture, so it cannot take ``tmp_path``. The session-scoped
-    autouse fixture below fills this in from ``tmp_path_factory``; the mkdtemp
-    fallback keeps the composer usable if it is ever called outside a test.
-    """
-    global _OUTPUT_ROOT
-    if _OUTPUT_ROOT is None:
-        _OUTPUT_ROOT = pathlib.Path(tempfile.mkdtemp(prefix="pyurbanair-tests-"))
-    return _OUTPUT_ROOT
+REPO = pathlib.Path(__file__).resolve().parents[1]
+CONFIGS = REPO / "configs"
+TEST_CONFIGS = pathlib.Path(__file__).resolve().parent / "configs"
 
 
-@pytest.fixture(scope="session", autouse=True)  # type: ignore[misc]
-def _isolate_run_outputs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
-    """Point the composer's output root at pytest's temp tree, session-wide."""
-    global _OUTPUT_ROOT
-    if _OUTPUT_ROOT is None:
-        _OUTPUT_ROOT = tmp_path_factory.mktemp("run_outputs")
-    os.environ.setdefault("PYLBM_BUILD_ROOT", str(_LBM_BUILD_CACHE))
-    yield
+def compose(config_name: str, *overrides: str, root: pathlib.Path) -> DictConfig:
+    """A configs/ config with every output and scratch dir under `root`."""
+    paths = [
+        "paths.machine=local",
+        f"paths.results_root={root / 'results'}",
+        f"paths.scratch.local={root / 'scratch'}",
+        f"paths.weights_dir={root / 'weights'}",
+        f"paths.training_data_dir={root / 'training_data'}",
+    ]
+    with initialize_config_dir(config_dir=str(CONFIGS), version_base=None):
+        return hydra_compose(
+            config_name,
+            overrides=[f"hydra.searchpath=[file://{TEST_CONFIGS}]", *paths, *overrides],
+        )
 
 
-def _isolated_path_overrides() -> list[str]:
-    """A fresh, repo-external home for one composed config's three output roots."""
-    run_dir = _output_root() / f"run_{next(_RUN_COUNTER):04d}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+def load_script(path: str) -> ModuleType:
+    """Import a script (e.g. "scripts/run_forward.py") as a module."""
+    file = REPO / path
+    name = "_".join(file.relative_to(REPO).with_suffix("").parts)
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, file)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def surrogate(session_root: pathlib.Path) -> list[str]:
+    """Overrides that run the tiny trained surrogates (`trained` fixture)."""
     return [
-        f"paths.results_dir={run_dir / 'results'}",
-        f"paths.experiment_dir={run_dir / 'experiment'}",
-        f"++paths.base_results_dir={run_dir / 'base_results'}",
+        f"paths.weights_dir={session_root / 'weights'}",
+        f"paths.training_data_dir={session_root / 'training_data'}",
     ]
 
 
-def _compose_test_cfg(
-    overrides: Sequence[str] | None = None,
-    config_name: str = "run_forward_model",
-) -> DictConfig:
-    # ``config_name`` selects the primary config (entry point). Forward-model
-    # tests use ``run_forward_model``; ESMDA tests use ``run_esmda`` (the single
-    # primary config for scripts/esmda/run_esmda.py) and pick the smoother via the
-    # ``esmda/smoother`` group override.
-    # ``run_probe_series`` inherits ``/run_esmda``'s defaults, including the
-    # ``case`` that gets retuned per production run, so it needs the same pin.
-    esmda_overrides = (
-        _ESMDA_OVERRIDES if config_name in ("run_esmda", "run_probe_series") else []
-    )
-    # The path overrides go before the caller's, so a test that wants its own
-    # (already isolated) tmp_path for one of the roots still wins.
-    caller_overrides = list(overrides or [])
-    with initialize(version_base=None, config_path="../conf"):
-        cfg = compose(
-            config_name=config_name,
-            overrides=[
-                *_SMOKE_OVERRIDES,
-                *esmda_overrides,
-                *_isolated_path_overrides(),
-                *caller_overrides,
-            ],
-        )
-    _fit_nudging_to_smoke_domain(cfg)
-    _fit_pyudales_to_smoke_domain(cfg, caller_overrides)
-    return cfg
-
-
-# `nnudge_meters` is the height below which nudging is NOT applied, so it has to
-# leave at least one nudged level above it. The backends set it for a real
-# domain (tens of metres); the smoke shape above is 10 m tall, and anything at
-# or above its top cell center makes the solver raise. Scale it down instead of
-# holding the production configs to the test domain's height.
-_SMOKE_NNUDGE_METERS = 4.0
-
-
-def _fit_nudging_to_smoke_domain(cfg: DictConfig) -> None:
-    # Only the mounts that actually carry a nudging_config — pylbm has none, and
-    # run_esmda/run_filtering mount two models rather than one.
-    for mount in ("model", "truth_model", "assim_model"):
-        nudging = cfg.get(mount, {}).get("forward_model", {}).get("nudging_config")
-        if nudging is not None and "nnudge_meters" in nudging:
-            nudging.nnudge_meters = _SMOKE_NNUDGE_METERS
-
-
-def _override_key(override: str) -> str:
-    """Return an override's dotted key without Hydra's mutation prefix."""
-    return override.partition("=")[0].lstrip("+~")
-
-
-def _field_was_overridden(
-    overrides: Sequence[str], field: str, *, include_nested: bool = False
-) -> bool:
-    """Whether a caller explicitly controls a field (or one of its children)."""
-    for override in overrides:
-        key = _override_key(override)
-        if key == field or (include_nested and key.startswith(f"{field}.")):
-            return True
-    return False
-
-
-def _fit_pyudales_to_smoke_domain(
-    cfg: DictConfig, caller_overrides: Sequence[str]
-) -> None:
-    """Keep production uDALES compute and inlet settings out of smoke runs."""
-    for mount in ("model", "truth_model", "assim_model"):
-        model = cfg.get(mount)
-        if model is None or model.get("solver_name") != "udales":
-            continue
-        forward_model = model.get("forward_model")
-        if forward_model is None:
-            continue
-
-        ncpu_field = f"{mount}.forward_model.ncpu"
-        if not _field_was_overridden(caller_overrides, ncpu_field):
-            forward_model.ncpu = 1
-
-        inlet_field = f"{mount}.forward_model.inlet_turbulence"
-        inlet = forward_model.get("inlet_turbulence")
-        if inlet is not None and not _field_was_overridden(
-            caller_overrides, inlet_field, include_nested=True
-        ):
-            inlet.enabled = False
+# ---------------------------------------------------------------------------
+# Session fixtures: synthetic training data and the surrogates trained on it
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)  # type: ignore[misc]
-def _restore_hydra_config_singleton() -> Iterator[None]:
-    """Keep ``HydraConfig`` from leaking a composed config across test files.
+def _no_job_script_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests never run against the machine a job script's env.sh selects."""
+    monkeypatch.delenv("PYURBANAIR_MACHINE", raising=False)
+    monkeypatch.delenv("PYURBANAIR_RESULTS_ROOT", raising=False)
 
-    ``HydraConfig`` is a process-wide singleton, so a test that primes it with
-    ``HydraConfig.instance().set_config(cfg)`` leaves it populated for the rest
-    of the session. A config from bare ``compose()`` has no
-    ``hydra.runtime.output_dir`` (it is ``???``), so any later test that reaches
-    ``resolve_output_dir`` takes its ``HydraConfig.initialized()`` branch and
-    dies on MissingMandatoryValue instead of falling back to
-    ``paths.base_results_dir``. Whether that happens comes down to file
-    collection order, which makes it a nasty failure to place.
+
+@pytest.fixture(scope="session")  # type: ignore[misc]
+def session_root(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
+    return pathlib.Path(tmp_path_factory.mktemp("session"))
+
+
+@pytest.fixture(scope="session")  # type: ignore[misc]
+def training_data(session_root: pathlib.Path) -> pathlib.Path:
+    """Synthetic training data in generate_data.py's layout, on the tiny grid.
+
+    Smooth random u, v, w around a building block, 10 frames per trajectory:
+    four train trajectories, one val and one test.
     """
-    from hydra.core.hydra_config import HydraConfig
-
-    previous = HydraConfig.instance().cfg
-    yield
-    HydraConfig.instance().cfg = previous
-
-
-@pytest.fixture  # type: ignore[misc]
-def compose_test_cfg() -> Callable[..., DictConfig]:
-    return _compose_test_cfg
-
-
-@pytest.fixture  # type: ignore[misc]
-def surrogate_model_dir_factory() -> Callable[..., pathlib.Path]:
-    """Build a minimal trained-surrogate folder (config.yaml + weights.pt).
-
-    Mirrors what ``scripts/neural_surrogate/train_neural_surrogate.py`` writes: a model
-    ``config.yaml`` holding the architecture and dataset (state_vars /
-    param_vars / root_dir), a sibling ``weights.pt`` matching that
-    architecture, and a training-data ``config.yaml`` (under ``root_dir``)
-    carrying the trained ``domain`` and ``time`` so the forward model can
-    derive its trained grid and output frequency. No real data or training
-    needed — callers point the surrogate at the returned folder.
-
-    ``num_history_steps`` (how many past frames the network consumes) is only
-    written — under both ``architecture`` and ``dataset``, as the trainer does —
-    when it differs from the default of 1, so the default folder is unchanged.
-    """
-    import torch
-    from hydra.utils import instantiate
-    from omegaconf import OmegaConf
-
-    def _build(
-        tmp_path: pathlib.Path,
-        *,
-        domain: dict,
-        time: dict,
-        state_vars: Sequence[str] = ("u", "v", "w"),
-        param_vars: Sequence[str] = ("inflow_angle", "velocity_magnitude"),
-        architecture: dict | None = None,
-        num_history_steps: int = 1,
-    ) -> pathlib.Path:
-        architecture = architecture or {
-            "_target_": "neural_surrogates.UNetConvNeXt",
-            "base_channels": 4,
-            "channel_mults": [1, 2],
-            "depths": [1, 1],
-            "kernel_size": 3,
-            "expansion": 2,
-        }
-        # A one-step surrogate (the default) writes exactly the config the
-        # trainer has always written; the key only appears for H > 1.
-        if num_history_steps != 1:
-            architecture = {**architecture, "num_history_steps": num_history_steps}
-        root_dir = tmp_path / "training_data"
-        root_dir.mkdir(parents=True, exist_ok=True)
-        OmegaConf.save(
-            OmegaConf.create({"domain": domain, "time": time}),
-            root_dir / "config.yaml",
-        )
-
-        model_dir = tmp_path / "model_dir"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        OmegaConf.save(
-            OmegaConf.create(
+    cfg = compose("forward", "+test=forward", root=session_root)
+    out = session_root / "training_data" / "tiny"
+    out.mkdir(parents=True)
+    OmegaConf.save(
+        OmegaConf.create(
+            {"case_name": cfg.case_name, "domain": cfg.domain, "time": cfg.time}
+        ),
+        out / "config.yaml",
+        resolve=True,
+    )
+    nx, ny, nz = cfg.domain.nx, cfg.domain.ny, cfg.domain.nz
+    (x0, x1), (y0, y1), (z0, z1) = cfg.domain.bounds
+    coords = {
+        "zt": z0 + (np.arange(nz) + 0.5) * (z1 - z0) / nz,
+        "yt": y0 + (np.arange(ny) + 0.5) * (y1 - y0) / ny,
+        "xt": x0 + (np.arange(nx) + 0.5) * (x1 - x0) / nx,
+    }
+    blanking = np.zeros((nz, ny, nx), dtype=np.int8)
+    blanking[:2, 7:13, 7:13] = 1  # one building
+    times = np.arange(10, dtype=float) * float(cfg.time.output_frequency)
+    rng = np.random.default_rng(0)
+    splits = {"train": 4, "val": 1, "test": 1}
+    for split, count in splits.items():
+        (out / "state" / split).mkdir(parents=True)
+        (out / "param" / split).mkdir(parents=True)
+        for i in range(count):
+            angle = rng.normal(0.0, 10.0) + np.cumsum(rng.normal(0, 1, len(times)))
+            speed = rng.normal(5.0, 0.5) + np.cumsum(rng.normal(0, 0.1, len(times)))
+            fields = {}
+            for c, name in enumerate(("u", "v", "w")):
+                base = (speed if name == "u" else np.radians(angle) * speed)[
+                    :, None, None, None
+                ]
+                noise = rng.normal(0, 0.3, (len(times), nz, ny, nx))
+                field = (0.0 if name == "w" else base) * (1 + 0.2 * c) + noise
+                fields[name] = (
+                    ("time", "zt", "yt", "xt"),
+                    np.where(blanking, 0.0, field).astype(np.float32),
+                )
+            state = xarray.Dataset(
+                {**fields, "blanking": (("zt", "yt", "xt"), blanking)},
+                coords={"time": times, **coords},
+            )
+            params = xarray.Dataset(
                 {
-                    "architecture": architecture,
-                    "dataset": {
-                        "root_dir": str(root_dir),
-                        "state_vars": list(state_vars),
-                        "param_vars": list(param_vars),
-                        **(
-                            {}
-                            if num_history_steps == 1
-                            else {"num_history_steps": num_history_steps}
-                        ),
-                    },
-                }
-            ),
-            model_dir / "config.yaml",
-        )
-        model = instantiate(
-            architecture,
-            n_state_channels=len(state_vars),
-            n_params=len(param_vars),
-        )
-        torch.save(model.state_dict(), model_dir / "weights.pt")
-        return model_dir
-
-    return _build
+                    "inflow_angle": ("time", angle),
+                    "velocity_magnitude": ("time", speed),
+                    "pressure_gradient_magnitude": 0.0041912,
+                },
+                coords={"time": times},
+            )
+            state.to_netcdf(out / "state" / split / f"sample_{i:04d}.nc")
+            params.to_netcdf(out / "param" / split / f"sample_{i:04d}.nc")
+    return out
 
 
-@pytest.fixture(scope="module")  # type: ignore[misc]
-def compose_module_cfg() -> Callable[..., DictConfig]:
-    """Module-scoped variant of ``compose_test_cfg``.
+TRAIN_ORDER = (
+    "train_stepper",
+    "finetune_stepper",
+    "train_autoencoder",
+    "train_latent_generator",
+    "train_dft",
+)
 
-    Composing inside ``hydra.initialize`` is cheap, but each call still
-    opens and closes a ``GlobalHydra`` instance. Module-scoped fixtures
-    (e.g. those that compile pylbm once for a whole test module) need a
-    composer that can be invoked outside the function-scoped fixture
-    lifecycle. This returns the same callable so test code looks
-    identical to the function-scoped path.
+
+@pytest.fixture(scope="session")  # type: ignore[misc]
+def trained(session_root: pathlib.Path, training_data: pathlib.Path) -> dict[str, Any]:
+    """Train every surrogate once on the synthetic data (in dependency order).
+
+    Returns {training config: its composed config}; the weights are in
+    `<session_root>/weights/<name>/`.
     """
-    return _compose_test_cfg
+    torch = pytest.importorskip("torch")
+    torch.set_num_threads(1)
+    train = load_script("scripts/surrogate/train.py")
+    configs = {}
+    for name in TRAIN_ORDER:
+        cfg = compose(f"surrogate/{name}", f"+test={name}", root=session_root)
+        train.run(cfg)
+        configs[name] = cfg
+    return configs

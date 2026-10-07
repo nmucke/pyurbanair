@@ -1,0 +1,131 @@
+# Hybrid ESMDA parameter smoothing and sequential state filtering.
+# The filter_smoothing node owns their shared horizon, seed and error scale.
+defaults:
+  - observation/error
+  - common/runtime
+  - execution: assimilation
+  - case: xie_and_castro
+  # --- the smoother half (conf/esmda/*) ---
+  # `none`: the param-only ctor rejects DistanceLocalization outright (it
+  # localizes state rows, and there are none here), and correlation
+  # localization is a tuning choice rather than a default for this hybrid.
+  - esmda: default
+  - esmda/localization: none
+  - esmda/state_reduction: none
+  - esmda/smoother: dynamic
+  # --- the filter half (conf/filtering/*) ---
+  - filtering: default
+  - filtering/analysis: stochastic
+  - filtering/localization: none
+  - filtering/state_reduction: none
+  # The parameter-updating mode (`joint`, the default below) requires spread
+  # maintenance — an inflation or an evolution — so ship the inflation on and
+  # the evolution off, matching run_filtering.yaml.
+  - filtering/inflation: rtps
+  - filtering/evolution: none
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  - params@truth_params: dynamic_sine
+  - params@prior_params: dynamic
+  - _self_
+  - observation/operator: temporal_points
+  - observation/aggregation: mean
+  - experiment: null
+
+# --- Output roots (everything mutable lands under .temp/). Two model mounts
+# (truth/assim) and no base `model`, so name the output by both backends. ---
+paths:
+  results_dir: .temp/filter_smoothing_${truth_model.name}_to_${assim_model.name}
+  # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
+  # so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp
+  base_results_dir: .temp_lbm
+
+# --- Time-varying parameter knot spacing (per-window horizon lives in the case).
+# The dynamic prior/truth take a new value every `seconds_per_knot` seconds; the
+# dynamic smoother's `num_time_points` is derived from the resulting knot count
+# by the script, exactly as run_esmda.py does. Keep it at or below
+# `time.output_frequency * <a few>`: in JOINT mode the filter approximates the
+# ESMDA schedule by ONE constant per forecast segment (the segment midpoint), so
+# knots finer than a cycle are averaged away by that approximation. ---
+time:
+  seconds_per_knot: 60.0
+
+# --- Which parameters are estimated (same contract as run_esmda.yaml /
+# run_filtering.yaml: a list -> update only those prior parameters;
+# null -> update every prior parameter; [] -> update none). All truth and prior
+# parameters are sampled and applied, including parameters excluded from DA. ---
+params_to_estimate:
+  - inflow_angle
+  - velocity_magnitude
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+# Shared horizon and seed. Observation uncertainty comes from observation/error.
+filter_smoothing:
+  # One window = `time.simulation_time` seconds, exactly as in both siblings.
+  # Unlike a pure filter's, a window boundary here is NOT purely computational:
+  # the ESMDA loop restarts on the next window's prior (extrapolated from this
+  # window's posterior for a dynamic trajectory) and the joint correction is
+  # reset, so W is a real modelling choice.
+  num_assimilation_windows: 2
+  seed: 42
+  # Beta tempering: how strongly each phase may use an observation that BOTH
+  # assimilate. Every filter analysis uses `beta * R` (L^(1/beta)); finite,
+  # >= 1. The single source for the filter's beta (forwarded to
+  # `filtering.beta` below; a conflicting `filtering.beta=` override is
+  # rejected). R itself — the physical `observation_error` variances, the
+  # obs_error_std artifacts and the innovation chi2 — stays physical. See
+  # docs/data_assimilation.md §9.
+  beta: 1.0
+  # filter_only | shared_budget.
+  #   filter_only   — ESMDA keeps its full normalized schedule; only the filter
+  #                   is tempered. Nominal combined exponent 1 + 1/beta, so this
+  #                   is heuristic damping, not likelihood accounting. beta 1.0
+  #                   is the legacy hybrid, bit for bit.
+  #   shared_budget — opt-in research mode: ESMDA runs alpha / w with the
+  #                   DERIVED weight w = (beta - 1)/beta, so the two phases
+  #                   split each observation's unit budget. Needs beta > 1, the
+  #                   raw product in both phases (`esmda.interval_seconds=null`)
+  #                   and filtering.assimilate_every_n_step=1; rejected before
+  #                   the truth is simulated otherwise.
+  likelihood_allocation: filter_only
+
+# --- The smoother half. `esmda.smoother` is the one mode-specific block
+# (selected by the `esmda/smoother` group); everything else here is shared
+# wiring the group files interpolate. The window/seed knobs live on
+# `filter_smoothing:` above rather than being duplicated here. ---
+esmda:
+  # Hybrid owns its horizon and seed in filter_smoothing.
+  num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
+  seed: ${filter_smoothing.seed}
+  save_obs_diagnostics: true
+
+filtering:
+  num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
+  seed: ${filter_smoothing.seed}
+  beta: ${filter_smoothing.beta}
+  mode: joint
+  assimilate_every_n_step: 1
+
+run:
+  # Read by the shared ESMDA metric/figure stages when they are pointed at this
+  # run directory (they gate their state/sensor/field blocks on it).
+  # When true, ensemble forecasts are written to disk (one NetCDF per member)
+  # instead of one in-memory ensemble Dataset. The two halves get SEPARATE roots
+  # (_ensemble_states/esmda for the MDA `step_{i}` dirs, _ensemble_states/filter
+  # for the per-window `cycle_{k}` dirs) so the two layouts never cohabit.
+  ensemble_save_on_disk: false
+  # Save the per-cycle analyzed params/state histories accumulated over the
+  # whole horizon (params_history.nc / state_history.nc; the state history holds
+  # analyzed final frames only, so it stays small), plus the MDA parameter
+  # trajectory per window (esmda_params_history.nc). Per-cycle diagnostics
+  # (cycle_diagnostics.yaml) are always saved.
+  save_history: true
+  # Truth source: null -> simulate inline (default); a path -> load a
+  # state.nc/params.nc artifact written by run_forward_model.py.
+  truth_dir: null
+  # Begin the assimilation horizon partway into a disk-loaded truth (skips a
+  # spin-up): frames before this time are dropped and the axis rebased so it
+  # becomes t=0. null/0 -> start from the truth's first frame.
+  truth_start_time: null

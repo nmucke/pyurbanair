@@ -1,0 +1,131 @@
+# Compare selected backends across named parameter scenarios.
+# Each model and scenario is mounted independently for N-way comparison.
+defaults:
+  - common/runtime
+  - execution: comparison
+  - case: xie_and_castro
+  # Parameter configs are mounted by scenario name. Add another with
+  # `+params@parameter_scenarios.my_case=dynamic_sine`, then select it in
+  # `compare.parameter_scenarios` on the CLI.
+  - params@parameter_scenarios.draw_a: dynamic_sine
+  - params@parameter_scenarios.draw_b: dynamic_cosine
+  # Every candidate backend, mounted under its own key. Mounting is cheap (it
+  # only composes YAML); `compare.models` decides what is instantiated and run.
+  - model@models.pyudales: pyudales
+  - model@models.pypalm: pypalm
+  # - model@models.pylbm: pylbm
+  # - model@models.neural_surrogate: neural_surrogate
+  - _self_
+  - experiment: null
+
+compare:
+  # Which of the mounted backends to run, in plot order. The first entry is the
+  # default reference for the difference/error figures.
+  models: [pypalm, pyudales]
+  # Backend the state differences and field RMSE are measured against. null ->
+  # the first entry of `compare.models`.
+  reference: null
+  # Each selected scenario runs against every entry in `compare.models`.
+  # The defaults therefore produce pypalm/pyudales x two independent AR(2)
+  # draws (four runs). Mount dynamic_sine / dynamic_cosine above to switch to
+  # prescribed harmonic profiles instead.
+  parameter_scenarios: [draw_a, draw_b]
+  # In addition to the per-scenario PALM-vs-uDALES figures, compare each solver
+  # against itself across the selected parameter scenarios. Results go under
+  # comparison/within_model/<solver>/; draw_a is the default reference.
+  within_model_parameter_comparisons: true
+  parameter_reference: null
+
+  # --- Comparison grid -------------------------------------------------------
+  # The backends live on different (and partly staggered) grids, so every field
+  # figure is drawn after interpolating each model onto one common cell-centred
+  # grid spanning `domain.bounds`. Keep this coarser than the solver grids --
+  # it only has to resolve the plots.
+  grid:
+    nx: 128
+    ny: 128
+  # Heights (m above the floor) sliced for the field figures and the animation.
+  heights: [2.0, 10.0, 32.0]
+  # Number of evenly-spaced snapshots in the static state-comparison figure.
+  num_snapshots: 5
+
+  # Write each model's full state to <out_dir>/<model>/state.nc. Off by default:
+  # a multi-model rollout at production resolution is several GB.
+  save_states: false
+  animate: true
+  fps: 10
+
+  # --- Statistical comparison ----------------------------------------------
+  # These diagnostics intentionally compare time-windowed and regional
+  # statistics, rather than requiring two chaotic LES realizations to match
+  # point-by-point. Regions are inferred from the selected STL: upstream,
+  # canopy, near wake, and far wake along the +x direction.
+  analysis:
+    statistics_window_seconds: 30.0
+    max_statistics_windows: 4
+    # Sensor-series smoothing: the time-resolved sensor traces are also drawn
+    # (and scored) after reducing a sliding `interval_seconds`-wide window to one
+    # number by `aggregation_mode` (mean|median|max|min) — the view the data
+    # assimilation entry points assimilate. null `interval_seconds` -> skip the
+    # smoothed panels and score the full-resolution series only.
+    interval_seconds: 30.0
+    aggregation_mode: mean
+    # Sliding Reynolds-average window (seconds, rounded to whole frames on the
+    # common time axis) behind the resolved-TKE error figure, the animation's
+    # TKE columns and the `field_tke_mae_z<h>` summary columns. null = a fifth
+    # of the run, floored at 8 frames -- short enough that the per-step curve is
+    # a curve and the animation's TKE columns move, long enough that each
+    # variance is a measurement rather than its own scatter. No default in
+    # seconds suits every case here (xie_and_castro writes 24 frames a window,
+    # barcelona 30 at a 4x coarser cadence), hence the fraction. Set a window
+    # spanning the whole run for the pass-long Reynolds average instead.
+    tke_window_seconds: null
+    # Vertical profiles/wake diagnostics use this smaller grid to keep the
+    # additional full-height interpolation compact.
+    profile_grid:
+      nx: 64
+      ny: 64
+    profile_num_heights: 24
+    # Remove this many common-grid cells adjacent to the STL-derived solid
+    # mask in field statistics/distributions. Sensor diagnostics are unchanged.
+    wall_exclusion_cells: 1
+    max_distribution_samples: 100000
+    spectrum_max_lag_seconds: 60.0
+    # Wake-recovery position: first x past the buildings where the mean
+    # streamwise velocity reaches (1 - deficit) of the upstream value.
+    wake_recovery_deficit: 0.10
+
+# Keep the two default AR(2) scenarios statistically identical except for their
+# seed. Override either seed on the CLI to draw further controlled cases.
+parameter_scenarios:
+  draw_a:
+    seed: 2
+  draw_b:
+    seed: 37
+
+# --- Output roots (everything mutable lands under .temp/) ---
+paths:
+  results_dir: results/compare_models
+  # Absolute scratch root for the solvers. compare_models.py rewrites
+  # `experiment_dir` to `${paths.experiment_root}_<model>_<scenario>` before
+  # building each backend, so co-resident solver/scenario cases never share a
+  # scratch dir. Resolved from $PWD rather than ${hydra:runtime.cwd} so it also
+  # works under bare compose().
+  experiment_root: ${oc.env:PWD}/.temp
+  experiment_dir: ${paths.experiment_root}
+  # Fallback output root used by resolve_output_dir() when Hydra isn't
+  # initialized (direct run(cfg) calls from tests).
+  base_results_dir: .temp_compare_models
+
+# --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
+# The dynamic prior takes a new value every `seconds_per_knot` seconds; if the
+# window length isn't a multiple of it, the last value is linearly extrapolated
+# onto the window end.
+time:
+  seconds_per_knot: 20.0
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=8 ensemble.num_parallel_processes=4`. ---
+run:
+  ensemble: false
+  rollout_steps: 0

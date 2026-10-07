@@ -57,6 +57,7 @@ class NamoptionsFile:
         self.sections: dict[str, dict[str, str]] = {}
         self.section_order: list[str] = []
         self.raw_lines: list[str] = []
+        self._removed_keys: set[tuple[str, str]] = set()
         self._parse_file()
 
     def _parse_file(self) -> None:
@@ -198,6 +199,15 @@ class NamoptionsFile:
                 self.section_order.append(section)
 
         self.sections[section][key] = str(value)
+        self._removed_keys.discard((section, key))
+
+    def remove_value(self, section: str, key: str) -> bool:
+        """Remove an existing key, returning whether the file needs rewriting."""
+        if key not in self.sections.get(section, {}):
+            return False
+        del self.sections[section][key]
+        self._removed_keys.add((section, key))
+        return True
 
     def has_section(self, section: str) -> bool:
         """
@@ -274,6 +284,8 @@ class NamoptionsFile:
                 parts = stripped.split("=", 1)
                 if len(parts) == 2:
                     key = parts[0].strip()
+                    if (current_section, key) in self._removed_keys:
+                        continue
                     if (
                         current_section in self.sections
                         and key in self.sections[current_section]

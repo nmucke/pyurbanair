@@ -1,0 +1,65 @@
+# @package _global_
+# Fixed small data-generation defaults independent of production.
+defaults:
+- /run_forward_model
+- /training_data/geometry_mode: random
+- override /model@model: pyudales
+- _self_
+ensemble:
+  failure:
+    policy: raise
+training_data:
+  num_train: 2
+  num_val: 1
+  num_test: 1
+  output_dir: ${paths.results_dir}/training_data
+  geometry:
+    source: realistic
+    stl_dir: examples/geometries/processed/${training_data.geometry.source}
+    udales_case_dir: examples/udales/${training_data.geometry.source}
+    palm_case_dir: examples/palm/${training_data.geometry.source}
+    resolution: 4.0
+    upstream_padding: 0.0
+    downstream_padding: 0.0
+    lateral_padding: 0.0
+    z_size: 64.0
+  simulation_time: 3.0
+  output_frequency: 1.0
+  spinup_time: 3.0
+  adaptive_spinup:
+    enabled: false
+    fill_times: 1.0
+    max_spinup_time: 3.0
+  seed: 0
+  save_vars:
+  - u
+  - v
+  - w
+  state_encoding:
+    zlib: true
+    complevel: 1
+    least_significant_digit: 3
+  pressure_gradient_magnitude: 0.0041912
+  num_parallel_processes: 1
+  sharding:
+    stage: all
+    num_shards: 1
+    shard_index: 0
+  params_sampler:
+    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
+    _convert_: all
+    seconds_per_knot: 1.5
+    external:
+      inflow_angle:
+        mean:
+          min: -45.0
+          max: 45.0
+        std: 15.0
+      velocity_magnitude:
+        mean:
+          min: 5.0
+          max: 10.0
+        std: 0.5
+    time_series:
+      correlation_length: 3.0
+    ensemble_size: 1

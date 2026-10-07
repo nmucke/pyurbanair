@@ -1,0 +1,66 @@
+# @package _global_
+# Evaluation of trained neural surrogates. One block per evaluation script:
+#   stepper           scripts/surrogate/evaluate_stepper.py
+#   autoencoder       scripts/surrogate/evaluate_autoencoder.py
+#   latent_generator  scripts/surrogate/evaluate_latent_generator.py
+defaults:
+  - /common
+  - _self_
+
+paths:
+  results_dir: ${paths.weights_dir}
+
+# Shared by every evaluation.
+device: cuda
+split: test
+seed: 0
+# Training-data root to evaluate on; null -> each model's own training data.
+data_dir: null
+
+stepper:
+  # One model, or several compared side by side on the same trajectories.
+  models:
+    - ${paths.weights_dir}/p3d_idealized
+  output_dir: ${paths.weights_dir}/stepper_eval
+  sample_indices: [0]
+  # Rollout length in frames; null -> the whole trajectory.
+  max_steps: null
+  animate: true
+
+autoencoder:
+  model_dir: ${paths.weights_dir}/tadpole_ae_s
+  output_dir: ${.model_dir}/eval
+  # mode: the latent mean; sample: a draw from the latent distribution.
+  latent_type: mode
+  # Reconstruction figures (one snapshot each) and their heights.
+  num_figures: 3
+  num_heights: 5
+  # Snapshots the metrics are computed on.
+  num_metric_samples: 48
+  batch_size: 8
+
+latent_generator:
+  model_dir: ${paths.weights_dir}/latent_generator_s
+  output_dir: ${.model_dir}/eval
+  # Held-out snapshots compared against, spread over the trajectories.
+  max_snapshots: 8
+  num_noise_seeds: 4
+  batch_size: 4
+  # Sampling steps tried in the step sweep.
+  num_steps_sweep: [5, 25, 50, 100]
+  # Figures of real vs generated fields.
+  num_figures: 2
+  # Velocity values pooled for the histograms, and their bins.
+  max_values: 200000
+  n_bins: 64
+  # Resamples for the held-out variability the thresholds are relative to.
+  bootstrap_resamples: 200
+  # Roll a trained stepper out from the generated fields; null -> skip.
+  rollout_stepper_dir: null
+  rollout_steps: 20
+  # Pass/fail thresholds, relative to the autoencoder and the data's own variability.
+  acceptance:
+    profile_rmse_factor: 2.0
+    w1_factor: 2.0
+    divergence_factor: 3.0
+    diversity_min_ratio: 0.25

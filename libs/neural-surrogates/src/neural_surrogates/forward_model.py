@@ -263,6 +263,9 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             trained_domain=trained_domain,
             model_dir=model_dir,
         )
+        # Guaranteed by _require_resolved; narrows the Optionals for mypy.
+        assert state_vars is not None and param_vars is not None
+        assert trained_output_frequency is not None and trained_domain is not None
 
         self.nx, self.ny, self.nz = int(nx), int(ny), int(nz)
         self.bounds = bounds
@@ -732,14 +735,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
     ) -> torch.Tensor:
         """Per-internal-step parameter vectors of shape ``(n_internal, P)``.
 
-        Time-varying params are linearly interpolated onto the network's
-        internal step times ``(k+1) * trained_output_frequency``; scalar
+        Step ``k`` advances the state from ``k * trained_output_frequency`` to
+        ``(k+1) * trained_output_frequency`` and is driven by the parameters at
+        its start, ``k * trained_output_frequency``, as in training (the
+        ``TransitionDataset`` pairs frame ``t`` with param row ``t``).
+        Time-varying params are linearly interpolated onto those times; scalar
         params are broadcast.
         """
         if params is None:
             raise ValueError("NeuralSurrogateForwardModel requires params.")
 
-        target_times = (np.arange(n_internal) + 1) * self.trained_output_frequency
+        target_times = np.arange(n_internal) * self.trained_output_frequency
         columns: list[np.ndarray] = []
         for name in self.param_vars:
             if name not in params:

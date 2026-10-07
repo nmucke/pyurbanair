@@ -61,10 +61,13 @@ and it is built in place).
 
 The compiled binary lands at `<build tree>/bin/boltzmann` (not in the shared pixi
 `bin/`), alongside a `.pylbm_build_stamp.json` recording the experiment, the
-netcdf/cuda mode, and hashes of the two compiled-in sources. With
+netcdf/cuda mode, `openmp: true` for an OpenMP build (the key is absent for a
+serial one), and hashes of the two compiled-in sources. With
 `model.compile=false`, `ForwardModel._verify_prebuilt_binary` checks that stamp
 and raises rather than reusing a binary built for a different grid or geometry —
-which does not fail loudly, it just produces wrong-shaped or all-NaN output.
+which does not fail loudly, it just produces wrong-shaped or all-NaN output. It
+also raises when the build's OpenMP mode does not match `ncpu` (serial for
+`ncpu: 1`, OpenMP for `ncpu > 1`; a CUDA build is never OpenMP).
 
 ---
 
@@ -96,13 +99,14 @@ Key constructor parameters:
 | `output_frequency` | 0.0538 | Seconds between output snapshots |
 | `spinup_time` | 0.0 | Warm-up seconds prepended (outputs discarded) |
 | `cuda` | `"auto"` | `"auto"` → CUDA if NVHPC is installed, else gfortran; `True` requires CUDA; `False` forces gfortran |
+| `ncpu` | 1 | OpenMP threads. `> 1` builds the gfortran binary with `MP=1` and runs it with `OMP_NUM_THREADS=ncpu`; `1` is the serial build, launched exactly as before. A CUDA build ignores it with a warning (§3) |
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
 | `inlet_turbulence` | None | Inflow-turbulence forcing dict, e.g. `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (see §7) |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
-The default in [`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml) sets
+The default in [`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml) sets
 `cuda: auto`, `verbose: false`, and `boundary_condition: inflow_outflow`.
 
 #### `compile(compile=True)`
@@ -135,14 +139,16 @@ The public entry point (called by `BaseForwardModel.__call__`):
 3. **Inflow settings** — `_apply_inflow_settings(params)` (see below).
 4. **Output cleanup** — `_clean_output()` deletes all `out_*.nc` files in
    `output_dir` to prevent stale files from a prior run being collected.
-5. **Run** — `self.run()` executes the `boltzmann` binary via `subprocess.run`
-   with `check=True` (non-zero exit raises `CalledProcessError`). Stack size is
+5. **Run** — `self.run()` executes the `boltzmann` binary through the shared
+   `pyurbanair.utils.solver_process.run_solver` (non-zero exit raises
+   `CalledProcessError`; the process dies with its Python owner). Stack size is
    raised to `unlimited` / `hard` before launch to handle large
    `nx*ny*nz` automatic arrays.
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
    with `xarray.concat`, assigns physical coordinates, scales velocity from
    lattice units (`* C_u`), trims spin-up outputs, trims to `simulation_time /
-   output_frequency` outputs, and assigns a seconds-based `time` coordinate.
+   output_frequency` outputs, and assigns a seconds-based `time` coordinate
+   (`dt, 2·dt, …, simulation_time`).
 7. **Prune restarts** — `remove_old_restart_files` keeps only the latest
    restart, preventing unbounded accumulation.
 
@@ -168,21 +174,9 @@ The public entry point (called by `BaseForwardModel.__call__`):
 
 #### `disable_spinup()`
 
-Sets `self.spinup_time = 0.0`. Called by `BaseRolloutForwardModel` after
-window 0 when `spinup_first_step_only=True`.
-
-> **One external caller drives these steps itself.**
-> [`scripts/esmda/run_probe_series.py`](../scripts/esmda/run_probe_series.py)
-> (the high-rate probe re-runs behind the Welch spectrum / figure S4) repeats
-> `run_single`'s launch sequence — `_set_scaling_factors` → `_prepare_warmstart`
-> → `_set_scaling_factors` → `_apply_inflow_settings` → `_clean_output` →
-> `run()` — and replaces only its *collection* step: at its 0.25 s default
-> cadence one window's snapshots run to ~100 GB per member on `case=barcelona`,
-> so each file is reduced to the probe points and unlinked instead of being
-> concatenated into one Dataset. It also keeps `spinup_time` on a warm start
-> (which `run_single` zeroes) to trim the restart's
-> transient. Keep that sequence and the `out_0000_F<iter>.nc` layout in mind when
-> refactoring `run_single`.
+Sets `self.spinup_time = 0.0`. Its only caller is the neural surrogate's
+`disable_spinup`, which forwards to its `spinup_forward_model`; warm-start
+windows already skip spin-up inside `run_single`.
 
 ### `EnsembleForwardModel`
 
@@ -196,7 +190,12 @@ it deep-copies the template `ForwardModel`, copies all files from the template's
 `self.dirs` on the copy.
 
 Parallel dispatch, failure policy, CPU pinning, and forkserver context are all
-in `BaseEnsembleForwardModel` (see codebase_guide.md §3).
+in `BaseEnsembleForwardModel` (see codebase_guide.md §3). With `ncpu > 1` each
+member runs `ncpu` OpenMP threads, so set `ensemble.num_cpus_per_process` to at
+least `ncpu`. That is advice, not checked anywhere: on Linux each worker is pinned
+to `num_cpus_per_process` cores, and more threads than pinned cores just
+oversubscribe them. macOS has no CPU pinning, so there the OS schedules all
+`num_parallel_processes * ncpu` threads freely.
 
 ---
 
@@ -238,10 +237,23 @@ handles the full build chain:
    failure so the real build starts with both files up to date.
 5. **Make invocation** — always `make -B` (full rebuild); passes
    `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=<build tree>/bin`,
-   `LIBDIR`. Compilation failure raises `RuntimeError`.
+   `LIBDIR`, and `MP=1` (`-fopenmp -DOPEN_MP`) when `ncpu > 1` — on both the
+   priming and the real invocation. OpenMP is CPU-only: when the build resolves
+   to CUDA (e.g. `cuda: auto` on a GPU node), `MP=1` is dropped with a warning,
+   so one config runs on both kinds of host. The thread count is a run-time
+   setting (`OMP_NUM_THREADS`), so changing `ncpu` between two values above 1
+   needs no rebuild; going between 1 and >1 does. Compilation failure raises
+   `RuntimeError` with the end of the build output.
 6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
-   cuda/netcdf mode, and hashes of the compiled-in sources next to the binary
-   (see §1).
+   cuda/netcdf mode, `openmp: true` when built with `MP=1`, and hashes of the
+   compiled-in sources next to the binary (see §1). A failed build writes no stamp, so the next compile retries it.
+
+**Platforms.** The gfortran build runs on Linux and macOS (osx-arm64) with the
+pixi env's compilers, FFTW and NetCDF. On macOS, `LIBDIR` also carries
+`-B/usr/bin/` from the shared `pyurbanair.utils.toolchain.apple_linker_flags`,
+so the link uses Apple's ld: conda's ld64 cannot read a current SDK's
+`libSystem.tbd` (`unknown architecture arm64e.x1`, then missing `expf`,
+`memcpy`). The CUDA build is Linux-only.
 
 `Makefile.set_path` (`makefile_utils.py`) is idempotent: it scans the whole file
 rather than stopping at the first blank line, consumes the line's own newline
@@ -406,9 +418,9 @@ constant is dimensionless and physically distinct from pypalm's `km_constant`
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -460,7 +472,7 @@ m/s. When `params` is `None`, `C_u` defaults to 75.
 
 ## 8. Configuration
 
-[`conf/model/pylbm.yaml`](../conf/model/pylbm.yaml):
+[`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml):
 
 ```yaml
 name: pylbm
@@ -473,6 +485,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
   cuda: auto
+  ncpu: 1                    # OpenMP threads; >1 builds with MP=1
   verbose: false
   boundary_condition: inflow_outflow
   profile_config: {type: power_law, alpha: 0.25}
@@ -510,6 +523,9 @@ model.forward_model.verbose=true
 
 # Disable CUDA (e.g. for CPU-only debugging)
 model.forward_model.cuda=false
+
+# Four OpenMP threads per run (with an ensemble, also ensemble.num_cpus_per_process=4)
+model.forward_model.ncpu=4
 
 # Skip recompile (binary already up to date)
 model.compile=false
@@ -549,6 +565,34 @@ tree (§1) and `make -B` always rebuilds, so this cannot happen with
 `model.compile=true`; with `model.compile=false`, `_verify_prebuilt_binary`
 compares the build stamp and raises instead of running.
 
+### OpenMP thread scaling, and why two runs never match
+
+With the same random seed (below), `ncpu > 1` reproduces the serial run bit
+for bit on macOS arm64 (checked at 1/2/4/8 threads, inflow turbulence on). On
+x86-64 Linux it does too without inflow turbulence, but with it the OpenMP build
+differs from the serial build by up to 2e-5 m/s on the tiny case. That
+difference is the same at 1, 2 and 4 threads (with `OMP_NUM_THREADS=1` too) and
+reproducible run to run, so it is code generation: the inflow-turbulence loops
+compiled with `-fopenmp` under `-Ofast -march=native` round differently, not
+thread scheduling, the RNG (drawn outside parallel regions) or reductions (none).
+The thread count never changes the result. Seeds matter far more: on a cold start
+`m_seedmanagement.F90` seeds `RANDOM_NUMBER` from the clock unless
+`seed_0000.orig` exists in the experiment dir, and `compile()` wipes the seed
+files, so two serial runs of one config already differ (~4e-5 m/s on the tiny
+case, ~0.1 m/s with inflow turbulence). Copy one run's `seed_0000.orig` into the
+other's experiment dir before comparing them
+(`tests/pylbm/test_pylbm_openmp.py`).
+
+Speed-up on an Apple M-series laptop (4 performance + 6 efficiency cores):
+~3.2x at 4 threads (3.3x on 120x120x24, 3.1x on 400x400x32), only 3.9x at 8 —
+little gain beyond the physical performance cores, as the solver is
+DRAM-bandwidth-bound. `ulimit -s` in `run()` raises only the main thread's
+stack; the OpenMP worker threads get the runtime's default (`OMP_STACKSIZE`).
+That default sufficed up to 400x400x32 on macOS (not measured on Linux), so no
+`OMP_STACKSIZE` is set; if large grids segfault only with `ncpu > 1`, export a
+bigger one. For an ensemble, weigh `ncpu` against
+`ensemble.num_parallel_processes` on the same budget of cores.
+
 ### Silent CUDA failures (`verbose=false`)
 
 The default config has `verbose: false`, which routes both `stdout` and `stderr`
@@ -574,7 +618,7 @@ MAX_ITERATION = 10**ITERATION_FIELD_WIDTH - 1          # 999_999
 restart_file_name(iteration, prefix="restart", tile="0000")
 ```
 
-`tests/test_pylbm_restart_filenames.py` parses the width out of the Fortran
+`tests/pylbm/test_pylbm_restart_filenames.py` parses the width out of the Fortran
 sources and fails if the two ever disagree, so a submodule bump that widens the
 field is caught there rather than in a silently wrong run.
 
@@ -711,7 +755,7 @@ higher than the building-only measurement.
 
 `EnsembleForwardModel` concatenates all member states in memory by default.
 For ensembles of ~96 members at grid sizes ≥ 75³ cells, this exhausts DRAM.
-Fix: set `run.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
+Fix: set `assimilation.ensemble_save_on_disk=true` (or `results_dir` on the ensemble
 model) so per-member files are written and read back individually. At 100³ the
 run remains disk-bound — the per-member file I/O becomes the bottleneck.
 

@@ -28,15 +28,16 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
-from . import PALM_MODEL_SYSTEM_PATH
+from pyurbanair.utils.solver_process import run_solver
+
+from . import PALM_BINARY, PALM_MODEL_SYSTEM_PATH
 from .utils.dir_utils import PALMDirectoryPaths
 
 logger = logging.getLogger(__name__)
 
 
-PALM_BINARY = PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "palm"
 COMBINE_BINARY = (
     PALM_MODEL_SYSTEM_PATH / "MAKE_DEPOSITORY_default" / "combine_plot_fields.x"
 )
@@ -122,7 +123,6 @@ class DirectRunResult:
     combine_s: float
     transfer_s: float
     total_s: float
-    palm_rc: int
     combine_rc: int
     output_files: list[str]
 
@@ -169,8 +169,8 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     for binary in (PALM_BINARY, COMBINE_BINARY):
         if not binary.exists():
             raise FileNotFoundError(
-                f"Prebuilt PALM binary missing at {binary}. Run pypalm "
-                f"compile_palm first (Hydra: model.compile=true)."
+                f"Prebuilt PALM binary missing at {binary}; "
+                "pypalm.install_palm() builds it."
             )
         link = dst_tempdir / binary.name
         # symlink is enough — both binaries are dynamically linked and read
@@ -194,7 +194,7 @@ def _link_binaries(dst_tempdir: pathlib.Path) -> None:
     # not satisfy it. Without this, combine exits on signal 9 (dyld "Library
     # not loaded: rrtmg.so"), the combined `_3d.nc` is never written, and
     # pypalm silently falls back to the zero-filled per-PE skeleton (see
-    # docs/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
+    # docs/archive/pypalm_zero_field_debug.md). Provide `./rrtmg.so` in the tempdir too.
     rrtmg_so = rrtmg_subdir / "rrtmg.so"
     rrtmg_so_link = dst_tempdir / "rrtmg.so"
     if rrtmg_so.is_file() and not rrtmg_so_link.exists():
@@ -239,11 +239,11 @@ def run_direct(
 
     When ``verbose`` is False the ``palm`` and ``combine_plot_fields.x`` stdout
     /stderr are captured rather than inherited, so nothing is streamed to the
-    terminal; on a non-zero exit the captured tail is logged so failures are
-    still diagnosable.
+    terminal; a failed ``palm`` raises with the tail of its log, and a failed
+    combine step logs its captured tail, so failures are still diagnosable.
     """
     capture = not verbose
-    _quiet = (
+    _quiet: dict[str, Any] = (
         {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True}
         if capture
         else {}
@@ -296,35 +296,26 @@ def run_direct(
             "./palm",
         ]
         t_palm = time.monotonic()
-        palm_result = subprocess.run(
-            _stack_limited(mpirun_cmd),
-            cwd=tempdir,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            **_quiet,
-        )
-        palm_s = time.monotonic() - t_palm
-        logger.info(
-            "direct_palm: palm wall=%.2fs rc=%s", palm_s, palm_result.returncode
-        )
-        if palm_result.returncode != 0:
-            if capture and palm_result.stdout:
-                tail = "\n".join(palm_result.stdout.splitlines()[-80:])
-                logger.error(
-                    "direct_palm: palm failed (rc=%s). Last output:\n%s",
-                    palm_result.returncode,
-                    tail,
+        palm_log = tempdir / "palm.log"
+        try:
+            with open(palm_log, "w") as log:
+                run_solver(
+                    _stack_limited(mpirun_cmd),
+                    cwd=tempdir,
+                    env=env,
+                    stdout=log if capture else None,
+                    stderr=subprocess.STDOUT if capture else None,
+                    log_path=palm_log if capture else None,
                 )
+        except subprocess.CalledProcessError:
             logger.error(
                 "direct_palm: re-run with PYPALM_KEEP_TEMPDIR=1 to retain %s "
                 "(RUN_CONTROL / DEBUG_* / PARIN) for diagnosis.",
                 tempdir,
             )
-            raise subprocess.CalledProcessError(
-                palm_result.returncode,
-                mpirun_cmd,
-                output=palm_result.stdout if capture else None,
-            )
+            raise
+        palm_s = time.monotonic() - t_palm
+        logger.info("direct_palm: palm wall=%.2fs", palm_s)
 
         # 3. ./combine_plot_fields.x (no mpirun — M0 confirmed this is correct)
         t_combine = time.monotonic()
@@ -361,7 +352,6 @@ def run_direct(
             combine_s=combine_s,
             transfer_s=transfer_s,
             total_s=time.monotonic() - t_start,
-            palm_rc=palm_result.returncode,
             combine_rc=combine_result.returncode,
             output_files=output_files,
         )

@@ -1,0 +1,198 @@
+# @package _global_
+#
+# Entry point for scripts/neural_surrogate/generate_training_data.py — the single
+# training-data generation config (replaces the former conf/training_data/ group
+# + conf/generate_training_data.yaml; dataset shape taken from the old medium preset).
+#
+# Fixed generation uses case= with training_data/geometry_mode=fixed.
+# The separate random-geometry generator uses mode=random and
+# geometry.source=idealized|realistic to select an UrbanTALES STL pool.
+defaults:
+  - /common/runtime
+  - /execution: forward
+  - /case: xie_and_castro
+  - /params: dynamic
+  - /model@model: pyudales
+  - /training_data/geometry_mode: random
+  - _self_
+
+# Historical data-generation roots and the same scientific knot spacing.
+paths:
+  results_dir: results/${model.name}
+  experiment_dir: ${oc.env:PWD}/.temp_${model.name}
+  base_results_dir: .temp_${model.name}
+time:
+  seconds_per_knot: 20.0
+run:
+  ensemble: false
+  ground_truth_dir: null
+  rollout_steps: 0
+  ensemble_save_on_disk: false
+# Dataset generation treats a failed sample as an error.
+ensemble:
+  failure:
+    policy: raise
+
+training_data:
+  # Dataset size for the selected geometry mode.
+  num_train: 500
+  num_val: 10
+  num_test: 10
+
+  # output_dir: training_data/${model.name}_${training_data.geometry.output_name}/
+  output_dir: /export/scratch2/ntm/training_data/${model.name}_${training_data.geometry.output_name}/
+
+  # --- Geometry source --------------------------------------------------
+  geometry:
+    # Fixed geometry (generate_training_data.py) uses case=, so the domain
+    # (nx/ny/nz + bounds) comes from the CASE, not from the resolution /
+    # z_size / *_padding knobs below — those stay inert here, kept at the
+    # pyudales_idealized values so this file still documents that dataset.
+    # Note the case grid is 1.5 x 1.33 x 1.33 m over z in [0, 32], finer and
+    # shallower than the 4 m isotropic / z = 64 m pool grid; and uDALES sets
+    # nprocx = ncpu, which must divide itot = 40 (so ncpu in
+    # 1/2/4/5/8/10/20/40, NOT the 16 that conf/model/pyudales.yaml carries).
+    source: realistic
+
+    # Pool + per-backend case-template locations, derived from `source`.
+    # Only consumed for the pool sources (idealized/realistic); the named
+    # cases carry their own paths in conf/case/<source>.yaml.
+    stl_dir: examples/geometries/processed/${training_data.geometry.source}
+    udales_case_dir: examples/udales/${training_data.geometry.source}
+    palm_case_dir: examples/palm/${training_data.geometry.source}
+
+    # Grid spacing in metres, identical in x, y and z. Per geometry, nx/ny are
+    # derived from the physical domain size (the pool's manifest.csv, with a
+    # mesh-bounds fallback) and rounded UP to a multiple of 16 cells — the
+    # domain is extended (never the mesh), so the extra cells are open fluid.
+    # They are placed around the geometry, not just behind it:
+    #   x — `upstream_padding` / `downstream_padding` below go in FRONT of and
+    #       BEHIND the geometry, and the rounding slack tops up the wake;
+    #   y — `lateral_padding` on both sides, plus the rounding slack split
+    #       evenly over them (an odd cell count leaves the spare cell at the
+    #       far side).
+    resolution: 4.0
+
+    # Open fluid (metres, each rounded up to a whole number of cells) inserted
+    # in front of and behind the geometry in x, the streamwise direction:
+    #   upstream_padding   — inflow fetch, so the inlet profile has room to
+    #                        develop instead of being imposed on the first row
+    #                        of buildings;
+    #   downstream_padding — wake, so the last row does not sit on the outlet;
+    #   lateral_padding    — applied to BOTH y sides, so the lateral boundaries
+    #                        are clear of the buildings whichever way the
+    #                        inflow_angle blows (the two sides are not
+    #                        distinguishable, hence one knob rather than two).
+    # All three are MINIMA: nx/ny cover geometry + padding rounded up to a
+    # multiple of 16, and the rounding slack tops up the wake in x and is split
+    # evenly over the two sides in y. All cost compute — at resolution 4.0 m
+    # every 64 m is 16 extra cells, and lateral_padding is charged twice (both
+    # sides). All 0.0 keeps the pre-knob behaviour: every spare cell behind the
+    # geometry in x, only the rounding slack centred in y.
+    upstream_padding: 64.0
+    downstream_padding: 64.0
+    lateral_padding: 64.0
+
+    # Fixed vertical domain extent (m), shared by ALL sampled geometries.
+    # z_size / resolution must itself be a multiple of 16. Geometries whose
+    # tallest building reaches z_size are dropped from the pool with a
+    # warning (pylbm SIGFPEs when buildings pierce the domain top).
+    z_size: 128.0
+
+  # Generation horizon (seconds) — set here, NOT inherited from the case, so
+  # the dataset's time setup is controlled entirely by this file.
+  simulation_time: 600.0
+  output_frequency: 5.0
+  # FLOOR for the spinup, and the value recorded in the saved config.yaml. On
+  # the turbulent-inlet path uDALES starts from REST with interior nudging off,
+  # so the domain fills by advection from the inlet face alone and the spinup
+  # is a flow-through-time problem. 300 s is ~2.7 fills on the median pool
+  # geometry -- measurably too short (a 764 m domain given 2 fills still shows
+  # a 27% inlet->outlet velocity deficit in its first saved frame), hence the
+  # adaptive sizing below. Keep this a LOWER BOUND on what any sample gets:
+  # train_latent_generator's `constant_prehistory` check reads this scalar.
+  spinup_time: 300.0
+  # Size the spinup per geometry from its own streamwise fill time instead of
+  # using one flat value for the whole pool. The pool spans 320-1344 m of
+  # streamwise domain and velocity_magnitude spans 5-10 m/s, so a flat spinup
+  # big enough for the p90 geometry wastes ~3x on the median one. Sampled at
+  # `fill_times` x (Lx_domain / bulk streamwise speed), rounded up to a whole
+  # output frame and clamped to [spinup_time, max_spinup_time].
+  #   enabled: false -> every sample gets the flat `spinup_time` above.
+  # At fill_times 6 this costs ~1.6x the bare-window compute (mean ~830 s) and
+  # leaves ~95% of samples fully filled, vs 1% at a flat 300 s.
+  adaptive_spinup:
+    enabled: true
+    fill_times: 6.0
+    max_spinup_time: 1500.0
+  seed: 0
+
+  # Time-varying state variables kept in each saved sample. null -> keep
+  # everything the backend returned (the previous behaviour). uDALES also
+  # returns `pres`, which nothing downstream reads -- every
+  # conf/neural_surrogate/*.yaml declares `state_vars: [u, v, w]` -- and which
+  # is a quarter of this corpus on disk. Variables with no time dimension (the
+  # pyudales blanking mask) are always kept regardless.
+  save_vars: [u, v, w]
+
+  # NetCDF encoding for the saved state files. null -> uncompressed, as before.
+  # These fields are smooth, so bit-rounding before deflate is worth far more
+  # than deflate alone: measured 2.5x here vs 1.3x lossless. At
+  # least_significant_digit 3 the quantisation is 5e-4 m/s on a 5-10 m/s field,
+  # orders of magnitude below the solver's own error; it is applied to float
+  # variables only. Costs ~1 s per sample written.
+  # Sizing for this run (520 sims, 4 m, z_size 128, 120 frames each):
+  #   u,v,w,pres uncompressed  967 GB   <- does not fit /export/scratch2
+  #   u,v,w      uncompressed  725 GB
+  #   u,v,w      this encoding ~293 GB
+  state_encoding:
+    zlib: true
+    complevel: 1
+    least_significant_digit: 3
+
+  # Backend-specific constant forcing. uDALES needs a streamwise pressure
+  # gradient (the sampler only draws inflow_angle + velocity_magnitude); held
+  # fixed across every member. Ignored by backends that don't consume it (e.g.
+  # pylbm). Canonical value matches conf/params/static.yaml.
+  pressure_gradient_magnitude: 0.0041912
+
+  num_parallel_processes: 1
+
+  # Split ONE random-geometry generation over independent jobs (a SLURM array)
+  # without changing what it produces (generate_random_geometries_training_data.py
+  # only; needs an explicit output_dir). stage:
+  #   all       plan + every geometry + finalize in this process (the default)
+  #   plan      draw geometries/splits/parameter trajectories once and freeze
+  #             them with the resolved config in output_dir
+  #   simulate  run shard `shard_index` of `num_shards` against that frozen plan;
+  #             samples already on disk are skipped, so resubmitting a shard
+  #             that hit the time limit resumes it
+  #   finalize  check every sample is on disk, write params.nc + figures
+  # Never written into the saved config.yaml.
+  sharding:
+    stage: all
+    num_shards: 1
+    shard_index: 0
+
+  # The sampler has three parts:
+  #   seconds_per_knot: knot spacing of each parameter trajectory; a knot is
+  #     placed every `seconds_per_knot` seconds over [0, simulation_time] (with
+  #     a linearly-extrapolated final knot when the horizon isn't a multiple).
+  #   external.<param>.{mean, std}: each may be a scalar (fixed for all sims) or
+  #     a {min, max} dict (drawn uniformly per sim).
+  #   time_series.*: hyperparameters of the AR(2)-relaxation generating the
+  #     smooth fluctuation z(t). Per simulation: x(t) = mean_per_sim + std_per_sim * z(t).
+  params_sampler:
+    _target_: pyurbanair.training_data.UniformExternalAR2Sampler
+    _convert_: all
+    seconds_per_knot: 60.0
+    external:
+      inflow_angle:
+        mean: {min: -45.0, max: 45.0}
+        std: 15.0
+      velocity_magnitude:
+        mean: {min: 5.0, max: 10.0}
+        std: 0.5
+    time_series:
+      correlation_length: 300.0
+    ensemble_size: 1

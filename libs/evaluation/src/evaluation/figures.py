@@ -3,7 +3,7 @@
 Here today (moved in WP0.2): the general state / parameter / sensor plots that
 came out of ``pyurbanair.plotting``. WP1.5 adds the evaluation figure set
 proper -- P1, S1, S5, F1, D1, then D3 and S4 in phases 2--3 — listed in
-``docs/plans/esmda_turbulence_evaluation.md`` §7.
+``docs/research/esmda_turbulence_evaluation.md`` §7.
 
 That new figure set will take time averages or statistics only -- never
 instantaneous fields, which decorrelate after a Lyapunov horizon and measure
@@ -28,7 +28,7 @@ import logging
 import pathlib
 import textwrap
 import warnings
-from typing import Iterator, Sequence, cast
+from typing import Iterator, Mapping, Sequence, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -60,6 +60,7 @@ from evaluation.style import (
     save_png,
 )
 from evaluation.turbulence import (
+    SensorTKEEvolution,
     evenly_spaced_levels,
     log_spectral_distance,
     median_spectrum,
@@ -112,6 +113,9 @@ _PARAM_LABELS = {
     "velocity_magnitude": "Velocity magnitude",
     "vertical_inflow_exponent": "Vertical inflow exponent (α)",
     "sgs_constant": "SGS constant",
+    "sgs_bias_b0": "SGS discrepancy coefficient b0",
+    "sgs_bias_b1": "SGS discrepancy coefficient b1",
+    "sgs_bias_b2": "SGS discrepancy coefficient b2",
 }
 
 
@@ -630,7 +634,7 @@ def plot_final_state_with_obs(
 
 # ===========================================================================
 # The WP1.5 evaluation figure set -- P1, S1, F1, S5, D1
-# (docs/plans/esmda_turbulence_evaluation.md section 7)
+# (docs/research/esmda_turbulence_evaluation.md section 7)
 #
 # A different contract from the general plots above, which stay as they are:
 # these take already-opened objects, write the file themselves and return the
@@ -824,7 +828,7 @@ def _truth_is_static(truth: np.ndarray | None) -> bool:
 
     The discriminator between the two knot pairings P1 can draw. A *static*
     parameter estimated over ``W`` windows still arrives with ``K = W`` knots
-    (``run_esmda.py`` stacks one point per window along ``time``), so the knot
+    (``concat_windows`` stacks one point per window along ``time``), so the knot
     count alone cannot tell the two apart -- but a constant truth can.
 
     Two finite knots are the minimum evidence for that claim: ``np.allclose``
@@ -1419,7 +1423,7 @@ def _empty_slab_panel(
 
 
 def _slab_component(
-    fields: xarray.Dataset, variable: str, component: str
+    fields: xarray.Dataset, variable: str, component: str | None
 ) -> np.ndarray | None:
     """A slab variable as ``(zlev, y, x)`` for one component; ``None`` if absent.
 
@@ -1442,6 +1446,8 @@ def _slab_component(
             )
             return None
         da = da.sel(component=component)
+    elif component is not None:
+        return None
     return np.asarray(da.transpose("zlev", "y", "x").values, dtype=float)
 
 
@@ -1452,6 +1458,7 @@ def plot_mean_slices(
     max_levels: int = 3,
     sampling_note: str | None = None,
     sampling_is_sparse: bool = False,
+    _quantity: str = "mean",
 ) -> pathlib.Path | None:
     """F1: time-mean horizontal slices, truth | prior | posterior | difference.
 
@@ -1504,17 +1511,21 @@ def plot_mean_slices(
     Returns the path written, or ``None`` without a posterior slab or without a
     single finite fluid cell to scale.
     """
-    posterior = _slab_component(fields, "posterior_slab_mean", _STREAMWISE)
+    if _quantity not in {"mean", "tke"}:
+        raise ValueError(f"unsupported slab quantity: {_quantity}")
+    figure_name = "plot_mean_slices" if _quantity == "mean" else "plot_tke_slices"
+    component = _STREAMWISE if _quantity == "mean" else None
+    posterior = _slab_component(fields, f"posterior_slab_{_quantity}", component)
     if posterior is None:
-        logger.info("plot_mean_slices: no posterior_slab_mean in the dataset")
+        logger.info("%s: no posterior_slab_%s in the dataset", figure_name, _quantity)
         return None
     if "zlev" not in fields.dims or int(fields.sizes["zlev"]) == 0:
         # ``evenly_spaced_levels`` raises on a zero-length axis, which would
         # abort the whole figure stage rather than skip this figure.
-        logger.info("plot_mean_slices: no z-levels in the slabs")
+        logger.info("%s: no z-levels in the slabs", figure_name)
         return None
-    truth = _slab_component(fields, "truth_slab_mean", _STREAMWISE)
-    prior = _slab_component(fields, "prior_slab_mean", _STREAMWISE)
+    truth = _slab_component(fields, f"truth_slab_{_quantity}", component)
+    prior = _slab_component(fields, f"prior_slab_{_quantity}", component)
 
     solid = None
     if "slab_fluid" in fields.data_vars:
@@ -1532,8 +1543,8 @@ def plot_mean_slices(
         """Whether a column has anything to show, logged per column when not."""
         if not np.isfinite(values).any():
             logger.info(
-                "plot_mean_slices: %s has no finite fluid cell and is drawn empty "
-                "(%s)",
+                "%s: %s has no finite fluid cell and is drawn empty (%s)",
+                figure_name,
                 label,
                 _EMPTY_SLAB_HINT[label],
             )
@@ -1565,7 +1576,7 @@ def plot_mean_slices(
 
     limits = finite_limits(*[values for _, values in columns])
     if limits is None:
-        logger.info("plot_mean_slices: no finite fluid cell in the slabs")
+        logger.info("%s: no finite fluid cell in the slabs", figure_name)
         return None
     vmin, vmax = limits
     if vmax <= vmin:  # a uniform field: a zero-width norm colours nothing
@@ -1630,7 +1641,7 @@ def plot_mean_slices(
                 ax.set_xlabel("x [m]")
                 ax.grid(False)
 
-        unit = f"{_STREAMWISE} [m/s]"
+        unit = f"{_STREAMWISE} [m/s]" if _quantity == "mean" else r"$k$ [m$^2$/s$^2$]"
         # "time-mean" is a claim about how the frames were drawn, not only about
         # what was averaged, so it goes everywhere the mean is named or nowhere.
         mean_label = "sample-mean" if sampling_is_sparse else "time-mean"
@@ -1642,7 +1653,7 @@ def plot_mean_slices(
                 ],
                 fraction=0.03,
                 pad=0.02,
-                label=f"{mean_label} {unit}",
+                label=f"{mean_label} {unit}" if _quantity == "mean" else unit,
             )
         if difference_image is not None:
             fig.colorbar(
@@ -1669,9 +1680,20 @@ def plot_mean_slices(
                 else f"  (t = {edges})"
             )
         title_prefix = "Sample-mean" if sampling_is_sparse else "Time-mean"
-        fig.suptitle(f"{title_prefix} {_STREAMWISE} on horizontal slices{span}")
+        fig.suptitle(
+            f"{title_prefix} {_STREAMWISE} on horizontal slices{span}"
+            if _quantity == "mean"
+            else f"Resolved turbulent kinetic energy at horizontal levels{span}"
+        )
 
-        if sampling_is_sparse:
+        if _quantity == "tke" and sampling_is_sparse:
+            caption = (
+                "Variance across sampled frames; analysis increments may add "
+                "energy. Not a continuous turbulence estimate. No SGS contribution."
+            )
+        elif _quantity == "tke":
+            caption = "Resolved velocity-fluctuation energy; no SGS contribution."
+        elif sampling_is_sparse:
             caption = (
                 "Means over the sampled frames only -- never instantaneous, but "
                 "NOT a continuous time average either."
@@ -1687,6 +1709,133 @@ def plot_mean_slices(
             caption += "\n" + _sampling_caption(sampling_note)
         fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
         return save_png(fig, output_path, transparent=False)
+
+
+def plot_tke_slices(
+    fields: xarray.Dataset,
+    output_path: str | pathlib.Path,
+    *,
+    max_levels: int = 3,
+    sampling_note: str | None = None,
+    sampling_is_sparse: bool = False,
+) -> pathlib.Path | None:
+    """Compare resolved TKE for truth, prior, posterior and posterior error."""
+    return plot_mean_slices(
+        fields,
+        output_path,
+        max_levels=max_levels,
+        sampling_note=sampling_note,
+        sampling_is_sparse=sampling_is_sparse,
+        _quantity="tke",
+    )
+
+
+def _plot_sensor_tke_panels(
+    series: Mapping[str, SensorTKEEvolution],
+    output_path: str | pathlib.Path,
+    *,
+    error: bool,
+    sampling_note: str | None,
+) -> pathlib.Path | None:
+    """Compare assimilation and validation sensors on a common time axis."""
+    usable = {
+        name: values
+        for name, values in series.items()
+        if name in {"assimilation", "validation"}
+        and np.isfinite(values.mean_error if error else values.mean).any()
+        and np.isfinite(values.truth).any()
+    }
+    if not usable:
+        logger.info("Sensor TKE panels: no finite truth/predicted TKE")
+        return None
+    with _styled():
+        fig, axes = plt.subplots(
+            2, 1, figsize=(10, 6.5), sharex=True, sharey=True, constrained_layout=True
+        )
+        captions = []
+        for ax, name in zip(axes, ("assimilation", "validation")):
+            ax.set_title(f"{name.capitalize()} sensors")
+            ax.set_ylabel(
+                r"Predicted $k$ - truth $k$ [m$^2$/s$^2$]"
+                if error
+                else r"Resolved $k$ [m$^2$/s$^2$]"
+            )
+            values = usable.get(name)
+            if values is None:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No sensor TKE data available",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+                continue
+            members = values.member_error if error else values.members
+            mean = values.mean_error if error else values.mean
+            for i, member in enumerate(members):
+                ax.plot(
+                    values.time,
+                    member,
+                    color=_COLOR_POSTERIOR,
+                    alpha=0.15,
+                    linewidth=0.8,
+                    label="Predicted members" if i == 0 else None,
+                )
+            ax.plot(
+                values.time,
+                mean,
+                color=_COLOR_POSTERIOR,
+                linewidth=2.5,
+                label="Ensemble-mean error" if error else "Predicted ensemble mean",
+            )
+            ax.plot(
+                values.time,
+                np.zeros_like(values.truth) if error else values.truth,
+                color="black",
+                linewidth=3,
+                label="Truth (zero error)" if error else "Truth",
+            )
+            ax.legend(loc="best")
+            captions.append(
+                f"{name.capitalize()}: {values.window_frames}-frame rolling window "
+                f"(~{values.window_span_seconds:.1f} s)"
+            )
+        if not error:
+            axes[0].set_ylim(bottom=0)
+        axes[1].set_xlabel("Time [s]")
+        fig.suptitle("TKE error" if error else "TKE evolution")
+        caption = "Sensor-mean resolved TKE; no SGS contribution.\n" + "; ".join(
+            captions
+        )
+        if sampling_note:
+            caption += "\n" + _sampling_caption(sampling_note)
+        fig.supxlabel(caption, fontsize=8, color=COLORS["charcoal"])
+        return save_png(fig, output_path, transparent=False)
+
+
+def plot_tke_time_evolution(
+    series: Mapping[str, SensorTKEEvolution],
+    output_path: str | pathlib.Path,
+    *,
+    sampling_note: str | None = None,
+) -> pathlib.Path | None:
+    """Truth and predicted TKE: assimilation sensors above validation sensors."""
+    return _plot_sensor_tke_panels(
+        series, output_path, error=False, sampling_note=sampling_note
+    )
+
+
+def plot_tke_error_evolution(
+    series: Mapping[str, SensorTKEEvolution],
+    output_path: str | pathlib.Path,
+    *,
+    sampling_note: str | None = None,
+) -> pathlib.Path | None:
+    """Signed member/mean TKE errors for assimilation and validation sensors."""
+    return _plot_sensor_tke_panels(
+        series, output_path, error=True, sampling_note=sampling_note
+    )
 
 
 # ---------------------------------------------------------------------------

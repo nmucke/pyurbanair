@@ -1,14 +1,15 @@
 """Utilities for creating config.sh files for uDALES."""
 
-import os
 import pathlib
+import shlex
+from typing import Optional
 
 from .dir_utils import DirectoryPaths
 
 
 def create_config_sh(
     dirs: DirectoryPaths,
-    matlab_bin: pathlib.Path,
+    matlab_bin: Optional[pathlib.Path],
     ncpu: int,
 ) -> None:
     """
@@ -19,27 +20,21 @@ def create_config_sh(
 
     Args:
         dirs: DirectoryPaths instance containing experiment_base_dir, udales_root_path, and output_dir.
-        matlab_bin: The path to the MATLAB binary.
+        matlab_bin: The path to the MATLAB binary, or None without MATLAB.
         ncpu: The number of CPUs to use.
     """
     config_sh_path = dirs.experiment_dir / "config.sh"
-    matlab_bin_dir = pathlib.Path(matlab_bin).parent
-    # Set DA_EXPDIR to experiment_base_dir so MATLAB can append expnr
-
-    udales_root_path = pathlib.Path(dirs.udales_root_path)
-    da_expdir = dirs.experiment_base_dir
+    executable = dirs.solver_executable or (
+        dirs.udales_root_path / "build" / "release" / "u-dales"
+    )
+    values = {
+        "DA_EXPDIR": dirs.experiment_base_dir,
+        "DA_TOOLSDIR": dirs.udales_root_path / "tools",
+        "DA_BUILD": executable,
+        "DA_WORKDIR": dirs.output_dir,
+        "NCPU": ncpu,
+        "MATLAB_BIN": matlab_bin or "",
+    }
     with open(config_sh_path, "w") as f:
-        f.write(f"export DA_EXPDIR={str(da_expdir)}\n")
-        f.write(f"export DA_TOOLSDIR={str(udales_root_path.joinpath('tools'))}\n")
-        f.write(
-            f"export DA_BUILD={str(udales_root_path.joinpath('build', 'release', 'u-dales'))}\n"
-        )
-        f.write(f"export DA_WORKDIR={str(dirs.output_dir)}\n")
-        f.write(f"export NCPU={ncpu}\n")
-        f.write(f"export MATLAB_BIN={str(matlab_bin)}\n")
-        # f.write(f"export PATH={matlab_bin_dir}:{os.environ.get('PATH', '')}\n")
-        # Disable FFTW/OpenMP threading to prevent oversubscription when running
-        # multiple MPI jobs in parallel. Each MPI job already uses multiple cores,
-        # so additional FFTW threads cause severe cache thrashing and slowdowns.
-        # f.write("export OMP_NUM_THREADS=1\n")
-        # f.write("export FFTW_NUM_THREADS=1\n")
+        for key, value in values.items():
+            f.write(f"export {key}={shlex.quote(str(value))}\n")

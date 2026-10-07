@@ -1,0 +1,43 @@
+# @package _global_
+# Static parameter ESMDA plus a state-only filter with a shared likelihood
+# budget over the same raw 20-second observation product.
+defaults:
+  - /experiment/sgs_bias_small_common@_global_
+  - override /esmda/smoother: static
+  - override /esmda/localization: none
+  - override /filtering/analysis: stochastic
+  - override /filtering/localization: none
+  - override /filtering/inflation: rtps
+  - override /observation/aggregation: none
+
+experiment:
+  workflow: filter_smoothing
+
+run:
+  name: sgs_bias_small_hybrid
+  ensemble_save_on_disk: false
+  save_history: true
+
+filter_smoothing:
+  num_assimilation_windows: 1
+  seed: 42
+  beta: 2.0
+  likelihood_allocation: shared_budget
+
+esmda:
+  num_steps: 3
+  alpha: ${.num_steps}
+  num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
+  seed: ${filter_smoothing.seed}
+  interval_seconds: null
+  save_obs_diagnostics: true
+
+filtering:
+  mode: state
+  num_assimilation_windows: ${filter_smoothing.num_assimilation_windows}
+  seed: ${filter_smoothing.seed}
+  assimilate_every_n_step: 1
+
+paths:
+  results_dir: results/pyudales/sgs_bias_small_hybrid/${now:%Y-%m-%d_%H-%M-%S}
+  experiment_dir: ${oc.env:PWD}/.temp/sgs_bias_small_hybrid/${now:%Y-%m-%d_%H-%M-%S}

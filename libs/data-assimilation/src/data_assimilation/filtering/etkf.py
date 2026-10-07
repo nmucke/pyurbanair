@@ -232,8 +232,11 @@ def whiten_observations(
     Args:
         pred_obs: Predicted observations, shape ``(N_d, N_e)``.
         obs: Observations, shape ``(N_d,)``.
-        C_D_diag: Physical observation-error variances, shape ``(N_d,)``,
-            strictly positive.
+        C_D_diag: The analysis's observation-error variances, shape
+            ``(N_d,)``, strictly positive: the physical ``C_D`` of a
+            ``beta = 1`` filter, ``beta * C_D`` of a tempered one (the filter
+            scales it before the call, so ``R`` here already means the
+            effective covariance and ``R_eff = E_inf**2 * beta * C_D``).
         error_inflation: Optional per-observation error inflation ``E_inf``,
             shape ``(N_d,)``, as returned by
             :meth:`~data_assimilation.localization.base.BaseLocalization.\
@@ -760,7 +763,7 @@ class LocalTransformDiagnostics:
     analysis are both invisible from its output: two configurations that differ
     by a factor of twenty in work produce identically shaped ensembles. The
     counts are also what the LETKF resource gate in
-    ``docs/plans/filtering_state_reduction_and_transforms.md`` asks to be
+    ``docs/plans/implemented/filtering_state_reduction_and_transforms.md`` asks to be
     reported per cycle, and the four per-block spectral arrays are that plan's
     step-5 TSVD diagnostics — available rank, retained rank, retained energy and
     discarded spectrum — which :class:`ObservationTransform` reports for the one
@@ -869,12 +872,10 @@ inflation_factors`, exactly as it does for the stochastic localized update, and
        per *distinct active* block, not one per row. (For scale: the shipped
        case has ``N_s = 230,400`` rows and, at ``localization_radius = 7.5``,
        roughly 5 percent of blocks with an active observation — both recorded
-       in ``docs/plans/filtering_state_reduction_and_transforms.md`` §6,
+       in ``docs/plans/implemented/filtering_state_reduction_and_transforms.md`` §6,
        corrections #1 and #4. How far the distinct-inflation dedup collapses
-       the block count on a real run is one of the quantities
-       ``docs/temp/filtering_ensemble_transform_benchmark.md`` exists to
-       measure; it has not been measured yet.) Bounded chunking is a safety
-       bound on top of that, not the mechanism.
+       the block count on a real run has not been measured.) Bounded
+       chunking is a safety bound on top of that, not the mechanism.
 
     ``localization_policy = "required"``: without a strategy this is just a
     slower global ETKF, so :class:`~data_assimilation.filtering.base.BaseFilter`

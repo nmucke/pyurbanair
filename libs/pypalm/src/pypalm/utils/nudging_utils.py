@@ -15,9 +15,10 @@ expresses via ``nnudge`` is emulated by a huge ``tnudge`` below a cutoff height.
 
 PALM's ``nudging`` switch requires ``large_scale_forcing = .T.`` (LSF0001),
 which in turn wants an ``LSF_DATA`` file. We stage a physically **inert**
-``LSF_DATA`` (both its surface and profile halves disable themselves via
-non-fatal paths) so the nudging term is the only large-scale forcing. See
-``write_inert_lsf_data`` and ``docs/plans/palm_nudging_driver_plan.md``.
+``LSF_DATA`` (its surface half disables itself, its profile half is all zero
+on NUDGING_DATA's time axis to sidestep a PALM bug, #165) so the nudging term
+is the only large-scale forcing. See
+``write_inert_lsf_data`` and ``docs/plans/implemented/palm_nudging_driver_plan.md``.
 
 The schedule builders (``_extract_schedule``, ``_prepend_spinup_plateau``,
 ``_build_uv_profiles``) are shared with the dynamic-driver path — the two
@@ -55,7 +56,7 @@ NUDGE_SENTINEL = -999999.0
 _TNUDGE_DISABLED = 1.0e9
 
 # Seconds added past ``end_time`` for the terminal bracketing snapshot the time
-# interpolator needs, and for the inert LSF_DATA times.
+# interpolator needs, and for the inert LSF_DATA surface time.
 _TERMINAL_PAD = 1.0
 _LSF_PAD = 1.0e6
 
@@ -174,32 +175,47 @@ def write_nudging_data(
     )
 
 
-def write_inert_lsf_data(path: pathlib.Path, end_time: float) -> None:
+def write_inert_lsf_data(
+    path: pathlib.Path, end_time: float, times: np.ndarray, heights: np.ndarray
+) -> None:
     """Write a physically inert ``LSF_DATA`` file.
 
     Exists only to satisfy the ``nudging`` → ``large_scale_forcing`` constraint
-    (LSF0001). Both halves disable themselves via PALM's non-fatal paths: the
-    single surface row is beyond ``end_time`` so ``lsf_surf`` is turned off
-    (LSF0012, warning); the bare ``#`` is consumed by the reader's skip loop;
-    and the ``# <time>`` profile marker (also beyond ``end_time``) makes the
-    profile search exit before reading any rows, turning off ``lsf_vert``
-    (LSF0016). The nudging term is then the only large-scale forcing. See
-    ``docs/plans/palm_nudging_driver_plan.md`` facts 5-6.
+    (LSF0001). The single surface row is beyond ``end_time``, so ``lsf_surf``
+    is turned off (LSF0012, warning) and the surface values PALM would
+    otherwise overwrite (``pt_surface``, ``surface_pressure``, fluxes) keep
+    their namelist values; the bare ``#`` is consumed by the reader's skip loop.
+
+    The profile half carries one all-zero block per ``NUDGING_DATA`` time
+    (``times``, ``heights``), because PALM's ``nudge_ref`` interpolates the
+    nudging profiles on this LSF time axis (``time_vert``) rather than on
+    ``timenudge``. Any other axis makes it read ``unudge(:,0)`` out of bounds
+    into ``u_init``/``v_init`` (issue #165). This keeps ``lsf_vert`` on, but
+    with zero content: ``ug``/``vg`` become 0 (only felt through Coriolis,
+    which periodic runs keep off), ``w_subs`` is never used without
+    ``large_scale_subsidence``, and the large-scale tendencies add zero. See
+    ``docs/pypalm.md`` §8.
     """
     t_far = float(end_time) + _LSF_PAD
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    zeros = "  0.0" * 7
     lines = [
         "# pyurbanair inert LSF_DATA — exists only to satisfy nudging's",
-        "# large_scale_forcing requirement; lsf_surf and lsf_vert both disable.",
+        "# large_scale_forcing requirement; lsf_surf off, lsf_vert all zero.",
         "# columns(surface): time shf qsws pt q p",
         f"{t_far:.6f}  0.0  0.0  0.0  0.0  0.0",
         "#",
-        f"# {t_far:.6f}",
     ]
+    for t in np.asarray(times, dtype=float):
+        lines.append(f"# {t:.6f}")
+        lines.extend(f"{z:14.6f}{zeros}" for z in np.asarray(heights, dtype=float))
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n")
     logger.info(
-        "Wrote inert LSF_DATA %s (all times past end_time=%.1f)", path, end_time
+        "Wrote inert LSF_DATA %s (surface past end_time=%.1f, %d zero profiles)",
+        path,
+        end_time,
+        len(times),
     )
 
 
@@ -263,7 +279,7 @@ def apply_nudging_driver(
     write_nudging_data(
         nudge_path, time_s, heights, tnudge_column, u_profiles, v_profiles
     )
-    write_inert_lsf_data(lsf_path, end_time)
+    write_inert_lsf_data(lsf_path, end_time, time_s, heights)
 
     logger.info(
         "Nudging driver: tnudge=%.1fs, nnudge_meters=%.1fm, %d snapshots, "

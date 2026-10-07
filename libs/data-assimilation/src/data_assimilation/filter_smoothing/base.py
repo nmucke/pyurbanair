@@ -22,7 +22,7 @@ One ``run()`` call is one window:
    the operator produced (``filtering/base.py``, module docstring).
 
    * ``theta`` **static**: one ``filter.run(...)`` over the whole window, which
-     is exactly how ``scripts/filtering/run_filtering.py`` drives the filter.
+     is exactly how ``scripts/run_filtering.py`` drives the filter.
      Nothing hybrid-specific happens, and in joint mode the phase reduces
      *exactly* to a standard joint EnKF over those cycles.
    * ``theta`` **dynamic**: the filter's forward model is instantiated with a
@@ -60,6 +60,19 @@ cycle-local coordinates change nothing on the filter side.
 C_D stays per-instance: the smoother's is the window-aggregated ``(N_d, N_d)``
 diagonal, the filter's a per-frame 1-D variance vector. The hybrid never builds
 either — the run script does.
+
+**Beta tempering.** Every raw observation is used by BOTH phases, so the hybrid
+carries a :class:`~data_assimilation.filter_smoothing.tempering.TemperingPolicy`
+that says how strongly each may use it: the filter's ``beta`` (every analysis
+uses ``beta R``) and the smoother's ``likelihood_weight`` (every MDA update uses
+``alpha_base / w``). The hybrid never sets either — the collaborators are built
+with them — it only VALIDATES that they match its policy, at construction and
+again at every ``run()``, and never mutates them. Under
+``likelihood_allocation="shared_budget"`` (``w + 1/beta = 1``) it additionally
+checks, before the ESMDA phase, that both phases see the same raw observation
+product (see :meth:`FilterSmoothing._check_shared_product`); the
+default ``filter_only`` policy at ``beta = 1`` is the legacy hybrid, bit for
+bit.
 """
 
 import logging
@@ -68,10 +81,20 @@ import shutil
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
+import jax.numpy as jnp
 import numpy as np
 import xarray
+from data_assimilation.filter_smoothing.tempering import (
+    TemperingPolicy,
+    resolve_tempering_policy,
+)
 from data_assimilation.filtering.base import BaseFilter, CycleDiagnostics
-from data_assimilation.smoothing.esmda import ParameterESMDA, StateAndParameterESMDA
+from data_assimilation.parameter_selection import merge_parameters, select_parameters
+from data_assimilation.smoothing.esmda import (
+    ParameterESMDA,
+    StateAndParameterESMDA,
+    TimeVaryingParameterESMDA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +103,18 @@ logger = logging.getLogger(__name__)
 # comparison against a float64 segment boundary would trip on representation
 # alone.
 _TIME_RTOL = 1e-6
+
+
+def _variance_vector(C_D: Any) -> jnp.ndarray:
+    """The physical variances of a smoother ``C_D``, as a 1-D vector.
+
+    The smoother holds either the constructor's diagonal ``(N_d, N_d)`` matrix
+    or, once a window's covariance was set with
+    ``set_observation_covariance``, the 1-D variance vector itself — and
+    ``jnp.diag`` of the latter would BUILD a matrix rather than read one.
+    """
+    C_D = jnp.asarray(C_D)
+    return C_D if C_D.ndim == 1 else jnp.diag(C_D)
 
 
 def _time_tol(scale: float) -> float:
@@ -138,7 +173,7 @@ def _interpolate_knots(
     span = times[upper] - times[lower]
     weight = np.clip((targets - times[lower]) / span, 0.0, 1.0)
     weight = weight.reshape((targets.size,) + (1,) * (values.ndim - 1))
-    return values[lower] * (1.0 - weight) + values[upper] * weight
+    return np.asarray(values[lower] * (1.0 - weight) + values[upper] * weight)
 
 
 def params_for_segment(
@@ -333,13 +368,16 @@ CycleDiagnostics` per filter cycle, renumbered 0..L-1 over the window (the
       prior: both hybrid paths drop it so the two histories index the same
       cycles as ``diagnostics``. ``params_history`` is ``None`` in
       ``mode="state"``.
-    * ``applied_params_history``: joint mode with a dynamic trajectory only —
-      the parameters each segment was actually forecast with, i.e.
-      ``e_k + c_k`` before that cycle's analysis. It is what separates the
-      ESMDA schedule from what the filter ran; ``None`` on the static path,
-      where every cycle is forecast with ``esmda_params`` itself, and in state
-      mode, where the applied parameters are per-segment trajectories of
-      differing knot counts and do not stack.
+    * ``applied_params_history``: the static filter's recorded per-cycle
+      forecast parameters when requested, or in dynamic joint mode the
+      parameters each segment actually used (``e_k + c_k``). Dynamic state
+      mode has per-segment trajectories of differing knot counts, so these
+      do not stack.
+
+    ``forecast_history`` passes the filter's
+    :attr:`~data_assimilation.filtering.base.FilterResult.forecast_history`
+    through (``time``-concatenated over the segments in the dynamic path),
+    gated, as there, on ``filter.collect_forecast_frames``.
     """
 
     esmda_params: xarray.Dataset
@@ -350,6 +388,7 @@ CycleDiagnostics` per filter cycle, renumbered 0..L-1 over the window (the
     params_history: Optional[xarray.Dataset] = None
     applied_params_history: Optional[xarray.Dataset] = None
     state_history: Optional[xarray.Dataset] = None
+    forecast_history: Optional[xarray.Dataset] = None
 
 
 class FilterSmoothing:
@@ -371,6 +410,16 @@ class FilterSmoothing:
             ``mode="parameter"`` is rejected — with no state block the filter
             phase would produce no posterior state at all, which is the one
             thing the hybrid asks it for.
+        tempering: The likelihood-allocation policy
+            (:func:`~data_assimilation.filter_smoothing.tempering.\
+resolve_tempering_policy`). ``None`` means ``filter_only`` at the filter's
+            own ``beta`` — so a filter built with ``beta=1`` and a full-weight
+            smoother is exactly the legacy hybrid. Either way the
+            collaborators must ALREADY carry the policy's weights
+            (``filter.beta == policy.beta``, ``smoother.likelihood_weight ==
+            policy.smoother_weight``); a mismatch raises instead of being
+            patched, so direct library use is held to the same contract as
+            the Hydra entry point.
 
     The filter's ``collect_pred_obs`` flag drives the same three histories
     here: each ``filter.run`` REBINDS its own lists (so a caller keeps the
@@ -378,7 +427,12 @@ class FilterSmoothing:
     calls into same-named attributes, rebound once per :meth:`run` call.
     """
 
-    def __init__(self, smoother: ParameterESMDA, filter: BaseFilter) -> None:
+    def __init__(
+        self,
+        smoother: ParameterESMDA,
+        filter: BaseFilter,
+        tempering: Optional[TemperingPolicy] = None,
+    ) -> None:
         # ``StateAndTimeVaryingParameterESMDA`` inherits from
         # ``TimeVaryingParameterESMDA``, hence from ``ParameterESMDA``, so the
         # isinstance test below accepts it: the state-bearing branch has to be
@@ -406,17 +460,224 @@ class FilterSmoothing:
                 "filtering.mode=state or =joint."
             )
 
+        if tempering is None:
+            # Filter-only at whatever beta the filter was built with: the
+            # smoother must then be full-weight, which _check_tempering asserts
+            # (a tempered smoother needs an explicit shared_budget policy).
+            tempering = resolve_tempering_policy(
+                getattr(filter, "beta", 1.0), "filter_only"
+            )
+        elif not isinstance(tempering, TemperingPolicy):
+            raise ValueError(
+                "tempering must be a TemperingPolicy (see "
+                "resolve_tempering_policy) or None, got "
+                f"{type(tempering).__name__}."
+            )
+
         self.smoother = smoother
         # Shadowing the builtin is confined to this constructor's argument name,
         # which is the user-facing spec ("the filter"); nothing in this module
         # calls ``filter()``.
         self.filter = filter
+        self.tempering = tempering
+        self._check_tempering()
 
         # Accumulated across the filter phase's calls when the filter records
         # them; rebound per ``run`` (see the class docstring).
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         self.pred_obs_history: list[np.ndarray] = []
         self.pred_obs_post_history: list[np.ndarray] = []
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
+
+    # ------------------------------------------------------------------
+    # Tempering
+    # ------------------------------------------------------------------
+
+    def _check_tempering(self) -> None:
+        """The collaborators carry the policy's weights; shared products agree.
+
+        Called at construction AND at the top of every :meth:`run`: the
+        collaborators are public, mutable objects, and the checks are cheap, so
+        a weight or stride changed after construction is caught before it can
+        cost a forecast. Nothing is ever written to the collaborators — each
+        applies its own weight exactly once, from construction
+        (``BaseFilter.effective_C_D_diag``, ``_BaseESMDA.effective_alpha``), so
+        repeated windows cannot re-multiply a covariance either.
+        """
+        policy = self.tempering
+        filter_beta = getattr(self.filter, "beta", 1.0)
+        if filter_beta != policy.beta:
+            raise ValueError(
+                f"The filter was built with beta={filter_beta!r} but the "
+                f"hybrid's tempering policy has beta={policy.beta!r} "
+                f"({policy.likelihood_allocation}). Build the filter with "
+                "beta=policy.beta; the hybrid never rewrites it."
+            )
+        smoother_weight = getattr(self.smoother, "likelihood_weight", 1.0)
+        if smoother_weight != policy.smoother_weight:
+            raise ValueError(
+                "The smoother was built with likelihood_weight="
+                f"{smoother_weight!r} but the tempering policy "
+                f"({policy.likelihood_allocation}, beta={policy.beta!r}) "
+                f"assigns it {policy.smoother_weight!r}. Build the smoother "
+                "with likelihood_weight=policy.smoother_weight (a tempered "
+                "smoother needs an explicit shared_budget policy)."
+            )
+        # The collaborators validated their own effective covariances at
+        # construction; re-running the policy's check in the filter's actual
+        # dtype keeps the two contracts from drifting apart.
+        # Only the extremes matter, so the smoother's C_D (dense (N_d, N_d) or
+        # a 1-D window vector) is reduced on device rather than copied.
+        C_D_diag = np.asarray(self.filter.C_D_diag)
+        policy.check_numerics(
+            base_alpha=float(self.smoother.alpha),
+            variances=[
+                float(np.max(C_D_diag)),
+                float(jnp.max(_variance_vector(self.smoother.C_D))),
+            ],
+            dtype=C_D_diag.dtype,
+        )
+        if policy.likelihood_allocation == "shared_budget":
+            self._check_shared_collaborators()
+
+    def _check_shared_collaborators(self) -> None:
+        """Structural preconditions of the shared likelihood budget.
+
+        ``w + 1/beta = 1`` is accounting PER REUSED OBSERVATION, so it only
+        means something if the two phases condition on the same raw
+        observations, through the same operator, with the same physical
+        covariance. The data-dependent half of that proof needs the batches and
+        lives in :meth:`_check_shared_product`; this is the half the
+        collaborators alone decide.
+
+        Correlated (temporal) observation errors are not checked for because
+        they cannot occur yet: both collaborators accept diagonal ``C_D`` only
+        (the smoother rejects off-diagonal entries, the filter takes a 1-D
+        variance vector). A correlated error model must be rejected here until
+        both phases implement the same joint likelihood.
+        """
+        aggregator = getattr(self.smoother, "aggregate_observations", None)
+        if aggregator is not None:
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the smoother to "
+                "assimilate the RAW frames (aggregate_observations=None; "
+                "esmda.interval_seconds=null in the run script), but it "
+                f"aggregates them ({type(aggregator).__name__}). An aggregated "
+                "product is a different likelihood from the filter's raw "
+                "frames, so the shared budget would not be shared."
+            )
+        every_n = int(getattr(self.filter, "assimilate_every_n_step", 1))
+        if every_n != 1:
+            # Conservative: with n > 1 the filter analyses only every n-th
+            # frame of a batch, while the smoother assimilates every frame it
+            # is handed.
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the filter to "
+                f"analyse every frame (assimilate_every_n_step=1, got {every_n}),"
+                " so both phases assimilate the same observation product."
+            )
+        if self.smoother.observation_operator is not self.filter.observation_operator:
+            raise ValueError(
+                "likelihood_allocation='shared_budget' requires the smoother "
+                "and the filter to share ONE observation operator instance: "
+                "the budget is split per observation, so both phases must "
+                "predict the same observations."
+            )
+
+    def _check_shared_product(self, batches: list[xarray.DataArray]) -> None:
+        """The two phases see identical observations and covariances.
+
+        Run at the top of :meth:`run`, BEFORE the ESMDA phase (hence before any
+        forecast). Checks timestamps and covariances, not merely lengths. In
+        the run script the load-bearing guarantees are the shared operator
+        instance (:meth:`_check_shared_collaborators`), the timestamp checks
+        and the ``C_D`` tiling: its batches carry no ``obs`` coordinate and both
+        phases are handed the same ``batches``, so the coordinate and value
+        checks below guard direct library use rather than the Hydra path.
+
+        * every batch carries the same non-time coordinates as batch 0 (the
+          ESMDA phase concatenates with ``join="override"``, which would
+          otherwise silently relabel a batch with a different ``obs`` axis);
+        * the frame times are strictly increasing across the whole window
+          (:func:`segment_bounds` plus the batch starts) — a repeated
+          timestamp would be the same frame consumed twice;
+        * the smoother's flattened window vector is, value for value and in
+          order, the concatenation of the frames the filter will assimilate;
+        * the smoother's physical ``C_D`` diagonal is the filter's per-frame
+          ``C_D_diag`` tiled over those frames.
+        """
+        reference = batches[0]
+        ref_coords = {
+            str(name): np.asarray(coord.values)
+            for name, coord in reference.coords.items()
+            if "time" not in coord.dims
+        }
+        for k, batch in enumerate(batches):
+            if batch.sizes.get("obs") != reference.sizes.get("obs"):
+                raise ValueError(
+                    f"observations[{k}] has {batch.sizes.get('obs')} "
+                    f"observations per frame, observations[0] "
+                    f"{reference.sizes.get('obs')}; shared_budget needs one "
+                    "observation product for the whole window."
+                )
+            coords = {
+                str(name): np.asarray(coord.values)
+                for name, coord in batch.coords.items()
+                if "time" not in coord.dims
+            }
+            if coords.keys() != ref_coords.keys() or not all(
+                np.array_equal(coords[name], ref_coords[name]) for name in coords
+            ):
+                raise ValueError(
+                    f"observations[{k}] labels its observations differently "
+                    "from observations[0] (non-time coordinates differ). "
+                    "shared_budget requires the smoother's window vector and "
+                    "the filter's frames to be the same observations."
+                )
+        segment_bounds(batches)
+        # segment_bounds orders the batch ENDS only; a batch may still start
+        # at or before the previous one's end, i.e. repeat a boundary frame.
+        frame_times = np.concatenate(
+            [np.asarray(batch.coords["time"].values, dtype=float) for batch in batches]
+        )
+        if frame_times.size > 1 and not np.all(np.diff(frame_times) > 0.0):
+            raise ValueError(
+                "shared_budget: the window's frame times are not strictly "
+                f"increasing across batches ({frame_times.tolist()}); a "
+                "repeated timestamp is the same observation consumed twice, "
+                "which the per-observation budget does not allow."
+            )
+
+        # The frames exactly as each phase will read them: through the
+        # collaborators' own conversion paths, so dtype and order are theirs.
+        filter_frames = [
+            np.asarray(self.filter._cycle_observations(batch)) for batch in batches
+        ]
+        num_frames = sum(int(f.shape[0]) for f in filter_frames)
+        window_obs = xarray.concat(batches, dim="time", join="override")
+        smoother_vector = np.asarray(self.smoother._get_observations(window_obs))
+        filter_vector = np.concatenate([f.reshape(-1) for f in filter_frames])
+        if smoother_vector.shape != filter_vector.shape or not np.array_equal(
+            smoother_vector, filter_vector
+        ):
+            raise ValueError(
+                "shared_budget: the smoother's flattened window observations "
+                "are not the filter's per-cycle frames in the same order "
+                f"({smoother_vector.shape} vs {filter_vector.shape})."
+            )
+
+        smoother_var = np.asarray(_variance_vector(self.smoother.C_D))
+        filter_var = np.tile(np.asarray(self.filter.C_D_diag), num_frames)
+        if smoother_var.shape != filter_var.shape or not np.allclose(
+            smoother_var, filter_var, rtol=1e-6, atol=0.0
+        ):
+            raise ValueError(
+                "shared_budget: the smoother's physical C_D diagonal "
+                f"(length {smoother_var.size}) is not the filter's per-frame "
+                f"C_D_diag tiled over the window's {num_frames} frame(s) "
+                f"(length {filter_var.size}). Both phases must condition on "
+                "the same physical observation-error covariance."
+            )
 
     # ------------------------------------------------------------------
     # Observations
@@ -481,8 +742,7 @@ class FilterSmoothing:
         delete, the same ``cycle_0/`` under the filter's results root. The
         segments are renumbered onto the window's global cycle index as they
         finish (:meth:`_collect_segment_dir`), which is the layout the
-        downstream ``forecast`` state source expects. Same pattern as
-        ``scripts/filtering/run_filtering.py``'s per-window staging.
+        downstream ``forecast`` state source expects.
 
         ``None`` in memory mode: nothing is written and nothing to stage.
         """
@@ -531,6 +791,9 @@ class FilterSmoothing:
         entry, so what it holds now is that call's cycles alone and extending
         keeps the hybrid's lists one-entry-per-global-cycle.
         """
+        self.analyzed_pred_obs_history.extend(
+            getattr(self.filter, "analyzed_pred_obs_history", [])
+        )
         if not self.filter.collect_pred_obs:
             return
         self.pred_obs_history.extend(self.filter.pred_obs_history)
@@ -572,6 +835,36 @@ class FilterSmoothing:
             A :class:`FilterSmoothingResult`.
         """
         batches = self._validate_observations(observations)
+        if params is not None:
+            select_parameters(params, self.smoother.parameter_names_to_estimate)
+            select_parameters(params, self.filter.parameter_names_to_estimate)
+        # Pre-flight, before the ESMDA phase's first forecast: the weights
+        # still match the policy and, under a shared budget, both phases are
+        # about to condition on the same raw observations.
+        self._check_tempering()
+        if self.tempering.likelihood_allocation == "shared_budget":
+            self._check_shared_product(batches)
+
+        smoother_model = self.smoother.forward_model
+        if getattr(smoother_model, "forecast_window_replay_enabled", False):
+            if params is None:
+                raise ValueError("SGS discrepancy hybrid requires a parameter prior.")
+            self.smoother._validate_global_parameters(params)
+            if self.filter.mode != "state":
+                raise ValueError(
+                    "SGS discrepancy hybrid requires a state-only filter so "
+                    "coefficients remain fixed through the filter phase."
+                )
+            filter_model = self.filter.forward_model
+            if (
+                getattr(smoother_model, "_failure_policy", None) != "raise"
+                or getattr(filter_model, "_failure_policy", None) != "raise"
+            ):
+                raise ValueError(
+                    "SGS discrepancy hybrid requires failure.policy=raise "
+                    "in both ensemble stacks."
+                )
+            smoother_model.synchronize_forecast_state_from(filter_model)
 
         # --- ESMDA phase ------------------------------------------------
         # ``join="override"``: the batches share the ``obs`` axis by
@@ -601,6 +894,7 @@ class FilterSmoothing:
         )
 
         # --- Filter phase -----------------------------------------------
+        self.analyzed_pred_obs_history = []
         self.pred_obs_history = []
         self.pred_obs_post_history = []
         self.pred_obs_frames_history = []
@@ -654,8 +948,9 @@ class FilterSmoothing:
             diagnostics=result.diagnostics,
             esmda_params_history=esmda_params_history,
             params_history=params_history,
-            applied_params_history=None,
+            applied_params_history=getattr(result, "applied_params_history", None),
             state_history=result.state_history if return_history else None,
+            forecast_history=result.forecast_history,
         )
 
     def _run_dynamic(
@@ -672,8 +967,9 @@ class FilterSmoothing:
         call, which is what makes this loop a re-arrangement of the filter
         rather than a different filter. Verified against ``BaseFilter.run``:
         it never resets ``self.rng_key`` (the key is only split, inside
-        ``_analysis_cycle`` and the parameter evolution, and the split state
-        persists on the instance across calls), and the analyzed
+        ``_analysis_cycle`` and before each evolved forecast, and the split
+        state persists on the instance across calls, as does whether the next
+        forecast's parameters are evolved), and the analyzed
         ``result.state`` it returns is exactly the warm start the next cycle
         would have received — carried here as ``carry_state``. The only
         per-call reset is of the pred-obs histories, which is why they are
@@ -690,6 +986,7 @@ class FilterSmoothing:
         applied_history: list[xarray.Dataset] = []
         params_history: list[xarray.Dataset] = []
         state_history: list[xarray.Dataset] = []
+        forecast_history: list[xarray.Dataset] = []
         carry_state = state
         final_params: Optional[xarray.Dataset] = None
         # The joint correction, ``None`` until the first analysis produces one
@@ -708,7 +1005,11 @@ class FilterSmoothing:
                     # correction is what the filter has learned on top of it.
                     schedule = trajectory_values_at(theta, midpoint)
                     seg_params = (
-                        schedule if correction is None else schedule + correction
+                        schedule
+                        if correction is None
+                        else merge_parameters(
+                            schedule, schedule[list(correction.data_vars)] + correction
+                        )
                     )
                 else:
                     seg_params = params_for_segment(theta, t_start, t_end)
@@ -726,10 +1027,15 @@ class FilterSmoothing:
 
                 if joint:
                     assert result.params is not None and schedule is not None
-                    correction = result.params - schedule
+                    selected = select_parameters(
+                        result.params, self.filter.parameter_names_to_estimate
+                    )
+                    correction = selected - schedule[list(selected.data_vars)]
                     final_params = result.params
 
                 carry_state = result.state
+                if result.forecast_history is not None:
+                    forecast_history.append(result.forecast_history)
                 # Renumber onto the window's global cycle index: every
                 # single-cycle call numbered its own cycle 0.
                 for diag in result.diagnostics:
@@ -778,6 +1084,11 @@ class FilterSmoothing:
             state_history=(
                 xarray.concat(state_history, dim="cycle", join="override")
                 if state_history
+                else None
+            ),
+            forecast_history=(
+                xarray.concat(forecast_history, dim="time", join="override")
+                if forecast_history
                 else None
             ),
         )

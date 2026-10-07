@@ -1,0 +1,12 @@
+# @package _global_
+# Named, reviewable run recipe.
+defaults:
+  - override /case: xie_and_castro
+  - override /execution: forward
+  - override /params: dynamic_sine
+  - override /model@model: pyudales
+
+experiment:
+  workflow: forward
+run:
+  name: xie_truth

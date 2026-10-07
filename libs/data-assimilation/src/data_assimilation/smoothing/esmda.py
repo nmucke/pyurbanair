@@ -1,8 +1,11 @@
 import logging
+import math
+import numbers
 import os
 import pathlib
 import shutil
 from abc import abstractmethod
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import jax
@@ -10,13 +13,21 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 from data_assimilation.augmentation import ParamAugmentation, StateAugmentation
-from data_assimilation.filtering.analysis import stochastic_enkf_update
+from data_assimilation.filtering.analysis import (
+    stochastic_enkf_update,
+    validate_variances,
+)
 from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import (
     AggregateObservations,
     ObservationOperator,
     sensor_observation_coords,
+)
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_parameter_names,
 )
 from data_assimilation.reduction import OnlineStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing, Observations
@@ -38,6 +49,12 @@ class _BaseESMDA(BaseSmoothing):
 smoothing.base.BaseSmoothing`) is applied to the real observations and to
     every ``H(x)``, so ``C_D`` must be sized for the *aggregated* observation
     vector.
+
+    ``likelihood_weight`` (default ``1.0``, the legacy smoother) is the share
+    ``w`` of the observation likelihood the MDA schedule consumes: every update
+    runs with ``effective_alpha = alpha / w`` while ``alpha`` stays the
+    normalized base coefficient and ``C_D`` stays physical. It is derived by
+    the filter-smoothing hybrid's shared-budget policy, not a user knob.
     """
 
     #: Whether this smoother can supply physical row coordinates to a
@@ -46,6 +63,17 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
     #: ``False`` so an incompatible pairing is rejected at construction rather
     #: than deep inside the first Kalman update.
     _supplies_row_coordinates: bool = False
+
+    #: Share of the observation likelihood this smoother's MDA schedule
+    #: consumes (see ``__init__``). Class-level default so instances built
+    #: without ``__init__`` (array-level unit tests use ``__new__``) resolve the
+    #: legacy full-weight value.
+    likelihood_weight: float = 1.0
+
+    #: Static parameters explicitly exempt from every localization strategy.
+    global_parameter_names: tuple[str, ...] = ()
+    #: None estimates every supplied field; () keeps all forecast fields fixed.
+    parameter_names_to_estimate: Optional[tuple[str, ...]] = None
 
     def __init__(
         self,
@@ -57,6 +85,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         rng_key: Optional[jax.Array] = None,
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
+        likelihood_weight: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -69,28 +100,33 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # it here so a full (non-diagonal) C_D fails loudly instead of silently
         # producing a wrong perturbation/inflation.
         C_D = jnp.asarray(C_D)
-        if C_D.ndim != 2 or C_D.shape[0] != C_D.shape[1]:
-            raise ValueError(
-                f"C_D must be a square (N_d, N_d) matrix, got shape {C_D.shape}."
-            )
-        off_diagonal = C_D - jnp.diag(jnp.diag(C_D))
-        if not bool(jnp.all(off_diagonal == 0.0)):
-            raise ValueError(
-                "C_D must be diagonal: the element-wise C_D_sqrt and the "
-                "diagonal used by the localized update assume a diagonal "
-                "observation-error covariance. Pass sigma**2 on the diagonal."
-            )
-        # Strictly positive variances keep ``C_DD + alpha * C_D`` positive
-        # definite (C_DD is only rank <= N_e - 1). A zero/negative variance -- a
-        # config typo or a "perfect" synthetic sensor -- makes the analysis
-        # system singular in the directions outside the ensemble span, and JAX's
-        # solve returns NaN without raising.
-        if not bool(jnp.all(jnp.diag(C_D) > 0.0)):
-            raise ValueError(
-                "C_D must have strictly positive diagonal variances; a zero or "
-                "negative observation-error variance makes the analysis system "
-                "singular (NaN-poisoning the ensemble). Check obs_error_std."
-            )
+        if C_D.ndim == 1:
+            C_D = validate_variances(C_D)
+        else:
+            if C_D.ndim != 2 or C_D.shape[0] != C_D.shape[1]:
+                raise ValueError(
+                    f"C_D must be a square (N_d, N_d) matrix, got shape {C_D.shape}."
+                )
+            off_diagonal = C_D - jnp.diag(jnp.diag(C_D))
+            if not bool(jnp.all(off_diagonal == 0.0)):
+                raise ValueError(
+                    "C_D must be diagonal: the element-wise C_D_sqrt and the "
+                    "diagonal used by the localized update assume a diagonal "
+                    "observation-error covariance. Pass sigma**2 on the diagonal."
+                )
+            # Strictly positive variances keep ``C_DD + alpha * C_D`` positive
+            # definite (C_DD is only rank <= N_e - 1). A zero/negative variance -- a
+            # config typo or a "perfect" synthetic sensor -- makes the analysis
+            # system singular in the directions outside the ensemble span, and JAX's
+            # solve returns NaN without raising.
+            if not bool(jnp.all(jnp.isfinite(C_D))) or not bool(
+                jnp.all(jnp.diag(C_D) > 0.0)
+            ):
+                raise ValueError(
+                    "C_D must have strictly positive diagonal variances; a zero or "
+                    "negative observation-error variance makes the analysis system "
+                    "singular (NaN-poisoning the ensemble). Check obs_error_std."
+                )
 
         # ES-MDA consistency: the tempering coefficients must satisfy
         # ``sum_k 1/alpha_k = 1`` for the multiple updates to equal one Bayesian
@@ -101,14 +137,42 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # ``alpha = num_steps`` is always consistent). The final-time trajectory
         # smoothing passes alpha=1 through ``_compute_kalman_update`` directly,
         # not via ``self.alpha``, so it is unaffected by this check.
-        effective_alpha = num_steps if alpha is None else alpha
-        if abs(num_steps / effective_alpha - 1.0) > 1e-6:
+        #
+        # This validates the BASE schedule only and is deliberately independent
+        # of ``likelihood_weight``: a tempered smoother still runs a normalized
+        # base schedule, and the weight rescales it afterwards (below).
+        base_alpha = num_steps if alpha is None else alpha
+        if abs(num_steps / base_alpha - 1.0) > 1e-6:
             raise ValueError(
                 f"Inconsistent ES-MDA schedule: num_steps={num_steps} and "
-                f"alpha={effective_alpha} give sum_k 1/alpha_k = "
-                f"{num_steps / effective_alpha:.4g} != 1. Set alpha=num_steps "
+                f"alpha={base_alpha} give sum_k 1/alpha_k = "
+                f"{num_steps / base_alpha:.4g} != 1. Set alpha=num_steps "
                 "(the default) or leave alpha unset."
             )
+
+        # Likelihood weight ``w`` (shared-budget hybrid tempering, see
+        # docs/plans/implemented/hybrid_beta_tempering.md): the MDA schedule conditions on
+        # ``L^w`` instead of ``L`` by running every update with the effective
+        # coefficient ``alpha_base / w``, so ``sum_k 1/alpha_eff_k = w`` and the
+        # remaining ``1 - w`` of the budget is left to another phase (the
+        # hybrid's filter). ``w = 1`` is the legacy full-likelihood smoother.
+        # The weight is derived by the hybrid's policy resolver, not a user
+        # knob. Validated before anything is stored so a bad value leaves no
+        # half-built smoother (and no on-disk step directories) behind.
+        likelihood_weight = self._validate_likelihood_weight(likelihood_weight)
+        self._validate_effective_covariance(C_D, base_alpha, likelihood_weight)
+
+        if isinstance(global_parameter_names, str):
+            raise ValueError("global_parameter_names must be a sequence of names.")
+        names = tuple(global_parameter_names or ())
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("global_parameter_names must contain nonempty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("global_parameter_names must not contain duplicates.")
+        self.global_parameter_names = names
+        self.parameter_names_to_estimate = validate_parameter_names(
+            parameter_names_to_estimate
+        )
 
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
@@ -117,6 +181,8 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             localization is not None
             and localization.requires_coordinates
             and not self._supplies_row_coordinates
+            and not self.global_parameter_names
+            and self.parameter_names_to_estimate != ()
         ):
             raise ValueError(
                 f"{type(localization).__name__} requires physical row "
@@ -126,7 +192,13 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 "state_and_dynamic)."
             )
 
-        self.alpha = num_steps if alpha is None else alpha
+        # ``self.alpha`` keeps meaning the BASE coefficient (every existing
+        # reader expects the normalized schedule); the coefficient the update
+        # actually uses is ``effective_alpha``. ``C_D``/``C_D_sqrt`` stay the
+        # PHYSICAL observation-error covariance -- the weight is applied only
+        # inside the update, exactly once.
+        self.alpha = base_alpha
+        self.likelihood_weight = likelihood_weight
         self.C_D = C_D
         self.C_D_sqrt = jnp.sqrt(self.C_D)
         # Default the PRNG key here (not in the signature): a default argument
@@ -140,7 +212,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # via a local analysis driven by the strategy's inflation factors.
         self.localization = localization
 
-        # On-disk peak-storage control, set by the caller (e.g. run_esmda.py)
+        # On-disk peak-storage control, set by the caller (e.g. run_smoother.py)
         # after construction. When ``prune_disk_steps`` is True and the forward
         # model saves on disk, each ESMDA step's per-member forecast directory is
         # deleted as soon as its Kalman update is computed -- the warm-start IC
@@ -153,7 +225,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         self.prune_disk_steps = False
         self.keep_prior_disk_step = True
 
-        # Observation-space diagnostics, set by the caller (e.g. run_esmda.py)
+        # Observation-space diagnostics, set by the caller (e.g. run_smoother.py)
         # after construction, same attribute-plumbing pattern as
         # ``prune_disk_steps``. When ``collect_obs_diagnostics`` is True each
         # ``_one_step`` records the predicted observations it materialized, and
@@ -163,14 +235,146 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # evaluation happens, unless a caller asks for it.
         self.collect_obs_diagnostics = False
         self.pred_obs_history: list[np.ndarray] = []
+        # Optional H(actual returned trajectory) after final-time smoothing.
+        self.collect_analyzed_observations = False
+        self.analyzed_pred_obs: np.ndarray | None = None
 
         if self.forward_model.save_on_disk:
+            assert self.forward_model.results_dir is not None
             self.base_results_dir = self.forward_model.results_dir
             for i in range(num_steps + 1):
                 step_dir = self.base_results_dir / f"step_{i}"
                 os.makedirs(step_dir, exist_ok=True)
                 for state_file in step_dir.glob("state_*.nc"):
                     state_file.unlink(missing_ok=True)
+
+    @staticmethod
+    def _validate_likelihood_weight(likelihood_weight: Any) -> float:
+        """Return ``likelihood_weight`` as a float, rejecting invalid values.
+
+        Must be a real, finite number with ``0 < w <= 1``. ``bool`` is rejected
+        explicitly (it is a ``numbers.Real`` subclass, and ``True`` silently
+        meaning ``w = 1`` would hide a wiring bug). ``w = 0`` would assign the
+        smoother no likelihood at all -- an infinite covariance the solver must
+        never see -- and ``w > 1`` would condition on the data more than once.
+        """
+        # Two flags rather than one ``or``: mypy narrows ``bool`` out of
+        # ``numbers.Real`` and would flag the second operand as unreachable.
+        is_bool = (
+            isinstance(likelihood_weight, bool) or type(likelihood_weight) is np.bool_
+        )
+        is_real = isinstance(likelihood_weight, numbers.Real)
+        if is_bool or not is_real:
+            raise ValueError(
+                "likelihood_weight must be a real number in (0, 1], got "
+                f"{likelihood_weight!r} ({type(likelihood_weight).__name__})."
+            )
+        weight = float(likelihood_weight)
+        if not math.isfinite(weight) or not 0.0 < weight <= 1.0:
+            raise ValueError(
+                f"likelihood_weight must be finite with 0 < w <= 1, got {weight}. "
+                "It is the smoother's share of the observation likelihood "
+                "(1.0 = the legacy full-likelihood ES-MDA)."
+            )
+        return weight
+
+    @staticmethod
+    def _validate_effective_covariance(
+        C_D: jnp.ndarray, base_alpha: float, likelihood_weight: float
+    ) -> None:
+        """Reject an effective ``alpha_base / w`` that breaks in the compute dtype.
+
+        A finite configuration can still overflow: a tiny weight makes
+        ``alpha_base / w`` (or ``alpha_eff * C_D``) exceed the float32 range
+        JAX computes in by default, and the Kalman solve would then see an
+        infinite covariance (or its reciprocal weight round to zero). The
+        product is formed exactly as :func:`stochastic_enkf_update` forms it
+        (Python scalar times the variance vector), so it is checked in the
+        dtype the update actually runs in. The legacy ``w = 1`` path only
+        re-checks the base schedule, which the ``C_D`` validation already
+        keeps finite.
+        """
+        try:
+            effective_alpha = base_alpha / likelihood_weight
+        except OverflowError:
+            effective_alpha = math.inf
+        C_D_diag = C_D if C_D.ndim == 1 else jnp.diag(C_D)
+        # An overflowing cast is exactly what is being detected; keep numpy's
+        # RuntimeWarning out of the logs (the ValueError below reports it).
+        with np.errstate(over="ignore"):
+            scaled = effective_alpha * C_D_diag
+            alpha_in_dtype = jnp.asarray(effective_alpha, dtype=scaled.dtype)
+        if not (
+            math.isfinite(effective_alpha)
+            and bool(jnp.isfinite(alpha_in_dtype))
+            and bool(alpha_in_dtype > 0)
+            and bool(1.0 / alpha_in_dtype > 0)
+            and bool(jnp.all(jnp.isfinite(scaled)))
+            and bool(jnp.all(scaled > 0))
+        ):
+            raise ValueError(
+                f"likelihood_weight={likelihood_weight} gives an effective "
+                f"ES-MDA coefficient alpha_base / w = {base_alpha} / "
+                f"{likelihood_weight} whose effective covariance alpha_eff * C_D "
+                f"is not finite and positive in {scaled.dtype}. Use a larger "
+                "likelihood weight (or smaller observation-error variances)."
+            )
+
+    @property
+    def effective_alpha(self) -> float:
+        """The coefficient the update actually uses: ``alpha / likelihood_weight``.
+
+        Derived (not stored) so it always reflects the current base ``alpha``
+        -- array-level tests set ``alpha`` on bare instances directly.
+        """
+        return float(self.alpha) / self.likelihood_weight
+
+    def _apply_likelihood_weight(self, base_alpha: float) -> float:
+        """Map a BASE-schedule coefficient to the one passed to the update.
+
+        Returns ``base_alpha`` itself (same object, no arithmetic) at unit
+        weight, so the legacy path is bitwise unchanged.
+        """
+        if self.likelihood_weight == 1.0:
+            return base_alpha
+        return base_alpha / self.likelihood_weight
+
+    def set_observation_covariance(self, C_D: Any) -> None:
+        """Replace physical covariance for the next window after validation.
+
+        The replacement is PHYSICAL, like the constructor's: the likelihood
+        weight still enters only through :attr:`effective_alpha`, so it is
+        re-checked here against the new variances (``alpha_eff * C_D`` must stay
+        finite in the compute dtype) before anything is assigned.
+        """
+        covariance = jnp.asarray(C_D)
+        if covariance.ndim == 2:
+            if covariance.shape[0] != covariance.shape[1] or not bool(
+                jnp.all(covariance == jnp.diag(jnp.diag(covariance)))
+            ):
+                raise ValueError(
+                    "C_D must be diagonal; correlated errors are unsupported."
+                )
+            covariance = jnp.diag(covariance)
+        diagonal = validate_variances(covariance)
+        self._validate_effective_covariance(
+            diagonal, float(self.alpha), self.likelihood_weight
+        )
+        self.C_D = diagonal
+        self.C_D_sqrt = jnp.sqrt(self.C_D)
+
+    def __call__(
+        self, *args: Any, observation_covariance: Any = None, **kwargs: Any
+    ) -> Any:
+        """Optionally use a physical covariance only for this window."""
+        if observation_covariance is None:
+            return super().__call__(*args, **kwargs)
+        previous, previous_sqrt = self.C_D, self.C_D_sqrt
+        self.set_observation_covariance(observation_covariance)
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            self.C_D, self.C_D_sqrt = previous, previous_sqrt
 
     def _set_step_results_dir(self, step: int) -> None:
         """Point the forward model's results directory at the given step."""
@@ -249,7 +453,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
                 global path and by coordinate-free strategies.
             alpha: Optional override of the ESMDA inflation coefficient for
                 this single update (used by the un-tempered final trajectory
-                smoothing step). ``None`` -> ``self.alpha``.
+                smoothing step). ``None`` -> ``self.alpha``. Always a
+                BASE-schedule value: like ``self.alpha`` it is divided by
+                ``likelihood_weight`` here, never treated as already scaled.
 
         Returns:
             Updated augmented array of the same shape.
@@ -258,21 +464,76 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # tempered alpha; the single shared implementation lives in
         # ``filtering/analysis.py`` (1-D variance-vector C_D contract). ``N_e``
         # is kept in the signature for callers but derived from the arrays.
-        alpha = self.alpha if alpha is None else alpha
+        #
+        # The likelihood weight enters ONLY here, as ``alpha_base / w`` handed
+        # to the kernel as its ``alpha``: the kernel draws the perturbations
+        # from ``alpha * C_D`` and solves with ``C_DD + alpha * C_D``, so the
+        # effective covariance is applied exactly once. ``self.C_D`` stays
+        # physical. At ``w = 1`` the base value passes through untouched and
+        # no extra key is split, so the seeded RNG stream is the legacy one.
+        alpha = self._apply_likelihood_weight(self.alpha if alpha is None else alpha)
+        localization = self.localization
+        if localize_mask is not None and not bool(jnp.any(localize_mask)):
+            # An explicitly global vector needs no spatial coordinates (and
+            # consumes exactly the same perturbation draw as a global update).
+            localization = None
         self.rng_key, subkey = jax.random.split(self.rng_key)
         return stochastic_enkf_update(
             augmented=augmented,
             pred_obs=pred_obs,
             obs=obs,
-            C_D_diag=jnp.diag(self.C_D),
+            C_D_diag=(self.C_D if self.C_D.ndim == 1 else jnp.diag(self.C_D)),
             rng_key=subkey,
             alpha=alpha,
-            localization=self.localization,
+            localization=localization,
             group_ids=group_ids,
             localize_mask=localize_mask,
             row_coords=row_coords,
             obs_coords=obs_coords,
         )
+
+    def _validate_global_parameters(self, params: xarray.Dataset) -> None:
+        """Check explicit static/global metadata before any solver forecast."""
+        selected = select_parameters(params, self.parameter_names_to_estimate)
+        missing = [name for name in self.global_parameter_names if name not in params]
+        if missing:
+            raise ValueError(
+                f"Global parameter names absent from params: {sorted(missing)}"
+            )
+        for name in self.global_parameter_names:
+            if params[name].dims != ("ensemble",):
+                raise ValueError(
+                    f"Global parameter {name!r} must be static with dims ('ensemble',)."
+                )
+        if (
+            self.localization is not None
+            and self.localization.requires_coordinates
+            and not self._supplies_row_coordinates
+            and not set(selected.data_vars).issubset(self.global_parameter_names)
+        ):
+            raise ValueError(
+                "Distance-based localization on a parameter-only smoother requires "
+                "every parameter to be explicitly declared in global_parameter_names; "
+                "other parameter rows have no physical coordinates."
+            )
+
+    def _parameter_localize_mask(self, params: xarray.Dataset) -> Optional[jnp.ndarray]:
+        """Exclude explicitly global parameter rows, leaving legacy defaults intact."""
+        if not self.global_parameter_names:
+            return None
+        return jnp.asarray(
+            [name not in self.global_parameter_names for name in params.data_vars]
+        )
+
+    def _preserve_parameter_attrs(
+        self, updated: xarray.Dataset, template: xarray.Dataset
+    ) -> xarray.Dataset:
+        if not self.global_parameter_names:
+            return updated
+        updated.attrs = dict(template.attrs)
+        for name in updated.data_vars:
+            updated[name].attrs = dict(template[name].attrs)
+        return updated
 
     def _observation_coords(self, n_d: int) -> jnp.ndarray:
         """Physical (x, y, z) coordinate of each of the ``n_d`` observations.
@@ -326,6 +587,64 @@ sensor_observation_coords` (shared with the filtering package); see its
         return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
+        """Run one window, committing only a successful posterior forecast.
+
+        A supporting backend restores its hidden solver state before every
+        forecast. Analysis-only calls and exceptions leave its pre-window state
+        intact, so intermediate endpoints cannot leak into a later forecast.
+        """
+        if not final_forecast and return_state_history:
+            raise ValueError(
+                "return_state_history requires the final forecast: with "
+                "final_forecast=False there is no posterior state to close "
+                "the history with."
+            )
+        if return_state_history and self.forward_model.save_on_disk:
+            raise ValueError(
+                "return_state_history is not supported in on-disk save mode: "
+                "the per-step states live in the step_{i}/ directories "
+                "(see get_state). Use an in-memory forward model "
+                "(results_dir=None) to collect the state history."
+            )
+        self._validate_global_parameters(params)
+        replay = getattr(self.forward_model, "forecast_window_replay_enabled", False)
+        if replay:
+            self.forward_model.begin_forecast_window()
+        try:
+            result = self._analysis_window(
+                params=params,
+                observations=observations,
+                state=state,
+                return_params_history=return_params_history,
+                return_state_history=return_state_history,
+                final_forecast=final_forecast,
+            )
+            if replay:
+                self.forward_model.end_forecast_window(commit=final_forecast)
+        except BaseException:
+            if replay:
+                self.forward_model.end_forecast_window(commit=False)
+            raise
+        return result
+
+    def _forecast_step(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+    ) -> xarray.Dataset:
+        if getattr(self.forward_model, "forecast_window_replay_enabled", False):
+            self.forward_model.restore_forecast_window()
+        return super()._forecast_step(state=state, params=params)
+
+    def _analysis_window(
+        self,
+        params: xarray.Dataset,
+        observations: Observations,
+        state: Optional[xarray.Dataset] = None,
+        return_params_history: bool = False,
+        return_state_history: bool = False,
+        final_forecast: bool = True,
+    ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop.
 
         ``observations`` is the window's time-resolved observation DataArray
@@ -358,24 +677,12 @@ sensor_observation_coords` (shared with the filtering package); see its
         filter-smoothing hybrid, which produces the posterior state with a
         sequential filter instead.
         """
-        if not final_forecast and return_state_history:
-            raise ValueError(
-                "return_state_history requires the final forecast: with "
-                "final_forecast=False there is no posterior state to close "
-                "the history with."
-            )
-        if return_state_history and self.forward_model.save_on_disk:
-            raise ValueError(
-                "return_state_history is not supported in on-disk save mode: "
-                "the per-step states live in the step_{i}/ directories "
-                "(see get_state). Use an in-memory forward model "
-                "(results_dir=None) to collect the state history."
-            )
-
         # Aggregate + flatten the real observations once (a plain array passes
         # through). The predicted observations take the same path inside
         # ``_observation_step``, so the two always live in the same space.
         obs = self._get_observations(observations)
+        if obs.ndim != 1 or obs.shape[0] != self.C_D.shape[0]:
+            raise ValueError("Observation vector and physical covariance sizes differ.")
 
         initial_state = state
 
@@ -383,6 +690,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         # window gets that window's entries alone. Rebound rather than cleared:
         # the caller may still hold the previous window's list.
         self.pred_obs_history = []
+        self.analyzed_pred_obs = None
 
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
         state_history: list[xarray.Dataset] = []
@@ -433,6 +741,12 @@ sensor_observation_coords` (shared with the filtering package); see its
             # params.
             self._set_step_results_dir(self.num_steps)
             state = self._forecast_step(state=initial_state, params=params)
+            if getattr(self.forward_model, "forecast_window_replay_enabled", False):
+                params = self.forward_model.apply_failure_substitutions_to_params(
+                    params
+                )
+                if return_params_history:
+                    params_history[-1] = params
 
             # Close the observation-space history with the POSTERIOR forecast:
             # the in-loop appends only cover the num_steps prior/intermediate
@@ -456,7 +770,15 @@ sensor_observation_coords` (shared with the filtering package); see its
             # params.
             state = self._final_time_smoothing_step(state, obs)
 
+            if self.collect_analyzed_observations:
+                self.analyzed_pred_obs = np.asarray(
+                    self._observation_step(
+                        state=state, results_dir=self._results_dir_or_none()
+                    )
+                ).T
+
             if return_state_history:
+                assert state is not None
                 state_history.append(state)
 
         # Build return values
@@ -478,11 +800,21 @@ sensor_observation_coords` (shared with the filtering package); see its
             )
             return result_params, result_state
 
+        assert state is not None
         return result_params, state
 
 
 class ParameterESMDA(_BaseESMDA):
-    """Parameter-only ESMDA smoothing."""
+    """Parameter-only ESMDA smoothing.
+
+    ``global_parameter_names`` declares static ``(ensemble,)`` parameters that
+    always use all observations, including under correlation localization. No
+    spatial location is assigned to these rows. A parameter-only smoother can
+    use distance localization only when every parameter is explicitly global.
+    Names are validated against each input Dataset before forecasting; the
+    declaration persists across updates and windows. The default empty tuple
+    preserves the existing localization behavior.
+    """
 
     def update_params_from_pred_obs(
         self,
@@ -515,6 +847,24 @@ class ParameterESMDA(_BaseESMDA):
         Returns:
             The updated parameter Dataset, on ``params``' own coordinates.
         """
+        self._validate_global_parameters(params)
+        selected = select_parameters(params, self.parameter_names_to_estimate)
+        if group_ids is not None and len(selected.data_vars) != len(params.data_vars):
+            indices = [i for i, name in enumerate(params.data_vars) if name in selected]
+            group_ids = group_ids[jnp.asarray(indices, dtype=int)]
+        updated = self._update_flat_params_from_pred_obs(
+            selected, pred_obs, obs, group_ids=group_ids
+        )
+        return merge_parameters(params, updated)
+
+    def _update_flat_params_from_pred_obs(
+        self,
+        params: xarray.Dataset,
+        pred_obs: jnp.ndarray,
+        obs: jnp.ndarray,
+        *,
+        group_ids: Optional[jnp.ndarray] = None,
+    ) -> xarray.Dataset:
         obs = jnp.asarray(obs)
         pred_obs = jnp.asarray(pred_obs)
         param_names = list(params.data_vars.keys())
@@ -528,6 +878,8 @@ class ParameterESMDA(_BaseESMDA):
                 "results step directory."
             )
 
+        if not param_names:
+            return params
         params_array = jnp.array([params[name].values for name in param_names])
 
         # Block grouping (paper sec. 3b): co-locate the augmented rows that
@@ -540,7 +892,12 @@ class ParameterESMDA(_BaseESMDA):
         else:
             group_ids = None
         params_updated = self._compute_kalman_update(
-            params_array, pred_obs, obs, N_e, group_ids=group_ids
+            params_array,
+            pred_obs,
+            obs,
+            N_e,
+            group_ids=group_ids,
+            localize_mask=self._parameter_localize_mask(params),
         )
 
         updated_data_vars = {
@@ -548,7 +905,9 @@ class ParameterESMDA(_BaseESMDA):
             for i, name in enumerate(param_names)
         }
 
-        return xarray.Dataset(data_vars=updated_data_vars, coords=params.coords)
+        return self._preserve_parameter_attrs(
+            xarray.Dataset(data_vars=updated_data_vars, coords=params.coords), params
+        )
 
     def _one_step(
         self,
@@ -594,6 +953,9 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         pin_initial_time_point: bool = False,
         localization: Optional[BaseLocalization] = None,
         aggregate_observations: Optional[AggregateObservations] = None,
+        likelihood_weight: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -604,6 +966,9 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             rng_key=rng_key,
             localization=localization,
             aggregate_observations=aggregate_observations,
+            likelihood_weight=likelihood_weight,
+            global_parameter_names=global_parameter_names,
+            parameter_names_to_estimate=parameter_names_to_estimate,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -631,8 +996,18 @@ ParamAugmentation` for the flattening semantics.
         self._param_augmentation.check_num_time_points(params)
 
     def _time_varying_group_ids(self, params: xarray.Dataset) -> jnp.ndarray:
-        """Block id per flattened param row, grouping knots of one parameter."""
-        return self._param_augmentation.group_ids(params)
+        """Block id per flattened param row, grouping knots of one parameter.
+
+        With ``localization.group_parameter_knots=False`` every row (each knot)
+        is its own block instead.
+        """
+        group_ids = self._param_augmentation.group_ids(params)
+        if (
+            self.localization is not None
+            and not self.localization.group_parameter_knots
+        ):
+            return jnp.arange(len(group_ids), dtype=int)
+        return group_ids
 
     def _flatten_time_varying_params(self, params: xarray.Dataset) -> xarray.Dataset:
         """Flatten ``(time, ensemble)`` params to scalar ``(ensemble,)`` vars."""
@@ -644,7 +1019,10 @@ ParamAugmentation` for the flattening semantics.
         original_params: xarray.Dataset,
     ) -> xarray.Dataset:
         """Reverse :meth:`_flatten_time_varying_params`."""
-        return self._param_augmentation.unflatten(flat_params, original_params)
+        return self._preserve_parameter_attrs(
+            self._param_augmentation.unflatten(flat_params, original_params),
+            original_params,
+        )
 
     def update_params_from_pred_obs(
         self,
@@ -663,18 +1041,31 @@ ParamAugmentation` for the flattening semantics.
         :meth:`~data_assimilation.augmentation.ParamAugmentation.flatten`'s
         order.
         """
+        self._validate_global_parameters(params)
+        original_params = params
+        params = select_parameters(params, self.parameter_names_to_estimate)
         self._check_num_time_points(params)
         flat_params = self._flatten_time_varying_params(params)
+        if group_ids is not None and len(params.data_vars) != len(
+            original_params.data_vars
+        ):
+            full_flat = self._param_augmentation.flatten(original_params)
+            indices = [
+                i for i, name in enumerate(full_flat.data_vars) if name in flat_params
+            ]
+            group_ids = group_ids[jnp.asarray(indices, dtype=int)]
         # Group ids built from the true name->knot mapping (grouping this
         # parameter's time knots), so the block update never has to re-parse the
         # flattened names. A caller that already built them (with the same
         # mapping) passes them in instead.
         if group_ids is None:
             group_ids = self._time_varying_group_ids(params)
-        updated_flat = super().update_params_from_pred_obs(
+        updated_flat = self._update_flat_params_from_pred_obs(
             flat_params, pred_obs, obs, group_ids=group_ids
         )
-        return self._unflatten_params(updated_flat, params)
+        return merge_parameters(
+            original_params, self._unflatten_params(updated_flat, params)
+        )
 
 
 class StateAndParameterESMDA(_BaseESMDA):
@@ -683,7 +1074,7 @@ class StateAndParameterESMDA(_BaseESMDA):
     Optionally performs the state part of the Kalman update in a reduced
     SVD/KL basis fitted ONLINE to the current forecast ensemble
     (``state_reduction``, see :class:`~data_assimilation.reduction.\
-OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
+OnlineStateReduction` and ``docs/archive/reduced_state_da.md``), and an optional
     post-loop Kalman smoothing of the full window trajectory
     (``final_time_smoothing``). Both default to off, which reproduces the
     full-space behavior exactly.
@@ -725,6 +1116,19 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 "the analysis returns no state there, so the smoothed "
                 "trajectory would be discarded. Use an in-memory forward "
                 "model (results_dir=None)."
+            )
+        # The final-time smoothing is an EXTRA full-weight update on top of the
+        # MDA schedule (see ``_final_time_smoothing_step``). Under a shared
+        # likelihood budget (``likelihood_weight < 1``) the rest of the budget
+        # belongs to another phase, so this update has no allocation at all;
+        # reject the pairing rather than silently over-conditioning. The legacy
+        # unit-weight path (and its double-conditioning warning) is unchanged.
+        if final_time_smoothing and self.likelihood_weight != 1.0:
+            raise ValueError(
+                "final_time_smoothing is incompatible with likelihood_weight="
+                f"{self.likelihood_weight} (!= 1): its extra un-tempered update "
+                "has no allocation under a shared likelihood budget. Disable "
+                "final_time_smoothing or use the full-weight smoother."
             )
         self.state_reduction = state_reduction
         self.final_time_smoothing = final_time_smoothing
@@ -871,6 +1275,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         is ``None`` on this path (enforced at construction).
         """
         param_names = list(flat_params.data_vars.keys())
+        param_localize_mask = self._parameter_localize_mask(flat_params)
         # ``_unflatten_state`` reads only dims/sizes/coords/dtype from its
         # template, so ``states_array`` itself serves -- no need to allocate a
         # full ensemble-sized copy of empties (a real device allocation).
@@ -878,7 +1283,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
 
         states_flat = self._flatten_state(states_array)
 
-        params_array = jnp.array([flat_params[name].values for name in param_names])
+        params_array = ParamAugmentation.to_array(flat_params)
 
         # Reduced path: Kalman-update SVD/KL coefficients instead of the raw
         # state rows, then decode the increment onto each member's full state
@@ -902,7 +1307,9 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
                 },
                 coords={"ensemble": flat_params.coords["ensemble"]},
             )
-            return updated_states, updated_flat
+            return updated_states, self._preserve_parameter_attrs(
+                updated_flat, flat_params
+            )
 
         N_s = states_flat.shape[0]
         augmented = jnp.concatenate([states_flat, params_array], axis=0)
@@ -919,7 +1326,11 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             localize_mask = jnp.concatenate(
                 [
                     jnp.ones(N_s, dtype=bool),
-                    jnp.full((len(param_names),), localize_params, dtype=bool),
+                    (
+                        jnp.full((len(param_names),), localize_params, dtype=bool)
+                        if param_localize_mask is None
+                        else param_localize_mask & localize_params
+                    ),
                 ]
             )
             # Block grouping: co-locate state rows by their physical grid and
@@ -958,7 +1369,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             },
             coords={"ensemble": flat_params.coords["ensemble"]},
         )
-        return updated_states, updated_flat
+        return updated_states, self._preserve_parameter_attrs(updated_flat, flat_params)
 
     def _one_step(
         self,
@@ -979,19 +1390,18 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
         states_array = self._get_states(state=state, results_dir=results_dir)
         N_e = params.sizes["ensemble"]
 
+        self._validate_global_parameters(params)
+        selected = select_parameters(params, self.parameter_names_to_estimate)
         # Static params are already scalar (ensemble,) vars: no flatten needed.
         updated_states, updated_flat = self._augmented_state_update(
             states_array,
-            params,
+            selected,
             pred_obs,
             obs,
             N_e,
             snapshots_flat=self._basis_snapshots(state, results_dir),
         )
-        return updated_states, xarray.Dataset(
-            data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
-            coords=params.coords,
-        )
+        return updated_states, merge_parameters(params, updated_flat)
 
     def _final_time_smoothing_step(
         self,
@@ -1021,7 +1431,7 @@ OnlineStateReduction` and ``docs/reduced_state_da.md``), and an optional
             used for uncertainty quantification. The rigorous alternative is to
             carry the reduced trajectory coefficients in the augmented vector
             through the MDA schedule so the trajectory is conditioned exactly
-            once (see docs/temp/da_review_math.md §1.1 / §3.10).
+            once (see docs/archive/da_review_math.md §1.1 / §3.10).
         """
         if not self.final_time_smoothing or state is None:
             return state
@@ -1135,7 +1545,8 @@ class StateAndTimeVaryingParameterESMDA(
     :class:`TimeVaryingParameterESMDA`, so the effective signature is
     ``(observation_operator, forward_model, C_D, num_time_points,
     num_steps=3, alpha=None, rng_key=..., pin_initial_time_point=False,
-    localization=None, state_reduction=None, final_time_smoothing=False)``.
+    localization=None, aggregate_observations=None, likelihood_weight=1.0,
+    state_reduction=None, final_time_smoothing=False)``.
     """
 
     def _one_step(
@@ -1158,6 +1569,9 @@ class StateAndTimeVaryingParameterESMDA(
         # scalars (respecting pin_initial_time_point). The shared localized
         # update handles the augmented [state | params] vector.
         states_array = self._get_states(state=state, results_dir=results_dir)
+        self._validate_global_parameters(params)
+        original_params = params
+        params = select_parameters(params, self.parameter_names_to_estimate)
         flat_params = self._flatten_time_varying_params(params)
         N_e = flat_params.sizes["ensemble"]
 
@@ -1171,4 +1585,4 @@ class StateAndTimeVaryingParameterESMDA(
             param_group_ids=self._time_varying_group_ids(params),
         )
         updated_params = self._unflatten_params(updated_flat, params)
-        return updated_states, updated_params
+        return updated_states, merge_parameters(original_params, updated_params)

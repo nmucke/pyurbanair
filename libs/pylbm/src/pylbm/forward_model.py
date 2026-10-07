@@ -19,6 +19,7 @@ from pylbm.utils import get_lbm_directory_paths
 
 from pyurbanair.base_ensemble_forward_model import ForwardModelRunFailure
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.solver_process import run_solver
 
 from .stl_to_lbm import stl_to_lbm_geometry
 from .utils import (
@@ -80,8 +81,15 @@ class ForwardModel(BaseForwardModel):
         spinup_time: float = 0.0,
         profile_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        ncpu: int = 1,
     ) -> None:
         super().__init__(results_dir=results_dir)
+
+        # OpenMP threads. ncpu > 1 builds with MP=1 and runs with
+        # OMP_NUM_THREADS=ncpu; ncpu == 1 is the serial build, unchanged.
+        if isinstance(ncpu, bool) or not isinstance(ncpu, int) or ncpu < 1:
+            raise ValueError(f"ncpu must be an integer >= 1, got {ncpu!r}")
+        self.ncpu = ncpu
 
         self.spinup_time = spinup_time
         self._spinup_outputs = 0
@@ -120,7 +128,6 @@ class ForwardModel(BaseForwardModel):
                 if temp_dir is not None
                 else pathlib.Path(".temp")
             ),
-            case_dir=pathlib.Path("examples/lbm"),
             experiment_name=experiment_name,
         )
 
@@ -159,7 +166,7 @@ class ForwardModel(BaseForwardModel):
         profile_heights = (np.arange(nz) + 0.5) * dz
         # Cached so _apply_inflow_settings can rewrite uvel_shear.dat per member
         # when an estimated vertical_inflow_exponent (α) overrides the
-        # construction-time shear (docs/esmda_model_error_parameters.md §2.1).
+        # construction-time shear (docs/archive/esmda_model_error_parameters.md §2.1).
         self._profile_heights = profile_heights
         self._zsize = zsize
         if profile_config is not None and profile_config.get("type") not in (
@@ -221,12 +228,6 @@ class ForwardModel(BaseForwardModel):
                 f"{self.dirs.executable_path}. {remedy}"
             )
 
-        expected = compute_build_signature(
-            src_path=self.dirs.lbm_src_path,
-            experiment_name=self.dirs.experiment_name,
-            enable_cuda=self.cuda,
-            enable_netcdf=self.enable_netcdf,
-        )
         recorded = read_build_stamp(build_root)
         if recorded is None:
             raise RuntimeError(
@@ -234,21 +235,41 @@ class ForwardModel(BaseForwardModel):
                 "carries no build stamp, so it cannot be checked against the "
                 f"current grid and geometry. {remedy}"
             )
+        expected = compute_build_signature(
+            src_path=self.dirs.lbm_src_path,
+            experiment_name=self.dirs.experiment_name,
+            enable_cuda=self.cuda,
+            enable_netcdf=self.enable_netcdf,
+            # A CUDA binary is never OpenMP (compile_lbm drops it), whatever ncpu.
+            openmp=self.ncpu > 1 and recorded.get("cuda") is not True,
+        )
 
         # 'cuda' is excluded: it does not change the solver's numerics or array
         # shapes, and cuda=auto legitimately resolves differently per host.
+        # 'openmp' is only stamped when true, so a missing key means serial; a
+        # serial binary would ignore OMP_NUM_THREADS, and an OpenMP one is not
+        # reused for ncpu=1 so that run stays the serial build.
         stale = [
             key
             for key in ("experiment", "netcdf", "sources")
             if recorded.get(key) != expected[key]
         ]
+        if recorded.get("openmp", False) != expected.get("openmp", False):
+            stale.append("openmp")
         if stale:
             raise RuntimeError(
                 f"The LBM binary at {self.dirs.executable_path} is stale: "
-                f"{', '.join(stale)} changed since it was built. Running it would "
-                f"silently produce output for the wrong grid or geometry. {remedy}"
+                f"{', '.join(stale)} changed since it was built. Running it could "
+                "silently produce output for the wrong grid or geometry, or with "
+                f"the wrong (serial vs OpenMP) build for ncpu={self.ncpu}. {remedy}"
             )
 
+        if self.ncpu > 1 and recorded.get("cuda") is True:
+            logger.warning(
+                "ncpu=%d is ignored: the prebuilt LBM binary is a CUDA build, to "
+                "which OpenMP does not apply.",
+                self.ncpu,
+            )
         logger.info(
             "Reusing LBM binary at %s (build stamp matches current sources)",
             self.dirs.executable_path,
@@ -263,6 +284,7 @@ class ForwardModel(BaseForwardModel):
                 verbose=self.verbose,
                 enable_cuda=self.cuda,
                 enable_netcdf=self.enable_netcdf,
+                openmp=self.ncpu > 1,
             )
             # A rebuilt binary may use a different RANDOM_SEED size than the
             # stale seed_*.dat/.orig files written by the previous binary,
@@ -275,7 +297,7 @@ class ForwardModel(BaseForwardModel):
 
         # Create infile.in by running the executable (only if it doesn't exist)
         if not self.dirs.infile_path.exists():
-            create_infile(dirs=self.dirs, verbose=self.verbose)
+            create_infile(dirs=self.dirs, verbose=self.verbose, openmp=self.ncpu > 1)
         elif self.verbose:
             logger.info(
                 "infile.in already exists at %s, skipping creation.",
@@ -516,7 +538,7 @@ class ForwardModel(BaseForwardModel):
         """
         # Model-error knobs (α shear exponent, SGS constant) apply identically to
         # the static and time-varying inflow paths, so consume them here, outside
-        # the branch (docs/esmda_model_error_parameters.md §6.2). Each is a no-op
+        # the branch (docs/archive/esmda_model_error_parameters.md §6.2). Each is a no-op
         # when its parameter is absent, keeping single-model/default runs
         # byte-identical.
         override_cfg = resolve_profile_config(params, self.profile_config)
@@ -585,6 +607,8 @@ class ForwardModel(BaseForwardModel):
         if "PIXI_ENVIRONMENT" not in env:
             env["PIXI_ENVIRONMENT"] = str(self.dirs.pixi_env_path)
         _augment_runtime_library_paths(env=env, pixi_env_path=self.dirs.pixi_env_path)
+        if self.ncpu > 1:
+            env["OMP_NUM_THREADS"] = str(self.ncpu)
 
         # Raise the stack size limit before launching. The LBM binary uses
         # large automatic (stack) arrays sized by nx*ny*nz; on big grids (e.g.
@@ -597,18 +621,15 @@ class ForwardModel(BaseForwardModel):
             f"{self.dirs.executable_path}"
         )
         try:
-            # check=True so a non-zero LBM exit raises CalledProcessError, which
-            # the ensemble runner catches to resample the member from a survivor.
-            # Without it, a crashed member silently produces partial/no output and
-            # later breaks the cross-member concat with an AlignmentError.
-            _ = subprocess.run(
-                shell_cmd,
-                shell=True,
+            # A non-zero LBM exit raises CalledProcessError, which the ensemble
+            # runner catches to resample the member from a survivor. Without it,
+            # a crashed member silently produces partial/no output and later
+            # breaks the cross-member concat with an AlignmentError.
+            run_solver(
+                ["sh", "-c", shell_cmd],
                 env=env,
                 stderr=self.stderr,
                 stdout=self.stdout,
-                text=True,
-                check=True,
             )
         finally:
             # Always return to original directory, even if the run failed.
@@ -705,12 +726,12 @@ class ForwardModel(BaseForwardModel):
         if state.sizes["time"] > expected_outputs:
             state = state.isel(time=slice(-expected_outputs, None))
 
-        # Store the time coordinate in seconds (0, dt, 2·dt, …) rather than
-        # bare step indices, so downstream consumers (e.g. the temporal
-        # observation operator's seconds-based interval binning) see a real
-        # time axis consistent with the other backends.
+        # Store the time coordinate in seconds (dt, 2·dt, …, simulation_time)
+        # rather than bare step indices: the frames are the outputs in
+        # (0, simulation_time], the same axis as every other backend.
         state = state.assign_coords(
-            time=np.arange(state.sizes["time"], dtype=float) * self.output_frequency
+            time=(np.arange(state.sizes["time"], dtype=float) + 1)
+            * self.output_frequency
         )
 
         remove_old_restart_files(self.dirs)

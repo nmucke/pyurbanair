@@ -58,8 +58,8 @@ def compute_nudging_profiles(
     u_arr, v_arr = angle_to_velocity(inflow_angle, velocity_magnitude)
 
     shape = profile_shape if profile_shape is not None else np.ones(ktot)
-    u_profiles = u_arr[:, np.newaxis] * shape[np.newaxis, :]
-    v_profiles = v_arr[:, np.newaxis] * shape[np.newaxis, :]
+    u_profiles = np.asarray(u_arr)[:, np.newaxis] * shape[np.newaxis, :]
+    v_profiles = np.asarray(v_arr)[:, np.newaxis] * shape[np.newaxis, :]
     thl_profiles = np.full((n_times, ktot), thl0)
     qt_profiles = np.full((n_times, ktot), qt0)
 
@@ -274,8 +274,6 @@ def apply_time_varying_inflow(
         spinup_time: Duration of the spinup period in seconds.  During spinup
             the nudging holds the initial parameter values constant.
     """
-    from .params_utils import apply_inflow_settings
-
     namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
     namoptions = NamoptionsFile(namoptions_path)
 
@@ -388,56 +386,6 @@ def apply_time_varying_inflow(
         dpdx_profile=zeros,
         dpdy_profile=zeros,
     )
-    # if boundary_condition == "inflow_outflow":
-    #     # Match the reference expnr=400 convention: start the flow from
-    #     # rest and let nudging plus the west-face inflow BC ramp toward
-    #     # the t=0 target during spinup.  Writing t=0 velocities into
-    #     # prof.inp stagnates the flow against building walls before the
-    #     # pressure solver has settled.
-    #     zeros = np.zeros(ktot)
-    #     update_prof_file_profile(
-    #         dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}",
-    #         u_profile=zeros,
-    #         v_profile=zeros,
-    #     )
-    #     update_lscale_file_profile(
-    #         dirs.experiment_dir / f"lscale.inp.{dirs.experiment_name}",
-    #         u_profile=zeros,
-    #         v_profile=zeros,
-    #         dpdx_profile=zeros,
-    #         dpdy_profile=zeros,
-    #     )
-
-    #     # Still write scalar u0, v0 to namoptions INPS (uDALES uses
-    #     # these as reference scalars independent of IC).  dpdx/dpdy are
-    #     # zeroed because under inflow_outflow the west-face BC drives
-    #     # the flow.
-    #     u0, v0 = angle_to_velocity(float(inflow_angle[0]), float(velocity_mag[0]))
-    #     namoptions.set_value("INPS", "u0", f"{u0:.7f}")
-    #     namoptions.set_value("INPS", "v0", f"{v0:.7f}")
-    #     namoptions.set_value("INPS", "dpdx", "0.0")
-    #     namoptions.set_value("INPS", "dpdy", "0.0")
-    #     namoptions.write()
-    # else:
-    #     # Periodic BC: keep the t=0 profile in prof.inp and lscale.inp,
-    #     # because there is no inflow face to drive the flow.
-    #     initial_params_vars: dict = {
-    #         "inflow_angle": float(inflow_angle[0]),
-    #         "velocity_magnitude": float(velocity_mag[0]),
-    #     }
-    #     if "pressure_gradient_magnitude" in params:
-    #         pg = params["pressure_gradient_magnitude"].values
-    #         initial_params_vars["pressure_gradient_magnitude"] = (
-    #             float(pg) if pg.ndim == 0 else float(pg[0])
-    #         )
-
-    #     initial_params = xarray.Dataset(data_vars=initial_params_vars)
-    #     apply_inflow_settings(
-    #         initial_params,
-    #         dirs,
-    #         boundary_condition=boundary_condition,
-    #         profile_shape=profile_shape,
-    #     )
 
     # Verify critical files exist
     nudge_exists = nudge_file_path.exists()

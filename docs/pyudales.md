@@ -12,22 +12,38 @@ boundary-layer LES solver on a staggered C-grid.
 
 ## 1. Obtaining the Fortran source
 
-[`__init__.py`](../libs/pyudales/src/pyudales/__init__.py) runs at first import. It
-reads `.gitmodules` to locate the `libs/pyudales/u-dales` submodule entry, then:
+Importing pyudales does not download, checkout or compile solver code. Normal
+`prepare_udales` / `run_preprocessing` prepares the solver and preprocessing tools;
+direct forecasts and ensemble construction also ensure the solver is prepared
+before any workers start.
 
-1. Attempts `git submodule update --init --recursive libs/pyudales/u-dales`.
-2. Falls back to a direct `git clone` of the URL extracted from `.gitmodules`.
-3. Checks out the tag/branch recorded in `.gitmodules` (currently v2.2.0).
+[`utils/solver_build.py`](../libs/pyudales/src/pyudales/utils/solver_build.py)
+exports pristine commit `b84916ac60cecd1da54dd09df76c15e30dcaabe9` from the
+submodule's Git objects (or a cached direct clone), leaving local edits untouched.
+Stock and discrepancy variants live in separate, locked, atomically published
+cache entries. The default cache is `.cache/pyudales`; `PYUDALES_CACHE_DIR` can
+select another writable location. Package resources may be read-only. Cache keys
+include source/extension hashes, build scripts, toolchain, dependencies, flags and
+platform. Reuse requires a matching capability manifest and executable hash.
+Failed or partial builds are rebuilt; `CMakeCache.txt` alone is insufficient.
+A failed configure or compile raises with the build output, publishes nothing,
+and the next preparation retries it.
 
-After the source is present the `__init__` runs `build_udales_macos.sh release`
-(builds the Fortran binary into `u-dales/build/release/`) and
-`build_preprocessing_macos.sh` (builds the IBM preprocessing tools including
-`u-dales/tools/View3D/`). These are skipped when the corresponding
-`CMakeCache.txt` already exists.
+**Platforms.** The same scripts build on Linux and macOS
+([`shell_scripts/build_udales.sh`](../libs/pyudales/shell_scripts/build_udales.sh),
+`build_preprocessing.sh`). `build_udales.sh` points CMake at the pixi env
+(`CMAKE_PREFIX_PATH`, `NETCDF_DIR`, `NETCDF_FORTRAN_DIR`, `FFTW_ROOT` default to
+`$CONDA_PREFIX`), so a system NetCDF or FFTW can never be picked up instead;
+values you set yourself still win. On macOS with a pixi compiler, the shared
+`pyurbanair.utils.toolchain.apple_linker_flags` selects Apple's `/usr/bin/ld`
+for both native builds and the IBM geometry compiler: conda's ld64 cannot read
+a current SDK's `libSystem.tbd`. An explicit caller-supplied `-B` flag takes
+precedence. The active SDK and effective linker flags enter the build cache key.
 
-The top-level script path is in `LOCAL_EXECUTE_SCRIPT`
-(`libs/pyudales/shell_scripts/local_execute.sh`), kept outside the submodule so
-local modifications survive submodule re-initialisation.
+The selected executable travels in `DirectoryPaths.solver_executable` and
+`config.sh`'s `DA_BUILD`; its source tree supplies the corresponding preprocessing
+tools. No manual patch, solver fork, or executable-path override is required.
+The launch script remains a pyudales resource outside the upstream source.
 
 **Known build constraint.** The uDALES build implements only the `cd2` (second-
 order centred differencing) momentum advection scheme. Setting `iadv_mom=1` in
@@ -45,11 +61,11 @@ available — `&NAMSUBGRID cs` under `lsmagorinsky=.true.`, `c_vreman` under
 `ForwardModel(BaseForwardModel)`
 
 Key constructor arguments (all wired from
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml)):
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml)):
 
 | Argument | Purpose |
 |---|---|
-| `case_dir` | Source of the namoptions / STL template files (from `${geometry.udales_case_dir}`) |
+| `case_dir` | Case folder whose files (namoptions, the STL its `stl_file` names) are copied into the run (from `${geometry.case_dir}`) |
 | `experiment_name` | uDALES experiment number string (default `"999"`) |
 | `ncpu` | Total MPI ranks; always decomposed as `nprocx=ncpu, nprocy=1` (x-strips only) |
 | `simulation_time` | Window length in seconds; written to `&RUN runtime` |
@@ -60,6 +76,7 @@ Key constructor arguments (all wired from
 | `nudging_config` | Nudging tunables dict; see §6 |
 | `inlet_turbulence` | Turbulent-inlet block. `None`/`false` (default) is a strict no-op; `true` switches the inlet to synthetic driver planes (`BCxm=3`) and turns nudging off. See §6.1 |
 | `instability_check` | dt-watchdog config dict; see §7 |
+| `per_member_irandom` | `False` (default) is a no-op. `True` gives each run its own initial-condition seed; see §6.2 |
 | `precomputed_geom_dir` | Skip STL→IBM Fortran step by reusing prior geometry bundle |
 | `verbose` | `False` (default) suppresses all subprocess stdout/stderr |
 
@@ -185,7 +202,7 @@ belonging to the closure that is on (`u-dales/src/modsubgrid.f90`, subroutine
 | One-equation | `loneeqn=.true.` | `cm`/`ce1`/`ce2` — **not** in the namelist | prognostic SGS TKE |
 
 The closure itself is chosen by the `closure` constructor arg
-(`conf/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
+(`configs/model/pyudales.yaml`). `_apply_closure` writes **all three** switches — the
 chosen one `.true.`, the others `.false.` — so the active closure is fully
 determined by the config rather than by whatever the case template shipped. Only
 the keys uDALES declares in the NAMSUBGRID namelist may ever be written: an
@@ -214,9 +231,9 @@ from `run.<expnr>.log`'s companion Python log.
 
 **Where `sgs_constant` comes from.** Two sources, in precedence order:
 
-1. `sgs_constant` in the params Dataset (from the `conf/params/*.yaml` sampler) —
+1. `sgs_constant` in the params Dataset (from the `configs/params/*.yaml` sampler) —
    used when ESMDA estimates or pins it.
-2. `forward_model.sgs_constant` in the backend's own `conf/model/*.yaml` — the
+2. `forward_model.sgs_constant` in the backend's own `configs/model/*.yaml` — the
    per-backend default.
 
 Absent from both is a strict no-op: the solver's own closure/template value
@@ -229,7 +246,7 @@ value in the shared params sampler cannot be correct for all three at once.
 > **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
 > (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
 > for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
-> retune `conf/params/*.yaml` when switching a case's closure.
+> retune `configs/params/*.yaml` when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -239,11 +256,176 @@ of the initial condition.
 
 ---
 
+### 4.1 Strain/rotation discrepancy
+
+`model.forward_model.model_discrepancy` enables a native Vreman viscosity
+correction. Fixed coefficients are supported in single and ensemble forward
+runs. The backend also provides the window checkpoint/replay protocol below.
+The runners also support parameter-only ESMDA, parameter/joint filtering, and
+parameter-only ESMDA followed by state-only filtering. ESMDA and the hybrid may
+estimate dynamic inflow parameters alongside static SGS coefficients; the
+coefficients have no time dimension and carry their analyzed values between
+windows. There are no within-forecast coefficient schedules or coefficient
+process noise.
+
+The backend requires explicit feature settings. The shipped model config currently
+enables the SGS bias test with a 10 m canopy height, a height band of `[0.5, 2.0]`,
+regularization of 0.01 s⁻¹, and a log cap of `log(1.5)`. The dynamic prediction
+prior prescribes coefficients of `-20`; these are test settings, not calibration.
+Set `model_discrepancy.enabled=false` to use the stock solver.
+
+The following numbers illustrate
+the interface and are **not calibrated defaults**:
+
+```yaml
+model_discrepancy:
+  enabled: true
+  kind: sgs_strain_rotation
+  coefficient_model: persistent
+  canopy_height: 10.0
+  height_band_over_H: [0.5, 1.5]
+  gradient_regularization: 1.0e-6
+  log_multiplier_cap: 1.0986122886681098
+  prior_std: null
+```
+
+Height is measured in metres from the native solver's vertical datum (`zf`);
+`canopy_height` is a fixed representative building height. The regularization is
+in s⁻¹ and the logarithmic cap is dimensionless. Coefficient priors live in
+`configs/params/static.yaml` or the `static_parameters` block of
+`configs/params/dynamic.yaml`; truth values live in the regular truth configs.
+Explicit distributions take precedence.
+`prior_std` is an optional fallback: its three positive finite scales supply
+zero-centred Gaussian priors for selected coefficients missing from a custom
+sampler, in the static block of either sampler type. Leave it null when all
+selected coefficients have explicit priors.
+In a forward-only run this field does not sample anything.
+
+All SGS coefficient entries in the truth and prediction parameter configs are
+sampled and applied independently of `params_to_estimate`. That setting only
+selects prediction parameters for DA updates. For example, `Constant` entries
+of `-20` under the dynamic prior's `static_parameters` apply those coefficients
+even when only `inflow_angle` and `velocity_magnitude` are estimated. A coefficient
+absent from the config falls back to its constructor value (zero by default),
+unless selected inference supplies a missing prior via `prior_std`.
+
+Supply static scalar Dataset fields `sgs_bias_b0`, `sgs_bias_b1`, `sgs_bias_b2`
+through `params` (or `Constant` entries in the parameter sampler). For example:
+
+```python
+params = xarray.Dataset({"sgs_bias_b0": 0.1, "sgs_bias_b1": -0.2, "sgs_bias_b2": 0.05})
+state = forward_model(params=params)
+```
+
+Coefficients are routed separately from inlet controls. Each call resolves
+against constructor coefficients (zero by default), then applies that call's
+provided fields; previous call values never become defaults. All three are
+written after preprocessing. Time-array and nonfinite coefficients are rejected.
+Disabling a reused case strips extension-only namelist keys before selecting the
+stock executable; untouched disabled inputs are a no-op.
+When enabled, the native `c_vreman` value must be finite and nonnegative, including
+any per-call `sgs_constant` override. A positive multiplier cannot repair a
+negative native eddy viscosity.
+
+The correction is `exp(L*tanh((b0+b1*phi+b2*q)/L))`, where `phi` is the compact
+sine-squared height band and `q` compares squared rotation and strain norms.
+The native patch reuses Vreman gradients every closure evaluation, preserves
+scalar diffusivity by applying the multiplier after `ekh` is calculated, and
+adds molecular viscosity afterward. The existing momentum stress divergence and
+boundary filling remain in place. Enabled zero-gradient cells have zero SGS
+viscosity; the disabled branch retains upstream arithmetic. Before the first
+step, the enabled extension refreshes viscosity from the staged state with
+velocity halos/boundaries populated. Enabled warm starts stage the full rank
+restart set, inject each rank's velocity/pressure slab, synchronize clocks and
+preserve that rank's hidden records byte-for-byte. This staging supports the
+pinned `cd2` layout and an evenly divided x-only decomposition. Auxiliary restart
+reads (`lreadmean`, `lreadminl`, or `nsv>0` with `lreadscal`) are rejected until
+those additional files are carried too. Unsupported layouts or incomplete rank
+sets fail before launch. Native startup also rejects inconsistent
+rank clocks before entering thermodynamic collectives.
+
+The returned/saved state carries JSON in its `model_discrepancy` attribute:
+feature settings, coefficients, executable/build provenance and native multiplier
+extrema/saturation diagnostics. The native diagnostic text file is collected
+before output cleanup. Ensemble metadata is aggregated as
+`model_discrepancy_by_member`. General native physics, multi-rank equivalence,
+wall/energy budgets, continuous-versus-segmented forecasts, and coefficient
+recovery remain separate acceptance gates; compiling the extension does not
+demonstrate transfer skill.
+
+### 4.2 Window checkpoints for repeated forecasts
+
+Discrepancy-enabled forward and ensemble models implement
+`begin_forecast_window()`, `restore_forecast_window()`, and
+`end_forecast_window(commit=...)`. Begin captures each member's full native
+carry, runtime input files, template, mutable parameter defaults, and physical
+clock in a separate temporary directory. Restore verifies the snapshot hashes
+and stages its contents before replacing the live inputs. Checkpoints include
+every MPI rank; incomplete or corrupt carry fails instead of silently falling
+back to a cold start. Snapshot storage is additional to forecast output storage
+and is released when the window closes.
+
+Each replay starts from these inputs, then injects the current velocity/pressure
+state and coefficients. The native startup viscosity refresh still runs before
+timestep selection. A successful `commit=True` retains the final forecast's
+carry and clock once; `commit=False` restores the original inputs and clock.
+The ESMDA loop uses this lifecycle automatically on supporting backends, rolling
+back on errors or `final_forecast=False`. Ordinary sequential forward calls
+outside this lifecycle continue carrying their previous endpoint.
+
+Failure substitution copies the donor's window-start identity as well as its
+endpoint carry and clock, including the synthetic-inlet seed. Discrepancy
+parameter substitution clones the donor exactly: failure jitter would associate
+the accepted forecast with coefficients it never used. The failed member's
+original snapshot remains available for whole-window rollback. The disabled
+backend path does not capture checkpoints or change failure jitter.
+
+A cold checkpoint has no native carry. Repeated cold calls restart from the
+same inputs; a later analyzed warm start without a native carry constructs its
+template from that attempt's inputs. This is not an archived post-spinup hidden
+state. Joint initial-state ESMDA and cross-model initial-state injection remain outside
+the supported discrepancy runner modes. Sequential joint filtering instead
+updates each forecast endpoint before the next warm segment.
+
+For the hybrid, the filter and smoother retain separate experiment directories.
+Before each window, the smoother imports the filter's validated native carry,
+physical clock, and inlet realization, while preserving its own window runtime.
+The smoother's analysis-only call rolls back its intermediate endpoints; the
+state-only filter then advances with the estimated coefficient vector. Hybrid
+SGS runs require `ensemble.failure.policy=raise`: donor remapping across these
+separate stacks is not supported yet. Ordinary ESMDA/filter donor handling is
+unchanged.
+
+The small native regression case verifies exact repeated cold and warm forecasts
+on one and two MPI ranks, including replay after an intervening state/coefficient
+change. With zero coefficients the diagnostic multiplier is exactly one, but
+the enabled startup refresh can change the first adaptive timestep, so stock
+comparison uses a numerical tolerance. The rank regression compares the
+extension-minus-stock effect separately at each rank count; it does not assert
+that independently initialized stock runs are decomposition-independent.
+
+These checkpoints support replay within a live Python run, not resuming an
+interrupted assimilation job. They do not checkpoint the assimilation RNG or
+restore forecast output artifacts. Nonzero scalar top-flux cases and discrete
+energy/wall budgets remain unverified: startup boundary gradients can depend on
+the diffusivity that the enabled refresh subsequently changes. A neutral-case
+velocity regression cannot establish that boundary budget.
+
+---
+
 ## 5. Preprocessing — Python vs Matlab
 
 uDALES requires preprocessing that converts an STL geometry into IBM (Immersed
 Boundary Method) input files (`solid_*.txt`, `fluid_boundary_*.txt`,
 `facet_sections_*.txt`, `facets.inp`, `facetarea.inp`). Two paths exist:
+
+**Keep the domain top 1.5 cells above the buildings.** Upstream's
+`matchFacetsCells.f90` does not clamp a facet's top cell in z, so geometry
+ending in the top cell of the w-grid makes it read past its arrays: the facet
+sections then depend on uninitialised memory (zeroed on Linux, random on
+macOS, where uDALES stops in `wallfunmom`). `ibm.py` refuses such geometry
+with an error naming the highest allowed roof. The tests' tiny grid uses a 15 m
+lid over the 10 m roof for this reason.
 
 **Python preprocessor** (default):
 [`python_udgeom/`](../libs/pyudales/src/pyudales/python_udgeom/) — a pure-Python
@@ -256,16 +438,20 @@ reimplementation of the Matlab `write_inputs.m` workflow.
 | [`seb.py`](../libs/pyudales/src/pyudales/python_udgeom/seb.py) | Surface energy balance input generation |
 | [`write_inputs.py`](../libs/pyudales/src/pyudales/python_udgeom/write_inputs.py) | Orchestrator — calls ibm/seb, handles `precomputed_geom_dir` bypass |
 
+The generated `config.sh` shell-quotes paths, preserving spaces and treating
+shell metacharacters as literal path characters.
+
 The Python preprocessor is invoked via `shell_scripts/write_inputs.sh`, which sets
 `DA_EXPDIR` and `DA_TOOLSDIR` environment variables and runs the Python script
 against the experiment directory. It uses `trimesh` for STL loading.
 
 **Matlab preprocessor** (legacy, optional):
-Calls `u-dales/tools/write_inputs.sh` and requires `matlab_bin` to be on `PATH`.
+Calls `u-dales/tools/write_inputs.sh` and needs `matlab_bin` (unset by default)
+to point at your MATLAB binary.
 The Matlab path sleeps 90 s after subprocess launch to wait for MATLAB to finish.
 
 **Selector.** The `prepare._target_` in
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) points at
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) points at
 `pyurbanair.config.hydra_helpers.prepare_udales`, which receives
 `python_or_matlab: python` (the config default) and passes it to
 `forward_model.run_preprocessing(python_or_matlab=...)`.
@@ -286,8 +472,8 @@ for pyudales geometry detection — use only the `solid_c.txt`-sourced blanking.
 
 ## 6. Inflow / nudging
 
-pyudales applies inflow via **nudging** (`use_nudging=True` is hardcoded in
-`_apply_inflow_settings`) unless `inlet_turbulence.enabled` is set, which
+pyudales applies inflow via **nudging** (under both boundary conditions)
+unless `inlet_turbulence.enabled` is set, which
 replaces both the nudged inlet face and the interior relaxation with synthetic
 driver planes (§6.1). The nudging generates a
 `timedepnudge.inp.<expnr>` file and enables `&PHYSICS lnudge=.true.`,
@@ -304,7 +490,9 @@ driver planes (§6.1). The nudging generates a
   values is prepended before the time-varying schedule begins.
 - Under inflow-outflow BCs, `dpdx`/`dpdy` are zeroed in namoptions (`&INPS`) so
   the inlet face is the sole streamwise driver (no body-force conflict with pylbm,
-  which has no body force).
+  which has no body force). Under periodic BCs the case template's `dpdx`/`dpdy`
+  are kept: the `pressure_gradient_magnitude` parameter is not written by any
+  uDALES path (it stays in the parameter schema as a neural-surrogate input).
 
 **`profile_config`** (nested under `nudging_config`):
 
@@ -326,7 +514,7 @@ nnudge = int(np.count_nonzero(heights < nnudge_meters))
 ```
 
 where `heights` are cell centres `(0.5*dz, 1.5*dz, …)`. This takes precedence
-over the raw `nnudge` key. Config default: `nnudge_meters: 4.0`.
+over the raw `nnudge` key.
 
 **`tnudge`**: nudging relaxation timescale in seconds (default 15.0). Xie & Castro
 "divergence" in practice is marginal dt-collapse at end-of-window, not a nudging
@@ -337,7 +525,7 @@ failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.
 
 uDALES v2.2.0 has two inlet-turbulence routes. The Lund (1998) recycling
 generator is dead code (documented below, and still asserted against the Fortran
-source by `tests/test_udales_inlet_turbulence.py`). The **precursor/driver**
+source by `tests/pyudales/test_udales_inlet_turbulence.py`). The **precursor/driver**
 route — `BCxm=3` → `idriver=2`, `moddriver.f90` — is wired end to end, and that
 is what `inlet_turbulence.enabled: true` drives, fed by driver planes
 **synthesised in Python** rather than by a precursor run.
@@ -479,9 +667,9 @@ intensity * |U(z)|` with constant TI in z, the backflow rate is
 0.25** — hundreds of backflow cells per window on a 200x32 inlet plane. Keep
 `intensity` at or below ~0.15 unless you first restore that guard.
 
-**Calibrated defaults.** `conf/model/pyudales.yaml` now ships values tuned for
-the `realistic` STL pool at 4 m spacing (`intensity: 0.15`,
-`length_scale_y/z: 24`, `length_scale_x: 48`, `time_step: 0.5`). Three things
+**Shipped values.** `configs/model/pyudales.yaml` carries values chosen for
+the `realistic` STL pool at 4 m spacing; its comments say which are still test
+values. Three things
 still bias the realised turbulence below its nominal value, all of which
 calibration should account for before reaching for more amplitude:
 
@@ -498,7 +686,7 @@ calibration should account for before reaching for more amplitude:
   refinement if the canyon flow turns out to care.
 
 See §8 of
-[docs/plans/udales_inlet_turbulence.md](plans/udales_inlet_turbulence.md).
+[docs/plans/implemented/udales_inlet_turbulence.md](plans/implemented/udales_inlet_turbulence.md).
 
 #### Why not the Lund generator
 
@@ -537,13 +725,33 @@ generator: it needs no Fortran changes at all.
 
 ---
 
+### 6.2 Per-member initial-condition seed (`per_member_irandom`)
+
+uDALES perturbs the cold-start velocity field (`&RUN lrandomize`, default
+`.true.`, amplitude `randu`) with the seed `irandom`, which defaults to 43. The
+truth and every member therefore share one realisation, so a laminar or
+periodic ensemble at fixed parameters has no realisation spread.
+`forward_model.per_member_irandom: true` writes
+`irandom = derive_seed(experiment_name) % 134456` into each run's namoptions
+(truth included) through `random_utils.apply_random_initial_condition`, from
+`_apply_inflow_settings`. It uses the same stable per-member digest as the
+inlet-turbulence seed (§6.1). The modulus is uDALES' own generator period
+(`randomnize`: `ir = mod(ir*8121 + 28411, 134456)` in 32-bit integers); a
+larger seed overflows `ir*8121` and biases the perturbations. It only matters on a cold start: a warm-started
+run inherits its copied state, and uDALES does not re-randomize. Off by
+default, so default runs are unchanged.
+
 ## 7. Instability watchdog
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
 
-`run_with_dt_watchdog` replaces the bare `subprocess.run` used to launch uDALES.
-It spawns the process in its own session (so killing the session kills the entire
-`bash → mpiexec → MPI-rank` tree), then tails `run.<expnr>.log` in a polling loop:
+`run_with_dt_watchdog` launches uDALES through the shared
+[`pyurbanair.utils.solver_process.run_solver`](../src/pyurbanair/utils/solver_process.py),
+which every backend uses: the `bash → mpiexec → MPI-rank` tree runs in its own
+process group, is killed on return or error, and dies with its owner even when
+that Python process is killed without cleanup. A failure raises a
+`CalledProcessError` carrying the tail of `run.<expnr>.log`. The watchdog tails
+that log in a polling loop:
 
 ```
 line pattern: "... dt:  0.242654880"   ← parsed by _DT_RE
@@ -620,7 +828,7 @@ compensation knobs".
 | Module | Purpose |
 |---|---|
 | [`clean_up_utils.py`](../libs/pyudales/src/pyudales/utils/clean_up_utils.py) | `clean_output_dir` (delete output), `clean_temp_dir` (wipe experiment dir except namoptions/STL/config.sh) |
-| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_NCPU`, `MATLAB_BIN` |
+| [`config_utils.py`](../libs/pyudales/src/pyudales/utils/config_utils.py) | `create_config_sh` — writes `config.sh` with `DA_EXPDIR`, `DA_TOOLSDIR`, `DA_BUILD`, `DA_WORKDIR`, `NCPU`, `MATLAB_BIN` |
 | [`dir_utils.py`](../libs/pyudales/src/pyudales/utils/dir_utils.py) | `DirectoryPaths` dataclass, `get_udales_directory_paths`, `get_project_root` |
 | [`file_update_utils.py`](../libs/pyudales/src/pyudales/utils/file_update_utils.py) | `update_prof_file`, `update_lscale_file`, `…_profile` variants — patch `prof.inp` and `lscale.inp` in-place |
 | [`file_utils.py`](../libs/pyudales/src/pyudales/utils/file_utils.py) | `copy_files`, `change_file_extensions` (rename experiment-suffix files) |
@@ -633,7 +841,7 @@ compensation knobs".
 | [`ncpu_utils.py`](../libs/pyudales/src/pyudales/utils/ncpu_utils.py) | `validate_and_sync_ncpu` — sets `nprocx=ncpu, nprocy=1` and checks divisibility |
 | [`nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py) | `apply_time_varying_inflow`, `compute_nudging_profiles`, `write_timedepnudge_file`, `enable_nudging_in_namoptions` (see §6) |
 | [`params_utils.py`](../libs/pyudales/src/pyudales/utils/params_utils.py) | `INFLOW_PARAM_NAMES` whitelist, `extract_inflow_params`, `merge_params`, `apply_inflow_settings`, `get_param_value`, `is_time_varying_params` |
-| [`random_utils.py`](../libs/pyudales/src/pyudales/utils/random_utils.py) | `apply_random_initial_condition` — sets `irandom`/`randu`/`lrandomize` in `&RUN` |
+| [`random_utils.py`](../libs/pyudales/src/pyudales/utils/random_utils.py) | `apply_random_initial_condition` — sets `irandom`/`randu`/`lrandomize` in `&RUN` (used by `per_member_irandom`, §6.2) |
 | [`rollout_utils.py`](../libs/pyudales/src/pyudales/utils/rollout_utils.py) | `collect_rollout_results` — concatenate per-window result files along time |
 | [`run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py) | `run_with_dt_watchdog`, `InstabilityCheck` (see §7) |
 | [`save_frequency_utils.py`](../libs/pyudales/src/pyudales/utils/save_frequency_utils.py) | `apply_output_frequency` (writes `tfielddump`), `apply_save_only_last_timestep` (sets `tfielddump=runtime`) |
@@ -642,10 +850,11 @@ compensation knobs".
 
 ---
 
-## 10. Config wiring — `conf/model/pyudales.yaml`
+## 10. Config wiring — `configs/model/pyudales.yaml`
 
-[`conf/model/pyudales.yaml`](../conf/model/pyudales.yaml) is the complete model
-config entry. Notable fields:
+[`configs/model/pyudales.yaml`](../configs/model/pyudales.yaml) is the complete model
+config entry. Notable fields (values illustrative: the file is the source of
+truth and is tuned between runs):
 
 ```yaml
 name: pyudales
@@ -653,17 +862,19 @@ solver_name: udales          # selects dim_mapping in ObservationOperator
 
 forward_model:
   _target_: pyudales.forward_model.ForwardModel
-  case_dir: ${geometry.udales_case_dir}
+  case_dir: ${geometry.case_dir}
   precomputed_geom_dir: ${oc.select:geometry.udales_precomputed_geom_dir,null}
   temp_dir: ${paths.experiment_dir}
   experiment_name: "999"
-  matlab_bin: /opt/sw/matlab-2023b/bin/matlab  # unused when python_or_matlab: python
-  ncpu: 25
+  matlab_bin: null            # only python_or_matlab: matlab needs it
+  ncpu: 1
   boundary_condition: inflow_outflow
   closure: vreman             # smagorinsky | vreman | null (keep template)
+  per_member_irandom: false   # true -> one cold-start seed per run (§6.2)
   nudging_config:
     tnudge: 15.0
-    nnudge_meters: 4.0          # skip nudging below 4 m (near-wall cells)
+    nnudge_meters: 16.0         # skip nudging below this height (m)
+    interior_nudging: true      # false -> inflow at the boundary only
     profile_config:
       type: power_law
       alpha: 0.25
@@ -674,9 +885,9 @@ forward_model:
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: false            # true -> synthetic driver planes, BCxm=3 (§6.1)
-    intensity: 0.1            # u'_rms / |U_mean(z)|
-    length_scale_x/y/z: 50/25/25   # m, digital-filter integral length scales
+    enabled: true             # synthetic driver planes, BCxm=3 (§6.1); false = no-op
+    intensity: 0.15           # u'_rms / |U_mean(z)|
+    length_scale_x/y/z: 24/12/12   # m, digital-filter integral length scales
     time_step: 0.5            # s, &DRIVER dtdriver
     driverjobnr: 998
   nx/ny/nz: ${domain.nx/ny/nz}
@@ -726,8 +937,9 @@ carry to the failed member's slot so the resampled state and the subgrid carry a
 consistent.
 
 `disable_spinup()` zeros `spinup_time` and rewrites `runtime` in namoptions.
-Called by `BaseRolloutForwardModel` after step 0 when
-`spinup_first_step_only=True`.
+Its only caller is the neural surrogate's `disable_spinup`, which forwards to
+its `spinup_forward_model`; warm-start windows zero `spinup_time` in
+`run_single` themselves.
 
 ---
 
@@ -746,10 +958,10 @@ written. `_read_fielddump` detects this and stitches per-rank slabs in Python vi
 exploding memory. Always use `_stitch_x_decomposition`.
 
 **Ensemble parallelism.** Each ensemble member runs its own uDALES instance with
-its own process group (`start_new_session=True`). With `ncpu=25` per member and
+its own process group (`run_solver`). With `ncpu=25` per member and
 `num_parallel_processes=4`, 100 MPI ranks run simultaneously. The DRAM-bandwidth
 ceiling on the development box is ~4–8 parallel processes (see
-[ensemble_scaling.md](temp/ensemble_scaling.md)).
+[ensemble_scaling.md](archive/ensemble_scaling.md)).
 
 ---
 
@@ -764,7 +976,7 @@ ceiling on the development box is ~4–8 parallel processes (see
 | Add a new inflow parameter | Add to `INFLOW_PARAM_NAMES` in `params_utils.py` first |
 | Skip expensive preprocessing | Set `precomputed_geom_dir` / `geometry.udales_precomputed_geom_dir` |
 | Debug a silent crash | Set `verbose: true` on the forward model (or `model.forward_model.verbose=true` CLI) |
-| Tune the instability watchdog | `instability_check:` block in `conf/model/pyudales.yaml` |
+| Tune the instability watchdog | `instability_check:` block in `configs/model/pyudales.yaml` |
 | Interpolate staggered → centred | `pyudales.utils.grid_utils.interpolate_grid(ds)` |
 | Change nudging height cutoff | `nudging_config.nnudge_meters` in model config |
 | Understand ncpu → nprocx mapping | `utils/ncpu_utils.validate_and_sync_ncpu` |

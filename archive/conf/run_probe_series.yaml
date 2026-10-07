@@ -1,0 +1,117 @@
+# Probe-series diagnostic: direct ESMDA ingredients with probe-specific scratch.
+defaults:
+  - common/runtime
+  - execution: assimilation
+  - case: xie_and_castro
+  - esmda: default
+  - esmda/localization: correlation
+  - esmda/state_reduction: none
+  - esmda/smoother: dynamic
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  - params@truth_params: dynamic_sine
+  - params@prior_params: dynamic
+  - observation/operator: temporal_points
+  - observation/aggregation: mean
+  - _self_
+  - experiment: null
+
+# Keep the same physical and artifact contract as an ESMDA run.
+paths:
+  results_dir: .temp/${truth_model.name}_to_${assim_model.name}
+  experiment_dir: ${oc.env:PWD}/.temp_probes
+  base_results_dir: .temp_lbm
+time:
+  seconds_per_knot: 60.0
+params_to_estimate: [inflow_angle, velocity_magnitude]
+run:
+  ensemble_save_on_disk: true
+  save_prior_state: false
+  truth_dir: null
+  truth_start_time: null
+
+
+# Probe reruns clean solver output and restart files. The dedicated scratch root
+# above keeps those operations separate from an assimilation run.
+probes:
+  # The finished ESMDA run directory to re-probe (it holds the posterior params /
+  # states and truth_access.yaml, and receives truth_probes.nc +
+  # windows/window_{w}_probes*.nc). null -> ${paths.results_dir}, i.e. the same
+  # dir the identically-composed ESMDA run wrote to.
+  run_dir: null
+
+  # Which assimilation window to re-run. Negative indices count from the end, so
+  # the default is the LAST window — the one whose posterior is best constrained.
+  window_index: -1
+
+  # Probe cadence in seconds. Welch spectra need >~1e3 samples per sensor, which
+  # the assimilation cadence (`time.output_frequency`, 2-10 s) cannot supply;
+  # this is the only reason the re-run exists. The snapshots it produces are
+  # deleted again as soon as the probes are extracted from them.
+  #
+  # SIZED FROM THE BAND, NOT FROM THE FLOOR. The scored band's width depends only
+  # on the SAMPLE COUNT (the cadence cancels -- see
+  # `evaluation.turbulence.spectral_band_bins`), and it is bin 1 to bin B, so B
+  # bins is a frequency span of exactly B. Over a 300 s window:
+  #
+  #   cadence | samples | scored bins | band (Hz)      | span
+  #   1.00 s  |   300   |   4 (= the  | 0.027 - 0.108  | 0.6 decade
+  #           |         |   refusal   |                |
+  #           |         |   floor)    |                |
+  #   0.50 s  |   600   |   9         | 0.027 - 0.24   | 0.95 decade
+  #   0.25 s  |  1200   |  18         | 0.027 - 0.48   | 1.26 decades
+  #
+  # 1 s lands exactly on `_MIN_BAND_BINS`: the code returns a number, but it is an
+  # RMS over four bins spanning less than a decade, and 0.027-0.108 Hz at U~8 m/s
+  # over 14 m blocks is the ENERGY-CONTAINING range, not an inertial range -- so
+  # figure S4's `-5/3` guide would be drawn over a band that contains no `-5/3`.
+  # One window shorter and the metric no-ops entirely, after the solve. Hence
+  # 0.25 s, the value the WP3.2 plan is written against.
+  #
+  # WHAT IT COSTS (4x the 1 s default; the solve itself is unchanged -- `dt` and
+  # the timestep count do not depend on the output cadence, so this is pure I/O
+  # and peak scratch). One snapshot is 5 float32 fields (rho,u,v,w,blanking) over
+  # `nx*ny*nz`, i.e. ~20 B/cell, and a solve writes `(spinup_time +
+  # simulation_time) / output_frequency` of them; peak disk is
+  # `ensemble.num_parallel_processes` times ONE member's worth, since the whole
+  # window is on disk before Python reduces any of it:
+  #
+  #   xie_and_castro (50x40x16, 640 kB/snapshot, 50 s lead-in + 300 s window)
+  #     1.00 s ->  350 snapshots ~ 0.22 GB per member
+  #     0.25 s -> 1400 snapshots ~ 0.90 GB per member
+  #   barcelona (224x224x32, 32 MB/snapshot, 500 s lead-in + 300 s window)
+  #     1.00 s ->  800 snapshots ~  26 GB per member  (~103 GB at 4 workers)
+  #     0.25 s -> 3200 snapshots ~ 103 GB per member  (~411 GB at 4 workers)
+  #
+  # On barcelona that is the number to check before launching; `spinup_time`
+  # below is the cheapest lever (it is 5/8 of that solve's snapshots at the
+  # case default) and `include_prior` doubles the member count. The probe files
+  # themselves stay in the megabytes either way.
+  output_frequency: 0.25
+
+  # Lead-in (seconds) prepended to the window and then discarded. The re-run
+  # warm-starts from the window's own initial field via an LBM restart file. That
+  # carries the macroscopic field essentially exactly, but each clone's restart
+  # dir is cleared before it runs (so no earlier invocation's truth field can
+  # seed it), leaving the ghost cells and non-equilibrium stress to be rebuilt
+  # from equilibrium rather than from this member's own history, and the
+  # inflow settings and
+  # velocity scale are re-applied for this run — so the series still opens on a
+  # short seam, and this trims it. The field is already developed, so this can be
+  # much shorter than a cold-start spin-up — cut it per run if the extra solve is
+  # expensive (it is also the cheapest lever on the disk figures above).
+  spinup_time: ${time.spinup_time}
+
+  # Also re-probe the PRIOR members (doubles the solver cost). Without them the
+  # S4 figure shows truth vs posterior only, no prior envelope.
+  include_prior: false
+
+  # Cap on the number of members re-probed (the first N). null -> every member
+  # in the window's posterior params file.
+  max_members: null
+
+  # Truth handling: `auto` re-runs the truth at the probe cadence when it can
+  # (pylbm truth on the assimilation grid) and otherwise falls back to the
+  # truth's stored cadence, recording that in the output attrs; `stored` forces
+  # the fallback (no truth solve at all).
+  truth_source: auto

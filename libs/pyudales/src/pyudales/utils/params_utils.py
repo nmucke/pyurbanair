@@ -1,29 +1,14 @@
 """Utilities for handling parameter extraction and merging for ForwardModel."""
 
-import logging
-import pathlib
 from typing import Optional
 
-import numpy as np
 import xarray
-
-from .dir_utils import DirectoryPaths
-from .file_update_utils import (
-    update_lscale_file,
-    update_lscale_file_profile,
-    update_prof_file,
-    update_prof_file_profile,
-)
-from .inflow_utils import angle_to_pressure_gradient, angle_to_velocity
-from .namoptions_utils import NamoptionsFile
-
-logger = logging.getLogger(__name__)
 
 # Parameter names that survive extract/merge into the solver-facing Dataset.
 # Beyond the inflow trio, the model-error knobs ``vertical_inflow_exponent`` (α)
 # and ``sgs_constant`` must be whitelisted here too — otherwise they are silently
 # dropped before reaching the solver and their ESMDA estimates never take effect
-# (docs/esmda_model_error_parameters.md §6.3).
+# (docs/archive/esmda_model_error_parameters.md §6.3).
 INFLOW_PARAM_NAMES = (
     "inflow_angle",
     "velocity_magnitude",
@@ -176,98 +161,3 @@ def get_param_value(
         return default
 
     return params[param_name].item()  # type: ignore[no-any-return]
-
-
-def apply_inflow_settings(
-    params: xarray.Dataset,
-    dirs: DirectoryPaths,
-    boundary_condition: str = "periodic",
-    profile_shape: Optional[np.ndarray] = None,
-) -> None:
-    """
-    Apply the inflow settings to namoptions file and update affected input files.
-
-    Args:
-        params: xarray.Dataset containing inflow parameters. Only applies settings
-               if inflow_angle and at least one magnitude (velocity_magnitude or
-               pressure_gradient_magnitude) are provided.
-        dirs: DirectoryPaths instance containing experiment_dir and experiment_name.
-        boundary_condition: "periodic" or "inflow_outflow". Under inflow_outflow,
-            dpdx/dpdy are forced to zero because the inflow face already drives
-            the flow; an additional pressure-gradient body force creates a stiff
-            conflict with nudging that destabilizes the pressure solver.
-
-    Returns:
-        Updated params Dataset if settings were applied, None otherwise.
-    """
-    # Extract parameter values from params Dataset
-    inflow_angle = get_param_value(params, "inflow_angle")
-    velocity_magnitude = get_param_value(params, "velocity_magnitude")
-    pressure_gradient_magnitude = get_param_value(params, "pressure_gradient_magnitude")
-
-    # Only apply if we have angle and at least one magnitude
-    if inflow_angle is None:
-        logger.warning("inflow_angle not provided, skipping inflow settings update")
-        return None
-
-    if velocity_magnitude is None and pressure_gradient_magnitude is None:
-        logger.warning(
-            "Neither velocity_magnitude nor pressure_gradient_magnitude provided, "
-            "skipping inflow settings update"
-        )
-        return None
-
-    # Calculate velocity and pressure gradient components from angle and magnitudes
-    # Use defaults of 0.0 if magnitudes are not provided (though we check above)
-    u0, v0 = angle_to_velocity(
-        inflow_angle, velocity_magnitude if velocity_magnitude is not None else 0.0
-    )
-    if boundary_condition == "inflow_outflow":
-        # The inlet face drives the flow, so an additional body-force pressure
-        # gradient is redundant and biases cross-model assimilation (LBM is
-        # inlet-driven with no body force).  Force it to zero so that
-        # velocity_magnitude is the only streamwise driver.
-        dpdx, dpdy = 0.0, 0.0
-    else:
-        dpdx, dpdy = angle_to_pressure_gradient(
-            inflow_angle,
-            pressure_gradient_magnitude
-            if pressure_gradient_magnitude is not None
-            else 0.0,
-        )
-
-    namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
-
-    # Update namoptions file using NamoptionsFile
-    namoptions = NamoptionsFile(namoptions_path)
-    namoptions.set_value("INPS", "u0", f"{u0:.7f}")
-    namoptions.set_value("INPS", "v0", f"{v0:.7f}")
-    namoptions.set_value("INPS", "dpdx", f"{dpdx:.7f}")
-    namoptions.set_value("INPS", "dpdy", f"{dpdy:.7f}")
-    namoptions.write()
-
-    # Update the affected input files
-    prof_path = dirs.experiment_dir / f"prof.inp.{dirs.experiment_name}"
-    lscale_path = dirs.experiment_dir / f"lscale.inp.{dirs.experiment_name}"
-
-    if profile_shape is None:
-        update_prof_file(prof_path, u0=u0, v0=v0)
-        update_lscale_file(lscale_path, u0=u0, v0=v0, dpdx=dpdx, dpdy=dpdy)
-    else:
-        update_prof_file_profile(
-            prof_path,
-            u_profile=u0 * profile_shape,
-            v_profile=v0 * profile_shape,
-        )
-        update_lscale_file_profile(
-            lscale_path,
-            u_profile=u0 * profile_shape,
-            v_profile=v0 * profile_shape,
-            dpdx_profile=dpdx * profile_shape,
-            dpdy_profile=dpdy * profile_shape,
-        )
-
-    logger.info(
-        f"Updated inflow settings: angle={inflow_angle}°, "
-        f"u0={u0:.7f}, v0={v0:.7f}, dpdx={dpdx:.7f}, dpdy={dpdy:.7f}"
-    )

@@ -29,6 +29,8 @@ import jax
 import jax.numpy as jnp
 import xarray
 
+from pyurbanair.static_parameters.distributions import Distribution
+
 
 class ParameterTimeSeries(abc.ABC):
     """ABC for time-varying parameter prior + extrapolation.
@@ -46,7 +48,7 @@ class ParameterTimeSeries(abc.ABC):
 
     def __init__(
         self,
-        external_parameters: dict[str, object],
+        external_parameters: dict[str, Distribution],
         time_coords: jnp.ndarray,
         seed: int = 0,
     ) -> None:
@@ -80,7 +82,9 @@ class ParameterTimeSeries(abc.ABC):
     # Shared helpers for subclasses
     # ------------------------------------------------------------------
 
-    def _moments(self, name: str) -> tuple[object, object, Optional[float], Optional[float]]:
+    def _moments(
+        self, name: str
+    ) -> tuple[object, object, Optional[float], Optional[float]]:
         """Extract ``(mean, std, min, max)`` from an external-prior Distribution.
 
         A ``Normal`` exposes all four attributes directly; a ``Constant`` is
@@ -90,9 +94,14 @@ class ParameterTimeSeries(abc.ABC):
         """
         dist = self.external_parameters[name]
         if hasattr(dist, "mean"):  # Normal-style location/scale prior
-            return dist.mean, dist.std, dist.min, dist.max
+            return (
+                getattr(dist, "mean"),
+                getattr(dist, "std"),
+                getattr(dist, "min"),
+                getattr(dist, "max"),
+            )
         if hasattr(dist, "value"):  # Constant: fixed x_ext, no spread
-            return dist.value, 0.0, None, None
+            return getattr(dist, "value"), 0.0, None, None
         raise TypeError(
             f"external parameter {name!r} ({dist!r}) is not usable as a "
             "dynamic external prior: it needs a mean/std (Normal) or a "

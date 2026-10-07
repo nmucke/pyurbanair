@@ -14,7 +14,7 @@ synthesised in Python from the same ESMDA parameters the nudging path uses
 (``velocity_magnitude``, ``inflow_angle``, ``vertical_inflow_exponent``), plus
 digital-filter turbulent fluctuations in the style of Xie & Castro (2008) — the
 same authors as the benchmark case. Design record:
-``docs/plans/udales_inlet_turbulence.md``.
+``docs/plans/implemented/udales_inlet_turbulence.md``.
 
 Why synthetic rather than a real precursor
 ------------------------------------------
@@ -130,17 +130,14 @@ def elapsed_time_path(dirs: DirectoryPaths) -> pathlib.Path:
 def read_elapsed_time(dirs: DirectoryPaths, default: float = 0.0) -> float:
     """Seconds of turbulence history this member has already consumed.
 
-    Not strictly "physical time simulated". Every successful ``run_single``
-    advances it, and ESMDA re-forecasts the *same* window ``num_steps`` times
-    with updated parameters (``smoothing/esmda.py:313-316`` keeps
-    ``initial_state`` fixed), so after an assimilation window the clock reads
-    ``num_steps * window_runtime``. Nothing breaks — the offset only has to
-    advance monotonically to index a stationary, effectively infinite history —
-    but it does mean each ESMDA iteration sees a *different* inlet realisation
-    for the same physical interval. Whether iterations should instead share one
-    realisation (so the Kalman update is not confounded by a changing noise
-    draw) is a DA-behaviour question, not a plumbing one; it would need a signal
-    from the assimilation layer, which the wrapper cannot infer locally.
+    Every successful ``run_single`` advances this clock. With the opt-in
+    discrepancy replay lifecycle, the assimilation layer restores the
+    window-start clock before each forecast and accepts only the final
+    endpoint. Repeated forecasts then see the same synthetic inlet history.
+    Outside that lifecycle the legacy behavior remains: every forecast advances
+    the offset, including repeated ESMDA iterations over one physical interval.
+    In that case the clock indexes stationary inlet history rather than physical
+    elapsed time.
 
     The stored ``experiment_name`` is checked, not decorative: ensemble members
     are built by ``create_new_forward_model``, which mirrors the template's
@@ -221,7 +218,7 @@ def is_inlet_turbulence_enabled(config: Optional[dict]) -> bool:
     """True only when an ``inlet_turbulence`` dict explicitly enables the knob.
 
     ``None``/``{}``/``enabled: false`` are all a strict no-op — nothing is
-    written to namoptions and no driver files appear (CLAUDE.md no-op rule).
+    written to namoptions and no driver files appear (AGENTS.md no-op rule).
     """
     if not config:
         return False

@@ -1,0 +1,8 @@
+# The LBM on the tiny grid, on the CPU.
+defaults:
+  - pylbm
+  - _self_
+
+forward_model:
+  cuda: false
+  ncpu: 1

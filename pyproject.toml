@@ -11,7 +11,7 @@ dependencies = [
   "matplotlib>=3.10.8,<4",
   "jax>=0.7.0,<0.8.0",
   "tqdm>=4.67.1,<5",
-  "vape4d>=0.2.0,<0.3.0",
+  "psutil>=6,<8",
   "hydra-core>=1.3,<2", "manifold3d>=3.5.2,<4",
 ]
 name = "pyurbanair"
@@ -19,9 +19,21 @@ requires-python = ">= 3.12,<3.13"
 version = "0.1.0"
 
 [tool.pixi.workspace]
+# pixi.lock is lock format v7 with a rich `linux-64-cuda` platform. Older pixi
+# can't read it or rewrites it on install (0.72.0 still does), dirtying a fresh
+# clone; every release from 0.72.1 to 0.81 leaves it as is.
+requires-pixi = ">=0.72.1"
 preview = ["pixi-build"]
 channels = ["conda-forge","robostack"]
-platforms = ["osx-arm64","linux-64"]
+platforms = [
+  "osx-arm64",
+  "linux-64",
+  # The `cuda` feature's platform. `cuda` advertises the host's CUDA runtime to
+  # the solver: without it the `__cuda` virtual package is missing and any
+  # conda-forge package gated on CUDA (e.g. the `cuda*_mkl_*` pytorch builds) is
+  # treated as uninstallable.
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12.6" },
+]
 conda-pypi-map = { "conda-forge" = "./conda-pypi-mapping.json" }
 
 # conda-pypi-map = { "conda-forge" = "https://raw.githubusercontent.com/prefix-dev/parselmouth/main/files/mapping_as_grayskull.json" }
@@ -79,11 +91,13 @@ openmpi = {version=">=4.1.0", channel="conda-forge"}
 libnetcdf = {version=">=4.9.3", channel="conda-forge"}
 coreutils = {version=">=9.0", channel="conda-forge"}
 
+# Every env but `cuda` has `cpu` or `delftblue`: keep them off `linux-64-cuda`.
+[tool.pixi.feature.delftblue]
+platforms = ["osx-arm64", "linux-64"]
+
 # OpenMPI 5.0.x segfaults in MPI_Finalize on DelftBlue (mca_base_var_finalize ->
 # var_destructor in libopen-pal), killing uDALES with exit 139 after a clean
-# run; 4.1.x takes a different MCA cleanup path. After changing this, rebuild
-# libs/pyudales/u-dales/build/release: the auto-build only checks the binary
-# exists, not which MPI it links.
+# run; 4.1.x takes a different MCA cleanup path.
 [tool.pixi.feature.delftblue.dependencies]
 openmpi = {version=">=4.1.0,<5", channel="conda-forge"}
 
@@ -113,36 +127,20 @@ data-assimilation = { path = "libs/data-assimilation", editable = true }
 [tool.pixi.feature.evaluation.pypi-dependencies]
 evaluation = { path = "libs/evaluation", editable = true }
 
-# Cinematic LES visualization (Unreal Engine export + Blender preview). Kept in
-# its own lightweight `viz` environment: openvdb (conda-forge only) drags in
-# boost/tbb, which we don't want perturbing the big dev solve.
-# openvdb 11 has no osx-arm64 build, so the feature is linux-64 only.
-[tool.pixi.feature.viz]
-platforms = ["linux-64"]
-
-[tool.pixi.feature.viz.dependencies]
-# 11.x on purpose: 12+ writes VDB file format 225, which Blender 4.2 and the
-# OpenVDB bundled with Unreal Engine 5 cannot read (they stop at 224).
-openvdb = ">=11,<12"
-scikit-image = ">=0.25,<0.27"
-numba = ">=0.61,<1"
-pytest = ">=8.3.5,<8.4"
-
-[tool.pixi.feature.viz.activation.env]
-PYTHONNOUSERSITE = "1"
-
-[tool.pixi.feature.viz.pypi-dependencies]
-les-render = { path = "libs/les-render", editable = true }
-
-# The les-render suite lives outside `tests/` (the dev env has no openvdb).
-[tool.pixi.feature.viz.tasks]
-test-render = { cmd = "pytest libs/les-render/tests -q", description = "Run the les-render tests (Blender/ffmpeg tests skip when absent)" }
-
 # torch comes from PyPI, not conda-forge: conda pytorch >=2.6 hard-depends
 # on conda triton, whose nvcc toolchain caps gcc <13 and conflicts with the
 # gcc 15.2 the CFD features pin. The generic requirement lives in the
 # neural-surrogates package itself (torch>=2.4,<3); the cpu/cuda features
 # pin the wheel variant (+cpu / +cu126) per environment.
+# Exception: on osx-arm64 the PyPI torch wheel bundles its own libomp, which
+# clashes with conda-forge llvm-openmp (OMP Error #15 on `import torch, numpy`).
+# There torch comes from conda-forge so the env has one OpenMP runtime (no
+# triton on macOS, so the conflict above does not apply). Keep these versions
+# equal to the Linux +cpu / +cu126 wheel pins below.
+[tool.pixi.feature.neural-surrogates.target.osx-arm64.dependencies]
+pytorch = "2.12.1.*"
+torchvision = "0.27.1.*"
+
 [tool.pixi.feature.neural-surrogates.pypi-dependencies]
 neural-surrogates = { path = "libs/neural-surrogates", editable = true }
 # UPT architecture deps (pure-torch/python, PyPI-only). kappamodules is not on
@@ -188,6 +186,9 @@ profile = "black"
 multi_line_output = 3
 line_length = 88
 known_first_party = ["pyurbanair"]
+# quiet_jax must be imported before jax: give it its own section ahead of stdlib.
+known_quiet_jax = ["pyurbanair.quiet_jax"]
+sections = ["FUTURE", "QUIET_JAX", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 # Vendored third-party code (kept byte-for-byte upstream; do not reorder imports).
 extend_skip_glob = ["*/_tadpole/*"]
 
@@ -206,34 +207,29 @@ warn_no_return = true
 warn_unreachable = true
 strict_equality = true
 
-# Vendored third-party autoencoder (neural_surrogates.architectures._tadpole):
-# kept byte-for-byte upstream, so it does not satisfy this repo's strict mypy.
+# Vendored third-party code (neural_surrogates.architectures._tadpole and
+# _upt): kept upstream, so it does not satisfy this repo's strict mypy.
 [[tool.mypy.overrides]]
-module = "neural_surrogates.architectures._tadpole.*"
+module = [
+  "neural_surrogates.architectures._tadpole.*",
+  "neural_surrogates.architectures._upt.*",
+]
 ignore_errors = true
-
-# les_render's Blender scripts run inside Blender's own interpreter against the
-# untyped `bpy` API; the pure-numpy helpers they share are tested in pytest.
-[[tool.mypy.overrides]]
-module = "les_render.blender.*"
-ignore_errors = true
-
-# Untyped third-party modules used by les_render (viz env only).
-[[tool.mypy.overrides]]
-module = ["pyopenvdb", "openvdb", "numba", "skimage.*", "scipy.*", "yaml"]
-ignore_missing_imports = true
 
 
 
 [tool.pytest.ini_options]
-addopts = "-v"
+addopts = "-q --strict-markers -m 'not integration'"
+testpaths = ["tests"]
+# archive/ holds the retired conf/, scripts/ and tests/; never collect it.
+norecursedirs = ["archive", ".*", "build", "dist", "*.egg", "venv", "node_modules", "outputs", "multirun"]
+markers = [
+  "integration: runs a compiled CFD solver; select explicitly with -m integration",
+]
 
 [tool.pixi.feature.dev.dependencies]
 pytest= ">=8.3.5,<8.4"
 pre-commit = {version="~=4.1.0", channel="conda-forge"}
-black = {version="~=24.1.0", channel="conda-forge"}
-isort = {version="~=6.0.0", channel="conda-forge"}
-mypy = {version="~=1.15.0", channel="conda-forge"}
 
 
 # Workaround for a file/directory clash between two transitive deps in the
@@ -248,11 +244,10 @@ mypy = {version="~=1.15.0", channel="conda-forge"}
 setup-dev = { cmd = "bash scripts/setup_dev_env.sh", description = "Bootstrap dev env (works around coreutils/tempest-remap bin/test conflict)" }
 
 [tool.pixi.feature.dev.tasks]
-"py.test" = { cmd = "py.test tests --exitfirst", description = "Run tests" }
+"py.test" = { cmd = "python -m pytest tests --exitfirst --durations=20", description = "Run fast tests without compiled CFD solves" }
+test-integration = { cmd = "python -m pytest tests -m integration --exitfirst --durations=20", description = "Run the small real-solver integration suite" }
+test-all = { cmd = "python -m pytest tests -m '' --exitfirst --durations=20", description = "Run all unit and solver integration tests" }
 pre-commit = { cmd = "pre-commit run", description = "Run pre-commit hooks on specific files" }
-format = { cmd = "black src", description = "Format code" }
-type-check = { cmd = "mypy src", description = "Type check code" }
-sort-imports = { cmd = "isort src", description = "Sort imports" }
 
 [tool.pixi.feature.benchmark_geometry.dependencies]
 numpy = "*"
@@ -262,13 +257,7 @@ typer = "*"
 # CUDA / GPU JAX wheels exist only for linux-64, so scope the whole feature to
 # it; otherwise pixi tries (and fails) to solve the cuda env for osx-arm64.
 [tool.pixi.feature.cuda]
-platforms = ["linux-64"]
-
-# Advertise the host's CUDA runtime to the solver. Without this, the `__cuda`
-# virtual package is missing and any conda-forge package gated on CUDA (e.g.
-# the `cuda*_mkl_*` pytorch builds) is treated as uninstallable.
-[tool.pixi.feature.cuda.system-requirements]
-cuda = "12.6"
+platforms = ["linux-64-cuda"]  # linux-64 with CUDA, see the workspace platforms
 
 [tool.pixi.feature.cuda.dependencies]
 # NVIDIA CUDA toolkit and drivers are system-level and should be installed from NVIDIA:
@@ -292,10 +281,10 @@ jax = { version = "==0.7.2", extras = ["cuda12"] }
 # on the host's 560.x driver; the default PyPI wheel is CUDA 13 and needs a
 # >=580 driver. Lives only on the pytorch wheel index. torch's own deps pull
 # in the matching triton for torch.compile.
-torch = { version = "==2.12.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
+torch = { version = "==2.12.1+cu126", index = "https://download.pytorch.org/whl/cu126" }
 # torchvision (transitive via timm / p3d-surrogate) must match the torch wheel
-# ABI and index — see the cpu feature note. 0.27.0 pairs with torch 2.12.0.
-torchvision = { version = "==0.27.0+cu126", index = "https://download.pytorch.org/whl/cu126" }
+# ABI and index — see the cpu feature note. 0.27.1 pairs with torch 2.12.1.
+torchvision = { version = "==0.27.1+cu126", index = "https://download.pytorch.org/whl/cu126" }
 
 [tool.pixi.feature.cuda.activation]
 scripts = ["activation_scripts/cuda_activation.sh"]
@@ -324,6 +313,9 @@ prune-nvhpc = { cmd = "bash activation_scripts/prune_nvhpc.sh", description = "R
 # Both export to subprocesses, so parallel forward-model workers stay quiet
 # too. Kept out of the shared `dev` feature so the GPU-capable `cuda` and
 # `delftblue` environments are not forced onto CPU.
+[tool.pixi.feature.cpu]
+platforms = ["osx-arm64", "linux-64"]
+
 [tool.pixi.feature.cpu.activation.env]
 PYTHONNOUSERSITE = "1"
 JAX_PLATFORMS = "cpu"
@@ -332,20 +324,40 @@ JAX_PLATFORMS = "cpu"
 # of CUDA 13 libraries; the `+cpu` variant skips them. (macOS wheels have no
 # CUDA baggage, so no pin is needed there.)
 [tool.pixi.feature.cpu.target.linux-64.pypi-dependencies]
-torch = { version = "==2.12.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
+torch = { version = "==2.12.1+cpu", index = "https://download.pytorch.org/whl/cpu" }
 # torchvision is pulled in transitively by timm (a p3d-surrogate dep). It must
 # come from the same wheel index as torch: the generic-PyPI torchvision is built
 # against the CUDA torch ABI and fails with `operator torchvision::nms does not
-# exist` against torch +cpu. 0.27.0 is the build that pairs with torch 2.12.0.
-torchvision = { version = "==0.27.0+cpu", index = "https://download.pytorch.org/whl/cpu" }
+# exist` against torch +cpu. 0.27.1 is the build that pairs with torch 2.12.1.
+torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/whl/cpu" }
 
+
+# Forward-run HTML viewer and PNG/MP4 renderer: numpy, xarray, matplotlib and
+# `evaluation` (solid mask); PyVista/VTK only through the optional
+# `visualization-3d` feature.
+[tool.pixi.feature.visualization.pypi-dependencies]
+visualization = { path = "libs/visualization", editable = true }
+
+# Optional local agent interface; workers do not require the MCP SDK.
+[tool.pixi.feature.mcp.pypi-dependencies]
+mcp-server = { path = "libs/mcp-server", editable = true }
+
+[tool.pixi.feature.mcp.tasks]
+start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve local forward tools over stdio" }
+register-claude = { cmd = "bash scripts/register_claude.sh", description = "Register the pyurbanair MCP server with Claude Code (asks first)" }
+
+[tool.pixi.feature.visualization-3d.dependencies]
+pyvista = ">=0.44,<0.47"
+vtk = ">=9.3,<9.6"
+ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
-snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "neural-surrogates", "lbm", "palm", "cuda"] }
-viz = { features = ["viz", "py312"] }
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "cuda"] }
+mcp = { features = ["mcp", "visualization", "evaluation", "dev", "py312", "cpu"] }
+rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }

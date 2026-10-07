@@ -1,0 +1,93 @@
+# Sequential filtering workflow. Shared filter settings and selected analysis
+# components are composed below; an optional experiment records a named run.
+defaults:
+  - observation/error
+  - common/runtime
+  - execution: assimilation
+  - case: xie_and_castro
+  - filtering: default
+  - filtering/analysis: stochastic
+  - filtering/localization: none
+  - filtering/state_reduction: none
+  - filtering/inflation: rtps
+  - filtering/evolution: none
+  - model@truth_model: pyudales
+  - model@assim_model: pyudales
+  # Mixed drift-tracking default: a time-varying (dynamic) TRUTH the filter
+  # tracks with a STATIC scalar prior it re-analyses each cycle. The prior MUST
+  # be static (params@prior_params=static) -- a dynamic prior belongs to the
+  # ESMDA smoothers. Set params@truth_params=static_truth for a constant truth.
+  - params@truth_params: dynamic_sine
+  - params@prior_params: static
+  - _self_
+  - observation/operator: temporal_points
+  - observation/aggregation: none
+  - experiment: null
+
+# --- Output roots (everything mutable lands under .temp/). Two model mounts
+# (truth/assim) and no base `model`, so name the output by both backends. ---
+paths:
+  results_dir: .temp/filtering_${truth_model.name}_to_${assim_model.name}
+  # Absolute scratch dir for the solvers (they chdir into it). Resolved from $PWD
+  # so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp
+  base_results_dir: .temp_lbm
+
+# --- Time-varying parameter knot spacing. NOT used by the filter itself (only
+# static parameters are supported), but the dynamic params sampler configs
+# interpolate it — keeping the key here lets a dynamic mount compose (and fail
+# with the script's explicit static-only error instead of a missing-key one),
+# and keeps shared overrides (tests) portable across the run_* entry points. ---
+time:
+  seconds_per_knot: 30.0
+
+# --- Which parameters the filter estimates (same contract as run_esmda.yaml
+# `params_to_estimate`: a list -> update only those prior parameters;
+# null -> update every prior parameter; [] -> update none). All truth and prior
+# parameters are sampled and applied, including parameters excluded from DA. ---
+# The mixed default's dynamic truth (conf/params/dynamic_truth.yaml) only varies
+# inflow_angle and velocity_magnitude, so estimate those (a parameter absent from
+# the truth would be tracked against no reference). Add others when the truth
+# sampler defines them.
+params_to_estimate:
+  - inflow_angle
+  - velocity_magnitude
+  - sgs_bias_b0
+  - sgs_bias_b1
+  - sgs_bias_b2
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+# --- Filtering settings. The filter itself (the `_target_` block) composes the
+# analysis / localization / state reduction / inflation / evolution selected by
+# the groups above;
+# `filtering.mode` picks which augmented blocks the analysis updates. ---
+
+run:
+  # Read by the shared ESMDA metric/figure stages when they are pointed at a
+  # filtering run directory (they gate their state/sensor/field blocks on it);
+  # the filtering-specific stages ignore it.
+  # When true, ensemble forecasts are written to disk (one NetCDF per member,
+  # per cycle, under cycle_{k}/ dirs) instead of one in-memory ensemble Dataset.
+  ensemble_save_on_disk: false
+  # Save the per-cycle analyzed params/state histories (params_history.nc /
+  # state_history.nc; the state history holds final frames only, so it stays
+  # small). Per-cycle diagnostics (cycle_diagnostics.yaml) are always saved.
+  save_history: true
+  # Also save the FORECAST frames at the model's full output cadence — every
+  # `time.output_frequency` step, including the `assimilate_every_n_step - 1`
+  # per cycle no analysis touches — as
+  # windows/window_{w}_forecast_state.nc, on the run's physical time axis. Read
+  # against the analyzed frames of the same window they show the ensemble
+  # drifting from the truth between analyses and being corrected at each one.
+  # Off by default: the files are `assimilate_every_n_step` times the size of
+  # the window's analyzed states, and a window's worth is held in memory while
+  # it runs.
+  save_forecast_history: false
+  # Truth source: null -> simulate inline (default); a path -> load a
+  # state.nc/params.nc artifact written by run_forward_model.py.
+  truth_dir: null
+  # Begin the assimilation horizon partway into a disk-loaded truth (skips a
+  # spin-up): frames before this time are dropped and the axis rebased so it
+  # becomes t=0. null/0 -> start from the truth's first frame.
+  truth_start_time: null

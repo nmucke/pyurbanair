@@ -78,7 +78,7 @@ from neural_surrogates.training.base import BaseTraining
 class AutoencoderTrainer(BaseTraining):
     def __init__(
         self,
-        *args,
+        *args: Any,
         kl_weight: float = 1.0e-6,
         geometry_recon_weight: float = 0.1,
         discriminator: torch.nn.Module | None = None,
@@ -88,7 +88,7 @@ class AutoencoderTrainer(BaseTraining):
         adv_ramp_steps: int = 1000,
         adaptive_adv_weight: bool = True,
         disc_recon_threshold: float | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.kl_weight = float(kl_weight)
@@ -154,7 +154,8 @@ class AutoencoderTrainer(BaseTraining):
         assert self.discriminator is not None
         self.discriminator = self.discriminator.to(self.device)
         if self.channels_last:
-            self.discriminator = self.discriminator.to(  # type: ignore[call-overload]
+            # torch is untyped in the pre-commit mypy env, so the ignore is unused there.
+            self.discriminator = self.discriminator.to(  # type: ignore[call-overload, unused-ignore]
                 memory_format=torch.channels_last_3d
             )
         # Mirror BaseTraining's scaler: only fp16-on-CUDA autocast needs loss

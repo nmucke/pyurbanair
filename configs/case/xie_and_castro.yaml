@@ -1,0 +1,101 @@
+# @package _global_
+#
+# Case: Xie & Castro 2008 staggered cube array.
+#
+# A `case` bundles the geometry-specific config categories (domain bounds tuned
+# to the array, sensor layout inside it, and the STL geometry) into one
+# switchable group. Select with `case=xie_and_castro` (the default) or
+# `case=barcelona`. The DA-method / run-size categories (esmda, ensemble, time,
+# parameters, paths) stay shared at the conf root and are not part of a case.
+# `size/` and `preset/` overlays deep-merge over the domain/obs below.
+
+case_name: xie_and_castro
+
+domain:
+  # Grid + physical bounds — the canonical domain for the assimilation scripts.
+  # Rescale a whole run with the `size/` overlays (`size=tiny` … `size=xlarge`),
+  # which deep-merge over these values, or override individual fields on the CLI
+  # (`domain.nx=80`). x starts at -20 to leave an open upstream inflow region in
+  # front of the Xie & Castro array (which starts at x=5).
+  # Keep nx and ny EVEN: PALM's default poisfft pressure solver rejects an odd
+  # number of grid points along a cyclic direction (PAC0071 / PAC0072).
+  nx: 30
+  ny: 40
+  nz: 16
+  bounds:
+    - [-20.0, 40.0]
+    - [0.0, 80.0]
+    - [0.0, 32.0]
+
+geometry:
+  # One folder per case (see geometries/README.md): the STL every backend
+  # reads, the uDALES namoptions (its `stl_file` names the STL next to it) and
+  # the PALM _p3d. Absolute interpolation (`${geometry.stl_path}`) is used in
+  # the model configs because the model group may be mounted under several
+  # packages (model@model / @truth_model / @assim_model).
+  case_dir: geometries/xie_and_castro
+  stl_path: ${.case_dir}/xie_castro_2008_STL.stl
+
+obs:
+  # Observation operator. Canonical sensor layout for the rollout ESMDA;
+  # forward-only scripts ignore the assimilation-specific fields. The `size/`
+  # overlays supply size-appropriate sensor coordinates (and `interval_seconds`).
+  # Sensors must fall inside `domain.bounds` and outside the buildings; the N-S
+  # lanes between the Xie & Castro cube columns stay open for every y. `mode: grid`
+  # (with `x_min`/`x_max`/`n_per_axis`/`z`) is the alternative to explicit
+  # `*_points`.
+  mode: points
+
+  # Assimilation sensors, placed in the open N-S lanes between the cube columns
+  # at street level (z=2 m, below the 2.8 m minimum cube height) — true in-canyon
+  # measurements, inside domain.bounds and clear of every building footprint.
+  x_points: [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
+  y_points: [20.0, 60.0, 10.0, 50.0, 30.0, 70.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+
+  # Validation sensors (held out from assimilation): a separate set the Kalman
+  # update never sees, used only to score the posterior at unseen locations
+  # (`sensor_statistics.validation`, the S5 validation columns and the D1
+  # held-out rank histograms). Every one sits in open space, and the set spans
+  # flow regimes the street-level assimilation sensors above do NOT cover, so
+  # the held-out score is a genuine generalization test rather than a
+  # near-duplicate of the assimilated one:
+  #   (2, 30)   z=2   undisturbed approach flow, upstream of the array
+  #   (20, 55)  z=2   open lane between the two block rows
+  #   (17, 30)  z=2   wake / recirculation, ~2.3 m behind the block at
+  #                   x=[5.3, 14.7] (13-14 m tall, depending on grid)
+  #   (10, 30)  z=20  the only sensor above the canopy, over that same block.
+  #                   z=20 is chosen against the TALLEST roof in the array
+  #                   (17.2 m in the STL, 18 m voxelized on the full x=[-20,80]
+  #                   domain) rather than against its own column's roof, so it
+  #                   stays above-canopy at every grid and domain crop. Note the
+  #                   margin is thin at the coarsest grid — one cell at nz=16
+  #                   (cell centre 19 m over an 18 m roof) — so it sits in the
+  #                   roughness sublayer, not in free-stream flow.
+  # The two additions stay >=10 m from every assimilation sensor: the wake one
+  # 12.2 m, the above-canopy one exactly 10.0 m horizontally from (10, 20) but
+  # 18 m above it. (The closest pair in the whole set is the pre-existing lane
+  # sensor, exactly 5 m from the assimilation sensor at (20, 50).)
+  # Held-out placement is grid-independent: all four are fluid cells at the case
+  # resolution and at the 50x40x16 / 60x80x16 sweep grids. Guarded by
+  # tests/test_case_sensor_placement.py, which checks the voxelized geometry
+  # rather than restating these coordinates.
+  validation_x_points: [2.0, 20.0, 17.0, 10.0]
+  validation_y_points: [30.0, 55.0, 30.0, 30.0]
+  validation_z_points: [2.0, 2.0, 2.0, 20.0]
+
+  states: [u, v]
+  temporal_mode: full
+
+time:
+  # Per-window simulation horizon for this geometry (seconds). One assimilation
+  # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
+  # in front; the state is written every `output_frequency` s. The number of
+  # windows is a compute knob set in assimilation.yaml.
+  simulation_time: 180.0
+  output_frequency: 1.0
+  spinup_time: 30.0
+  # Time-varying parameter knot spacing: the dynamic samplers take a new value
+  # every `seconds_per_knot` seconds over `simulation_time`; a non-multiple
+  # window end is reached by linear extrapolation.
+  seconds_per_knot: 60.0

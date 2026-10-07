@@ -1,0 +1,41 @@
+# Forward simulation: case, sampler, backend, execution budget and run controls.
+# Select a named run with experiment=forward/xie_truth or override fields on the CLI.
+defaults:
+  - common/runtime
+  - execution: forward
+  - case: xie_and_castro
+  - params: dynamic
+  - model@model: pyudales
+  - _self_
+  - experiment: null
+
+# --- Output roots (everything mutable lands under .temp/) ---
+paths:
+  results_dir: results/${model.name}
+  # Absolute scratch dir for the solvers (pylbm/pyudales/pypalm chdir into it, so
+  # it must stay absolute and stable across chdirs). Resolved from $PWD rather
+  # than ${hydra:runtime.cwd} so it also works under bare compose() in tests.
+  experiment_dir: ${oc.env:PWD}/.temp_${model.name}
+  # Fallback output root used by resolve_output_dir() when Hydra isn't
+  # initialized (direct run(cfg) calls from tests).
+  base_results_dir: .temp_${model.name}
+
+# --- Time-varying parameter knot spacing (per-window horizon lives in the case) ---
+# The dynamic prior takes a new value every `seconds_per_knot` seconds; if the
+# window length isn't a multiple of it, the last value is linearly extrapolated
+# onto the window end.
+time:
+  seconds_per_knot: 20.0
+
+# --- Ensemble execution. Override per run on the CLI, e.g.
+# `ensemble.ensemble_size=128 ensemble.num_parallel_processes=8`. ---
+run:
+  ensemble: false
+  ground_truth_dir: null
+  rollout_steps: 0
+  # Optional NetCDF path or {path, member, time_index}. Member uses the coordinate
+  # label; time_index selects the last available history frame by position.
+  initial_state: null
+  # Currently rejected by the shared forward workflow. Complete artifact mode
+  # persists every member/window but still retains rollout history in memory.
+  ensemble_save_on_disk: false

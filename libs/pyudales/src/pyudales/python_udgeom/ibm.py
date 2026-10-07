@@ -2,11 +2,13 @@
 
 import os
 import pathlib
+import shlex
 import subprocess
-from typing import Optional
+from typing import Any, NoReturn, Optional
 
 import numpy as np
 import trimesh
+from pyudales.utils.solver_build import _build_environment
 
 
 def write_ibm_files_using_fortran(
@@ -36,7 +38,7 @@ def write_ibm_files_using_fortran(
     toolsdir: Optional[str] = None,
     tol_mypoly: float = 5e-4,
     n_threads: int = 8,
-) -> tuple:
+) -> np.ndarray:
     """
     Write IBM files using Fortran routines.
 
@@ -77,7 +79,15 @@ def write_ibm_files_using_fortran(
         else:
             # Fallback: try relative to script location
             script_dir = pathlib.Path(__file__).parent.parent.parent.parent.parent
-            fortran_path = script_dir / "libs" / "pyudales" / "u-dales" / "tools" / "IBM" / "IBM_preproc_fortran"
+            fortran_path = (
+                script_dir
+                / "libs"
+                / "pyudales"
+                / "u-dales"
+                / "tools"
+                / "IBM"
+                / "IBM_preproc_fortran"
+            )
 
     if not fortran_path.exists():
         raise FileNotFoundError(
@@ -85,10 +95,31 @@ def write_ibm_files_using_fortran(
             f"Please ensure DA_TOOLSDIR is set correctly or toolsdir parameter is provided."
         )
 
+    # Upstream's matchFacetsCells.f90 loops a facet over cells up to the one
+    # above its top and clamps that index in x and y, but not in z: geometry
+    # ending in the top cell of the w-grid makes it read past its arrays, so
+    # the facet sections depend on whatever memory follows (a solver STOP in
+    # wallfunmom on macOS). Refuse such geometry instead.
+    in_domain = (
+        (TR.triangles[:, :, 0].max(axis=1) > 0)
+        & (TR.triangles[:, :, 0].min(axis=1) < itot * dx)
+        & (TR.triangles[:, :, 1].max(axis=1) > 0)
+        & (TR.triangles[:, :, 1].min(axis=1) < jtot * dy)
+    )
+    if in_domain.any():
+        roof = float(TR.triangles[in_domain][:, :, 2].max())
+        highest = zgrid_w[-2] + (zgrid_w[-1] - zgrid_w[-2]) / 2 + tol_mypoly
+        if roof > highest:
+            raise ValueError(
+                f"The geometry inside the domain reaches z = {roof:g} m, but uDALES's "
+                f"IBM preprocessing needs it to stay at or below z = {highest:g} m "
+                "(1.5 cells under the domain top). Raise the domain's upper z bound."
+            )
+
     os.chdir(fpath)
 
     # Write input files for Fortran code
-    # Match MATLAB fprintf format exactly: %15.10f 
+    # Match MATLAB fprintf format exactly: %15.10f
     # Note: Python's f"{val:15.10f}" right-aligns, creating leading spaces, but Fortran's f15.10 format
     # can handle this. The 'x' in Fortran format means "skip whitespace", so multiple spaces are OK.
     with open(os.path.join(fpath, "inmypoly_inp_info.txt"), "w") as f:
@@ -116,7 +147,9 @@ def write_ibm_files_using_fortran(
         # Line 10: stl_ground diag_neighbs periodic_x periodic_y (i1 format)
         # MATLAB: fprintf(fileID,'%d %d %d %d\n',[stl_ground diag_neighbs periodic_x periodic_y]);
         # Fortran reads as: (i1,x,i1,x,i1,x,i1) - single digit integers with spaces
-        f.write(f"{int(stl_ground)} {int(diag_neighbs)} {int(periodic_x)} {int(periodic_y)}\n")
+        f.write(
+            f"{int(stl_ground)} {int(diag_neighbs)} {int(periodic_x)} {int(periodic_y)}\n"
+        )
         f.flush()  # Ensure file is written before Fortran reads it
         os.fsync(f.fileno())  # Force write to disk
 
@@ -139,16 +172,16 @@ def write_ibm_files_using_fortran(
         face_centers.append(center)
         face_normals.append(normal)
 
-    face_centers = np.array(face_centers)
-    face_normals = np.array(face_normals)
+    face_centers_array = np.array(face_centers)
+    face_normals_array = np.array(face_normals)
 
     # Write faces file
     with open(os.path.join(fpath, "faces.txt"), "w") as f:
         for i, face in enumerate(TR.faces):
             f.write(
                 f"{face[0]+1:8d} {face[1]+1:8d} {face[2]+1:8d} "
-                f"{face_centers[i, 0]:15.10f} {face_centers[i, 1]:15.10f} {face_centers[i, 2]:15.10f} "
-                f"{face_normals[i, 0]:15.10f} {face_normals[i, 1]:15.10f} {face_normals[i, 2]:15.10f}\n"
+                f"{face_centers_array[i, 0]:15.10f} {face_centers_array[i, 1]:15.10f} {face_centers_array[i, 2]:15.10f} "
+                f"{face_normals_array[i, 0]:15.10f} {face_normals_array[i, 1]:15.10f} {face_normals_array[i, 2]:15.10f}\n"
             )
 
     # Compile the IBM preprocessor INTO the per-experiment dir (fpath), never the
@@ -165,12 +198,14 @@ def write_ibm_files_using_fortran(
         "IBM_preproc_io.f90",
         "IBM_preproc_main.f90",
     ]
+    build_env = _build_environment("gfortran")
     compile_cmd = (
         ["gfortran", "-O3", "-fopenmp", f"-J{fpath}", f"-I{fpath}"]
         + [str(fortran_path / s) for s in src_files]
+        + shlex.split(build_env.get("LDFLAGS", ""))
         + ["-o", "IBM_preproc.exe"]
     )
-    subprocess.run(compile_cmd, check=True, cwd=fpath)
+    subprocess.run(compile_cmd, check=True, cwd=fpath, env=build_env)
 
     # Clean up the .mod files produced in fpath (gfortran lowercases them).
     for mod_file in [
@@ -200,6 +235,7 @@ def write_ibm_files_using_fortran(
     # Read output files and count points
     # The Fortran code writes info_fort.txt with the counts
     info_fort_file = os.path.join(fpath, "info_fort.txt")
+    ncounts: np.ndarray
     if os.path.exists(info_fort_file):
         # Read ncounts from info_fort.txt (skip first row header, read all values from second row)
         # MATLAB: readmatrix('info_fort.txt', 'Range', [2,1]) reads row 2, all columns
@@ -221,16 +257,32 @@ def write_ibm_files_using_fortran(
         solid_c = np.loadtxt(os.path.join(fpath, "solid_c.txt"), skiprows=1, dtype=int)
 
         # Read fluid boundary points
-        fluid_boundary_u = np.loadtxt(os.path.join(fpath, "fluid_boundary_u.txt"), skiprows=1, dtype=int)
-        fluid_boundary_v = np.loadtxt(os.path.join(fpath, "fluid_boundary_v.txt"), skiprows=1, dtype=int)
-        fluid_boundary_w = np.loadtxt(os.path.join(fpath, "fluid_boundary_w.txt"), skiprows=1, dtype=int)
-        fluid_boundary_c = np.loadtxt(os.path.join(fpath, "fluid_boundary_c.txt"), skiprows=1, dtype=int)
+        fluid_boundary_u = np.loadtxt(
+            os.path.join(fpath, "fluid_boundary_u.txt"), skiprows=1, dtype=int
+        )
+        fluid_boundary_v = np.loadtxt(
+            os.path.join(fpath, "fluid_boundary_v.txt"), skiprows=1, dtype=int
+        )
+        fluid_boundary_w = np.loadtxt(
+            os.path.join(fpath, "fluid_boundary_w.txt"), skiprows=1, dtype=int
+        )
+        fluid_boundary_c = np.loadtxt(
+            os.path.join(fpath, "fluid_boundary_c.txt"), skiprows=1, dtype=int
+        )
 
         # Read facet sections
-        facet_sections_u = np.loadtxt(os.path.join(fpath, "facet_sections_u.txt"), skiprows=1)
-        facet_sections_v = np.loadtxt(os.path.join(fpath, "facet_sections_v.txt"), skiprows=1)
-        facet_sections_w = np.loadtxt(os.path.join(fpath, "facet_sections_w.txt"), skiprows=1)
-        facet_sections_c = np.loadtxt(os.path.join(fpath, "facet_sections_c.txt"), skiprows=1)
+        facet_sections_u = np.loadtxt(
+            os.path.join(fpath, "facet_sections_u.txt"), skiprows=1
+        )
+        facet_sections_v = np.loadtxt(
+            os.path.join(fpath, "facet_sections_v.txt"), skiprows=1
+        )
+        facet_sections_w = np.loadtxt(
+            os.path.join(fpath, "facet_sections_w.txt"), skiprows=1
+        )
+        facet_sections_c = np.loadtxt(
+            os.path.join(fpath, "facet_sections_c.txt"), skiprows=1
+        )
 
         # Create ncounts array (similar to MATLAB version)
         ncounts = np.array(
@@ -256,8 +308,6 @@ def write_ibm_files_using_fortran(
     return ncounts
 
 
-def write_ibm_files(*args, **kwargs):
+def write_ibm_files(*args: Any, **kwargs: Any) -> NoReturn:
     """Write IBM files using MATLAB routines (deprecated)."""
     raise NotImplementedError("MATLAB-based IBM file writing not implemented in Python")
-
-

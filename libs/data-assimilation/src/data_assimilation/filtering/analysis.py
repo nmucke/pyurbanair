@@ -9,7 +9,10 @@ state — and both packages call it:
 * ``smoothing/esmda.py`` passes its tempered ``alpha`` (and its own key
   splitting), so the smoother behavior is unchanged by the extraction;
 * ``filtering/base.py`` calls it through :class:`StochasticEnKFAnalysis` with
-  the filter's full-weight ``alpha = 1``.
+  the filter's full-weight ``alpha = 1``. A filter tempered by ``beta`` hands
+  the scheme ``beta * C_D`` as ``C_D_diag`` instead, and still ``alpha = 1``:
+  the covariance is scaled exactly once (perturbation std ``sqrt(beta)``
+  sigma), never again through ``alpha``.
 
 New update flavors for the filter (ETKF, particle-style updates, ...) are new
 :class:`AnalysisScheme` implementations — the cycle loop in ``BaseFilter``
@@ -49,9 +52,9 @@ def validate_variances(C_D_diag: jnp.ndarray) -> jnp.ndarray:
             "Pass the diagonal of the observation-error covariance (sigma**2 "
             "per observation)."
         )
-    if not bool(jnp.all(C_D_diag > 0.0)):
+    if not bool(jnp.all(jnp.isfinite(C_D_diag))) or not bool(jnp.all(C_D_diag > 0.0)):
         raise ValueError(
-            "Observation-error variances must be strictly positive; a zero or "
+            "Observation-error variances must be finite and strictly positive; a zero or "
             "negative variance makes the analysis system singular "
             "(NaN-poisoning the ensemble). Check obs_error_std."
         )

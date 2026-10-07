@@ -537,13 +537,13 @@ class BaseTraining:
             n += 1
             self._accumulate_terms(term_sums)
         self._train_terms = self._mean_terms(term_sums, n)
-        return (total / max(n, 1)).item()
+        return float((total / max(n, 1)).item())
 
     def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
         """Hook for a second optimizer that must step after the main one (the AE's
         adversarial discriminator). No-op for every other trainer."""
 
-    @torch.no_grad()
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _validate(self) -> float:
         self.model.eval()
         total = torch.zeros((), device=self.device)
@@ -554,7 +554,7 @@ class BaseTraining:
             n += 1
             self._accumulate_terms(term_sums)
         self._val_terms = self._mean_terms(term_sums, n)
-        return (total / max(n, 1)).item()
+        return float((total / max(n, 1)).item())
 
     def _pushforward_steps_for_epoch(self, epoch: int) -> int:
         """Active rollout horizon at ``epoch`` (0-based) under the curriculum."""

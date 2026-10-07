@@ -5,7 +5,12 @@ Public API re-exported here so consumers can import from the package root
 layout do not break callers. See ``docs/data_assimilation.md``.
 """
 
-from data_assimilation.filter_smoothing import FilterSmoothing, FilterSmoothingResult
+from data_assimilation.filter_smoothing import (
+    FilterSmoothing,
+    FilterSmoothingResult,
+    TemperingPolicy,
+    resolve_tempering_policy,
+)
 from data_assimilation.filtering import (
     AnalysisScheme,
     BaseFilter,
@@ -13,7 +18,6 @@ from data_assimilation.filtering import (
     EnsembleKalmanFilter,
     ETKFAnalysis,
     FilterResult,
-    IdentityEvolution,
     LETKFAnalysis,
     ObservationTSVD,
     ParameterEvolution,
@@ -59,7 +63,6 @@ __all__ = [
     "FilterResult",
     "FilterSmoothing",
     "FilterSmoothingResult",
-    "IdentityEvolution",
     "InflationScheme",
     "LETKFAnalysis",
     "MultiplicativeInflation",
@@ -76,7 +79,9 @@ __all__ = [
     "StateAndParameterESMDA",
     "StateAndTimeVaryingParameterESMDA",
     "StochasticEnKFAnalysis",
+    "TemperingPolicy",
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
     "flatten_observations",
+    "resolve_tempering_policy",
 ]

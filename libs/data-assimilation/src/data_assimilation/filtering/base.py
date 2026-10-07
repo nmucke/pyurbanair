@@ -23,6 +23,11 @@ aggregation (``AggregateObservations``) is a smoother-side choice, kept by the
 ESMDA smoothers. Here every frame the operator produced is assimilated, so H
 and y agree frame by frame by construction.
 
+Every analysis may be likelihood-TEMPERED by the filter's ``beta >= 1``: it
+then uses ``beta * C_D`` instead of ``C_D`` (the ESMDA x filter hybrid's knob;
+see :class:`BaseFilter`). ``beta = 1`` is the default and the untempered filter,
+bit for bit; ``C_D_diag`` and the chi2 diagnostic stay physical either way.
+
 Two additive facilities are inert by default: an ``assimilate_every_n_step``
 that thins the ANALYSES within a cycle without thinning what the operator
 produces or what is recorded, and a ``collect_forecast_frames`` that keeps
@@ -32,12 +37,14 @@ the attributes).
 """
 
 import logging
+import math
+import numbers
 import os
 import pathlib
 import shutil
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional, Sequence, Union
+from typing import Any, Callable, Literal, Optional, Sequence, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -56,6 +63,11 @@ from data_assimilation.inflation import InflationScheme
 from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_parameter_names,
+)
 from data_assimilation.reduction import OnlineStateReduction
 from tqdm import tqdm
 
@@ -64,6 +76,35 @@ from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 logger = logging.getLogger(__name__)
 
 FilterMode = Literal["state", "parameter", "joint"]
+
+
+def validate_beta(beta: Any) -> float:
+    """Validate the filter's likelihood-tempering multiplier; return a float.
+
+    ``beta`` multiplies the observation-error covariance of every analysis
+    (``R_filter = beta * R``), so it must be a real, finite number ``>= 1``:
+    below one it would SHARPEN the likelihood beyond the data's own errors, and
+    ``inf`` — the "filter off" limit — must not be passed through a solver (see
+    ``docs/plans/implemented/hybrid_beta_tempering.md``). Booleans are rejected explicitly:
+    ``True`` is an ``int`` in Python and would otherwise pass as ``beta = 1``,
+    which is exactly the silent config slip (``beta: yes``) this guards against.
+    """
+    # Flags first, then one test: chaining the isinstance narrowings makes the
+    # pre-commit mypy (NumPy untyped there) call the error branch unreachable.
+    is_bool = isinstance(beta, bool) or type(beta) is np.bool_
+    is_real = isinstance(beta, numbers.Real)
+    if is_bool or not is_real:
+        raise ValueError(
+            f"beta must be a real number >= 1 (a multiplier of C_D), got "
+            f"{beta!r} of type {type(beta).__name__}."
+        )
+    value = float(beta)
+    if not math.isfinite(value) or value < 1.0:
+        raise ValueError(
+            f"beta must be a finite number >= 1 (a multiplier of C_D; 1 = the "
+            f"untempered filter), got {beta!r}."
+        )
+    return value
 
 
 @dataclass
@@ -113,6 +154,7 @@ class CycleDiagnostics:
     # predicted-observation rows really are H applied to the analyzed state;
     # otherwise the name of the approximation they represent.
     obs_posterior_rmse_kind: str = "exact"
+    obs_analyzed_final_rmse: Optional[float] = None
     analysis_time: Optional[float] = None
     reduction_rank: Optional[int] = None
     reduction_available_rank: Optional[int] = None
@@ -161,10 +203,15 @@ class FilterResult:
     """Return value of :meth:`BaseFilter.run` (no return-type polymorphism).
 
     ``state`` is the analyzed end-of-run state (final frame; the warm start
-    for any continuation) and ``params`` the final analyzed/evolved
-    parameters. Histories are ``cycle``-concatenated Datasets, present only
-    when ``return_history=True`` (``params_history`` additionally holds the
-    prior as its first entry).
+    for any continuation) and ``params`` the final analyzed parameters (pure
+    analyses: the parameter evolution is applied before the next forecast).
+    Histories are ``cycle``-concatenated Datasets, present only when
+    ``return_history=True`` (``params_history`` additionally holds the prior
+    as its first entry). With explicit ``global_parameter_names``,
+    ``applied_params_history`` records one accepted forecast parameter vector
+    per cycle, after evolution and failure-donor substitution and before
+    analysis. It is absent on the default path and when history collection is
+    disabled.
 
     ``forecast_history`` is the odd one out and deliberately so: it is
     ``time``-concatenated (every output frame of every cycle's segment, not one
@@ -179,6 +226,8 @@ class FilterResult:
     params_history: Optional[xarray.Dataset] = None
     state_history: Optional[xarray.Dataset] = None
     forecast_history: Optional[xarray.Dataset] = None
+    # Accepted forecast coefficients, after donor substitution, before analysis.
+    applied_params_history: Optional[xarray.Dataset] = None
 
 
 class BaseFilter:
@@ -217,14 +266,27 @@ class BaseFilter:
             anomalies (prior hook also applied to the predicted-observation
             anomalies, keeping the gain consistent with the inflated
             ensemble).
-        parameter_evolution: Parameter forecast model applied after each
-            analysis; required (or ``inflation``) for the parameter-updating
-            modes (``"parameter"``/``"joint"``), whose parameter block
-            otherwise collapses silently.
+        parameter_names_to_estimate: Parameter fields included in the analysis,
+            inflation and evolution. None selects all supplied fields; an empty
+            sequence selects none. Every forecast still receives all fields.
+        parameter_evolution: Parameter forecast model, applied to the
+            estimated parameters before every forecast that follows an
+            analysis (the posterior parameters stay pure analyses); required
+            (or ``inflation``) for the parameter-updating modes
+            (``"parameter"``/``"joint"``), whose parameter block otherwise
+            collapses silently.
         state_reduction: Optional current or streaming SVD/POD representation
             for the physical state block. Supported only by unlocalized
             ``"state"`` and ``"joint"`` analyses.
         rng_key: PRNG key; defaults to a fresh ``PRNGKey(42)`` per instance.
+        beta: Likelihood tempering of every analysis: each one uses the
+            EFFECTIVE covariance ``beta * C_D`` (``L^(1/beta)``), so ``beta > 1``
+            weakens the filter's pull toward the data. A real finite number
+            ``>= 1``; ``1.0`` (the default) is the untempered filter, bit for
+            bit. It is neither ensemble-spread inflation nor localization's
+            ``tapering_beta``, and it leaves :attr:`C_D_diag` physical (see
+            :attr:`effective_C_D_diag`). The ESMDA x filter hybrid sets it from
+            its likelihood-allocation policy.
 
     On-disk mode mirrors the smoother: each cycle's forecast is written to
     ``cycle_{k}/`` under the forward model's results dir. Setting
@@ -286,6 +348,11 @@ class BaseFilter:
     #: mode it re-reads each cycle's member files in full.
     collect_forecast_frames: bool = False
 
+    #: Static parameter rows that use all observations under any localization.
+    #: These names persist across cycles; they do not assign a grid location.
+    global_parameter_names: tuple[str, ...] = ()
+    parameter_names_to_estimate: Optional[tuple[str, ...]] = None
+
     def __init__(
         self,
         observation_operator: Callable[[xarray.Dataset], Any],
@@ -298,6 +365,9 @@ class BaseFilter:
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        beta: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -307,6 +377,17 @@ class BaseFilter:
         self.forward_model = forward_model
         self.analysis = analysis
         self.mode: FilterMode = mode
+        if isinstance(global_parameter_names, str):
+            raise ValueError("global_parameter_names must be a sequence of names.")
+        names = tuple(global_parameter_names or ())
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("global_parameter_names must contain nonempty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("global_parameter_names must not contain duplicates.")
+        self.global_parameter_names = names
+        self.parameter_names_to_estimate = validate_parameter_names(
+            parameter_names_to_estimate
+        )
 
         # One FRAME's error covariance, not one cycle's: the serial sweep hands
         # the analysis one frame's (num_sensors x num_states) vector at a time,
@@ -330,6 +411,23 @@ class BaseFilter:
                 )
             C_D = jnp.diag(C_D)
         self.C_D_diag = validate_variances(C_D)
+
+        # Beta tempering: R_filter = beta * R. Scaled HERE, once per filter
+        # instance, and never again: every analysis of every cycle of every
+        # run() call reads the same precomputed vector, so repeated windows
+        # (consecutive run() calls on one instance, as run_filtering.py and the
+        # hybrid make) can never compound it. ``C_D_diag`` itself stays the
+        # PHYSICAL per-frame covariance — it is what the innovation chi2 (NIS)
+        # is measured against and what the scripts write as obs_error_std.
+        #
+        # The covariance is scaled exactly ONCE, and only here: the stochastic
+        # kernel draws its perturbations from the covariance it is handed
+        # (std ``sqrt(beta) * sigma``) and the ensemble transforms whiten by
+        # it, so beta must NOT also reach the kernel as ``alpha``. Because R is
+        # scaled rather than rows, the whole augmented update — state and
+        # parameter rows alike in joint mode — is tempered uniformly.
+        self._beta: float = validate_beta(beta)
+        self.effective_C_D_diag: jnp.ndarray = self._temper(self.C_D_diag)
 
         if (
             localization is not None
@@ -416,6 +514,7 @@ class BaseFilter:
             mode in ("parameter", "joint")
             and parameter_evolution is None
             and inflation is None
+            and self.parameter_names_to_estimate != ()
         ):
             raise ValueError(
                 f"mode={mode!r} needs spread maintenance: without "
@@ -424,6 +523,9 @@ class BaseFilter:
                 "cycles and the filter stops learning."
             )
         self.parameter_evolution = parameter_evolution
+        # Set once an analysis has produced parameters; from then on every
+        # forecast, in this run() call or a later one, gets evolved parameters.
+        self._params_analyzed = False
 
         # Default the PRNG key here (not in the signature): a default argument
         # would be evaluated at import time -- initializing the JAX backend as
@@ -459,6 +561,7 @@ class BaseFilter:
         self.pred_obs_frames_history: list[Optional[xarray.DataArray]] = []
 
         if self.forward_model.save_on_disk:
+            assert self.forward_model.results_dir is not None
             self.base_results_dir = self.forward_model.results_dir
 
     # ------------------------------------------------------------------
@@ -471,7 +574,10 @@ class BaseFilter:
         params: Optional[xarray.Dataset] = None,
     ) -> Optional[xarray.Dataset]:
         """Run the ensemble over one cycle's segment (None in on-disk mode)."""
-        return self.forward_model.run_ensemble(state=state, params=params)
+        return cast(  # type: ignore[redundant-cast,unused-ignore]
+            Optional[xarray.Dataset],
+            self.forward_model.run_ensemble(state=state, params=params),
+        )
 
     def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
         """Record one cycle's raw forecast observations ``(T*N_obs, N_e)``.
@@ -746,7 +852,103 @@ class BaseFilter:
     # The cycle loop
     # ------------------------------------------------------------------
 
+    collect_analyzed_observations: bool = False
+    analyzed_observation_operator: Any
+    _cycle_covariances: Any = None
+    # The beta-tempered twin of ``_cycle_covariances``: what the cycle's
+    # analyses consume, while the physical one feeds the chi2 diagnostic.
+    _cycle_effective_covariances: Any = None
+    _window_covariances: Any = None
+
+    @property
+    def beta(self) -> float:
+        """The likelihood-tempering multiplier, fixed at construction.
+
+        Read-only because :attr:`effective_C_D_diag` is derived from it once:
+        reassigning beta afterwards would leave every analysis on the OLD
+        tempered covariance while run records (and the hybrid's policy check)
+        reported the new value. Build a new filter to change it.
+        """
+        return self._beta
+
+    @beta.setter
+    def beta(self, value: Any) -> None:
+        raise AttributeError(
+            "beta is fixed at construction (effective_C_D_diag is derived from "
+            "it once); build a new filter to change it."
+        )
+
+    def _temper(self, variances: jnp.ndarray) -> jnp.ndarray:
+        """``beta * variances``: the covariance every analysis actually uses.
+
+        The ONE place beta touches a covariance — the constructor's, a
+        replacement from :meth:`set_observation_covariance`, and a window's
+        per-frame ``observation_covariances`` all come through here, so each is
+        scaled exactly once and never compounds across windows. ``1.0 * x`` is
+        exact in every float dtype, so the default reproduces the untempered
+        filter bit for bit (same values, same RNG stream — no key is split for
+        beta). Validated in its ACTUAL dtype: a finite beta can still overflow
+        a float32 variance to inf, which must fail here rather than as a NaN
+        ensemble in cycle 0.
+        """
+        effective = self.beta * jnp.asarray(variances)
+        if not bool(jnp.all(jnp.isfinite(effective))):
+            raise ValueError(
+                f"beta={self.beta!r} overflows the {effective.dtype} "
+                "observation-error variances (beta * C_D is not finite). Use a "
+                "smaller beta."
+            )
+        return validate_variances(effective.reshape(-1)).reshape(effective.shape)
+
+    def set_observation_covariance(self, C_D: Any) -> None:
+        """Replace the physical covariance of one frame after validation.
+
+        The tempered :attr:`effective_C_D_diag` is re-derived from the NEW
+        physical covariance (never from the old effective one), and both are
+        validated before either is assigned, so a rejected replacement leaves
+        the filter unchanged.
+        """
+        covariance = jnp.asarray(C_D)
+        if covariance.ndim == 2:
+            if covariance.shape[0] != covariance.shape[1] or not bool(
+                jnp.all(covariance == jnp.diag(jnp.diag(covariance)))
+            ):
+                raise ValueError(
+                    "C_D must be diagonal; correlated errors are unsupported."
+                )
+            covariance = jnp.diag(covariance)
+        physical = validate_variances(covariance)
+        effective = self._temper(physical)
+        self.C_D_diag = physical
+        self.effective_C_D_diag = effective
+
     def run(
+        self,
+        state: Optional[xarray.Dataset] = None,
+        params: Optional[xarray.Dataset] = None,
+        observations: Optional[Union[jnp.ndarray, Sequence[Any]]] = None,
+        *,
+        return_history: bool = False,
+        observation_covariances: Any = None,
+    ) -> FilterResult:
+        """Filter with optional physical variances shaped like the raw batches.
+
+        Variances have shape (cycles, frames, obs), or (cycles, obs) for
+        single-frame cycles. All entries are validated before forecasting and
+        thinned with the observation stride. Constructor covariance is unchanged.
+        They are PHYSICAL: the analyses use ``beta`` times them (tempered once,
+        here, before the first forecast); the chi2 diagnostic uses them as is.
+        """
+        previous = getattr(self, "_window_covariances", None)
+        self._window_covariances = observation_covariances
+        try:
+            return self._run(state, params, observations, return_history=return_history)
+        finally:
+            self._window_covariances = previous
+            self._cycle_covariances = None
+            self._cycle_effective_covariances = None
+
+    def _run(
         self,
         state: Optional[xarray.Dataset] = None,
         params: Optional[xarray.Dataset] = None,
@@ -806,6 +1008,19 @@ class BaseFilter:
                 'array, or a one-element list of per-cycle ("time", "obs") '
                 "DataArrays."
             )
+        covariances = self._window_covariances
+        if covariances is not None:
+            covariances = jnp.asarray(covariances)
+            if covariances.ndim == 2:
+                covariances = covariances[:, None, :]
+            if covariances.shape != obs_batches.shape:
+                raise ValueError(
+                    "observation_covariances must match raw observation batches."
+                )
+            validate_variances(covariances.reshape(-1))
+        effective_covariances = (
+            None if covariances is None else self._temper(covariances)
+        )
         if obs_batches.shape[2] != self.C_D_diag.shape[0]:
             raise ValueError(
                 f"Observation frames have N_obs={obs_batches.shape[2]} but C_D "
@@ -835,10 +1050,27 @@ class BaseFilter:
                     "the stride."
                 )
             obs_batches = obs_batches[:, every_n - 1 :: every_n, :]
+            if covariances is not None:
+                covariances = covariances[:, every_n - 1 :: every_n, :]
+            if effective_covariances is not None:
+                effective_covariances = effective_covariances[
+                    :, every_n - 1 :: every_n, :
+                ]
         if self.mode in ("parameter", "joint"):
             if params is None:
                 raise ValueError(f"mode={self.mode!r} requires params.")
-            self._check_static_params(params)
+            self._check_static_params(
+                select_parameters(params, self.parameter_names_to_estimate)
+            )
+        if params is not None:
+            select_parameters(params, self.parameter_names_to_estimate)
+        elif self.parameter_names_to_estimate:
+            raise ValueError(
+                "parameter_names_to_estimate requires a parameter Dataset."
+            )
+
+        if self.global_parameter_names:
+            self._validate_global_parameters(params)
 
         num_cycles = int(obs_batches.shape[0])
         n_obs_frame = int(obs_batches.shape[2])
@@ -850,10 +1082,12 @@ class BaseFilter:
             self.pred_obs_history = []
             self.pred_obs_post_history = []
             self.pred_obs_frames_history = []
+        self.analyzed_pred_obs_history: list[np.ndarray] = []
         diagnostics: list[CycleDiagnostics] = []
         params_history: list[xarray.Dataset] = (
             [params] if (return_history and params is not None) else []
         )
+        applied_params_history: list[xarray.Dataset] = []
         state_history: list[xarray.Dataset] = []
         # One entry per cycle, each the whole segment (see
         # ``collect_forecast_frames``); empty and never appended to otherwise.
@@ -865,13 +1099,32 @@ class BaseFilter:
             unit="cycle",
         )
         for cycle in pbar:
+            self._cycle_covariances = (
+                None if covariances is None else covariances[cycle]
+            )
+            self._cycle_effective_covariances = (
+                None if effective_covariances is None else effective_covariances[cycle]
+            )
             self._set_cycle_results_dir(cycle)
+
+            # The parameters' forecast model: evolve the last analysis before
+            # forecasting from it (never before the instance's first forecast).
+            if self.parameter_evolution is not None and self._params_analyzed:
+                assert params is not None
+                self.rng_key, evolve_key = jax.random.split(self.rng_key)
+                evolved = self.parameter_evolution.evolve(
+                    select_parameters(params, self.parameter_names_to_estimate),
+                    evolve_key,
+                )
+                params = merge_parameters(params, evolved)
 
             forecast = self._forecast_step(state=analysis_state, params=params)
             if params is not None:
                 params = self.forward_model.apply_failure_substitutions_to_params(
                     params
                 )
+            if return_history and self.global_parameter_names and params is not None:
+                applied_params_history.append(params.copy(deep=True))
             results_dir = (
                 self.forward_model.results_dir
                 if self.forward_model.save_on_disk
@@ -912,6 +1165,35 @@ class BaseFilter:
             analysis_state, params, cycle_diag = self._analysis_cycle(
                 cycle, final_state, params, pred_obs, obs_batches[cycle]
             )
+            if getattr(self, "collect_analyzed_observations", False):
+                assert analysis_state is not None
+                observed_state = analysis_state
+                if "time" not in observed_state.dims:
+                    # An adaptive-step backend (uDALES) ends each member's
+                    # segment at a slightly different time, so after the
+                    # ensemble concat ``time`` is a per-member coordinate, which
+                    # expand_dims refuses. The operator only needs a label for
+                    # this one analysed frame: collapse it to the members' mean.
+                    time_label = np.atleast_1d(
+                        np.mean(np.asarray(observed_state.coords.get("time", 0.0)))
+                    )
+                    observed_state = observed_state.drop_vars(
+                        "time", errors="ignore"
+                    ).expand_dims(time=time_label)
+                operator = getattr(
+                    self, "analyzed_observation_operator", self.observation_operator
+                )
+                analyzed_obs = self._prepare_pred_obs(operator(observed_state))
+                actual = np.asarray(analyzed_obs[:, -1, :]).T
+                self.analyzed_pred_obs_history.append(actual)
+                cycle_diag.obs_analyzed_final_rmse = float(
+                    np.sqrt(
+                        np.mean(
+                            (np.asarray(obs_batches[cycle, -1]) - actual.mean(axis=1))
+                            ** 2
+                        )
+                    )
+                )
             diagnostics.append(cycle_diag)
 
             # Repair any diverged members in the warm start for the next
@@ -939,6 +1221,11 @@ class BaseFilter:
                 if params_history
                 else None
             ),
+            applied_params_history=(
+                xarray.concat(applied_params_history, dim="cycle", join="override")
+                if applied_params_history
+                else None
+            ),
             state_history=(
                 xarray.concat(state_history, dim="cycle", join="override")
                 if state_history
@@ -955,6 +1242,22 @@ class BaseFilter:
             ),
         )
 
+    def _validate_global_parameters(self, params: Optional[xarray.Dataset]) -> None:
+        if not self.global_parameter_names:
+            return
+        if params is None:
+            raise ValueError("global_parameter_names requires a parameter Dataset.")
+        missing = [name for name in self.global_parameter_names if name not in params]
+        if missing:
+            raise ValueError(
+                f"Global parameter names absent from params: {sorted(missing)}"
+            )
+        for name in self.global_parameter_names:
+            if params[name].dims != ("ensemble",):
+                raise ValueError(
+                    f"Global parameter {name!r} must be static with dims ('ensemble',)."
+                )
+
     def _check_static_params(self, params: xarray.Dataset) -> None:
         """Phase 1 supports scalar (ensemble,) parameters only."""
         time_vars = [n for n in params.data_vars if "time" in params[n].dims]
@@ -963,7 +1266,7 @@ class BaseFilter:
                 f"Time-varying parameters {time_vars} are not supported by the "
                 "filter yet: filtering estimates the parameter value *now*, "
                 "evolved between cycles by a parameter evolution model (see "
-                "docs/temp/da_filtering_module_plan.md §4.4). Use the "
+                "docs/plans/implemented/da_filtering_module_plan.md §4.4). Use the "
                 "TimeVaryingParameterESMDA smoother, or reduce the parameters "
                 "to static scalars."
             )
@@ -987,8 +1290,8 @@ class BaseFilter:
         order, all of them updating the same end-of-segment augmented state
         through the ensemble cross-covariances. Everything around the sweep
         happens once per cycle — the basis fit, prior and posterior inflation,
-        the localization plumbing, the parameter evolution — because they are
-        properties of the cycle's forecast, not of an individual observation.
+        the localization plumbing — because they are properties of the cycle's
+        forecast, not of an individual observation.
 
         A configured ``state_reduction`` changes only the *analysis
         representation* of the state block: the rows handed to the analysis are
@@ -1031,7 +1334,8 @@ class BaseFilter:
             blocks.append(states_forecast)
         if self.mode in ("parameter", "joint"):
             assert params is not None  # validated in run()
-            flat_params = self._param_augmentation.flatten(params)
+            selected = select_parameters(params, self.parameter_names_to_estimate)
+            flat_params = self._param_augmentation.flatten(selected)
             params_array = ParamAugmentation.to_array(flat_params)
             n_param = params_array.shape[0]
             blocks.append(params_array)
@@ -1092,7 +1396,7 @@ class BaseFilter:
         # frame) but with all T*N_obs appended rows, whose mask/coords entries
         # are the same for every frame — the sensors do not move in time.
         group_ids, localize_mask, row_coords, obs_coords = self._localization_plumbing(
-            final_state, n_state, n_param, N_obs, N_d
+            final_state, n_state, n_param, N_obs, N_d, params=params
         )
 
         # One split per cycle, as before. With a single frame the subkey is used
@@ -1187,13 +1491,17 @@ class BaseFilter:
         if self.mode in ("parameter", "joint"):
             assert params is not None and flat_params is not None
             updated_flat = ParamAugmentation.from_array(updated[n_state:], flat_params)
-            params = xarray.Dataset(
+            if self.global_parameter_names:
+                updated_flat.attrs = dict(params.attrs)
+                for name in updated_flat.data_vars:
+                    updated_flat[name].attrs = dict(params[name].attrs)
+            updated_params = xarray.Dataset(
                 data_vars={name: updated_flat[name] for name in updated_flat.data_vars},
-                coords=params.coords,
+                coords=flat_params.coords,
+                attrs=updated_flat.attrs,
             )
-            if self.parameter_evolution is not None:
-                self.rng_key, evolve_key = jax.random.split(self.rng_key)
-                params = self.parameter_evolution.evolve(params, evolve_key)
+            params = merge_parameters(params, updated_params)
+            self._params_analyzed = bool(n_param)
 
         cycle_diag.analysis_time = time.perf_counter() - analysis_started
         if self.state_reduction is not None:
@@ -1233,17 +1541,33 @@ class BaseFilter:
 
         The same helper serves the reduction's discarded-increment diagnostic
         (see :meth:`_record_reduction_diagnostics`), which must reproduce this
-        sweep exactly — same frames, same order, same keys — for its difference
-        to measure the truncation and nothing else.
+        sweep exactly — same frames, same order, same keys, same (effective)
+        covariance — for its difference to measure the truncation and nothing
+        else.
+
+        Every analysis is handed ``beta * C_D`` — :attr:`effective_C_D_diag`, or
+        the cycle's tempered per-frame ``observation_covariances`` — and
+        nothing else: each frame's analysis is full weight in the sense of
+        taking no MDA ``alpha``, but tempered by ``beta`` through its
+        covariance.
         """
         num_frames, n_obs = int(obs.shape[0]), int(obs.shape[1])
         for frame in range(num_frames):
             start = obs_offset + frame * n_obs
+            # The EFFECTIVE (beta-tempered) covariance — the window's per-frame
+            # one when run() was given observation_covariances — and this is
+            # its only consumer: the sweep and the reduction-diagnostic replay
+            # both come through here, so they cannot disagree about R.
+            # Identical to the physical covariance at the default beta = 1.
             rows = self.analysis(
                 rows,
                 rows[start : start + n_obs],
                 obs[frame],
-                self.C_D_diag,
+                (
+                    self.effective_C_D_diag
+                    if self._cycle_effective_covariances is None
+                    else self._cycle_effective_covariances[frame]
+                ),
                 frame_keys[frame],
                 **plumbing,
             )
@@ -1323,7 +1647,7 @@ class BaseFilter:
         a localized transform) how many local blocks that took — as attributes
         of the last call. Without this hook those numbers exist only inside the
         scheme: they are the resource-gate quantities of
-        ``docs/plans/filtering_state_reduction_and_transforms.md`` §6, and the
+        ``docs/plans/implemented/filtering_state_reduction_and_transforms.md`` §6, and the
         cost and meaning of a localized analysis are otherwise invisible from
         its output.
 
@@ -1388,6 +1712,7 @@ class BaseFilter:
         n_param: int,
         n_obs: int,
         n_appended: int,
+        params: Optional[xarray.Dataset] = None,
     ) -> tuple[
         Optional[jnp.ndarray],
         Optional[jnp.ndarray],
@@ -1409,6 +1734,7 @@ class BaseFilter:
         number of ride-along rows the row-wise descriptors must cover. They are
         equal on the ``T = 1`` path.
         """
+        self._validate_global_parameters(params)
         if self.localization is None:
             return None, None, None, None
 
@@ -1416,9 +1742,20 @@ class BaseFilter:
         if n_state:
             mask_blocks.append(jnp.ones(n_state, dtype=bool))
         if n_param:
-            mask_blocks.append(
-                jnp.full((n_param,), self.localization.localizes_parameters, dtype=bool)
+            param_mask = jnp.full(
+                (n_param,), self.localization.localizes_parameters, dtype=bool
             )
+            if self.global_parameter_names:
+                assert params is not None
+                param_mask = param_mask & jnp.asarray(
+                    [
+                        name not in self.global_parameter_names
+                        for name in select_parameters(
+                            params, self.parameter_names_to_estimate
+                        ).data_vars
+                    ]
+                )
+            mask_blocks.append(param_mask)
         mask_blocks.append(jnp.zeros(n_appended, dtype=bool))
         localize_mask = jnp.concatenate(mask_blocks)
 
@@ -1472,6 +1809,11 @@ class BaseFilter:
         ``C_D`` is per frame, so the stacked system's error covariance is
         ``tile(C_D_diag, T)``, the block-diagonal repetition of it.
 
+        The chi2 is measured against the PHYSICAL ``C_D_diag``, never the
+        beta-tempered analysis covariance: it asks whether the forecast spread
+        is consistent with the actual observation errors, which beta does not
+        change (beta only decides how hard the analysis pulls).
+
         ``pred_obs`` must be the raw forecast (pre-inflation) so the chi2
         spread term reflects what the model produced, not what the inflation
         chose; the block spreads intentionally use the (possibly inflated)
@@ -1494,7 +1836,12 @@ class BaseFilter:
         innovation = obs - jnp.mean(pred_obs, axis=1)
         pred_obs_dev = pred_obs - jnp.mean(pred_obs, axis=1, keepdims=True)
         C_DD = jnp.dot(pred_obs_dev, pred_obs_dev.T) / (N_e - 1)
-        S = C_DD + jnp.diag(jnp.tile(self.C_D_diag, num_frames))
+        physical_variances = (
+            jnp.tile(self.C_D_diag, num_frames)
+            if getattr(self, "_cycle_covariances", None) is None
+            else self._cycle_covariances.reshape(-1)
+        )
+        S = C_DD + jnp.diag(physical_variances)
         chi2 = float(
             innovation
             @ jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(S), innovation)
@@ -1545,6 +1892,9 @@ class EnsembleKalmanFilter(BaseFilter):
         parameter_evolution: Optional[ParameterEvolution] = None,
         rng_key: Optional[jax.Array] = None,
         state_reduction: Optional[OnlineStateReduction] = None,
+        beta: float = 1.0,
+        global_parameter_names: Optional[Sequence[str]] = None,
+        parameter_names_to_estimate: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -1557,4 +1907,7 @@ class EnsembleKalmanFilter(BaseFilter):
             parameter_evolution=parameter_evolution,
             state_reduction=state_reduction,
             rng_key=rng_key,
+            beta=beta,
+            global_parameter_names=global_parameter_names,
+            parameter_names_to_estimate=parameter_names_to_estimate,
         )

@@ -29,6 +29,9 @@ backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.
 [tool.hatch.build.targets.wheel]
 packages = ["src/pyudales"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"shell_scripts" = "pyudales/shell_scripts"
+
 [tool.pixi.dependencies]
 python = {version=">=3.12, <3.13", channel="conda-forge"}
 cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
@@ -41,8 +44,3 @@ nco = {version=">=5.3.6", channel="conda-forge"}
 
 [tool.pixi.pypi-dependencies]
 pyudales = { path = ".", editable = true }
-
-[tool.pixi.tasks]
-build-udales-macos = { cmd = "bash build_udales_macos.sh common release", description = "Build uDALES in release mode" }
-build-preprocessing-macos = { cmd = "bash build_preprocessing_macos.sh common", description = "Build uDALES preprocessing tools (View3D)" }
-init-udales = { cmd = "python setup_post_install.py", description = "Download and initialize u-dales repository (for editable installs)" }
