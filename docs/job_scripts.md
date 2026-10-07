@@ -109,12 +109,13 @@ sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gs
   job_scripts/delftblue/surrogate_train.slurm "${args[@]}"
 ```
 
-Without the CPU job the GPU job makes the copy itself; with a complete copy it
-only validates it. **Resuming:** submit the same GPU command again. It
+Without the CPU job the GPU job makes the copy itself (about a day for the
+whole corpus); with a complete copy it only validates it in seconds, so once
+the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It
 continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is
 the total, not the epochs to add; `checkpoint_every=1` loses at most one epoch
 to the time limit, and `encoder.pt` / `decoder.pt` / `geometry_branch.pt` are
-refreshed with every new best `weights.pt`. Each submission rewrites
+cut from the best `weights.pt` at the start of each job and on every new best. Each submission rewrites
 `config.yaml` from the current config (in this layout, also for a run started
 with the earlier one), so keep the overrides. `cell_budget`
 counts full trajectory grids, not the 64-cell crops, hence `null` here and the
@@ -157,7 +158,7 @@ earlier layout load as they are; a DFT on this one also needs
 - **DelftBlue OpenMPI:** the `delftblue` env pins OpenMPI below 5: 5.0.x
   segfaults uDALES in `MPI_Finalize` (exit 139 after a clean run).
 - **DelftBlue GPUs:** `gpu-a100` gives a full 80 GB A100 for up to 48 h;
-  `gpu-a100-small` a 10 GB slice with 2 CPUs for up to 4 h.
+  `gpu-a100-small` a 10 GB MIG slice (up to 4 CPUs) for up to 4 h.
 - **DelftBlue accounts:** `innovation` allows a user 1 running and 10 queued
   jobs; submit long series under `research-ceg-gse`.
 - **DelftBlue throughput:** uDALES data generation costs about 1.6–2.1 µs per

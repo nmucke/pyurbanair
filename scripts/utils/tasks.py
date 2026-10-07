@@ -102,6 +102,8 @@ def _autoencoder(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     def export_encoder_decoder(trainer: Any) -> None:
         # Separate files the latent generator and the DFT stepper load, cut
         # from weights.pt so they always hold the same (best) weights.
+        if not (out_dir / "weights.pt").exists():
+            return  # no finite validation loss yet, so no best weights
         state = torch.load(out_dir / "weights.pt", map_location="cpu")
         for prefix, file in [
             ("ae.encoder.", "encoder.pt"),
@@ -117,6 +119,8 @@ def _autoencoder(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     def export_with_best_weights(trainer: Any) -> None:
         # Re-export whenever new best weights are written, so a run killed at
         # the time limit still leaves them for the latent generator and DFT.
+        # A resumed run first re-cuts them from the best weights on disk.
+        export_encoder_decoder(trainer)
         write_best_val = trainer._write_best_val
 
         def write_and_export(best_val: float) -> None:

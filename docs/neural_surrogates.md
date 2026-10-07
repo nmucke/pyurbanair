@@ -1506,8 +1506,8 @@ handoff to the DFT stepper and the latent generator), and `config.yaml` /
 file sits next to them — `geometry_branch.pt`, a plain `state_dict` of the
 branch (the encoder/decoder projections it feeds already travel inside
 `encoder.pt`/`decoder.pt`); `TadpoleTimeStepper` loads it (§31). These
-exports are cut from `weights.pt` and rewritten every time the trainer saves
-new best weights (and once more after training), so they always match
+exports are cut from `weights.pt` at the start of each run that already has
+one, every time the trainer saves new best weights, and once more after training, so they always match
 `weights.pt`, also when a job is killed at its time limit. Resubmitting the
 same command resumes from `checkpoint.pt`; `num_epochs` is the total.
 
