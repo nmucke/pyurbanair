@@ -17,6 +17,7 @@ job_scripts/
 │   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid>
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
+│   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
 └── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
@@ -102,15 +103,18 @@ args=(--config-name surrogate/train_autoencoder name=tadpole_ae_b_realistic
   architecture.size=B batch_sampler.batch_size=48 batch_sampler.cell_budget=null
   batch_sampler.drop_last=false dataloader.num_workers=12 trainer.checkpoint_every=1
   prechunk.output_root=/scratch/$USER/training_data/pyudales_realistic_rechunked)
-prep=$(sbatch --parsable --account=research-ceg-gse --cpus-per-task=1 --mem-per-cpu=3900M \
-  job_scripts/delftblue/surrogate_train.slurm "${args[@]}" prechunk.prepare_only=true)
+prep=$(sbatch --parsable job_scripts/delftblue/surrogate_prechunk_data.slurm "${args[@]}")
 sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gse \
   --gpus-per-task=1 --cpus-per-task=16 --mem-per-cpu=4G --time=48:00:00 \
   job_scripts/delftblue/surrogate_train.slurm "${args[@]}"
 ```
 
-Without the CPU job the GPU job makes the copy itself (about a day for the
-whole corpus); with a complete copy it only validates it in seconds, so once
+For another dataset, `surrogate_prechunk_data.slurm paths.data_dir=<dataset>
+prechunk.output_root=<copy>` makes its copy; train with the same two
+overrides. A job cut off at its time limit resumes where it stopped when
+resubmitted. The copy takes about 4 min per 700 MB trajectory (about 35 h, so two
+submissions, for the 520-file corpus). Without the CPU job the GPU job makes
+the copy itself; with a complete copy it only validates it in seconds, so once
 the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It
 continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is
 the total, not the epochs to add; `checkpoint_every=1` loses at most one epoch
@@ -160,7 +164,7 @@ earlier layout load as they are; a DFT on this one also needs
 - **DelftBlue GPUs:** `gpu-a100` gives a full 80 GB A100 for up to 48 h;
   `gpu-a100-small` a 10 GB MIG slice (up to 4 CPUs) for up to 4 h.
 - **DelftBlue accounts:** `innovation` allows a user 1 running and 10 queued
-  jobs; submit long series under `research-ceg-gse`.
+  jobs of at most 24 h; submit long series under `research-ceg-gse`.
 - **DelftBlue throughput:** uDALES data generation costs about 1.6–2.1 µs per
   grid cell per simulated second.
 - **DelftBlue BeeGFS** can intermittently report hard-linked pixi env files as

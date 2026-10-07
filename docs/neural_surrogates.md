@@ -1538,7 +1538,9 @@ source or option fails rather than mixing data (pick a new directory to
 rebuild); a lock stops two writers. `config.yaml` keeps the source
 `dataset.root_dir`, while the normalization stats are cached under the copy.
 `prechunk.prepare_only=true` makes the copy and exits without building a model,
-so it can run as a CPU job before the GPU one.
+so it can run as a CPU job before the GPU one
+(`job_scripts/<machine>/surrogate_prechunk_data.slurm`, see
+[job_scripts.md](job_scripts.md)).
 
 ### 30. File map
 
