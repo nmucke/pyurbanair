@@ -349,6 +349,9 @@ fails unless you run `pixi add ffmpeg` once on the login node or export
 
 Tadpole AE training: `sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm train`
 uses one full `gpu-a100` A100 for 48 hours, eight CPUs and 32 GB host RAM.
+The `resume` mode continues from the project checkpoint, importing the earlier
+scratch run when needed; new training artifacts go to
+`/projects/urbanair/model_weights/tadpole_ae_b_realistic/`.
 Optional `PRECHUNK_DATA=true` prepares/reuses a lossless scratch dataset before
 training. Use `prepare_tadpole_data.slurm` for CPU-only preparation, then an
 `afterok` dependency for the GPU run; all state files and snapshots are retained.
@@ -356,6 +359,10 @@ See the [pre-chunking instructions](../job_scripts/delftblue/README.md#optional-
 The `smoke` mode runs the bounded two-frame test on `gpu-a100-small` when
 submitted with the resource overrides in the
 [GPU training instructions](../job_scripts/delftblue/README.md#tadpole-ae-pre-training-gpu).
+
+Tadpole AE evaluation: `sbatch job_scripts/delftblue/test_autoencoder.slurm`
+uses one 10 GB A100 slice for up to four hours; see the
+[evaluation instructions](../job_scripts/delftblue/README.md#tadpole-ae-evaluation-gpu).
 
 | Task | Command |
 |------|---------|

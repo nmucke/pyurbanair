@@ -371,7 +371,21 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         geom_feats = self._branch_features(geometry, geom_features, state)
         if geom_feats is not None:
             geom_feats = self._fold_geom_feats(geom_feats, c)
-        return self.ae.encoder(folded, latent_type or self.latent_type, geom_feats)
+        microbatch = self.ae.max_internal_batchsize
+        if microbatch is None or folded.shape[0] <= microbatch:
+            return self.ae.encoder(folded, latent_type or self.latent_type, geom_feats)
+        latents: list[torch.Tensor] = []
+        for start in range(0, folded.shape[0], microbatch):
+            end = start + microbatch
+            chunk_feats = (
+                None if geom_feats is None else [feat[start:end] for feat in geom_feats]
+            )
+            latents.append(
+                self.ae.encoder(
+                    folded[start:end], latent_type or self.latent_type, chunk_feats
+                )
+            )
+        return torch.cat(latents, dim=0)
 
     def decode(
         self, latent: torch.Tensor, geom_feats: list[torch.Tensor] | None = None

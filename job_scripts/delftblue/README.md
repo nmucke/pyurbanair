@@ -17,14 +17,34 @@ reads the full corpus. The full-GPU batch probe completed 10 steps at batch size
 memory. The config uses batch size 48 for more headroom. Its eight-core, 32 GB
 allocation also completed successfully.
 
-Training outputs go to `/scratch/$USER/tadpole_ae/train/`, including resolved
+Training outputs go to
+`/projects/urbanair/model_weights/tadpole_ae_b_realistic/`, including resolved
 config, metrics, checkpoint, best weights and encoder/decoder/geometry exports.
 Logs are `slurm-tadpole-ae-<jobid>.{out,err}` in the submit directory. Export
 `DATA_ROOT`, `OUTPUT_DIR`, or `PIXI_ENV` before submission to change those
-defaults. The stable training directory enables a later submission to resume
-from the last completed epoch. Do not run two training jobs against the same
-output directory simultaneously. Scratch outputs are retained for inspection;
-archive useful weights to project storage.
+defaults. The stable project directory preserves artifacts between jobs. Do not
+run two training jobs against the same output directory simultaneously.
+
+To continue training after a 48-hour job, submit the same `train` command again.
+The training config has `trainer.resume=true`, so it loads `checkpoint.pt` from
+that output directory and continues at the next epoch. For an explicit resume
+that fails if no checkpoint exists, use:
+
+```bash
+sbatch job_scripts/delftblue/pretrain_tadpole_ae.slurm resume
+```
+
+The first `resume` job imports the existing artifacts from
+`/scratch/$USER/tadpole_ae/train/` when the project directory has no checkpoint.
+Set `RESUME_FROM=<artifact_dir>` to import a different run. The import copies
+the checkpoint, best weights, config, metrics, best-validation sidecar, and
+encoder/decoder/geometry exports. It reuses matching partial copies from an
+interrupted import and refuses mismatched artifacts so runs cannot be mixed.
+Copies take the project directory's group ownership; preserving the scratch
+group can hit a BeeGFS quota error. Later `resume` jobs use the project
+checkpoint directly.
+`trainer.num_epochs` is the **total** target epoch count, not the number to add;
+raise it with a Hydra override only if the saved run has reached the old target.
 
 For the bounded real-data smoke test, override the Slurm resources:
 
@@ -44,11 +64,10 @@ Tune batch size through `batch_sampler.batch_size`, not `dataloader.batch_size`.
 The default training batch size is 48 with four loader workers on the eight-CPU
 full A100 job; smoke jobs use batch size 1 and zero workers.
 Full training scans all trajectories for normalization on the first run and
-caches the statistics. Reuse `OUTPUT_DIR` with the same model/data settings to
-resume; `trainer.num_epochs` is the total target epoch count. Checkpoints and
-handoff exports are saved every epoch. The smoke resume stage fixes the total
-at two epochs. Repeat the GPU-memory probe when changing model, crop or batch
-settings.
+caches the statistics. Keep the same model/data settings when resuming.
+Checkpoints and handoff exports are saved every epoch. The smoke resume stage
+fixes the total at two epochs. Repeat the GPU-memory probe when changing model,
+crop or batch settings.
 
 ### Optional pre-chunked training data
 
@@ -116,6 +135,36 @@ The [DelftBlue GPU instructions](https://doc.dhpc.tudelft.nl/delftblue/Slurm-sch
 limit `gpu-a100-small` to one 10 GB GPU slice, two CPU cores and four hours;
 the research GPU walltime limit on `gpu-a100` is 48 hours. Neither mode
 requests an exclusive node.
+
+## Tadpole AE evaluation (GPU)
+
+After full-corpus training, evaluate the saved best weights on the test split:
+
+```bash
+sbatch job_scripts/delftblue/test_autoencoder.slurm
+```
+
+The job reads `config.yaml` and `weights.pt` from
+`/projects/urbanair/model_weights/tadpole_ae_b_realistic` and uses the dataset
+path saved in that config. It requests one 10 GB A100 slice, two CPU cores,
+8 GB host RAM, and four hours. The evaluator processes at most two folded crops
+at once to limit GPU
+memory use; override `max_internal_batchsize=1` if a larger grid needs less
+memory. Plots (including truth-versus-reconstruction
+`vertical_profiles_<nz>x<ny>x<nx>.png`) and `metrics.json` go to
+`<model_dir>/ae_eval/`; Slurm logs go to
+`slurm-test-tadpole-ae-<jobid>.{out,err}` in the submit directory. Set
+`MODEL_DIR`, `EVAL_DIR`, or `PIXI_ENV` before `sbatch` to change paths or the
+Pixi environment. Extra arguments override the evaluation Hydra config:
+
+```bash
+MODEL_DIR=/scratch/$USER/tadpole_ae/train sbatch \
+    job_scripts/delftblue/test_autoencoder.slurm split=val num_metric_samples=24
+```
+
+The training smoke artifact contains only `train` and `val` files. Use
+`split=val` when evaluating that artifact. The default `test` split applies to
+the full training corpus.
 
 ## CFD and assimilation (CPU)
 

@@ -19,7 +19,7 @@ split: test
 # Latent sampling at eval: "mode" (deterministic — use the latent mean, the
 # right choice for reproducible reconstruction metrics) or "sample" (draw from
 # the posterior, as in training).
-latent_type: mode
+latent_type: sample
 
 # Visualisation: how many distinct trajectories to show, how many time slices
 # per trajectory, and how many z-heights per reconstruction figure.
@@ -33,4 +33,7 @@ num_metric_samples: 48
 # Full-field reconstruction (larger than training crops); start with one
 # snapshot at a time for the B model. Override model_dir for Slurm outputs.
 batch_size: 1
+# Limit folded crop microbatches at evaluation time. null uses the training
+# artifact's setting; DelftBlue's 10 GB GPU-slice job overrides this to 2.
+max_internal_batchsize: 8
 seed: 0

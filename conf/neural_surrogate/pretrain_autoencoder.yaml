@@ -234,7 +234,7 @@ dataloader:
   drop_last: false
   # Four workers feed the full-A100 job's eight-CPU allocation. Smoke overrides
   # this to zero workers on its two-CPU slice.
-  num_workers: 4
+  num_workers: 12
   pin_memory: true
   persistent_workers: true
   # Ship the (shared) geometry mask + SDF features once per batch; falls back to

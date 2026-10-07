@@ -11,6 +11,9 @@ reconstructs snapshots from the chosen split, and writes:
 * ``height_profile.png`` -- reconstruction RMSE vs normalised height ``z/nz``
   (aggregated across all metric snapshots and grids), i.e. where in the column
   the AE reconstructs well/poorly (near-ground vs top).
+* ``vertical_profiles_{nz}x{ny}x{nx}.png`` -- fluid-cell conditional mean and
+  fluctuation RMS vs z level for truth and reconstruction, per grid shape and
+  for each state channel plus speed magnitude when ``u``, ``v``, ``w`` exist.
 * ``error_hist.png`` -- distribution of per-cell reconstruction errors (fluid).
 * ``pred_vs_true.png`` -- density of reconstructed vs true ``|u|`` over fluid
   cells (the identity line is a perfect AE).
@@ -63,6 +66,11 @@ def _load_model(cfg: DictConfig, train_cfg: DictConfig, device: torch.device):
     # Deterministic latent for reproducible reconstruction metrics (governs the
     # inner autoencoder's sampling).
     model.ae.latent_type = str(cfg.latent_type)
+    if cfg.get("max_internal_batchsize") is not None:
+        microbatch = int(cfg.max_internal_batchsize)
+        if microbatch < 1:
+            raise ValueError("max_internal_batchsize must be positive")
+        model.ae.max_internal_batchsize = microbatch
     return model, dtype
 
 
@@ -178,6 +186,45 @@ class _Accum:
         }
 
 
+class _ProfileAccum:
+    """Fluid-cell vertical moments across snapshots with the same grid shape."""
+
+    def __init__(self, channel_names: list[str], nz: int) -> None:
+        self.speed_indices = (
+            [channel_names.index(name) for name in ("u", "v", "w")]
+            if all(name in channel_names for name in ("u", "v", "w"))
+            else None
+        )
+        self.names = channel_names + (["|U|"] if self.speed_indices is not None else [])
+        self.count = np.zeros(nz, dtype=np.float64)
+        self.sums = np.zeros((2, len(self.names), nz), dtype=np.float64)
+        self.sums_sq = np.zeros_like(self.sums)
+        self.n_snapshots = 0
+
+    def add(
+        self, truth: torch.Tensor, recon: torch.Tensor, fluid: torch.Tensor
+    ) -> None:
+        mask = fluid.numpy().astype(bool)
+        for source, field in enumerate((truth.numpy(), recon.numpy())):
+            if self.speed_indices is not None:
+                speed = np.linalg.norm(field[self.speed_indices], axis=0)
+                field = np.concatenate((field, speed[None]), axis=0)
+            values = np.where(mask[None], field, 0.0).astype(np.float64)
+            self.sums[source] += values.sum(axis=(2, 3))
+            self.sums_sq[source] += np.square(values).sum(axis=(2, 3))
+        self.count += mask.sum(axis=(1, 2))
+        self.n_snapshots += 1
+
+    def profiles(self) -> tuple[np.ndarray, np.ndarray]:
+        mean = np.full_like(self.sums, np.nan)
+        rms = np.full_like(self.sums, np.nan)
+        valid = self.count > 0
+        mean[..., valid] = self.sums[..., valid] / self.count[valid]
+        variance = self.sums_sq[..., valid] / self.count[valid] - mean[..., valid] ** 2
+        rms[..., valid] = np.sqrt(np.maximum(variance, 0.0))
+        return mean, rms
+
+
 # --------------------------------------------------------------------------- #
 # Plots
 # --------------------------------------------------------------------------- #
@@ -254,6 +301,32 @@ def _plot_height_profile(acc: _Accum, path) -> None:
     ax.set_ylabel("normalised height  z / nz")
     ax.set_title("RMSE vs height")
     ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120)
+    plt.close(fig)
+
+
+def _plot_vertical_profiles(
+    acc: _ProfileAccum, grid: tuple[int, int, int], path: Path
+) -> None:
+    mean, rms = acc.profiles()
+    levels = np.arange(grid[0])
+    fig, axes = plt.subplots(
+        2, len(acc.names), figsize=(3.2 * len(acc.names), 6.4), squeeze=False
+    )
+    for ci, name in enumerate(acc.names):
+        for row, values in enumerate((mean, rms)):
+            ax = axes[row, ci]
+            ax.plot(values[0, ci], levels, "--", color="#0b0b0b", label="truth")
+            ax.plot(values[1, ci], levels, color="#eb6834", label="AE recon")
+            ax.set_ylabel("z level")
+            ax.grid(True, alpha=0.25, linewidth=0.6)
+        axes[0, ci].set_title(f"{name}: conditional mean")
+        axes[1, ci].set_title(f"{name}: fluctuation RMS")
+    axes[0, 0].legend(frameon=False)
+    fig.suptitle(
+        f"Vertical profiles (fluid cells), grid {grid}, " f"{acc.n_snapshots} snapshots"
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -379,12 +452,19 @@ def run(cfg: DictConfig) -> None:
         by_traj.setdefault(traj, []).append(t)
 
     acc = _Accum(len(channel_names))
+    profiles: dict[tuple[int, int, int], _ProfileAccum] = {}
     latent_stds: list[np.ndarray] = []
     bs = int(cfg.batch_size)
     for traj, ts in by_traj.items():
         geometry = dataset.geometry_for(traj)
         features = dataset.geom_features_for(traj)
         fluid = geometry.bool()
+        grid = (
+            int(geometry.shape[0]),
+            int(geometry.shape[1]),
+            int(geometry.shape[2]),
+        )
+        profile_acc = profiles.setdefault(grid, _ProfileAccum(channel_names, grid[0]))
         for start in range(0, len(ts), bs):
             batch_t = ts[start : start + bs]
             state, _, _ = _load_snapshots(dataset, traj, batch_t, dtype)
@@ -411,6 +491,7 @@ def run(cfg: DictConfig) -> None:
             )
             for s in range(b):
                 acc.add(state[s], recon[s], fluid)
+                profile_acc.add(state[s], recon[s], fluid)
 
     summary = acc.summary()
     latent_active = float("nan")
@@ -423,6 +504,12 @@ def run(cfg: DictConfig) -> None:
     # --- Plots ---
     _plot_per_channel(summary, channel_names, out_dir / "per_channel_metrics.png")
     _plot_height_profile(acc, out_dir / "height_profile.png")
+    for grid, profile_acc in sorted(profiles.items()):
+        shape = "x".join(str(size) for size in grid)
+        _plot_vertical_profiles(
+            profile_acc, grid, out_dir / f"vertical_profiles_{shape}.png"
+        )
+    print(f"wrote {len(profiles)} vertical profile figure(s)")
     _plot_error_hist(acc, out_dir / "error_hist.png")
     _plot_pred_vs_true(acc, out_dir / "pred_vs_true.png")
     _plot_latent_stats(acc.kl, latent_active, out_dir / "latent_stats.png")
