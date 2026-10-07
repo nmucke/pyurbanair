@@ -272,6 +272,7 @@ def compile_lbm(
     verbose: bool = True,
     enable_netcdf: bool = True,
     enable_cuda: Union[bool, str] = False,
+    openmp: bool = False,
 ) -> None:
     """
     Compile the LBM program.
@@ -287,6 +288,9 @@ def compile_lbm(
         verbose: If True, print compilation output. If False, suppress output.
         enable_netcdf: If True, enable NETCDF compilation flag.
         enable_cuda: If True, compile with CUDA=1 (NVFORTRAN).
+        openmp: If True, compile the gfortran build with MP=1 (OpenMP; the
+              thread count is set at run time via OMP_NUM_THREADS). Ignored,
+              with a warning, when the build resolves to CUDA.
 
     Raises:
         FileNotFoundError: If makefile or lbm_src_path doesn't exist.
@@ -307,6 +311,14 @@ def compile_lbm(
     # fallback, where the NVHPC probe is irrelevant. Keep that invariant in mind if
     # its selection logic grows: the two must not disagree about where NVHPC lives.
     cuda = resolve_cuda(enable_cuda, pathlib.Path(dirs.pixi_env_path))
+    # OpenMP only parallelises the CPU build. cuda=auto lets one config (with
+    # ncpu > 1) run on both CPU and GPU hosts, so a CUDA build drops it.
+    if openmp and cuda:
+        logger.warning(
+            "ncpu > 1 requests an OpenMP build, but the LBM is being built with "
+            "CUDA; OpenMP does not apply to the GPU build, so building without it."
+        )
+        openmp = False
 
     build_env_path = _resolve_build_environment(
         dirs=dirs, enable_netcdf=enable_netcdf, enable_cuda=cuda
@@ -443,6 +455,8 @@ def compile_lbm(
             make_args.append("CUDA=1")
         else:
             make_args.append("GFORTRAN=1")
+        if openmp:
+            make_args.append("MP=1")
         if enable_netcdf:
             make_args.extend(["NETCDF=1", f"NCFDIR={netcdf_root}"])
             if cuda:
@@ -530,6 +544,7 @@ def compile_lbm(
                 experiment_name=dirs.experiment_name,
                 enable_cuda=cuda,
                 enable_netcdf=enable_netcdf,
+                openmp=openmp,
             ),
         )
 

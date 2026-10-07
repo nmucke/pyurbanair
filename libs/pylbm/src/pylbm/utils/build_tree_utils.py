@@ -251,6 +251,7 @@ def compute_build_signature(
     experiment_name: str,
     enable_cuda: Union[bool, str],
     enable_netcdf: bool,
+    openmp: bool = False,
 ) -> dict[str, Any]:
     """
     Describe the inputs that are baked into the compiled binary.
@@ -264,18 +265,24 @@ def compute_build_signature(
     ``enable_cuda`` is recorded for diagnostics only and is deliberately *not*
     part of the staleness check: it changes neither the numerics nor the array
     shapes, and ``cuda="auto"`` legitimately resolves differently per host.
+
+    ``openmp`` is recorded only when true, so serial stamps are unchanged and a
+    stamp without the key reads as a serial build.
     """
     digests: dict[str, str] = {}
     for name in ("mod_dimensions.F90", "m_solid_objects_init.F90"):
         candidate = src_path / name
         if candidate.exists():
             digests[name] = hashlib.sha256(candidate.read_bytes()).hexdigest()[:16]
-    return {
+    signature: dict[str, Any] = {
         "experiment": experiment_name,
         "cuda": enable_cuda if isinstance(enable_cuda, bool) else str(enable_cuda),
         "netcdf": bool(enable_netcdf),
         "sources": digests,
     }
+    if openmp:
+        signature["openmp"] = True
+    return signature
 
 
 def write_build_stamp(

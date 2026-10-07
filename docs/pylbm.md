@@ -61,10 +61,13 @@ and it is built in place).
 
 The compiled binary lands at `<build tree>/bin/boltzmann` (not in the shared pixi
 `bin/`), alongside a `.pylbm_build_stamp.json` recording the experiment, the
-netcdf/cuda mode, and hashes of the two compiled-in sources. With
+netcdf/cuda mode, `openmp: true` for an OpenMP build (the key is absent for a
+serial one), and hashes of the two compiled-in sources. With
 `model.compile=false`, `ForwardModel._verify_prebuilt_binary` checks that stamp
 and raises rather than reusing a binary built for a different grid or geometry —
-which does not fail loudly, it just produces wrong-shaped or all-NaN output.
+which does not fail loudly, it just produces wrong-shaped or all-NaN output. It
+also raises when the build's OpenMP mode does not match `ncpu` (serial for
+`ncpu: 1`, OpenMP for `ncpu > 1`; a CUDA build is never OpenMP).
 
 ---
 
@@ -96,6 +99,7 @@ Key constructor parameters:
 | `output_frequency` | 0.0538 | Seconds between output snapshots |
 | `spinup_time` | 0.0 | Warm-up seconds prepended (outputs discarded) |
 | `cuda` | `"auto"` | `"auto"` → CUDA if NVHPC is installed, else gfortran; `True` requires CUDA; `False` forces gfortran |
+| `ncpu` | 1 | OpenMP threads. `> 1` builds the gfortran binary with `MP=1` and runs it with `OMP_NUM_THREADS=ncpu`; `1` is the serial build, launched exactly as before. A CUDA build ignores it with a warning (§3) |
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
@@ -186,7 +190,12 @@ it deep-copies the template `ForwardModel`, copies all files from the template's
 `self.dirs` on the copy.
 
 Parallel dispatch, failure policy, CPU pinning, and forkserver context are all
-in `BaseEnsembleForwardModel` (see codebase_guide.md §3).
+in `BaseEnsembleForwardModel` (see codebase_guide.md §3). With `ncpu > 1` each
+member runs `ncpu` OpenMP threads, so set `ensemble.num_cpus_per_process` to at
+least `ncpu`. That is advice, not checked anywhere: on Linux each worker is pinned
+to `num_cpus_per_process` cores, and more threads than pinned cores just
+oversubscribe them. macOS has no CPU pinning, so there the OS schedules all
+`num_parallel_processes * ncpu` threads freely.
 
 ---
 
@@ -228,11 +237,16 @@ handles the full build chain:
    failure so the real build starts with both files up to date.
 5. **Make invocation** — always `make -B` (full rebuild); passes
    `CUDA=1` or `GFORTRAN=1`, `NETCDF=1`, `NCFDIR`, `BINDIR=<build tree>/bin`,
-   `LIBDIR`. Compilation failure raises `RuntimeError` with the end of the
-   build output.
+   `LIBDIR`, and `MP=1` (`-fopenmp -DOPEN_MP`) when `ncpu > 1` — on both the
+   priming and the real invocation. OpenMP is CPU-only: when the build resolves
+   to CUDA (e.g. `cuda: auto` on a GPU node), `MP=1` is dropped with a warning,
+   so one config runs on both kinds of host. The thread count is a run-time
+   setting (`OMP_NUM_THREADS`), so changing `ncpu` between two values above 1
+   needs no rebuild; going between 1 and >1 does. Compilation failure raises
+   `RuntimeError` with the end of the build output.
 6. **Build stamp** — on success, `write_build_stamp` records the experiment, the
-   cuda/netcdf mode, and hashes of the compiled-in sources next to the binary
-   (see §1). A failed build writes no stamp, so the next compile retries it.
+   cuda/netcdf mode, `openmp: true` when built with `MP=1`, and hashes of the
+   compiled-in sources next to the binary (see §1). A failed build writes no stamp, so the next compile retries it.
 
 **Platforms.** The gfortran build runs on Linux and macOS (osx-arm64) with the
 pixi env's compilers, FFTW and NetCDF. On macOS, `LIBDIR` also carries
@@ -471,6 +485,7 @@ forward_model:
   temp_dir: ${paths.experiment_dir}
   experiment_name: runcase
   cuda: auto
+  ncpu: 1                    # OpenMP threads; >1 builds with MP=1
   verbose: false
   boundary_condition: inflow_outflow
   profile_config: {type: power_law, alpha: 0.25}
@@ -509,6 +524,9 @@ model.forward_model.verbose=true
 # Disable CUDA (e.g. for CPU-only debugging)
 model.forward_model.cuda=false
 
+# Four OpenMP threads per run (with an ensemble, also ensemble.num_cpus_per_process=4)
+model.forward_model.ncpu=4
+
 # Skip recompile (binary already up to date)
 model.compile=false
 
@@ -546,6 +564,34 @@ error — it returns wrong-shaped or all-NaN output. Builds are per-run and out 
 tree (§1) and `make -B` always rebuilds, so this cannot happen with
 `model.compile=true`; with `model.compile=false`, `_verify_prebuilt_binary`
 compares the build stamp and raises instead of running.
+
+### OpenMP thread scaling, and why two runs never match
+
+With the same random seed (below), `ncpu > 1` reproduces the serial run bit
+for bit on macOS arm64 (checked at 1/2/4/8 threads, inflow turbulence on). On
+x86-64 Linux it does too without inflow turbulence, but with it the OpenMP build
+differs from the serial build by up to 2e-5 m/s on the tiny case. That
+difference is the same at 1, 2 and 4 threads (with `OMP_NUM_THREADS=1` too) and
+reproducible run to run, so it is code generation: the inflow-turbulence loops
+compiled with `-fopenmp` under `-Ofast -march=native` round differently, not
+thread scheduling, the RNG (drawn outside parallel regions) or reductions (none).
+The thread count never changes the result. Seeds matter far more: on a cold start
+`m_seedmanagement.F90` seeds `RANDOM_NUMBER` from the clock unless
+`seed_0000.orig` exists in the experiment dir, and `compile()` wipes the seed
+files, so two serial runs of one config already differ (~4e-5 m/s on the tiny
+case, ~0.1 m/s with inflow turbulence). Copy one run's `seed_0000.orig` into the
+other's experiment dir before comparing them
+(`tests/pylbm/test_pylbm_openmp.py`).
+
+Speed-up on an Apple M-series laptop (4 performance + 6 efficiency cores):
+~3.2x at 4 threads (3.3x on 120x120x24, 3.1x on 400x400x32), only 3.9x at 8 —
+little gain beyond the physical performance cores, as the solver is
+DRAM-bandwidth-bound. `ulimit -s` in `run()` raises only the main thread's
+stack; the OpenMP worker threads get the runtime's default (`OMP_STACKSIZE`).
+That default sufficed up to 400x400x32 on macOS (not measured on Linux), so no
+`OMP_STACKSIZE` is set; if large grids segfault only with `ncpu > 1`, export a
+bigger one. For an ensemble, weigh `ncpu` against
+`ensemble.num_parallel_processes` on the same budget of cores.
 
 ### Silent CUDA failures (`verbose=false`)
 
