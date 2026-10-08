@@ -985,6 +985,9 @@ def plot_parameter_pairs(
     member pairs with their correlation; the upper triangle is left empty.
     """
     n = len(names)
+    drawn = [
+        (k, m) for k, m in (("prior", prior), ("posterior", posterior)) if m is not None
+    ]
     with _styled():
         fig, axes = plt.subplots(
             n, n, figsize=(2.6 * n + 0.6, 2.6 * n + 0.6), squeeze=False
@@ -995,8 +998,6 @@ def plot_parameter_pairs(
                 if j > i:
                     ax.set_axis_off()
                     continue
-                sources = [("prior", prior), ("posterior", posterior)]
-                drawn = [(k, m) for k, m in sources if m is not None]
                 if i == j:
                     bins = np.histogram_bin_edges(
                         _finite(np.concatenate([m[:, i] for _, m in drawn])), 15

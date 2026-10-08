@@ -32,6 +32,7 @@ from evaluation.scores import (
     per_knot_in_band,
     shared_histograms,
     wasserstein2,
+    window_series_stats,
 )
 from evaluation.sensors import window_masks
 
@@ -246,3 +247,11 @@ def test_shared_histograms_share_the_bins_and_integrate_to_one() -> None:
         assert np.sum(densities[name] * np.diff(edges)) == pytest.approx(1.0)
     assert quantiles["b"][49] == pytest.approx(2.0, abs=0.1)  # the median
     assert np.isnan(densities["c"]).all() and np.isnan(quantiles["c"]).all()
+
+
+def test_window_series_stats_averages_within_windows() -> None:
+    """Two knots per window are averaged; an all-NaN window is None."""
+    stats = window_series_stats(np.array([1.0, 3.0, np.nan, np.nan, 5.0, 7.0]), 3)
+    assert stats is not None
+    assert stats["per_window"] == [2.0, None, 6.0]
+    assert stats["mean"] == pytest.approx(4.0)

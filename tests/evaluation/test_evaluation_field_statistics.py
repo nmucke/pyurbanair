@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 from evaluation.turbulence import (
     band_energy_ratio,
-    field_rmse,
     field_statistics,
     fluid_mask,
     intrinsic_profile,
     spanwise_spectra,
+    statistic_rmse,
 )
 
 from .test_evaluation_solid_mask import _write_boxes
@@ -59,14 +59,14 @@ def test_intrinsic_profile_averages_fluid_cells_only():
     assert np.isnan(profile[1])
 
 
-def test_field_rmse_over_fluid_cells_and_per_level():
+def test_statistic_rmse_over_fluid_cells_and_per_level():
     truth = np.zeros((2, 2, 2))
     prediction = np.full_like(truth, 1.0)
     prediction[1] = 3.0
     prediction[1, 0, 0] = 100.0  # masked out
     fluid = np.ones_like(truth, dtype=bool)
     fluid[1, 0, 0] = False
-    rmse, profile = field_rmse(prediction, truth, fluid)
+    rmse, profile = statistic_rmse(prediction, truth, fluid)
     np.testing.assert_allclose(profile, [1.0, 3.0])
     assert rmse == pytest.approx(np.sqrt((4 * 1 + 3 * 9) / 7))
 

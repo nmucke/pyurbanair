@@ -353,10 +353,12 @@ def _plot_statistics(diag: xarray.Dataset, out: pathlib.Path) -> None:
             [str(g) for g in diag.group.values],
             out / "spectra.png",
         )
-    sets = [str(v).removeprefix("sensor_density_") for v in diag]
+    sets = [
+        str(v).removeprefix("sensor_density_")
+        for v in diag
+        if v.startswith("sensor_density_")
+    ]
     for name in sets:
-        if f"sensor_density_{name}" not in diag:
-            continue
         density = diag[f"sensor_density_{name}"]
         quantiles = diag[f"sensor_quantiles_{name}"]
         kinds = [str(s) for s in density.source.values]

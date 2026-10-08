@@ -780,6 +780,42 @@ def series_stats(arr: np.ndarray) -> dict | None:
     }
 
 
+def window_series_stats(series: np.ndarray, num_windows: int) -> dict | None:
+    """:func:`series_stats` plus ``per_window``, the series' value per window.
+
+    A series with several values per window (a time-varying parameter's knots,
+    a filter's cycles) is averaged within each; a window with no finite value
+    is ``None``.
+    """
+    stats = series_stats(series)
+    if stats is not None:
+        values = np.asarray(series, dtype=float).reshape(num_windows, -1)
+        with warnings.catch_warnings():  # an all-NaN window is a None, not a warning
+            warnings.simplefilter("ignore", RuntimeWarning)
+            means = np.nanmean(values, axis=1)
+        stats["per_window"] = [float(v) if np.isfinite(v) else None for v in means]
+    return stats
+
+
+def member_correlation(members: xr.DataArray) -> xr.DataArray:
+    """Per window, the correlation matrix of the parameters over the members.
+
+    ``members`` is ``(window, ensemble, parameter)``; returns ``(window,
+    parameter, parameter_j)``, NaN for a parameter without spread.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        matrices = [
+            np.atleast_2d(np.corrcoef(m, rowvar=False))
+            for m in members.transpose("window", "ensemble", "parameter").values
+        ]
+    names = members.parameter.values
+    return xr.DataArray(
+        np.stack(matrices),
+        dims=("window", "parameter", "parameter_j"),
+        coords={"window": members.window, "parameter": names, "parameter_j": names},
+    )
+
+
 def calibrated_z_std(n_members: int) -> float | None:
     """Std of the z-scores a *calibrated* ``n_members`` ensemble produces.
 
@@ -1060,14 +1096,9 @@ def _score_window_statistic(
             return np.nanmean(flat.reshape(n_windows, -1), axis=1)
 
     crps_per_window = _per_window(crps)
-    crps_stats = series_stats(crps_per_window)
-    if crps_stats is not None:
-        crps_stats["per_window"] = [
-            float(v) if np.isfinite(v) else None for v in crps_per_window
-        ]
     finite_ranks = ranks[np.isfinite(ranks)].astype(int)
     entry = {
-        "crps": crps_stats,
+        "crps": window_series_stats(crps_per_window, n_windows),
         "z_score": z_score_stats(z, n_members),
         # Counts per rank, not the raw rank list. A rank histogram is what
         # figure D1 consumes, and pooling it over sensors and windows loses
@@ -1837,3 +1868,65 @@ def shared_histograms(
             np.full(N_QUANTILES, np.nan) if empty else np.quantile(v, QUANTILE_LEVELS)
         )
     return edges, densities, quantiles
+
+
+def sensor_distribution_summary(
+    samples: Mapping[str, Sequence[np.ndarray]], quantities: Sequence[str]
+) -> tuple[dict, dict[str, xr.DataArray]]:
+    """The ``sensor_distributions`` block of one sensor set, and its figure arrays.
+
+    ``samples`` maps each source (``truth`` and ``posterior`` among them) to its
+    values per window, ``(quantity, member, frame, sensor)`` on the same frames;
+    the truth has one member. Per quantity and window: :func:`distribution_scores`
+    of each prediction against the truth, and of the truth's first half-window
+    against its second (``truth_halves``, a floor that assumes stationarity),
+    as :func:`window_series_stats`. The figure arrays, per quantity:
+    ``sensor_bin_edges`` and each source's ``sensor_density`` and
+    ``sensor_quantiles`` (:func:`shared_histograms`), pooled over sensors,
+    windows and members.
+    """
+    num_windows = len(samples["truth"])
+    block: dict = {}
+    edges, densities, quantiles = [], [], []
+    for i, quantity in enumerate(quantities):
+        truth = [t[i, 0] for t in samples["truth"]]  # (frame, sensor) per window
+        scored = {
+            kind: [distribution_scores(t, s[w][i]) for w, t in enumerate(truth)]
+            for kind, s in samples.items()
+            if kind != "truth"
+        }
+        scored["truth_halves"] = [
+            distribution_scores(t[: len(t) // 2], t[len(t) // 2 :][None]) for t in truth
+        ]
+        block[quantity] = {
+            kind: {
+                key: window_series_stats(
+                    np.array([v[key] for v in values]), num_windows
+                )
+                for key in values[0]
+            }
+            for kind, values in scored.items()
+        }
+        e, d, q = shared_histograms(
+            {
+                kind: np.concatenate([s[i].ravel() for s in windows])
+                for kind, windows in samples.items()
+            }
+        )
+        edges.append(e)
+        densities.append(list(d.values()))
+        quantiles.append(list(q.values()))
+    coords = {"quantity": list(quantities), "source": list(samples)}
+    return block, {
+        "sensor_bin_edges": xr.DataArray(
+            np.array(edges),
+            dims=("quantity", "edge"),
+            coords={"quantity": list(quantities)},
+        ),
+        "sensor_density": xr.DataArray(
+            np.array(densities), dims=("quantity", "source", "bin"), coords=coords
+        ),
+        "sensor_quantiles": xr.DataArray(
+            np.array(quantiles), dims=("quantity", "source", "level"), coords=coords
+        ),
+    }

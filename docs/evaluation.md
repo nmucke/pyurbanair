@@ -60,7 +60,12 @@ no registries. The only class with state is
   `distribution_scores` (both, pooled over sensors and members, per sensor
   normalised by its truth std and averaged, and the median over members) and
   `shared_histograms` (densities on shared bins and quantiles, for a figure).
-- `series_stats` reduces a 1-D series to `{mean, final, max, min}`.
+  `sensor_distribution_summary` builds one sensor set's
+  `sensor_distributions` block and figure arrays from them.
+- `series_stats` reduces a 1-D series to `{mean, final, max, min}`;
+  `window_series_stats` adds the `per_window` values.
+- `member_correlation`: the parameters' correlation matrix over the members,
+  per window.
 
 `METRICS_VERSION = 2` marks the switch to the fair (`M(M-1)`) estimators;
 scores from before it are ~O(1/M) larger and not comparable.
@@ -116,7 +121,12 @@ loaded whole.
   resolved u′w′ of colocated `(time, z, y, x)` fields), `fluid_mask`
   (`stl_solid_mask` dilated by one cell, so centres whose colocation reads a
   solid face drop out), `intrinsic_profile` (per-level mean over the fluid
-  cells) and `field_rmse` (RMSE over the fluid cells, total and per level).
+  cells) and `statistic_rmse` (RMSE over the fluid cells, total and per
+  level). `member_field_reductions` applies them (and the spectra below) to
+  one member; `score_window_fields` scores one window's sources against the
+  truth on the posterior's grid, and `field_metric_blocks` turns the windows
+  into the `field_statistics`, `canopy_profiles` and `spectra` blocks and
+  their `diagnostics.nc` arrays.
 - Spanwise spectra: `spanwise_spectra` FFTs a component on its **native**
   grid (interpolation would low-pass the tail) along the periodic y, on every
   fully fluid `(x, z)` line from the first building to two cells before the
@@ -165,7 +175,7 @@ Shared colours and labels (`COLORS`, `MODEL_*`, `METHOD_*`, `PARAM_LABELS`,
 
 | Script | Uses |
 |---|---|
-| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `series_stats`, `vector_sensor_metrics`, `spread_skill`, `_skill_score`, `window_statistics_summary`, `distribution_scores`, `shared_histograms`, `window_statistics`, `window_sampling_std`, `quantity_series`, `observation_fit`, `data_mismatch`, `data_mismatch_summary`, `colocate_components`, `field_statistics`, `fluid_mask`, `intrinsic_profile`, `field_rmse`, `on_grid`, `spanwise_spectra`, `band_energy_ratio`, `median_spectrum`, `log_spectral_distance` |
+| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `series_stats`, `vector_sensor_metrics`, `spread_skill`, `_skill_score`, `window_statistics_summary`, `window_series_stats`, `member_correlation`, `sensor_distribution_summary`, `window_statistics`, `window_sampling_std`, `quantity_series`, `observation_fit`, `data_mismatch`, `data_mismatch_summary`, `member_field_reductions`, `score_window_fields`, `field_metric_blocks` |
 | [scripts/visualize_assimilation.py](../scripts/visualize_assimilation.py) | `plot_rollout_time_evolution`, `plot_final_state_with_obs`, `plot_sensor_timeseries`, `plot_tke_time_evolution`, `plot_rank_histogram`, `plot_parameter_pairs`, `plot_canopy_profiles`, `plot_sensor_distributions`, `plot_spanwise_spectra`, `sensor_magnitude`, `colocate_components`, `select_z_plane`, `sensor_tke_evolution` |
 | [scripts/visualize_forward.py](../scripts/visualize_forward.py) | `colocate_components` |
 

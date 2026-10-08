@@ -104,11 +104,9 @@ from __future__ import annotations
 import pyurbanair.quiet_jax  # noqa: F401  (silences JAX CPU-fallback noise)
 
 import argparse
-import functools
 import json
 import pathlib
 import sys
-import warnings
 
 import numpy as np
 import xarray
@@ -117,12 +115,13 @@ from evaluation.scores import (
     compute_parameter_metrics,
     data_mismatch,
     data_mismatch_summary,
-    distribution_scores,
+    member_correlation,
     observation_fit,
+    sensor_distribution_summary,
     series_stats,
-    shared_histograms,
     spread_skill,
     vector_sensor_metrics,
+    window_series_stats,
     window_statistics_summary,
 )
 from evaluation.sensors import (
@@ -132,17 +131,10 @@ from evaluation.sensors import (
     window_statistics,
 )
 from evaluation.turbulence import (
-    band_energy_ratio,
-    colocate_components,
-    field_rmse,
-    field_statistics,
-    fluid_mask,
-    intrinsic_profile,
-    log_spectral_distance,
-    median_spectrum,
-    on_grid,
-    spanwise_spectra,
-    stl_solid_mask,
+    ON_TRUTH_GRID,
+    field_metric_blocks,
+    member_field_reductions,
+    score_window_fields,
 )
 from omegaconf import DictConfig, OmegaConf
 
@@ -158,13 +150,6 @@ from helper_functions import (  # noqa: E402
     sensor_series,
     sensor_sets,
 )
-
-# The canopy profiles: time-mean u, TKE and resolved u'w' (field_statistics keys).
-PROFILE_QUANTITIES = ("u", "tke", "uw")
-# The height groups of `spanwise_spectra`.
-SPECTRUM_GROUPS = ("above_canopy", "in_canopy")
-# The sources read on the truth's grid, as one-member ensembles.
-ON_TRUTH_GRID = ("truth", "replica")
 
 
 def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
@@ -188,110 +173,88 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
 
     # --- Parameters -------------------------------------------------------------
     true_params = xarray.load_dataset(run_dir / "true_params.nc")
+    posterior_params = concat_windows(window_files("posterior_params"), sim_time)
     metrics["parameters"] = _parameter_metrics(
-        concat_windows(window_files("posterior_params"), sim_time),
+        posterior_params,
         true_params,
         concat_windows(window_files("prior_params"), sim_time),
         num_windows,
     )
-    names = _estimated_names(cfg, window_files("posterior_params")[0])
+    available = [str(n) for n in posterior_params.data_vars]
+    selected = cfg.assimilation.params_to_estimate
+    names = [n for n in (available if selected is None else selected) if n in available]
     if names:
         metrics["parameter_correlation"] = {}
         for kind in ("posterior", "prior"):
-            members, correlation = _parameter_correlation(
-                window_files(f"{kind}_params"), names
-            )
+            members = _parameter_members(window_files(f"{kind}_params"), names)
+            correlation = member_correlation(members)
             diagnostics[f"{kind}_parameter_members"] = members
             diagnostics[f"{kind}_parameter_correlation"] = correlation
-            final = correlation.isel(window=-1).values
             metrics["parameter_correlation"][kind] = {
-                a: {b: _finite(final[i, j]) for j, b in enumerate(names)}
-                for i, a in enumerate(names)
+                a: {b: _finite(v) for b, v in zip(names, row)}
+                for a, row in zip(names, correlation.values[-1])
             }
         diagnostics["true_parameter"] = _static_truth(true_params, names)
 
     # --- One pass over truth and ensembles, window by window ---------------------
     sets = sensor_sets(cfg)
+    # The truth and the noise floor (the truth configuration with another
+    # turbulence seed) are one-member ensembles on the truth's grid.
+    states = {"truth": open_truth(cfg, run_dir)}
+    if cfg.assimilation.get("replica_dir") is not None:
+        states["replica"] = open_forward_run(cfg, cfg.assimilation.replica_dir)
     # Prior: the free run with the prior parameters; forecast: the filter's
     # forecasts. Both are scored on the posterior's time stamps.
-    extra_files = {
-        kind: window_files(f"{kind}_state") for kind in ("prior", "forecast")
-    }
-    extra_files = {
-        kind: files
-        for kind, files in extra_files.items()
-        if all(f.exists() for f in files)
-    }
-    truth = open_truth(cfg, run_dir)
-    # The noise floor: the truth configuration with another turbulence seed,
-    # scored like the prior/forecast ensembles, as one member.
-    replica_dir = cfg.assimilation.get("replica_dir")
-    replica = None if replica_dir is None else open_forward_run(cfg, replica_dir)
+    ensembles = {"posterior": window_files("posterior_state")}
+    for kind in ("prior", "forecast"):
+        if all(f.exists() for f in window_files(f"{kind}_state")):
+            ensembles[kind] = window_files(f"{kind}_state")
     stl_path = case_stl_path(cfg)
-    frames_per_window = truth.sizes["time"] // num_windows
+    frames_per_window = states["truth"].sizes["time"] // num_windows
 
-    # Per source (truth, replica, posterior, prior, forecast), per window: the
-    # sensor series of each set and the field reductions (`_read_ensemble`).
-    # The truth and the replica are one-member ensembles on the truth's grid.
-    # The field statistics are scored per window, so only the profiles and
-    # spectra are kept across windows.
-    series_by: dict[str, dict[str, list]] = {}
-    fields: list[dict[str, xarray.Dataset]] = []
-    reduced: dict[str, xarray.Dataset] = {}
-
-    def collect(kind: str, series: dict, window_reduced: xarray.Dataset) -> None:
-        for name in sets:
-            series_by.setdefault(kind, {n: [] for n in sets})[name].append(series[name])
-        reduced[kind] = window_reduced
-
+    # Per source and window: the sensor series of each set (`series_by`) and
+    # the scored field reductions (`fields`).
+    series_by: dict[str, list[dict]] = {kind: [] for kind in (*states, *ensembles)}
+    fields = []
     for w in range(num_windows):
         window = slice(w * frames_per_window, (w + 1) * frames_per_window)
-        reduced.clear()
-        for kind, state in zip(ON_TRUTH_GRID, (truth, replica)):
-            if state is not None:
-                collect(
-                    kind,
-                    *_read_ensemble(
-                        state.isel(time=window).expand_dims("ensemble"),
-                        sets,
-                        cfg.truth_model.solver_name,
-                        stl_path,
-                    ),
-                )
+        reduced = {}
+        for kind, state in states.items():
+            series, reduced[kind] = _read_ensemble(
+                state.isel(time=window).expand_dims("ensemble"),
+                sets,
+                cfg.truth_model.solver_name,
+                stl_path,
+            )
+            series_by[kind].append(series)
         times = None  # the posterior's, which the others are read on
-        ensembles = {"posterior": window_files("posterior_state"), **extra_files}
         for kind, paths in ensembles.items():
             with xarray.open_dataset(paths[w]) as ds:
                 ds = ds.assign_coords(time=global_time(ds.time, w, sim_time))
-                series, window_reduced = _read_ensemble(
+                series, reduced[kind] = _read_ensemble(
                     ds, sets, cfg.assim_model.solver_name, stl_path, times
                 )
-            if times is None:
-                times = series[next(iter(sets))].time.values
-            collect(kind, series, window_reduced)
-        fields.append(_score_fields(reduced, stl_path))
-    truth.close()
-    if replica is not None:
-        replica.close()
+                if times is None:
+                    times = ds.time.values
+            series_by[kind].append(series)
+        fields.append(score_window_fields(reduced, stl_path))
+    for state in states.values():
+        state.close()
 
     # --- SGS health ---------------------------------------------------------------
-    discrepancy = OmegaConf.select(
+    if OmegaConf.select(
         cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
-    )
-    if discrepancy:
+    ):
         metrics["sgs_health"] = {
-            kind: _sgs_health(files)
-            for kind, files in (
-                ("posterior", window_files("posterior_state")),
-                ("prior", extra_files.get("prior")),
-            )
-            if files is not None
+            kind: _sgs_health(ensembles[kind])
+            for kind in ("posterior", "prior")
+            if kind in ensembles
         }
 
     # --- Field statistics, canopy profiles and spectra ------------------------------
-    field_metrics = _field_metrics(fields)
-    diagnostics.update(field_metrics.pop("diagnostics"))
-    metrics.update(field_metrics)
+    blocks, arrays = field_metric_blocks(fields)
+    metrics.update(blocks)
+    diagnostics.update(arrays)
 
     # --- Sensor metrics -----------------------------------------------------------
     for block in (
@@ -303,13 +266,16 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     ):
         metrics[block] = {}
     for name in sets:
-        truth_s = xarray.concat(series_by["truth"][name], dim="time").isel(ensemble=0)
-        posterior_s = xarray.concat(series_by["posterior"][name], dim="time")
-        extra = {
-            kind: xarray.concat(series[name], dim="time")
-            for kind, series in series_by.items()
-            if kind not in ("truth", "posterior")
+        per_window = {
+            kind: [s[name] for s in per_source]
+            for kind, per_source in series_by.items()
         }
+        extra = {
+            kind: xarray.concat(series, dim="time")
+            for kind, series in per_window.items()
+        }
+        truth_s = extra.pop("truth").isel(ensemble=0)
+        posterior_s = extra.pop("posterior")
         n_members = int(posterior_s.sizes["ensemble"])
 
         vector = vector_sensor_metrics(truth_s, posterior_s)
@@ -374,10 +340,21 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
                 for skill in (f"{kind}_crps_mean", f"crps_reduction_vs_{kind}"):
                     entry[skill] = scored["posterior"][key][skill]
         metrics["sensor_statistics"][name] = stats
-        metrics["sensor_distributions"][name], figure = _sensor_distributions(
-            {kind: series[name] for kind, series in series_by.items()},
-            tolerance,
-            num_windows,
+
+        # Every source sampled on the posterior's time stamps.
+        samples = {
+            kind: [
+                quantity_series(
+                    s.sel(time=p.time, method="nearest", tolerance=tolerance)
+                )
+                .transpose("quantity", "ensemble", "time", "sensor")
+                .values
+                for s, p in zip(series, per_window["posterior"])
+            ]
+            for kind, series in per_window.items()
+        }
+        metrics["sensor_distributions"][name], figure = sensor_distribution_summary(
+            samples, QUANTITIES
         )
         diagnostics.update({f"{key}_{name}": da for key, da in figure.items()})
 
@@ -470,37 +447,32 @@ def _data_mismatch(files: list[pathlib.Path]) -> dict | None:
     )
 
 
-def _per_window(series: np.ndarray, num_windows: int) -> list[float | None]:
-    """A window-indexed series' value per window; a per-knot or per-cycle series
-    (time-varying parameters) is averaged within each window."""
-    values = np.asarray(series, dtype=float).reshape(num_windows, -1)
-    with warnings.catch_warnings():  # an all-NaN window is a null, not a warning
-        warnings.simplefilter("ignore", RuntimeWarning)
-        return [_finite(v) for v in np.nanmean(values, axis=1)]
+def _parameter_metrics(
+    posterior: xarray.Dataset,
+    truth: xarray.Dataset,
+    prior: xarray.Dataset,
+    num_windows: int,
+) -> dict:
+    """RMSE and CRPS per parameter, posterior and prior, and the reduction."""
+    out = {}
+    for name, m in compute_parameter_metrics(posterior, truth, prior).items():
+        entry: dict[str, object] = {
+            "rmse": window_series_stats(m["rmse"], num_windows),
+            "crps": window_series_stats(m["crps"], num_windows),
+        }
+        for score in ("rmse", "crps"):
+            if f"prior_{score}" in m:
+                post = float(np.nanmean(m[score]))
+                pri = float(np.nanmean(m[f"prior_{score}"]))
+                entry[f"prior_{score}_mean"] = pri
+                entry[f"{score}_reduction_vs_prior"] = 1 - post / pri if pri else None
+        out[name] = entry
+    return out
 
 
-def _with_per_window(series: np.ndarray, num_windows: int) -> dict | None:
-    """`series_stats` plus the `per_window` values."""
-    stats = series_stats(series)
-    if stats is not None:
-        stats["per_window"] = _per_window(series, num_windows)
-    return stats
-
-
-def _estimated_names(cfg: DictConfig, params_file: pathlib.Path) -> list[str]:
-    """The estimated parameters in a window parameter file, in config order."""
-    with xarray.open_dataset(params_file) as ds:
-        available = list(ds.data_vars)
-    selected = cfg.assimilation.params_to_estimate
-    return [n for n in (available if selected is None else selected) if n in available]
-
-
-def _parameter_correlation(
-    files: list[pathlib.Path], names: list[str]
-) -> tuple[xarray.DataArray, xarray.DataArray]:
-    """Per window: the members (window, ensemble, parameter) and their correlation
-    matrix (window, parameter, parameter_j). A time-varying parameter enters as
-    its window mean; a parameter without spread has NaN correlations."""
+def _parameter_members(files: list[pathlib.Path], names: list[str]) -> xarray.DataArray:
+    """The members of the parameters `names` per window, (window, ensemble,
+    parameter); a time-varying parameter enters as its window mean."""
     members = []
     for path in files:
         ds = xarray.load_dataset(path)
@@ -513,23 +485,10 @@ def _parameter_correlation(
                 axis=1,
             )
         )
-    stacked = np.stack(members)  # (window, ensemble, parameter)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        correlation = np.stack(
-            [np.atleast_2d(np.corrcoef(m, rowvar=False)) for m in stacked]
-        )
-    window = np.arange(len(files))
-    return (
-        xarray.DataArray(
-            stacked,
-            dims=("window", "ensemble", "parameter"),
-            coords={"window": window, "parameter": names},
-        ),
-        xarray.DataArray(
-            correlation,
-            dims=("window", "parameter", "parameter_j"),
-            coords={"window": window, "parameter": names, "parameter_j": names},
-        ),
+    return xarray.DataArray(
+        np.stack(members),
+        dims=("window", "ensemble", "parameter"),
+        coords={"window": np.arange(len(files)), "parameter": names},
     )
 
 
@@ -580,29 +539,6 @@ def _sgs_health(files: list[pathlib.Path]) -> dict[str, list[float | None]]:
     return out
 
 
-def _parameter_metrics(
-    posterior: xarray.Dataset,
-    truth: xarray.Dataset,
-    prior: xarray.Dataset,
-    num_windows: int,
-) -> dict:
-    """RMSE and CRPS per parameter, posterior and prior, and the reduction."""
-    out = {}
-    for name, m in compute_parameter_metrics(posterior, truth, prior).items():
-        entry: dict[str, object] = {
-            "rmse": _with_per_window(m["rmse"], num_windows),
-            "crps": _with_per_window(m["crps"], num_windows),
-        }
-        for score in ("rmse", "crps"):
-            if f"prior_{score}" in m:
-                post = float(np.nanmean(m[score]))
-                pri = float(np.nanmean(m[f"prior_{score}"]))
-                entry[f"prior_{score}_mean"] = pri
-                entry[f"{score}_reduction_vs_prior"] = 1 - post / pri if pri else None
-        out[name] = entry
-    return out
-
-
 def _read_ensemble(
     ds: xarray.Dataset,
     sets: dict,
@@ -615,11 +551,9 @@ def _read_ensemble(
     `ds` is `(ensemble, time, ...)` on the run's global time axis. Given the
     global `times` of another source of the same window (the posterior's), only
     the frames at those times are read. Returns the series per sensor set and
-    a Dataset of: `stat_<q>` (z, y, x), the ensemble mean of each member's
-    field statistics on the cell centres (`field_statistics`; never the
-    statistics of the mean field); `profile` (ensemble, profile_quantity, z), each
-    member's canopy profiles; `spectrum` (ensemble, component, group, k), each
-    member's spanwise spectra on the native grids.
+    the members' `member_field_reductions`: the statistics averaged (never the
+    statistics of the mean field), the profiles and spectra stacked on
+    `ensemble`.
     """
     if times is not None:
         frames = np.abs(ds.time.values[None, :] - times[:, None]).argmin(axis=1)
@@ -627,289 +561,27 @@ def _read_ensemble(
         ds = ds.isel(time=frames)
     n_members = ds.sizes["ensemble"]
     series: dict[str, list] = {name: [] for name in sets}
-    totals: dict[str, xarray.DataArray] = {}
-    profiles, spectra = [], []
+    total, profiles, spectra = None, [], []
     for m in range(n_members):
         member = ds[["u", "v", "w"]].isel(ensemble=slice(m, m + 1)).load()
         for name, points in sets.items():
             series[name].append(sensor_series(member, points, solver_name))
-        stats, profile, k, dy, spectrum = _member_reductions(
+        reduced = member_field_reductions(
             member.isel(ensemble=0), solver_name, stl_path
         )
-        totals = {q: totals[q] + s if totals else s for q, s in stats.items()}
-        profiles.append(profile)
-        spectra.append(spectrum)
-    reduced = xarray.Dataset(
-        {
-            **{f"stat_{q}": total / n_members for q, total in totals.items()},
-            "profile": (("ensemble", "profile_quantity", "z"), np.stack(profiles)),
-            "spectrum": (("ensemble", "component", "group", "k"), np.stack(spectra)),
-        },
-        coords={
-            "profile_quantity": list(PROFILE_QUANTITIES),
-            "component": ["u", "v", "w"],
-            "group": list(SPECTRUM_GROUPS),
-            "k": k,
-        },
-        attrs={"dy": dy},
+        total = reduced if total is None else total + reduced
+        profiles.append(reduced.profile)
+        spectra.append(reduced.spectrum)
+    assert total is not None
+    mean = (total / n_members).assign(
+        profile=xarray.concat(profiles, dim="ensemble"),
+        spectrum=xarray.concat(spectra, dim="ensemble"),
     )
+    mean.attrs = reduced.attrs
     return (
         {name: xarray.concat(parts, dim="ensemble") for name, parts in series.items()},
-        reduced,
+        mean,
     )
-
-
-def _member_reductions(
-    member: xarray.Dataset, solver_name: str, stl_path: pathlib.Path
-) -> tuple[dict[str, xarray.DataArray], np.ndarray, np.ndarray, float, np.ndarray]:
-    """One member's field statistics `(z, y, x)` on the cell centres, its canopy
-    profiles `(quantity, z)` and its spanwise spectra `(component, group, k)`
-    on each component's native grid (interpolation would low-pass them), with
-    the wavenumbers `k` and the spanwise spacing `dy`."""
-    centred = colocate_components(member, solver_name)
-    coords = {d: centred[0][c].values for d, c in zip("zyx", centred[0].dims[-3:])}
-    stats = {
-        q: xarray.DataArray(values, dims=("z", "y", "x"), coords=coords)
-        for q, values in field_statistics(*(c.values for c in centred)).items()
-    }
-    fluid = _fluid_cells(stl_path, list(coords.values()), dilated=True)
-    profile = np.stack([intrinsic_profile(stats[q], fluid) for q in PROFILE_QUANTITIES])
-    spectra = []
-    for component in ("u", "v", "w"):
-        field = member[component]
-        native = [field[d].values for d in field.dims[-3:]]
-        dy = float(native[1][1] - native[1][0])
-        k, groups = spanwise_spectra(
-            field.values, _fluid_cells(stl_path, native, dilated=False), dy
-        )
-        spectra.append(
-            [
-                np.full(k.size, np.nan) if groups[g] is None else groups[g]
-                for g in SPECTRUM_GROUPS
-            ]
-        )
-    return stats, profile, k, dy, np.array(spectra)
-
-
-def _fluid_cells(
-    stl_path: pathlib.Path, coords: list[np.ndarray], dilated: bool
-) -> np.ndarray:
-    """The fluid cells of a `(z, y, x)` grid, once per grid: `fluid_mask` (dilated,
-    for colocated statistics) or the plain complement of the solid mask."""
-    return _fluid_cells_cached(
-        stl_path, *(tuple(np.asarray(c, dtype=float).tolist()) for c in coords), dilated
-    )
-
-
-@functools.cache
-def _fluid_cells_cached(
-    stl_path: pathlib.Path, z: tuple, y: tuple, x: tuple, dilated: bool
-) -> np.ndarray:
-    coords = (np.array(z), np.array(y), np.array(x))
-    if dilated:
-        return fluid_mask(stl_path, *coords)
-    return ~stl_solid_mask(stl_path, *coords)
-
-
-def _on_axis(da: xarray.DataArray, dim: str, values: np.ndarray) -> xarray.DataArray:
-    """`da` at `values` along `dim`: as it is when it is already there, else
-    linearly interpolated (NaN outside its range)."""
-    if da.sizes[dim] == len(values) and np.allclose(da[dim], values):
-        return da.assign_coords({dim: values})
-    return da.interp({dim: values})
-
-
-def _score_fields(
-    reduced: dict[str, xarray.Dataset], stl_path: pathlib.Path
-) -> dict[str, xarray.Dataset]:
-    """One window's field reductions per source, on the posterior's grid.
-
-    The truth's (and the replica's) statistics are interpolated onto the
-    posterior's cell centres and their profiles recomputed there; every
-    spectrum is put on the posterior's wavenumbers. Returns per source its
-    `profile` (ensemble, profile_quantity, z) and `spectrum` (ensemble, component,
-    group, k) and, but for the truth, the `rmse` (statistic) and per-level
-    `level_rmse` (statistic, z) of its statistics against the truth's. The
-    posterior's carries `dy` and the `building_height` range as attributes.
-    """
-    grid = reduced["posterior"]
-    centres = [grid[d].values for d in "zyx"]
-    fluid = _fluid_cells(stl_path, centres, dilated=True)
-    statistics = [str(v).removeprefix("stat_") for v in grid.data_vars if "stat_" in v]
-    stats = {
-        kind: {q: on_grid(ds[f"stat_{q}"], grid[f"stat_{q}"]) for q in statistics}
-        for kind, ds in reduced.items()
-    }
-    out = {}
-    for kind, ds in reduced.items():
-        profile = ds.profile
-        if kind in ON_TRUTH_GRID:
-            profile = xarray.DataArray(
-                [
-                    [
-                        intrinsic_profile(stats[kind][q], fluid)
-                        for q in PROFILE_QUANTITIES
-                    ]
-                ],
-                dims=profile.dims,
-                coords={"profile_quantity": profile.profile_quantity, "z": grid.z},
-            )
-        scored = xarray.Dataset(
-            {"profile": profile, "spectrum": _on_axis(ds.spectrum, "k", grid.k.values)}
-        )
-        if kind != "truth":
-            errors = [
-                field_rmse(stats[kind][q], stats["truth"][q], fluid) for q in statistics
-            ]
-            scored["rmse"] = ("statistic", [e[0] for e in errors])
-            scored["level_rmse"] = (("statistic", "z"), [e[1] for e in errors])
-            scored = scored.assign_coords(statistic=statistics)
-        out[kind] = scored
-
-    solid = ~_fluid_cells(stl_path, centres, dilated=False)
-    z = centres[0][:, None, None]
-    tops = np.where(solid, z, -np.inf).max(axis=0)[solid.any(axis=0)]
-    out["posterior"].attrs = {
-        "dy": grid.attrs["dy"],
-        "building_height": [tops.min(), tops.max()] if tops.size else [np.nan] * 2,
-    }
-    return out
-
-
-def _field_metrics(fields: list[dict[str, xarray.Dataset]]) -> dict:
-    """The field_statistics, canopy_profiles and spectra blocks from the
-    per-window `_score_fields`, and the `profile_<source>`,
-    `spectrum_<source>`, `spectrum_dy` and `building_height` arrays for
-    diagnostics.nc (the truth's and replica's without an ensemble dim)."""
-    num_windows = len(fields)
-    by_kind = {
-        kind: xarray.concat([f[kind] for f in fields], dim="window", join="override")
-        for kind in fields[0]
-    }
-    truth = by_kind["truth"].isel(ensemble=0)
-    first = fields[0]["posterior"]
-    k, dy = first.k.values, float(first.attrs["dy"])
-    blocks: dict = {
-        "field_statistics": {"z": first.z.values.tolist()},
-        "canopy_profiles": {},
-        "spectra": {},
-    }
-    with warnings.catch_warnings():  # a level or band with nothing in it is null
-        warnings.simplefilter("ignore", RuntimeWarning)
-        for kind, ds in by_kind.items():
-            if kind == "truth":
-                continue
-            for q in ds.statistic.values:
-                level = np.sqrt((ds.level_rmse.sel(statistic=q) ** 2).mean("window"))
-                blocks["field_statistics"].setdefault(str(q), {})[kind] = {
-                    "rmse": _with_per_window(ds.rmse.sel(statistic=q), num_windows),
-                    "level_rmse": [_finite(v) for v in level.values],
-                }
-            error = ds.profile.mean("ensemble") - truth.profile
-            profile_rmse = np.sqrt((error**2).mean("z"))
-            for q in PROFILE_QUANTITIES:
-                blocks["canopy_profiles"].setdefault(q, {})[kind] = {
-                    "profile_rmse": _with_per_window(
-                        profile_rmse.sel(profile_quantity=q), num_windows
-                    )
-                }
-            median = median_spectrum(ds.spectrum.transpose("ensemble", ...).values)
-            scores = band_energy_ratio(k, median, truth.spectrum.values, dy)
-            scores["log_spectral_distance"] = log_spectral_distance(
-                truth.spectrum.values, median
-            )
-            for c, component in enumerate(ds.component.values):
-                for g, group in enumerate(ds.group.values):
-                    blocks["spectra"].setdefault(str(component), {}).setdefault(
-                        str(group), {}
-                    )[kind] = {
-                        name: _with_per_window(values[:, c, g], num_windows)
-                        for name, values in scores.items()
-                    }
-    for group in SPECTRUM_GROUPS:
-        if by_kind["posterior"].spectrum.sel(group=group).isnull().all():
-            print(f"No fully fluid {group} lines along y: no {group} spectra")
-
-    diagnostics = {
-        "spectrum_dy": xarray.DataArray(dy),
-        "building_height": xarray.DataArray(
-            fields[-1]["posterior"].attrs["building_height"], dims="bound"
-        ),
-    }
-    for kind, ds in by_kind.items():
-        if kind in ON_TRUTH_GRID:
-            ds = ds.isel(ensemble=0)
-        diagnostics[f"profile_{kind}"] = ds.profile
-        diagnostics[f"spectrum_{kind}"] = ds.spectrum
-    return {**blocks, "diagnostics": diagnostics}
-
-
-def _sensor_distributions(
-    series: dict[str, list[xarray.DataArray]], tolerance: float, num_windows: int
-) -> tuple[dict, dict[str, xarray.DataArray]]:
-    """The sensor_distributions block of one sensor set, and its figure arrays.
-
-    `series` maps each source to its per-window `(component, ensemble, time,
-    sensor)` series. Every source is sampled on the posterior's time stamps
-    (frames x sensors x members). Per quantity and window, `distribution_scores`
-    of each prediction against the truth, and of the truth's first half-window
-    against its second (`truth_halves`, a floor that assumes stationarity).
-    The figure arrays are the densities on shared bins and the quantiles of
-    each source, pooled over sensors, windows and members.
-    """
-    samples: dict[str, list[np.ndarray]] = {}  # (quantity, ensemble, time, sensor)
-    for kind, windows in series.items():
-        for w, s in enumerate(windows):
-            times = series["posterior"][w].time
-            s = s.sel(time=times, method="nearest", tolerance=tolerance)
-            samples.setdefault(kind, []).append(
-                quantity_series(s)
-                .transpose("quantity", "ensemble", "time", "sensor")
-                .values
-            )
-
-    block: dict = {}
-    edges, densities, quantiles = [], [], []
-    for i, quantity in enumerate(QUANTITIES):
-        truth = [t[i, 0] for t in samples["truth"]]  # (time, sensor) per window
-        scored = {
-            kind: [distribution_scores(t, s[w][i]) for w, t in enumerate(truth)]
-            for kind, s in samples.items()
-            if kind != "truth"
-        }
-        scored["truth_halves"] = [
-            distribution_scores(t[: len(t) // 2], t[len(t) // 2 :][None]) for t in truth
-        ]
-        block[quantity] = {
-            kind: {
-                key: _with_per_window(np.array([v[key] for v in values]), num_windows)
-                for key in values[0]
-            }
-            for kind, values in scored.items()
-        }
-        e, d, q = shared_histograms(
-            {
-                kind: np.concatenate([s[i].ravel() for s in s_w])
-                for kind, s_w in samples.items()
-            }
-        )
-        edges.append(e)
-        densities.append(list(d.values()))
-        quantiles.append(list(q.values()))
-    coords = {"quantity": list(QUANTITIES), "source": list(samples)}
-    return block, {
-        "sensor_bin_edges": xarray.DataArray(
-            np.array(edges),
-            dims=("quantity", "edge"),
-            coords={"quantity": list(QUANTITIES)},
-        ),
-        "sensor_density": xarray.DataArray(
-            np.array(densities), dims=("quantity", "source", "bin"), coords=coords
-        ),
-        "sensor_quantiles": xarray.DataArray(
-            np.array(quantiles), dims=("quantity", "source", "level"), coords=coords
-        ),
-    }
 
 
 def main() -> None:
