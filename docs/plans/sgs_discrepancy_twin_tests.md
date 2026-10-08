@@ -30,6 +30,11 @@ most likely way to misread the results:
    posterior spread?
 3. **Benefit:** does estimating SGS improve predictions at held-out sensors and
    in the next window's forecast, compared with estimating inflow alone?
+   This is the question that decides whether the SGS terms are worth keeping.
+   Estimating `b` is only worth it if T3 beats T2 (inflow only, `b = 0`) by
+   more than the noise floor on the scores. If T2 does just as well, the
+   answer is "no added value", even when T1/T3 recover `b`. Report that
+   plainly; it is a likely and useful outcome.
 
 A negative or inconclusive result is a valid outcome. Report it as such. Do not
 tune until something passes.
@@ -308,6 +313,24 @@ profiles, sensor distributions (W2) and spectra. A difference counts only if it
 is clearly larger than the gap between the replica and the truth. With 1–3
 seeds this is evidence, not a statistical claim. Say so in the report.
 
+**Value of the SGS terms (T3 vs T2).** Independently of the pass/fail above,
+give a verdict on whether estimating `b` adds value over not estimating it:
+
+- **Adds value:** T3 is better than T2 on the held-out scores (posterior and
+  window-1/2 forecasts), by more than the replica floor and consistently
+  across seeds.
+- **No added value:** T3 and T2 are within the floor or the seed spread of
+  each other. Inflow-only estimation does just as well, so the SGS terms are
+  not worth their cost here.
+- **Hurts:** T2 is better. Check for compensation between `b` and the inflow
+  parameters in the posterior correlations.
+
+Make a small table per score (validation-sensor `sensor_statistics` CRPS, W2,
+field-statistic and canopy-profile RMSE, near-cutoff band ratio): T2, T3, their
+difference, the replica floor and the seed spread. Recovery of `b` (T1/T3) and
+value are separate: a recovered `b` with no gain on the scores means the
+correction is identifiable but its effect is too small to matter.
+
 ## Deliverables
 
 On the branch `exp/sgs-twin-tests` (never main), commit
@@ -318,6 +341,8 @@ On the branch `exp/sgs-twin-tests` (never main), commit
 - A per-run parameter table (truth / prior / posterior mean ± std / verdict)
   and the sensor and forecast scores.
 - Failures, and anything that surprised you.
+- The T3-vs-T2 value table and its verdict (adds value / no added value /
+  hurts).
 - A one-paragraph verdict on execution, recovery and benefit.
 
 Commit compact figures only if they are small. Push the branch; do not open a
@@ -380,6 +405,10 @@ held-out statistics above (validation sensors and the forecasts after
 assimilation stops). Use the same ≥10% threshold as Round 1. The improvement
 must be clearly larger than the PALM-replica floor, and calibration must not
 get worse. The coefficients must also be stable across seeds and windows.
+Give the same value verdict as in Round 1 (adds value / no added value /
+hurts), for T3 against T2 and against the `sgs_constant` baseline. This is the
+round where "no added value" matters most: it would mean inflow estimation
+(or one closure constant) is enough to match PALM.
 
 **Setup:**
 
