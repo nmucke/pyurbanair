@@ -1530,7 +1530,9 @@ dominated by the NetCDF chunk layout the data was written with. With
 `prechunk.output_root` set, `train.py` first writes (or validates) a lossless
 re-chunked copy of every `state/<split>/sample_*.nc` there
 ([datasets/rechunk.py](../libs/neural-surrogates/src/neural_surrogates/datasets/rechunk.py):
-time chunk 1, `[16, 64, 64]` spatial chunks, zlib level 1), then trains on it.
+time chunk 1, `prechunk.spatial_chunks` (`[16, 64, 64]` here) spatial chunks,
+zlib level 1), then trains on it. It writes whole output chunks at a time:
+filling a chunk piecemeal recompresses it on every write.
 Only the physical storage changes: every split, frame, value, coordinate and
 attribute is kept, packed values are copied as stored. A manifest of source and
 output file fingerprints makes an interrupted preparation resume, and a changed
@@ -1691,7 +1693,8 @@ geometry settings). The task:
    `TransitionDataset`s;
 2. builds the stepper with `require_ae_state_stats = not
    recompute_normalization`: by default the AE's state stats are kept and only
-   the param stats of the fine-tune split are installed;
+   the param stats of the fine-tune split are installed (computed from the
+   in-memory param tables; the state stats are not streamed);
 3. freezes everything, injects LoRA on `dft.encoder` / `dft.decoder` with the
    `lora:` block (`target_preset: tadpole_encdec`), and unfreezes the
    `trainable_modules` (the NEW modules trained *fully*: `subnetwork`,
@@ -1703,6 +1706,17 @@ geometry settings). The task:
 The stepper's geometry settings (`encode_geometry`, `sdf_features`,
 `geometry_branch`, `size`, `normalize`) must match the AE's: nothing
 cross-checks them beyond the strict encoder/decoder weight load.
+
+**Pre-chunked data (optional).** The same `prechunk` block as the autoencoder
+(§29), but with `spatial_chunks: null`: one chunk per frame and variable,
+since every sample reads two whole domains (`t` and `t+K`). Give it its own
+`output_root`; the autoencoder's crop-sized tiles make each whole-frame read
+many small ones. The copy holds only `state/`, so the task reads the params
+from `dataset.root_dir` (`TransitionDataset(param_root=...)`). On the realistic
+uDALES corpus (BeeGFS, 40-frame source chunks) a frame read measured ~1.4 s
+(decompression-bound) from the source, ~2.5 s (latency-bound) from the
+autoencoder's copy and ~0.55 s with ~0.1 s CPU from whole-frame chunks, at
+about the source's size.
 
 ```bash
 pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_dft \

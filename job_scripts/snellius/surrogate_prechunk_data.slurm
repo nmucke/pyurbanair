@@ -1,5 +1,6 @@
 #!/bin/bash
 #   sbatch job_scripts/snellius/surrogate_prechunk_data.slurm paths.data_dir=<dataset> prechunk.output_root=<copy>
+# For the DFT's whole-frame copy, append --config-name surrogate/train_dft.
 # The copy goes file by file on one core (16 is rome's smallest share).
 # Resubmit the same line to resume.
 #SBATCH --job-name=surrogate_prechunk_data

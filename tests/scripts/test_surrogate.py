@@ -83,6 +83,30 @@ def test_prechunked_training_keeps_the_source_root(
     assert (model_dir / "weights.pt").exists()
 
 
+def test_prechunked_dft_reads_whole_frames_and_source_params(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    ae = trained["train_autoencoder"]
+    prepared = tmp_path / "prechunked"
+    cfg = compose(
+        "surrogate/train_dft",
+        "+test=train_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
+        f"prechunk.output_root={prepared}",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    manifest = json.loads((prepared / ".rechunk-manifest.json").read_text())
+    assert manifest["complete"] and manifest["options"]["spatial_chunks"] is None
+    assert not (prepared / "param").exists()  # params come from the source
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    assert OmegaConf.load(model_dir / "config.yaml").dataset.root_dir == str(
+        training_data
+    )
+    assert (model_dir / "weights.pt").exists()
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)

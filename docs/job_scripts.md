@@ -112,8 +112,10 @@ sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gs
 For another dataset, `surrogate_prechunk_data.slurm paths.data_dir=<dataset>
 prechunk.output_root=<copy>` makes its copy; train with the same two
 overrides. A job cut off at its time limit resumes where it stopped when
-resubmitted. The copy takes about 4 min per 700 MB trajectory (about 35 h, so two
-submissions, for the 520-file corpus). Without the CPU job the GPU job makes
+resubmitted. The copy takes about 1.5 min per 700 MB trajectory (about 13 h
+for the 520-file corpus, the whole-frame one a little longer). The DFT has its own whole-frame copy: append
+`--config-name surrogate/train_dft` (the last one wins) with its own
+`prechunk.output_root`. Without the CPU job the GPU job makes
 the copy itself; with a complete copy it only validates it in seconds, so once
 the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It
 continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is

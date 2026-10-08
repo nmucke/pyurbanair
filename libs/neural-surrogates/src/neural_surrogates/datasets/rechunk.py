@@ -49,7 +49,7 @@ def _save_manifest(root: Path, manifest: dict[str, Any]) -> None:
 
 
 def _chunks(
-    variable: Any, time_chunk: int, spatial_chunks: Sequence[int]
+    variable: Any, time_chunk: int, spatial_chunks: Sequence[int] | None
 ) -> tuple[int, ...] | None:
     if not variable.dimensions:
         return None
@@ -57,7 +57,7 @@ def _chunks(
     non_time = [i for i, name in enumerate(variable.dimensions) if name != "time"]
     # Spatial fields use their final three non-time axes (also staggered grids).
     # Coordinate vectors remain whole; their size is negligible beside fields.
-    if len(non_time) >= 3:
+    if len(non_time) >= 3 and spatial_chunks is not None:
         for axis, size in zip(non_time[-3:], spatial_chunks):
             chunks[axis] = min(chunks[axis], size)
     if "time" in variable.dimensions:
@@ -66,7 +66,9 @@ def _chunks(
     return tuple(chunks)
 
 
-def _blocks(variable: Any, budget: int) -> Iterator[tuple[slice, ...]]:
+def _blocks(
+    variable: Any, budget: int, chunks: Sequence[int]
+) -> Iterator[tuple[slice, ...]]:
     shape = tuple(variable.shape)
     if not shape:
         yield ()
@@ -74,11 +76,18 @@ def _blocks(variable: Any, budget: int) -> Iterator[tuple[slice, ...]]:
     if any(n == 0 for n in shape):
         return
     source_chunks = variable.chunking()
-    block = list(source_chunks if isinstance(source_chunks, list) else shape)
-    block = [min(n, b) for n, b in zip(shape, block)]
+    source = source_chunks if isinstance(source_chunks, list) else shape
+    # Whole output chunks covering a source chunk: a partly written chunk is
+    # recompressed on every later write to it, which dominates the copy time.
+    block = [min(n, -(-s // c) * c) for n, s, c in zip(shape, source, chunks)]
     itemsize = max(1, np.dtype(variable.dtype).itemsize)
     # Allow both the source block and its verification read in the byte budget.
     while math.prod(block) * itemsize * 2 > budget:
+        counts = [-(-b // c) for b, c in zip(block, chunks)]
+        axis = max(range(len(block)), key=lambda i: counts[i])
+        if counts[axis] > 1:  # drop whole output chunks first
+            block[axis] = counts[axis] // 2 * chunks[axis]
+            continue
         axis = max(range(len(block)), key=lambda i: block[i])
         if block[axis] == 1:
             raise ValueError("max_buffer_mb is too small for one variable element")
@@ -100,7 +109,7 @@ def _copy_file(
     destination: Path,
     *,
     time_chunk: int,
-    spatial_chunks: Sequence[int],
+    spatial_chunks: Sequence[int] | None,
     compression_level: int,
     max_buffer_mb: float,
 ) -> int:
@@ -152,7 +161,7 @@ def _copy_file(
                             nelems=1009,
                             preemption=0.75,
                         )
-                for slab in _blocks(variable, budget):
+                for slab in _blocks(variable, budget, chunks or ()):
                     values = np.asarray(variable[slab])
                     copied[slab] = values
                     target.sync()
@@ -173,7 +182,7 @@ def prepare_rechunked_dataset(
     output_root: str | Path,
     *,
     time_chunk: int = 1,
-    spatial_chunks: Sequence[int] = (16, 64, 64),
+    spatial_chunks: Sequence[int] | None = (16, 64, 64),
     compression_level: int = 1,
     max_buffer_mb: float = 64,
 ) -> Path:
@@ -181,7 +190,9 @@ def prepare_rechunked_dataset(
 
     All splits, frames, cells, coordinates and encoded values are retained;
     only physical NetCDF storage changes. The existing SnapshotDataset can read
-    this root without any indexing or crop-sampling changes. Non-state files
+    this root without any indexing or crop-sampling changes.
+    ``spatial_chunks=None`` keeps each frame whole (one chunk per frame and
+    variable), for models that read entire domains. Non-state files
     (parameters, model artifacts, etc.) are outside this autoencoder cache.
 
     Preparation streams bounded blocks and verifies every copied value. A
@@ -196,11 +207,14 @@ def prepare_rechunked_dataset(
         raise ValueError("Source and rechunk output directories must not overlap")
     if isinstance(time_chunk, bool) or int(time_chunk) != time_chunk or time_chunk < 1:
         raise ValueError("time_chunk must be a positive integer")
-    spatial_chunks = tuple(spatial_chunks)
-    if len(spatial_chunks) != 3 or any(
-        isinstance(n, bool) or int(n) != n or n < 1 for n in spatial_chunks
-    ):
-        raise ValueError("spatial_chunks must contain three positive integers")
+    if spatial_chunks is not None:
+        spatial_chunks = tuple(spatial_chunks)
+        if len(spatial_chunks) != 3 or any(
+            isinstance(n, bool) or int(n) != n or n < 1 for n in spatial_chunks
+        ):
+            raise ValueError(
+                "spatial_chunks must be None or contain three positive integers"
+            )
     if (
         isinstance(compression_level, bool)
         or int(compression_level) != compression_level
@@ -211,7 +225,9 @@ def prepare_rechunked_dataset(
         raise ValueError("max_buffer_mb must be positive and finite")
     options: dict[str, Any] = {
         "time_chunk": int(time_chunk),
-        "spatial_chunks": [int(n) for n in spatial_chunks],
+        "spatial_chunks": (
+            None if spatial_chunks is None else [int(n) for n in spatial_chunks]
+        ),
         "compression_level": int(compression_level),
     }
     sources = _inventory(source)

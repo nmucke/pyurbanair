@@ -1,5 +1,6 @@
 #!/bin/bash
 #   sbatch job_scripts/delftblue/surrogate_prechunk_data.slurm paths.data_dir=<dataset> prechunk.output_root=<copy>
+# For the DFT's whole-frame copy, append --config-name surrogate/train_dft.
 # One core: the copy goes file by file. Resubmit the same line to resume.
 #SBATCH --job-name=surrogate_prechunk_data
 #SBATCH --partition=compute-p2
