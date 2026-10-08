@@ -67,7 +67,9 @@ def _stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
 
 
 def _autoencoder(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
-    train, val = _datasets(cfg)
+    # A prechunked copy is only read: config.yaml keeps the source root_dir.
+    root = prechunked_root(cfg)
+    train, val = _datasets(cfg) if root is None else _datasets(cfg, root_dir=root)
     model = instantiate(cfg.architecture, n_state_channels=len(train.state_vars))
     model.set_normalization(*get_normalization_stats(train))
     weights = cfg.loss_weights
@@ -98,16 +100,43 @@ def _autoencoder(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
         )
 
     def export_encoder_decoder(trainer: Any) -> None:
-        # Separate files the latent generator and the DFT stepper load.
-        model.ae.save_separate_weights(
-            str(out_dir / "encoder.pt"), str(out_dir / "decoder.pt")
-        )
-        if getattr(model, "geometry_branch", None) is not None:
-            torch.save(
-                model.geometry_branch.state_dict(), out_dir / "geometry_branch.pt"
-            )
+        # Separate files the latent generator and the DFT stepper load, cut
+        # from weights.pt so they always hold the same (best) weights.
+        if not (out_dir / "weights.pt").exists():
+            return  # no finite validation loss yet, so no best weights
+        state = torch.load(out_dir / "weights.pt", map_location="cpu")
+        for prefix, file in [
+            ("ae.encoder.", "encoder.pt"),
+            ("ae.decoder.", "decoder.pt"),
+            ("geometry_branch.", "geometry_branch.pt"),
+        ]:
+            part = {
+                k[len(prefix) :]: v for k, v in state.items() if k.startswith(prefix)
+            }
+            if part:
+                torch.save(part, out_dir / file)
 
-    return Setup(model, train, val, kwargs, after_fit=export_encoder_decoder)
+    def export_with_best_weights(trainer: Any) -> None:
+        # Re-export whenever new best weights are written, so a run killed at
+        # the time limit still leaves them for the latent generator and DFT.
+        # A resumed run first re-cuts them from the best weights on disk.
+        export_encoder_decoder(trainer)
+        write_best_val = trainer._write_best_val
+
+        def write_and_export(best_val: float) -> None:
+            write_best_val(best_val)
+            export_encoder_decoder(trainer)
+
+        trainer._write_best_val = write_and_export
+
+    return Setup(
+        model,
+        train,
+        val,
+        kwargs,
+        before_fit=export_with_best_weights,
+        after_fit=export_encoder_decoder,
+    )
 
 
 def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
@@ -224,12 +253,23 @@ TASKS: dict[str, Callable[[DictConfig, pathlib.Path], Setup]] = {
 # ---------------------------------------------------------------------------
 
 
-def _datasets(cfg: DictConfig) -> tuple[Any, Any]:
+def _datasets(cfg: DictConfig, **overrides: Any) -> tuple[Any, Any]:
     dtype = getattr(torch, cfg.dataset.dtype)
     return (
-        instantiate(cfg.dataset, split="train", dtype=dtype),
-        instantiate(cfg.dataset, split="val", dtype=dtype),
+        instantiate(cfg.dataset, split="train", dtype=dtype, **overrides),
+        instantiate(cfg.dataset, split="val", dtype=dtype, **overrides),
     )
+
+
+def prechunked_root(cfg: DictConfig) -> str | None:
+    """The re-chunked copy of `dataset.root_dir` (`prechunk` block), made or
+    validated first; None without one."""
+    prechunk = cfg.get("prechunk")
+    if prechunk is None or prechunk.output_root is None:
+        return None
+    from neural_surrogates.datasets.rechunk import prepare_rechunked_dataset
+
+    return str(prepare_rechunked_dataset(cfg.dataset.root_dir, prechunk.output_root))
 
 
 def _build_stepper(cfg: DictConfig, train: Any) -> Any:

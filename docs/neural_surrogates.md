@@ -1336,7 +1336,7 @@ normalization and attention depend on the region being processed. In particular,
 larger halos should be evaluated on seam errors and rollout quality rather than
 assumed equivalent to global processing. `max_internal_batchsize` limits the
 encoder/decoder batch, not the full-grid latent transform or all saved training
-activations.
+activations; in local mode `encode(...)` honours it too.
 
 For example, set these in `train_autoencoder.yaml` or `train_dft.yaml`:
 
@@ -1371,7 +1371,13 @@ snapshots to decorrelate them; `random_crop_size` returns a random spatial crop
 per item (the paper's intermediate pre-cropping — more crop diversity, smaller
 batches; default `null` = full field). `snapshot_collate` ships a shared
 geometry once as `(1, *grid)` (the full-field fast path) and falls back to
-stacking per-sample geometry when random-cropping.
+stacking per-sample geometry when random-cropping. Each loader worker keeps
+**one** trajectory's NetCDF file open: it is reused within a trajectory batch
+and closed when the next batch switches trajectory. netCDF4 keeps a chunk cache
+per open variable (64 MiB each for u/v/w on the realistic corpus), so keeping
+every visited file open, as shuffled multi-geometry batches would, exhausts
+worker RAM mid-epoch. Hence `cache: true` only keeps the current trajectory in
+memory here, not the whole split.
 
 ### 28. `AutoencoderTrainer` — the (V)AE loss
 
@@ -1499,7 +1505,11 @@ handoff to the DFT stepper and the latent generator), and `config.yaml` /
 `checkpoint.pt` / `metrics.csv` as usual. In geometry-branch mode one more
 file sits next to them — `geometry_branch.pt`, a plain `state_dict` of the
 branch (the encoder/decoder projections it feeds already travel inside
-`encoder.pt`/`decoder.pt`); `TadpoleTimeStepper` loads it (§31).
+`encoder.pt`/`decoder.pt`); `TadpoleTimeStepper` loads it (§31). These
+exports are cut from `weights.pt` at the start of each run that already has
+one, every time the trainer saves new best weights, and once more after training, so they always match
+`weights.pt`, also when a job is killed at its time limit. Resubmitting the
+same command resumes from `checkpoint.pt`; `num_epochs` is the total.
 
 **Batching.** `training.yaml` ships the `TrajectoryBatchSampler` (§6), which
 replaces `dataloader.batch_size` / `shuffle` / `drop_last` (set the batch size
@@ -1508,9 +1518,29 @@ multi-geometry corpora) and caps it at `max(1, cell_budget // cells)` cells:
 on large grids that silently drops the batch to 1, so size `cell_budget`
 from a known-good run (`batch_size * cells_per_sample`).
 `train_autoencoder.yaml` sets `batch_size: 8`, `cell_budget: 393216` and
-`random_crop_size: 64`. Choose each `encoder_crop_size` entry as a multiple of
+`random_crop_size: 64`. `cell_budget` counts each trajectory's **full** grid,
+not the random crop the dataset returns, so it does not bound crop memory: for
+crop training on large grids set `cell_budget: null` and tune `batch_size`
+directly. Choose each `encoder_crop_size` entry as a multiple of
 16 that divides the crop (or grid) along that axis: non-divisible axes are
 zero-padded every forward, which wastes compute and inflates the logged `kl`.
+
+**Pre-chunked data (optional).** Snapshot reads of a realistic corpus are
+dominated by the NetCDF chunk layout the data was written with. With
+`prechunk.output_root` set, `train.py` first writes (or validates) a lossless
+re-chunked copy of every `state/<split>/sample_*.nc` there
+([datasets/rechunk.py](../libs/neural-surrogates/src/neural_surrogates/datasets/rechunk.py):
+time chunk 1, `[16, 64, 64]` spatial chunks, zlib level 1), then trains on it.
+Only the physical storage changes: every split, frame, value, coordinate and
+attribute is kept, packed values are copied as stored. A manifest of source and
+output file fingerprints makes an interrupted preparation resume, and a changed
+source or option fails rather than mixing data (pick a new directory to
+rebuild); a lock stops two writers. `config.yaml` keeps the source
+`dataset.root_dir`, while the normalization stats are cached under the copy.
+`prechunk.prepare_only=true` makes the copy and exits without building a model,
+so it can run as a CPU job before the GPU one
+(`job_scripts/<machine>/surrogate_prechunk_data.slurm`, see
+[job_scripts.md](job_scripts.md)).
 
 ### 30. File map
 
@@ -1521,10 +1551,11 @@ zero-padded every forward, which wastes compute and inflates the logged `kl`.
 | `GeometryBranch` | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
 | Vendored autoencoder subtree | [architectures/_tadpole/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/) |
 | `SnapshotDataset` / `snapshot_collate` | [datasets/snapshot.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot.py) |
+| Lossless re-chunked copy (`prechunk`) | [datasets/rechunk.py](../libs/neural-surrogates/src/neural_surrogates/datasets/rechunk.py) |
 | `AutoencoderTrainer` | [training/autoencoder.py](../libs/neural-surrogates/src/neural_surrogates/training/autoencoder.py) |
 | Config | [configs/surrogate/train_autoencoder.yaml](../configs/surrogate/train_autoencoder.yaml) |
 | Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: autoencoder`) |
-| Tests | [test_autoencoder_pretraining.py](../tests/neural_surrogates/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/neural_surrogates/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/neural_surrogates/test_autoencoder_adversarial.py), [test_tadpole_geometry_branch.py](../tests/neural_surrogates/test_tadpole_geometry_branch.py) |
+| Tests | [test_autoencoder_pretraining.py](../tests/neural_surrogates/test_autoencoder_pretraining.py), [test_tadpole_discriminator.py](../tests/neural_surrogates/test_tadpole_discriminator.py), [test_autoencoder_adversarial.py](../tests/neural_surrogates/test_autoencoder_adversarial.py), [test_tadpole_geometry_branch.py](../tests/neural_surrogates/test_tadpole_geometry_branch.py), [test_snapshot_rechunking.py](../tests/neural_surrogates/test_snapshot_rechunking.py) |
 
 ---
 

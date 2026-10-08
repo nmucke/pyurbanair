@@ -16,6 +16,10 @@ Outputs, in `autoencoder.output_dir`:
                              (one figure per snapshot)
   per_channel_metrics.png    RMSE and relative L2 per variable
   height_profile.png         |U| RMSE against normalised height
+  vertical_profiles_<nz>x<ny>x<nx>.png
+                             per grid shape: mean and fluctuation RMS of each
+                             variable and |U| per z level, truth and
+                             reconstruction
   error_hist.png             histogram of the |U| error
   pred_vs_true.png           reconstructed against true |U|
   latent_stats.png           KL per snapshot and spread per latent channel
@@ -56,7 +60,10 @@ def run(cfg: DictConfig) -> None:
     dev = device(cfg.device)
     out = pathlib.Path(ev.output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    model, train_cfg = load_model(ev.model_dir, dev)
+    arch: dict[str, Any] = {}
+    if ev.max_internal_batchsize is not None:
+        arch["max_internal_batchsize"] = int(ev.max_internal_batchsize)
+    model, train_cfg = load_model(ev.model_dir, dev, **arch)
     model.ae.latent_type = str(ev.latent_type)
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split, random_crop_size=None)
     names = list(data.state_vars)
@@ -86,9 +93,13 @@ def run(cfg: DictConfig) -> None:
         by_traj.setdefault(pairs[i][0], []).append(pairs[i][1])
 
     acc = _Metrics(len(names), rng)
+    profiles: dict[tuple[int, ...], _Profiles] = {}
     kl, latent_std = [], []
     for traj, times in by_traj.items():
         fluid = data.geometry_for(traj).numpy().astype(bool)
+        profile = profiles.setdefault(
+            fluid.shape, _Profiles(fluid.shape[0], len(names))
+        )
         for start in range(0, len(times), int(ev.batch_size)):
             truth = load_states(data, traj, times[start : start + int(ev.batch_size)])
             recon, batch_kl, latent = _reconstruct(model, data, traj, truth, dev)
@@ -98,6 +109,7 @@ def run(cfg: DictConfig) -> None:
             )
             for true_state, recon_state in zip(truth, recon):
                 acc.add(true_state, recon_state, fluid)
+                profile.add(true_state, recon_state, fluid)
 
     summary = acc.summary(names)
     spread = np.mean(latent_std, axis=0)
@@ -110,6 +122,11 @@ def run(cfg: DictConfig) -> None:
     write_json(summary, out / "metrics.json")
     _plot_per_channel(summary, names, out / "per_channel_metrics.png")
     _plot_height_profile(acc, out / "height_profile.png")
+    for shape, profile in profiles.items():
+        grid = "x".join(map(str, shape))
+        _plot_vertical_profiles(
+            profile, names + ["|U|"], out / f"vertical_profiles_{grid}.png"
+        )
     _plot_error_hist(acc, out / "error_hist.png")
     _plot_pred_vs_true(acc, out / "pred_vs_true.png")
     _plot_latent_stats(kl, spread, out / "latent_stats.png")
@@ -211,6 +228,33 @@ class _Metrics:
         }
 
 
+class _Profiles:
+    """Per-level sums over the fluid cells of one grid shape, of each variable
+    and |U|: [0] truth, [1] reconstruction."""
+
+    def __init__(self, nz: int, n_vars: int) -> None:
+        self.count = np.zeros(nz)
+        self.sum = np.zeros((2, n_vars + 1, nz))
+        self.sum2 = np.zeros((2, n_vars + 1, nz))
+        self.snapshots = 0
+
+    def add(self, truth: np.ndarray, recon: np.ndarray, fluid: np.ndarray) -> None:
+        for i, field in enumerate((truth, recon)):
+            field = np.concatenate([field, speed(field)[None]])  # (C + 1, z, y, x)
+            values = np.where(fluid, field, 0.0)
+            self.sum[i] += values.sum(axis=(2, 3))
+            self.sum2[i] += (values**2).sum(axis=(2, 3))
+        self.count += fluid.sum(axis=(1, 2))
+        self.snapshots += 1
+
+    def mean_and_rms(self) -> tuple[np.ndarray, np.ndarray]:
+        """(2, C + 1, z) mean and fluctuation RMS; NaN at all-solid levels."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean = self.sum / self.count
+            rms = np.sqrt(np.maximum(self.sum2 / self.count - mean**2, 0.0))
+        return mean, rms
+
+
 # ---------------------------------------------------------------------------
 # Figures
 # ---------------------------------------------------------------------------
@@ -262,6 +306,31 @@ def _plot_height_profile(acc: _Metrics, path: pathlib.Path) -> None:
     ax.set_xlabel("|U| RMSE [m/s]")
     ax.set_ylabel("normalised height")
     ax.grid(alpha=0.3)
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_vertical_profiles(
+    profile: _Profiles, names: list[str], path: pathlib.Path
+) -> None:
+    mean, rms = profile.mean_and_rms()
+    levels = np.arange(len(profile.count))
+    fig, axes = plt.subplots(
+        2, len(names), figsize=(3 * len(names), 6), sharey=True, squeeze=False
+    )
+    rows = [(mean, "mean"), (rms, "fluctuation RMS")]
+    for c, name in enumerate(names):
+        for row, (values, kind) in enumerate(rows):
+            ax = axes[row, c]
+            ax.plot(values[0, c], levels, "k--", label="truth")
+            ax.plot(values[1, c], levels, color="tab:blue", label="reconstruction")
+            ax.set_title(f"{name} {kind}")
+            ax.grid(alpha=0.3)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("z index")
+    axes[0, 0].legend()
+    fig.suptitle(f"fluid cells, {profile.snapshots} snapshots")
+    fig.tight_layout()
     fig.savefig(path, dpi=110, bbox_inches="tight")
     plt.close(fig)
 

@@ -11,6 +11,7 @@ autoencoder:
   model_dir: ${paths.weights_dir}/autoencoder
   num_figures: 1
   num_metric_samples: 4
+  max_internal_batchsize: 2
 
 latent_generator:
   model_dir: ${paths.weights_dir}/latent_generator
