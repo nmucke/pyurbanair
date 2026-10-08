@@ -6,3 +6,6 @@ name: dft
 pretrained_dir: ${paths.weights_dir}/autoencoder
 dataset:
   pushforward_steps: 1
+# Never the user's copy: a test that wants one passes its own dir.
+prechunk:
+  output_root: null

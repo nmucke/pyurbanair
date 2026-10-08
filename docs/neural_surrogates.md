@@ -2053,7 +2053,8 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
 | `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
-| `latent_stats` | `max_batches: 50` train batches, `seed: 0` |
+| `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
+| `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
 | `physical_metadata` | `units` (one entry per state **and** parameter variable), `coordinate_order: [z, y, x]`, `geometry_mask_convention` (must equal `MASK_CONVENTION`, which deployment checks), `notes` |
 | `trainer` | `LatentFlowMatchingTrainer`, `val_seed: 0`; `amp` wraps the velocity net only |
 | `optimizer` | AdamW, `weight_decay: 1.0e-2`, handed only the velocity-net parameters |
@@ -2069,6 +2070,27 @@ the resolved `ae_kwargs`, `hidden_size` and `mlp_ratio`, plus the resolved
 **before** `fit()`; and, just before fitting, estimates the latent statistics
 on `max_batches` seeded-shuffle train batches through
 `trainer.prepared_batches`.
+
+**Latent cache (optional).** The frozen encoder is deterministic (latent type
+pinned to `mode`, whole frames, no crops), yet without a cache it re-encodes
+every frame at every step in fp32: about 8x the velocity net's FLOPs, plus a
+whole-frame read of the source data. With `latent_cache.output_root` set the
+task first makes (or validates) a cache of the raw latents there
+([datasets/latent_cache.py](../libs/neural-surrogates/src/neural_surrogates/datasets/latent_cache.py)
+`prepare_latent_cache`): per trajectory and split, the raw state latents of
+all frames (float32 `(T, D, Zl, Yl, Xl)`, memory-mapped) and the raw geometry
+conditioning, plus the latent statistics over every saved train frame, which
+replace the `latent_stats` estimate. It reads each trajectory once in source
+time chunks and encodes it one frame at a time through `_encode_raw`, as
+training does. A manifest of the AE fingerprint and `ae_kwargs`, the source
+files and the dataset settings makes an interrupted run resume and refuses a
+changed autoencoder or data (pick a new dir); `LatentCacheDataset` checks the
+sources again when training starts. Training then reads `LatentCacheDataset` items (`latent`, `geom`,
+`params_hist`) and calls `forward_cached`, which is `forward` minus the
+encoder, so the objective is unchanged. `latent_cache.prepare_only=true`
+encodes and exits (`job_scripts/<machine>/surrogate_prepare_latents.slurm`, a
+GPU job, see [job_scripts.md](job_scripts.md)); `config.yaml` keeps the source
+data, so evaluation and deployment still encode from states.
 
 **Artifact layout** (`model_weights/<name>/`): `config.yaml`, `weights.pt`
 (best-val **full** state dict: velocity net + frozen `ae.*` + every buffer),
@@ -2270,6 +2292,7 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Piece | File |
 |---|---|
 | `SnapshotHistoryDataset` / `snapshot_history_collate` | [datasets/snapshot_history.py](../libs/neural-surrogates/src/neural_surrogates/datasets/snapshot_history.py) |
+| Latent cache (`prepare_latent_cache`, `LatentCacheDataset`) | [datasets/latent_cache.py](../libs/neural-surrogates/src/neural_surrogates/datasets/latent_cache.py) |
 | Shared parameter-table reader (`load_param_table`) | [datasets/_params.py](../libs/neural-surrogates/src/neural_surrogates/datasets/_params.py) |
 | `TadpoleLatentGenerator` / `LatentEncoding` | [architectures/tadpole_latent_flow.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_latent_flow.py) |
 | Shared spatial helpers (`encode_spatial` / `decode_spatial`) | [architectures/_tadpole_spatial.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_spatial.py) |
@@ -2286,4 +2309,4 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Deploy config block | [configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml) (`forward_model.generative_spinup`) |
 | `prepare_neural_surrogate` | [src/pyurbanair/config/hydra_helpers.py](../src/pyurbanair/config/hydra_helpers.py) |
 | Plan | [07_latent_flow_matching_spinup.md](plans/implemented/neural_surrogates/07_latent_flow_matching_spinup.md) |
-| Tests | [test_snapshot_history_dataset.py](../tests/neural_surrogates/test_snapshot_history_dataset.py), [test_tadpole_latent_flow.py](../tests/neural_surrogates/test_tadpole_latent_flow.py), [test_latent_generator_training.py](../tests/neural_surrogates/test_latent_generator_training.py), [test_latent_generator_evaluation.py](../tests/neural_surrogates/test_latent_generator_evaluation.py), [test_generative_spinup.py](../tests/neural_surrogates/test_generative_spinup.py), shared fixtures [_latent_generator_fixtures.py](../tests/neural_surrogates/_latent_generator_fixtures.py) |
+| Tests | [test_snapshot_history_dataset.py](../tests/neural_surrogates/test_snapshot_history_dataset.py), [test_tadpole_latent_flow.py](../tests/neural_surrogates/test_tadpole_latent_flow.py), [test_latent_generator_training.py](../tests/neural_surrogates/test_latent_generator_training.py), [test_latent_generator_evaluation.py](../tests/neural_surrogates/test_latent_generator_evaluation.py), [test_generative_spinup.py](../tests/neural_surrogates/test_generative_spinup.py), [test_latent_cache.py](../tests/neural_surrogates/test_latent_cache.py), shared fixtures [_latent_generator_fixtures.py](../tests/neural_surrogates/_latent_generator_fixtures.py) |

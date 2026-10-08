@@ -166,7 +166,7 @@ example overrides are in [`configs/README.md`](../configs/README.md#neural-surro
 | `architectures.yaml` | — | every stepper architecture, `<family>_<size>` (`p3d`, `unet_convnext`, `upt`) |
 | `train_stepper.yaml` | `train.py` | next-step stepper; `'architecture=${architectures.<name>}'` |
 | `train_autoencoder.yaml` | `train.py` | field autoencoder (Tadpole); optional `prechunk` re-chunked data copy |
-| `train_latent_generator.yaml` | `train.py` | flow-matching latent initial-field generator |
+| `train_latent_generator.yaml` | `train.py` | flow-matching latent initial-field generator; optional precomputed `latent_cache` |
 | `train_dft.yaml` | `train.py` | pretrained autoencoder -> stepper (DFT); optional whole-frame `prechunk` copy |
 | `finetune_stepper.yaml` | `train.py` | fine-tune a pretrained stepper, `method: full \| lora` |
 | `eval.yaml` | `evaluate_*.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator` |

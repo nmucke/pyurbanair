@@ -3,6 +3,8 @@
 On CPU smoke shapes via the shared fixtures in ``_latent_generator_fixtures``:
 a shuffling val loader and an empty loader are rejected, the optimizer may not
 hold AE parameters, and training refuses to start without latent statistics.
+A latent-cache batch (raw latents precomputed by the frozen AE) scores the same
+loss as its snapshot batch and trains through ``fit``.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps.
 """
@@ -26,7 +28,7 @@ from neural_surrogates import (
     TrajectoryBatchSampler,
     snapshot_history_collate,
 )
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 
 from tests.neural_surrogates._latent_generator_fixtures import (
     HP,
@@ -130,3 +132,63 @@ def test_trainer_rejects_shuffling_val_loader_and_empty_loaders(tmp_path):
     assert not bool(model.latent_stats_installed)
     with pytest.raises(RuntimeError, match="latent normalisation"):
         trainer.fit()
+
+
+# --------------------------------------------------------------------------- #
+# Latent-cache batches.
+# --------------------------------------------------------------------------- #
+
+
+class _CachedLatents(Dataset):
+    """In-memory latent-cache items (``latent`` / ``geom`` / ``params_hist``)."""
+
+    def __init__(self, items: list[dict[str, torch.Tensor]]) -> None:
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
+        return self.items[i]
+
+
+def _cached_batch(trainer, model, batch) -> dict[str, torch.Tensor]:
+    """The latent-cache form of a snapshot batch (folded-geometry AE)."""
+    state, geometry, features = trainer._prepare_snapshot_batch(batch)
+    z_raw, geom_raw, *_ = model._encode_raw(state, geometry, features)
+    return {"latent": z_raw, "geom": geom_raw, "params_hist": batch["params_hist"]}
+
+
+def _cached_dataset(trainer, model, loader) -> _CachedLatents:
+    items = []
+    for batch in loader:
+        cached = _cached_batch(trainer, model, batch)
+        n = cached["latent"].shape[0]
+        items += [{k: v[i] for k, v in cached.items()} for i in range(n)]
+    return _CachedLatents(items)
+
+
+def test_cached_batch_matches_snapshot_batch_and_fits(tmp_path):
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir)
+    train_ds, val_ds = _dataset(data_dir, "train"), _dataset(data_dir, "val")
+    train, val = _loader(train_ds), _loader(val_ds)
+    trainer = _trainer(model, train, val)
+    model.compute_latent_normalization(trainer.prepared_batches(train))
+
+    batch = next(iter(train))
+    cached = _cached_batch(trainer, model, batch)
+    model.eval()  # as in validation
+    with torch.no_grad():
+        expected = trainer._forward(batch, torch.Generator().manual_seed(1))
+        got = trainer._forward(cached, torch.Generator().manual_seed(1))
+    assert torch.equal(got, expected)
+
+    cached_trainer = _trainer(
+        model,
+        DataLoader(_cached_dataset(trainer, model, train), batch_size=2, shuffle=True),
+        DataLoader(_cached_dataset(trainer, model, val), batch_size=2),
+    )
+    history = cached_trainer.fit()
+    assert len(history["val"]) == 1
+    assert all(torch.isfinite(torch.tensor(v)) for v in history["val"])

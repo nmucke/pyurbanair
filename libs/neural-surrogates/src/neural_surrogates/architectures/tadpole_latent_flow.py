@@ -1025,6 +1025,16 @@ class TadpoleLatentGenerator(nn.Module):
         :meth:`set_conditioning_schema`).
         """
         self._check_conditioning_schema(param_names, history_dt_seconds, "velocity")
+        return self._velocity(z, tau, params_hist, cond.geom_cond)
+
+    def _velocity(
+        self,
+        z: torch.Tensor,
+        tau: torch.Tensor,
+        params_hist: torch.Tensor,
+        geom_cond: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """:meth:`velocity` past the schema check, on the bare ``geom_cond``."""
         if z.dim() != 5 or z.shape[1] != self.state_latent_dim:
             raise ValueError(
                 f"z must be (B, {self.state_latent_dim}, Zl, Yl, Xl), got "
@@ -1034,12 +1044,12 @@ class TadpoleLatentGenerator(nn.Module):
         if tau.dim() != 1 or tau.shape[0] != b:
             raise ValueError(f"tau must be (B={b},), got {tuple(tau.shape)}")
         self._check_params_hist(params_hist, b)
-        if cond.geom_cond is None:
-            raise ValueError("cond.geom_cond is required (geometry conditioning)")
-        if tuple(cond.geom_cond.shape) != (b, self.geom_cond_dim, *z.shape[2:]):
+        if geom_cond is None:
+            raise ValueError("geom_cond is required (geometry conditioning)")
+        if tuple(geom_cond.shape) != (b, self.geom_cond_dim, *z.shape[2:]):
             raise ValueError(
-                f"cond.geom_cond must be (B={b}, G={self.geom_cond_dim}, "
-                f"{tuple(z.shape[2:])}), got {tuple(cond.geom_cond.shape)}"
+                f"geom_cond must be (B={b}, G={self.geom_cond_dim}, "
+                f"{tuple(z.shape[2:])}), got {tuple(geom_cond.shape)}"
             )
         n_tokens = b * int(z.shape[2]) * int(z.shape[3]) * int(z.shape[4])
         if self.max_latent_tokens is not None and n_tokens > self.max_latent_tokens:
@@ -1051,7 +1061,7 @@ class TadpoleLatentGenerator(nn.Module):
                 "the budget after profiling."
             )
         cond_vec = self._conditioning_vector(tau, params_hist)
-        v: torch.Tensor = self.velocity_net(z, cond_vec, geom_cond=cond.geom_cond)
+        v: torch.Tensor = self.velocity_net(z, cond_vec, geom_cond=geom_cond)
         return v
 
     # -- training objective ------------------------------------------------- #
@@ -1073,8 +1083,41 @@ class TadpoleLatentGenerator(nn.Module):
         """
         self._check_params_hist(params_hist, state.shape[0])
         cond = self.encode_latents(state, geometry, geom_features)
-        z1 = cond.z
-        assert z1 is not None
+        assert cond.z is not None
+        return self._flow_matching_draw(cond.z, cond.geom_cond, params_hist, generator)
+
+    def forward_cached(
+        self,
+        z_raw: torch.Tensor,
+        geom: torch.Tensor,
+        params_hist: torch.Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """:meth:`forward` from cached raw latents, skipping the frozen encoder.
+
+        ``z_raw`` is ``_encode_raw``'s raw state latent ``(B, D, Zl, Yl, Xl)``;
+        ``geom`` the raw geometry conditioning: the branch feature (used as-is)
+        or the geometry latent (normalised here, as :meth:`encode_latents`
+        does). Given the same inputs and ``generator`` it equals :meth:`forward`.
+        """
+        self._check_params_hist(params_hist, z_raw.shape[0])
+        self._require_latent_stats("forward_cached")
+        with torch.no_grad(), self._autocast_off(z_raw.device):
+            z = self._normalize_latents(z_raw.to(torch.float32), 0)
+            geom_cond = geom.to(torch.float32)
+            if self.ae.geometry_branch is None:
+                geom_cond = self._normalize_latents(geom_cond, self.state_latent_dim)
+        return self._flow_matching_draw(z, geom_cond, params_hist, generator)
+
+    def _flow_matching_draw(
+        self,
+        z1: torch.Tensor,
+        geom_cond: torch.Tensor | None,
+        params_hist: torch.Tensor,
+        generator: torch.Generator | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Draw ``z0`` / ``tau`` for normalised latents ``z1`` -> ``(v_pred, v_target)``."""
         z0 = torch.randn(
             z1.shape, generator=generator, device=z1.device, dtype=z1.dtype
         )
@@ -1084,7 +1127,7 @@ class TadpoleLatentGenerator(nn.Module):
         t = tau.view(-1, 1, 1, 1, 1)
         z_tau = (1.0 - t) * z0 + t * z1
         v_target = z1 - z0
-        v_pred = self.velocity(z_tau, tau, params_hist, cond)
+        v_pred = self._velocity(z_tau, tau, params_hist, geom_cond)
         return v_pred, v_target
 
     # -- sampling ----------------------------------------------------------- #

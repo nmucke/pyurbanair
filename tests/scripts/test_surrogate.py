@@ -108,6 +108,44 @@ def test_prechunked_dft_reads_whole_frames_and_source_params(
     assert (model_dir / "weights.pt").exists()
 
 
+def _latent_cache_cfg(
+    tmp_path: pathlib.Path, trained: dict[str, Any], *overrides: str
+) -> Any:
+    ae = trained["train_autoencoder"]
+    return compose(
+        "surrogate/train_latent_generator",
+        "+test=train_latent_generator",
+        f"paths.data_dir={trained['train_latent_generator'].paths.data_dir}",
+        f"autoencoder_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
+        f"latent_cache.output_root={tmp_path / 'latents'}",
+        *overrides,
+        root=tmp_path,
+    )
+
+
+def test_latent_cache_prepare_only(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    cfg = _latent_cache_cfg(tmp_path, trained, "latent_cache.prepare_only=true")
+    load_script("scripts/surrogate/train.py").run(cfg)
+    manifest = json.loads((tmp_path / "latents" / "manifest.json").read_text())
+    assert manifest["complete"]
+    assert not pathlib.Path(cfg.paths.weights_dir).exists()
+
+
+def test_latent_generator_trains_from_the_cache(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(tmp_path, trained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    assert saved.dataset.root_dir == cfg.paths.data_dir  # evaluation reads states
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert bool(model.latent_stats_installed)
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)

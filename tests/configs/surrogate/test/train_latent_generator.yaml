@@ -8,3 +8,6 @@ architecture:
   param_history_steps: 2
 latent_stats:
   max_batches: 2
+# Never the user's copy: a test that wants one passes its own dir.
+latent_cache:
+  output_root: null

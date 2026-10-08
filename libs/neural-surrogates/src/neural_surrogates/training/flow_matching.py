@@ -157,17 +157,29 @@ class LatentFlowMatchingTrainer(BaseTraining):
     ) -> torch.Tensor:
         """One flow-matching draw + fp32 MSE on a snapshot-history batch.
 
-        ``generator`` seeds the model's ``z0`` / ``tau`` draws; ``None`` (the
-        training path) uses the global RNG. The loss is formed outside the
-        autocast region on fp32 copies so a bf16 velocity prediction is
-        compared to its fp32 target at full precision.
+        A latent-cache batch (``latent`` / ``geom`` / ``params_hist``: raw
+        latents precomputed by the frozen AE) goes through the model's
+        ``forward_cached`` instead, skipping the encoder. ``generator`` seeds
+        the model's ``z0`` / ``tau`` draws; ``None`` (the training path) uses
+        the global RNG. The loss is formed outside the autocast region on fp32
+        copies so a bf16 velocity prediction is compared to its fp32 target at
+        full precision.
         """
-        state, geometry, features = self._prepare_snapshot_batch(batch)
         params_hist = batch["params_hist"].to(self.device, non_blocking=True)
-        with self._autocast():
-            v_pred, v_target = self.model(
-                state, params_hist, geometry, features, generator=generator
-            )
+        if "latent" in batch:
+            latent = batch["latent"].to(self.device, non_blocking=True)
+            geom = batch["geom"].to(self.device, non_blocking=True)
+            # The eager module: a torch.compile wrapper only compiles forward.
+            with self._autocast():
+                v_pred, v_target = self._eager_model.forward_cached(
+                    latent, geom, params_hist, generator=generator
+                )
+        else:
+            state, geometry, features = self._prepare_snapshot_batch(batch)
+            with self._autocast():
+                v_pred, v_target = self.model(
+                    state, params_hist, geometry, features, generator=generator
+                )
         # No fluid mask: see the module docstring (latent grid, padded positions
         # included on purpose).
         loss: torch.Tensor = self.loss_fn(v_pred.float(), v_target.float())

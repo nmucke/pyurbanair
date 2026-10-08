@@ -13,11 +13,18 @@ datasets read the same on-disk split:
 * :class:`SnapshotHistoryDataset` -- single time slices plus the ``(Hp, P)``
   parameter history ending at each snapshot, for the conditional latent
   generator (plan 07 generative spin-up).
+* :class:`LatentCacheDataset` -- the same samples served as the frozen
+  encoder's cached raw latents (built by :func:`prepare_latent_cache`).
 
 :class:`TrajectoryBatchSampler` batches multi-geometry splits (one trajectory
 -- one grid/geometry -- per batch) with an optional per-batch cell budget.
 """
 
+from neural_surrogates.datasets.latent_cache import (
+    LatentCacheDataset,
+    load_latent_stats,
+    prepare_latent_cache,
+)
 from neural_surrogates.datasets.patch import PatchTransitionDataset
 from neural_surrogates.datasets.sampler import TrajectoryBatchSampler
 from neural_surrogates.datasets.snapshot import SnapshotDataset, snapshot_collate
@@ -35,4 +42,7 @@ __all__ = [
     "snapshot_collate",
     "SnapshotHistoryDataset",
     "snapshot_history_collate",
+    "LatentCacheDataset",
+    "prepare_latent_cache",
+    "load_latent_stats",
 ]

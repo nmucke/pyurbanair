@@ -24,7 +24,15 @@ architecture:
   num_sampling_steps: 50
   latent_eps: 1.0e-6
   max_latent_tokens: 4096
-# Batches used to estimate the latent normalization statistics.
+# Optional cache of the frozen encoder's latents: one GPU pass over the data
+# (resumable), after which training reads latents instead of states, skips the
+# encoder, and takes the latent statistics over every train frame. null:
+# encode every batch. Keyed on the autoencoder (weights, settings) and the
+# data: a changed one needs a new dir.
+latent_cache:
+  output_root: null
+  prepare_only: false   # encode, then exit (a GPU job before training)
+# Batches used to estimate the latent normalization statistics (no cache).
 latent_stats:
   max_batches: 50
   seed: 0

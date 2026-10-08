@@ -63,5 +63,5 @@ stepper, cold-started from the latent generator.
 | `test_configs.py` | every entry point and option resolves; the test overlays are tiny; `inconsistency_check` accepts and rejects |
 | `test_forward.py` | `run_forward` (single, ensemble over two saved windows, initial-state selection) + `visualize_forward` |
 | `test_assimilation.py` | smoother, filtering and hybrid + `compute_metrics` + `visualize_assimilation`; a forward run as the truth |
-| `test_surrogate.py` | every training task, the autoencoder's and DFT's `prechunk` data copies, the three evaluations, `generate_data` |
+| `test_surrogate.py` | every training task, the autoencoder's and DFT's `prechunk` data copies, the latent generator's `latent_cache`, the three evaluations, `generate_data` |
 | `test_workflows.py` | `workflows/*.sh` |
