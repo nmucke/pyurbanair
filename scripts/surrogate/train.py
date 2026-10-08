@@ -15,7 +15,9 @@ rebuild the model), weights.pt (best validation weights) and the trainer's
 checkpoint; plus encoder.pt/decoder.pt for an autoencoder and adapter/ for LoRA.
 An autoencoder or DFT with `prechunk.output_root` trains on a re-chunked copy
 of the data (`prechunk.spatial_chunks`: tiles, or null for whole frames);
-`prechunk.prepare_only=true` only makes that copy.
+`prechunk.prepare_only=true` only makes that copy. A latent generator with
+`latent_cache.output_root` trains on the frozen encoder's precomputed latents;
+`latent_cache.prepare_only=true` only computes them (a GPU job).
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
-from tasks import TASKS, prechunked_root  # noqa: E402
+from tasks import TASKS, prechunked_root, prepare_latents  # noqa: E402
 
 
 def run(cfg: DictConfig) -> None:
@@ -39,6 +41,11 @@ def run(cfg: DictConfig) -> None:
         if cfg.prechunk.output_root is None:
             raise ValueError("prechunk.prepare_only needs prechunk.output_root")
         print(f"Prepared {prechunked_root(cfg)}")
+        return
+    if cfg.get("latent_cache") is not None and cfg.latent_cache.prepare_only:
+        if cfg.latent_cache.output_root is None:
+            raise ValueError("latent_cache.prepare_only needs latent_cache.output_root")
+        print(f"Prepared {prepare_latents(cfg)}")
         return
     out_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
     out_dir.mkdir(parents=True, exist_ok=True)

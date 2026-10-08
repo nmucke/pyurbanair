@@ -23,6 +23,11 @@ import numpy as np
 import torch
 import xarray
 from hydra.utils import instantiate
+from neural_surrogates.datasets.latent_cache import (
+    LatentCacheDataset,
+    load_latent_stats,
+    prepare_latent_cache,
+)
 from neural_surrogates.finetuning import (
     inject_lora,
     merge_to_state_dict,
@@ -145,21 +150,8 @@ def _autoencoder(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
 
 def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     ae_dir = pathlib.Path(cfg.autoencoder_dir)
-    ae = OmegaConf.load(ae_dir / "config.yaml")
-    # The frozen encoder only understands the autoencoder's inputs.
-    cfg.dataset.state_vars = list(ae.dataset.state_vars)
-    cfg.dataset.sdf_features = ae.architecture.sdf_features
-    cfg.dataset.sdf_clamp_cells = ae.architecture.sdf_clamp_cells
-    cfg.dataset.dtype = "float32"  # the frozen encoder runs in fp32
-    train, val = _datasets(cfg)
-    model = instantiate(
-        cfg.architecture,
-        n_state_channels=len(train.state_vars),
-        n_params=len(train.param_names),
-        pretrained_ae_dir=str(ae_dir),
-    )
-    model.set_normalization(*get_normalization_stats(train))
-    model.set_conditioning_schema(train.param_names, float(train.history_dt_seconds))
+    model, train, val = _latent_generator_inputs(cfg)
+    root = _latent_cache(cfg, model, train, val)
 
     # The saved config must rebuild the model without the autoencoder dir.
     cfg.architecture.update(
@@ -171,6 +163,17 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     )
     cfg.dataset.param_vars = list(train.param_names)
     cfg.generator = _generator_block(cfg, model, train, ae_dir)
+
+    if root is not None:
+        # Exact latent statistics of the whole train split, from the cache.
+        model.set_latent_normalization(*load_latent_stats(root))
+        cfg.dataloader.collate_fn = None  # cached items stack as they are
+        return Setup(
+            model,
+            LatentCacheDataset(root, train),
+            LatentCacheDataset(root, val),
+            {"_recursive_": False, "_convert_": "all"},
+        )
 
     def latent_statistics(trainer: Any) -> None:
         # Normalization of the encoder's latents, estimated on training batches.
@@ -224,6 +227,11 @@ def _dft(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
         {"weights_transform": merge_to_state_dict},
         after_fit=lambda trainer: _save_lora(trainer, peft, out_dir),
     )
+
+
+def prepare_latents(cfg: DictConfig) -> str | None:
+    """Make (or validate) the latent cache, without training."""
+    return _latent_cache(cfg, *_latent_generator_inputs(cfg))
 
 
 def _finetune_stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
@@ -283,6 +291,44 @@ def prechunked_root(cfg: DictConfig) -> str | None:
             cfg.dataset.root_dir,
             prechunk.output_root,
             spatial_chunks=prechunk.spatial_chunks,
+        )
+    )
+
+
+def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
+    """The generator around its frozen autoencoder, and the train/val data."""
+    ae_dir = pathlib.Path(cfg.autoencoder_dir)
+    ae = OmegaConf.load(ae_dir / "config.yaml")
+    # The frozen encoder only understands the autoencoder's inputs.
+    cfg.dataset.state_vars = list(ae.dataset.state_vars)
+    cfg.dataset.sdf_features = ae.architecture.sdf_features
+    cfg.dataset.sdf_clamp_cells = ae.architecture.sdf_clamp_cells
+    cfg.dataset.dtype = "float32"  # the frozen encoder runs in fp32
+    train, val = _datasets(cfg)
+    model = instantiate(
+        cfg.architecture,
+        n_state_channels=len(train.state_vars),
+        n_params=len(train.param_names),
+        pretrained_ae_dir=str(ae_dir),
+    )
+    # The frozen autoencoder keeps its own state statistics.
+    model.set_normalization(None, None, *get_param_normalization_stats(train))
+    model.set_conditioning_schema(train.param_names, float(train.history_dt_seconds))
+    return model, train, val
+
+
+def _latent_cache(cfg: DictConfig, model: Any, train: Any, val: Any) -> str | None:
+    """The cache of the frozen encoder's latents (`latent_cache` block), made
+    or validated first; None without one."""
+    cache = cfg.get("latent_cache")
+    if cache is None or cache.output_root is None:
+        return None
+    return str(
+        prepare_latent_cache(
+            model,
+            {"train": train, "val": val},
+            cache.output_root,
+            device=cfg.trainer.device,
         )
     )
 

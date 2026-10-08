@@ -373,6 +373,12 @@ def test_encode_and_sample_require_installed_latent_stats(tmp_path):
         m.encode_latents(state, geom)
     with pytest.raises(RuntimeError, match="latent normalisation"):
         m.sample(params_hist, geom, num_steps=1)
+    with pytest.raises(RuntimeError, match="latent normalisation"):
+        m.forward_cached(
+            torch.zeros(1, m.state_latent_dim, 1, 1, 2),
+            torch.zeros(1, m.geom_cond_dim, 1, 1, 2),
+            params_hist,
+        )
     with pytest.raises(ValueError, match="finite"):
         m.set_latent_normalization(
             torch.full((m.working_latent_dim,), float("nan")),
@@ -493,12 +499,12 @@ def test_forward_uses_linear_interpolation_and_exact_velocity_target(
     ] * cond.z
     seen = {}
 
-    def capture_velocity(z: Any, flow_time: Any, params: Any, encoding: Any) -> Any:
+    def capture_velocity(z: Any, flow_time: Any, params: Any, geom_cond: Any) -> Any:
         seen["z"] = z
         seen["tau"] = flow_time
         return torch.zeros_like(z)
 
-    monkeypatch.setattr(m, "velocity", capture_velocity)
+    monkeypatch.setattr(m, "_velocity", capture_velocity)
     _, target = m(
         state,
         params_hist,
@@ -509,6 +515,26 @@ def test_forward_uses_linear_interpolation_and_exact_velocity_target(
     assert torch.equal(seen["tau"], tau)
     assert torch.allclose(seen["z"], expected_z_tau)
     assert torch.allclose(target, cond.z - z0)
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_forward_cached_equals_forward(tmp_path, geometry):
+    """A latent-cache item (raw ``_encode_raw`` latents + raw geometry
+    conditioning) gives exactly :meth:`forward`'s draw for the same seed."""
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    state, geom, params_hist = _inputs(b=2)
+    feats = _sdf_feats(m, geom)
+    z_raw, geom_raw, branch_cond, *_ = m._encode_raw(state, geom, feats)
+    cached_geom = branch_cond if geometry == "branch" else geom_raw
+    expected = m(
+        state, params_hist, geom, feats, generator=torch.Generator().manual_seed(5)
+    )
+    got = m.forward_cached(
+        z_raw, cached_geom, params_hist, generator=torch.Generator().manual_seed(5)
+    )
+    assert torch.equal(got[0], expected[0]) and torch.equal(got[1], expected[1])
 
 
 # --------------------------------------------------------------------------- #

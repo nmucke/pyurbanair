@@ -18,6 +18,7 @@ job_scripts/
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
+│   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
@@ -143,6 +144,34 @@ DFT stepper (`pretrained_dir=<model dir>`) read only `architecture` and
 `dataset` from the autoencoder's `config.yaml`, so artifacts trained with the
 earlier layout load as they are; a DFT on this one also needs
 `architecture.size=B` and the autoencoder's SDF and `geometry_branch` settings.
+
+## Example: latent generator on precomputed latents (GPU)
+
+The flow-matching generator on the realistic corpus, trained on a cache of the
+frozen autoencoder's latents (`latent_cache`, see
+[neural_surrogates.md](neural_surrogates.md) §38). First one GPU job encodes
+every train/val frame, then the training reads the latents instead of the
+states and skips the encoder:
+
+```bash
+args=(--config-name surrogate/train_latent_generator name=latent_generator_b_realistic
+  paths.weights_dir=/projects/urbanair/model_weights
+  paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
+  autoencoder_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic
+  latent_cache.output_root=/scratch/$USER/training_data/pyudales_realistic_latents_ae_b
+  batch_sampler.cell_budget=null batch_sampler.batch_size=4)
+prep=$(sbatch --parsable job_scripts/delftblue/surrogate_prepare_latents.slurm "${args[@]}")
+sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gse \
+  --gpus-per-task=1 --cpus-per-task=16 --mem-per-cpu=4G --time=48:00:00 \
+  job_scripts/delftblue/surrogate_train.slurm "${args[@]}"
+```
+
+Encode only a final autoencoder: the cache is keyed on its `weights.pt` and
+settings, so a retrained one is refused (use a new `output_root`). The cache is about 112 GB
+(float32) for the 500 train trajectories; a resubmitted job resumes it. The
+latent generator's batch is bounded by `max_latent_tokens` (`B` x latent cells
+must stay at or below 4096); the default `cell_budget` counts full grids and
+gives one frame per batch here, hence `null` and a fixed batch size.
 
 ## Machine notes
 

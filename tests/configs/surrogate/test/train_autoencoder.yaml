@@ -3,3 +3,6 @@ defaults:
   - training
 
 name: autoencoder
+# Never the user's copy: a test that wants one passes its own dir.
+prechunk:
+  output_root: null

@@ -14,11 +14,14 @@ from neural_surrogates.architectures import (
     UNetConvNeXt,
 )
 from neural_surrogates.datasets import (
+    LatentCacheDataset,
     PatchTransitionDataset,
     SnapshotDataset,
     SnapshotHistoryDataset,
     TrajectoryBatchSampler,
     TransitionDataset,
+    load_latent_stats,
+    prepare_latent_cache,
     snapshot_collate,
     snapshot_history_collate,
 )
@@ -48,6 +51,9 @@ __all__ = [
     "snapshot_collate",
     "SnapshotHistoryDataset",
     "snapshot_history_collate",
+    "LatentCacheDataset",
+    "prepare_latent_cache",
+    "load_latent_stats",
     "DomainDecompositionLoss",
     "BaseTraining",
     "PatchTrainer",
