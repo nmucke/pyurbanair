@@ -2,11 +2,13 @@
 
 import numpy as np
 import pytest
+import xarray
 from evaluation.turbulence import (
     band_energy_ratio,
     field_statistics,
     fluid_mask,
     intrinsic_profile,
+    member_field_reductions,
     spanwise_spectra,
     statistic_rmse,
 )
@@ -72,24 +74,29 @@ def test_statistic_rmse_over_fluid_cells_and_per_level():
 
 
 def test_spanwise_spectra_known_modes_and_masked_block():
-    """Energy lands at the wavenumber of each group's mode; lines through the
-    block, upstream of it and at the outflow are never used."""
-    n_time, n_z, n_y, n_x, dy = 3, 6, 16, 10, 2.0
+    """Energy lands at the wavenumber of each group's fluctuating mode; a
+    steady mode carries none; lines through the block, upstream of it and at
+    the outflow are never used."""
+    n_time, n_z, n_y, n_x, dy = 2, 6, 16, 10, 2.0
     y = np.arange(n_y) * dy
     length = n_y * dy
+    sign = np.array([1.0, -1.0])[:, None, None, None]  # zero time mean
     fluid = np.ones((n_z, n_y, n_x), dtype=bool)
     fluid[:2, 4:8, 3:5] = False  # a building at x 3-4, two levels high
     field = np.zeros((n_time, n_z, n_y, n_x))
     # In canopy: mode 2 with amplitude 1 on every line.
-    field[:, :2] = np.cos(2 * np.pi * 2 * y / length)[None, None, :, None]
+    field[:, :2] = sign * np.cos(2 * np.pi * 2 * y / length)[None, None, :, None]
     # Above canopy: mode 5 with amplitude 2.
-    field[:, 2:] = 2 * np.cos(2 * np.pi * 5 * y / length)[None, None, :, None]
+    field[:, 2:] = 2 * sign * np.cos(2 * np.pi * 5 * y / length)[None, None, :, None]
+    # A steady mode everywhere: the time mean, so no energy.
+    field += 5 * np.cos(2 * np.pi * 3 * y / length)[None, None, :, None]
     # Poison lines that must be excluded: through the block, upstream of the
     # first building, at the outflow and in the top two levels.
-    field[:, :2, :, 3] += 1e3 * np.sin(2 * np.pi * 7 * y / length)[None, :]
-    field[:, :, :, :3] += 1e3 * np.sin(2 * np.pi * 7 * y / length)[None, None, :, None]
-    field[:, :, :, -2:] += 1e3 * np.sin(2 * np.pi * 7 * y / length)[None, None, :, None]
-    field[:, -2:] += 1e3 * np.sin(2 * np.pi * 7 * y / length)[None, :, None]
+    poison = 1e3 * sign * np.sin(2 * np.pi * 7 * y / length)[None, None, :, None]
+    field[:, :2, :, 3:4] += poison[:, 0]
+    field[:, :, :, :3] += poison
+    field[:, :, :, -2:] += poison
+    field[:, -2:] += poison
 
     k, spectra = spanwise_spectra(field, fluid, dy)
     dk = 1.0 / length
@@ -98,6 +105,63 @@ def test_spanwise_spectra_known_modes_and_masked_block():
         expected = np.zeros(k.size)
         expected[mode - 1] = amplitude**2 / 2 / dk  # variance / dk
         np.testing.assert_allclose(spectra[group], expected, atol=1e-9)
+
+
+def test_spanwise_spectra_ignore_a_solid_ground_plane():
+    """A fully solid level (uDALES' ground plane) does not move the x-range
+    upstream: it still starts at the first building."""
+    n_y, dy = 8, 1.0
+    y = np.arange(n_y) * dy
+    fluid = np.ones((5, n_y, 8), dtype=bool)
+    fluid[0] = False  # the ground plane
+    fluid[1, 2:5, 3] = False  # a building at x 3
+    field = np.zeros((2, 5, n_y, 8))
+    # Fluctuating energy only upstream of the building.
+    field[:, :, :, :3] = (
+        np.array([1.0, -1.0])[:, None, None, None]
+        * np.cos(2 * np.pi * 2 * y / (n_y * dy))[None, None, :, None]
+    )
+    _, spectra = spanwise_spectra(field, fluid, dy)
+    for group in ("in_canopy", "above_canopy"):
+        np.testing.assert_allclose(spectra[group], 0.0, atol=1e-12)
+
+
+def test_member_spectra_on_udales_grid_skip_the_ground_and_upstream(tmp_path):
+    """uDALES' w sits on zm, whose zm = 0 level is under the STL's ground
+    plane from x = 0 on: w's spectra still start at the first building, as
+    u's and v's do. A member stored in another dim order reads the same."""
+    stl = _write_boxes(
+        tmp_path / "case.stl",
+        [((0, 20), (0, 16), (-0.5, 0)), ((10, 12), (4, 8), (0, 3))],
+    )
+    xm, ym, zm = (
+        np.arange(-10.0, 20.0, 2),
+        np.arange(0.0, 16.0, 2),
+        np.arange(0.0, 12.0, 2),
+    )
+    coords = {"xm": xm, "xt": xm + 1, "ym": ym, "yt": ym + 1, "zm": zm, "zt": zm + 1}
+    sign = np.array([1.0, -1.0])[:, None, None, None]
+    w = np.zeros((2, zm.size, ym.size, xm.size))
+    # Fluctuations upstream of the building only (xt < 10).
+    w[..., (xm + 1) < 10] = (
+        sign * np.cos(2 * np.pi * 2 * (ym + 1) / 16)[None, None, :, None]
+    )
+    zeros = np.zeros_like(w)
+    member = xarray.Dataset(
+        {
+            "u": (("time", "zt", "yt", "xm"), zeros),
+            "v": (("time", "zt", "ym", "xt"), zeros),
+            "w": (("time", "zm", "yt", "xt"), w),
+        },
+        coords={"time": [1.0, 2.0], **coords},
+    )
+    spectra = member_field_reductions(member, "udales", stl).spectrum
+    np.testing.assert_allclose(spectra.sel(component="w"), 0.0, atol=1e-12)
+
+    shuffled = member.assign(w=member.w.transpose("xt", "time", "yt", "zm"))
+    np.testing.assert_allclose(
+        member_field_reductions(shuffled, "udales", stl).spectrum, spectra
+    )
 
 
 def test_spanwise_spectra_group_without_lines_is_none():

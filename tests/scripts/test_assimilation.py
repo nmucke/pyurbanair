@@ -463,6 +463,26 @@ def test_a_truth_from_before_the_time_axis_change_is_refused(
         helpers.open_truth(cfg, tmp_path)
 
 
+def test_open_forward_run_keeps_jittered_frames(tmp_path: pathlib.Path) -> None:
+    """uDALES output times jitter: frames within half an output interval of
+    the horizon's ends are matched to them, the frame at the start is not kept."""
+    helpers = load_script("scripts/utils/helper_functions.py")
+    times = [1.03, 2.02, 3.01, 4.04, 5.02, 6.03, 7.028, 8.01]
+    xarray.Dataset(coords={"time": times}).to_netcdf(tmp_path / "state.nc")
+    cfg = OmegaConf.create(
+        {
+            "assimilation": {
+                "truth_dir": str(tmp_path),
+                "truth_start_time": 1.0,
+                "num_windows": 2,
+            },
+            "time": {"simulation_time": 3.0, "output_frequency": 1.0},
+        }
+    )
+    state = helpers.open_truth(cfg, tmp_path)
+    np.testing.assert_allclose(state.time, [1.02, 2.01, 3.04, 4.02, 5.03, 6.028])
+
+
 def test_case_stl_path_is_from_the_repo_root(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

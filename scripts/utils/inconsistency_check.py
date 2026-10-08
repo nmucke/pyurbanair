@@ -110,7 +110,8 @@ def _replica(cfg: DictConfig) -> list[str]:
     end = float(da.truth_start_time or 0.0) + da.num_windows * cfg.time.simulation_time
     with xarray.open_dataset(path) as state:
         last = float(state.time[-1])
-    if last < end - 1e-6:
+    # Matched within half an output interval, as `open_forward_run` reads it.
+    if last < end - 0.5 * float(cfg.time.output_frequency):
         return [
             f"assimilation.replica_dir's state.nc ends at t={last:g} s, before the "
             f"horizon's end at {end:g} s (truth_start_time + num_windows * "

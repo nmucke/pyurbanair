@@ -113,6 +113,8 @@ def open_forward_run(cfg: DictConfig, directory: str) -> xarray.Dataset:
 
     Read from `assimilation.truth_start_time` on, with that time rebased to
     t=0, so it lines up with the truth: used for `truth_dir` and `replica_dir`.
+    Both ends are matched within half an output interval: uDALES output times
+    jitter (the last frame of a 60 s run may sit at 60.05 s).
     """
     horizon = cfg.assimilation.num_windows * cfg.time.simulation_time
     start = float(cfg.assimilation.truth_start_time or 0.0)
@@ -126,18 +128,24 @@ def open_forward_run(cfg: DictConfig, directory: str) -> xarray.Dataset:
             f"{path} has a frame at t=0: it predates output on "
             "(0, simulation_time] and would be read one frame off. Regenerate it."
         )
-    return _time_window(state, start, horizon)
+    tolerance = 0.5 * float(cfg.time.output_frequency)
+    return _time_window(state, start, horizon, tolerance=tolerance)
 
 
 def _time_window(
-    ds: xarray.Dataset, start: float, length: float, keep_start: bool = False
+    ds: xarray.Dataset,
+    start: float,
+    length: float,
+    keep_start: bool = False,
+    tolerance: float = 1e-6,
 ) -> xarray.Dataset:
     """Keep (start, start + length] and shift the time axis so `start` is t=0.
 
     That is where a run's output frames sit (the first one is one output
-    interval in). `keep_start` also keeps t=start, for parameter knots.
+    interval in). `keep_start` also keeps t=start, for parameter knots. Both
+    ends are matched within `tolerance`.
     """
-    eps = 1e-6
+    eps = tolerance
     after_start = ds.time >= start - eps if keep_start else ds.time > start + eps
     ds = ds.sel(time=after_start & (ds.time <= start + length + eps))
     return ds.assign_coords(time=ds.time - start)

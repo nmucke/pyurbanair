@@ -90,7 +90,7 @@ Arrays too large for metrics.yaml go into `diagnostics.nc` next to it:
   profile_<source>       (window, [ensemble,] profile_quantity, z) canopy profiles
   spectrum_<source>      (window, [ensemble,] component, group, k) spanwise
                          spectra, k in cycles/m; spectrum_dy the grid spacing
-  building_height        (bound) lowest and highest building top
+  building_height        (bound) lowest and highest building roof
   sensor_bin_edges_<set>, sensor_density_<set>, sensor_quantiles_<set>
                          per quantity: shared bins and each source's density and
                          quantiles, pooled over sensors, windows and members

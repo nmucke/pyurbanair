@@ -207,14 +207,17 @@ Two facts make spectra tractable here:
 
 The single setup is spanwise spectra on **fully fluid lines**. One function in
 `turbulence.py` takes a component on its native grid and the fluid mask. It
-FFTs along y every (x, z) line that is entirely fluid, and averages
+FFTs along y the fluctuations about the window time mean on every (x, z)
+line that is entirely fluid (the raw field's spectrum in the canopy is mostly
+the steady flow pattern around the buildings), and averages
 `|FFT|²` over lines, frames and the x-range downstream of the first building
 (dropping the last two cells before the outflow). Group the lines by height:
 
 - **Above canopy:** levels with no solid cell, below the top two cells, to
   avoid the top boundary.
 - **In canopy:** lines through open streets parallel to y. In Xie–Castro
-  these are the N–S lanes at x = 10, 20 and 30 m. The mask finds them
+  the case domain has exactly one open N–S lane (x ≈ 16–24 m, centre
+  20 m). The mask finds it
   automatically, so no case configuration is needed. A case without such
   lines (likely Barcelona) gets no in-canopy spectrum, and a log line says so.
 

@@ -2289,14 +2289,17 @@ def statistic_rmse(prediction, truth, fluid):
 
 
 def spanwise_spectra(field, fluid, dy):
-    """Spanwise energy spectra on the fully fluid ``(x, z)`` lines, by height group.
+    """Spanwise spectra of the fluctuations on the fully fluid ``(x, z)`` lines.
 
-    ``y`` is periodic in every backend, so each line is FFT'd as it is, with no
-    window or detrending. Pass a component on its **native** grid with the fluid
-    mask of that grid (``~stl_solid_mask`` at the component's own coordinates):
-    interpolation would low-pass the tail being measured. Only ``x`` from the
-    first column holding a solid cell up to ``_SPECTRA_OUTFLOW_CELLS`` before the
-    outflow is used. Groups:
+    The fluctuations are about the time mean of ``field`` (the window's, for
+    one member), so a steady pattern, such as the mean flow around the
+    buildings, carries no energy. ``y`` is periodic in every backend, so each
+    line is FFT'd as it is, with no window or detrending. Pass a component on
+    its **native** grid with the fluid mask of that grid (``~stl_solid_mask`` at
+    the component's own coordinates): interpolation would low-pass the tail
+    being measured. Only ``x`` from the first column holding a solid cell (on a
+    level that is not entirely solid, such as a ground plane) up to
+    ``_SPECTRA_OUTFLOW_CELLS`` before the outflow is used. Groups:
 
     - ``above_canopy``: levels with no solid cell, below the top
       ``_SPECTRA_TOP_CELLS``;
@@ -2309,16 +2312,18 @@ def spanwise_spectra(field, fluid, dy):
         dy: Spanwise grid spacing in m.
 
     Returns:
-        ``(k, spectra)``: ``k`` the wavenumbers in cycles/m without the mean
-        (``k = 0``) bin, and ``spectra`` a dict ``{group: (n_k,) | None}``, the
+        ``(k, spectra)``: ``k`` the wavenumbers in cycles/m without the
+        ``k = 0`` bin, and ``spectra`` a dict ``{group: (n_k,) | None}``, the
         one-sided spectral density averaged over lines and frames (so
-        ``sum(E) * dk`` is the variance along ``y``). ``None`` for a group with no
+        ``sum(E) * dk`` is the fluctuation variance along ``y``). ``None`` for a group with no
         line; the caller logs that.
     """
     values = np.asarray(field, dtype=float)
+    values = values - values.mean(axis=0)
     fluid = np.asarray(fluid, dtype=bool)
     n_z, n_y, n_x = fluid.shape
-    solid_columns = np.flatnonzero((~fluid).any(axis=(0, 1)))
+    partly_solid = (~fluid).any(axis=(1, 2)) & fluid.any(axis=(1, 2))
+    solid_columns = np.flatnonzero((~fluid[partly_solid]).any(axis=(0, 1)))
     x_slice = slice(
         solid_columns[0] if solid_columns.size else 0, n_x - _SPECTRA_OUTFLOW_CELLS
     )
@@ -2383,6 +2388,15 @@ def member_field_reductions(member, solver_name, stl_path):
     component's :func:`spanwise_spectra` on its native grid (interpolation would
     low-pass them), NaN for a group with no line; and the attribute ``dy``.
     """
+    # (..., z, y, x) by dim name: every backend's spatial dims start with z, y, x.
+    member = member.assign(
+        {
+            c: member[c].transpose(
+                ..., *(d for a in "zyx" for d in member[c].dims if d[0] == a)
+            )
+            for c in ("u", "v", "w")
+        }
+    )
     centred = colocate_components(member, solver_name)
     coords = {d: centred[0][c].values for d, c in zip("zyx", centred[0].dims[-3:])}
     stats = field_statistics(*(c.values for c in centred))
@@ -2392,7 +2406,11 @@ def member_field_reductions(member, solver_name, stl_path):
         field = member[component]
         native = [field[d].values for d in field.dims[-3:]]
         dy = float(native[1][1] - native[1][0])
-        k, groups = spanwise_spectra(field.values, ~_solid_mask(stl_path, *native), dy)
+        fluid_native = ~_solid_mask(stl_path, *native)
+        # Levels at or below the ground (uDALES' w at zm = 0, part of it under
+        # the STL's ground plane) are wall, not fluid.
+        fluid_native[native[0] <= 0] = False
+        k, groups = spanwise_spectra(field.values, fluid_native, dy)
         spectra.append(
             [
                 np.full(k.size, np.nan) if groups[g] is None else groups[g]
@@ -2429,7 +2447,7 @@ def score_window_fields(reduced, stl_path):
     ``spectrum`` and, but for the truth, the ``rmse`` ``(statistic)`` and
     ``level_rmse`` ``(statistic, z)`` of its statistics against the truth's
     (:func:`statistic_rmse`). The posterior's carries ``dy`` and the
-    ``building_height`` range (lowest and highest top) as attributes.
+    ``building_height`` range (lowest and highest roof) as attributes.
     """
     grid = reduced["posterior"]
     centres = [grid[d].values for d in "zyx"]
@@ -2467,7 +2485,10 @@ def score_window_fields(reduced, stl_path):
         out[kind] = scored
 
     solid = _solid_mask(stl_path, *centres)
-    tops = np.where(solid, centres[0][:, None, None], -np.inf).max(axis=0)
+    # The roof: the upper face of the top solid cell.
+    z = centres[0]
+    roofs = np.append(0.5 * (z[1:] + z[:-1]), 1.5 * z[-1] - 0.5 * z[-2])
+    tops = np.where(solid, roofs[:, None, None], -np.inf).max(axis=0)
     tops = tops[solid.any(axis=0)]
     out["posterior"].attrs = {
         "dy": grid.attrs["dy"],

@@ -127,12 +127,17 @@ loaded whole.
   truth on the posterior's grid, and `field_metric_blocks` turns the windows
   into the `field_statistics`, `canopy_profiles` and `spectra` blocks and
   their `diagnostics.nc` arrays.
-- Spanwise spectra: `spanwise_spectra` FFTs a component on its **native**
-  grid (interpolation would low-pass the tail) along the periodic y, on every
-  fully fluid `(x, z)` line from the first building to two cells before the
-  outflow, grouped `above_canopy` (levels without solid, below the top two)
-  and `in_canopy` (open streets along y; a case without them, likely
-  Barcelona, has none). `band_energy_ratio` gives the prediction/truth energy
+- Spanwise spectra: `spanwise_spectra` FFTs the fluctuations about the
+  window time mean of a component on its **native** grid (interpolation would
+  low-pass the tail) along the periodic y, on every fully fluid `(x, z)` line
+  from the first building (levels at or below z = 0, such as uDALES' `w` at
+  `zm = 0` under the ground plane, and fully solid levels ignored) to two
+  cells before the outflow, grouped `above_canopy` (levels
+  without solid, below the top two) and `in_canopy` (open streets along y:
+  Xie–Castro has exactly one, the N–S lane at x ≈ 16–24 m; a case without
+  them, likely Barcelona, has none). The fluctuations, not the raw field:
+  in the canopy the steady flow pattern around the buildings would otherwise
+  carry most of the energy. `band_energy_ratio` gives the prediction/truth energy
   in dB in `SPECTRAL_BANDS`: large `λ > 8Δ`, mid `4Δ–8Δ`, near cutoff `2Δ–4Δ`.
 - `rolling_tke`, `sensor_tke_evolution`: rolling resolved TKE at sensors,
   members kept separate.
@@ -195,7 +200,12 @@ reads about 1 even with wrong parameters). Read every score against the
 **replica floor** (`replica`, from `assimilation.replica_dir`: the truth rerun
 with another turbulence seed, scored as a one-member prediction) and, for the
 distributions, `truth_halves`: a posterior at the floor is as good as a
-perfect model can be.
+perfect model can be. The floor is a one-member one: a posterior statistic is
+the mean of N members' statistics, so its sampling error is about
+σ√(1 + 1/N) against the replica's σ√2, and a perfect N-member posterior sits
+at about replica · √((1 + 1/N)/2) (0.74 × replica for N = 10), below the
+replica. The `*_member_median` distances score one member at a time and are
+the like-for-like comparison with the replica.
 
 "Sources" below are the posterior, `prior` (`assimilation.save_prior_state`,
 smoother), `forecast` (`assimilation.save_forecast_history`, filter and
@@ -251,7 +261,9 @@ Read these with their limits:
   two codes resolve different fractions.
 - **The near-cutoff band partly measures numerics.** Across solvers the two
   codes' numerical dissipation differs near 2Δ, so a mismatch there is not
-  only physics; the large band is where inflow errors show.
+  only physics; the large band is where inflow errors show. pypalm also
+  interpolates `w` from `zw` onto `z` in its postprocess, a slight low-pass
+  along z that uDALES' native `w` does not have.
 - **Distribution sample sizes are the realisation's**, not the frame count:
   frames are autocorrelated. The KL value depends on its binning.
 - **The domain is small**: 80 m in y gives 20 wavenumbers on Xie–Castro; the
@@ -267,7 +279,7 @@ need: `{posterior,prior}_parameter_members` (window, ensemble, parameter),
 `profile_<source>` (window, [ensemble,] profile_quantity, z),
 `spectrum_<source>` (window, [ensemble,] component, group, k; `k` in
 cycles/m, `spectrum_dy` the spacing), `building_height` (lowest and highest
-top), and per sensor set `sensor_bin_edges_<set>`, `sensor_density_<set>` and
+roof), and per sensor set `sensor_bin_edges_<set>`, `sensor_density_<set>` and
 `sensor_quantiles_<set>` (pooled over sensors, windows and members). The
 truth and the replica have no ensemble dim.
 

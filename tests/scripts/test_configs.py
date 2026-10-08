@@ -278,9 +278,10 @@ def test_check_config_checks_the_replica_horizon(tmp_path: pathlib.Path) -> None
     cfg = compose("assimilation", *overrides, root=tmp_path)
     with pytest.raises(ValueError, match="replica_dir has no state.nc"):
         check(cfg, "smoother")
-    # The horizon ends at truth_start_time + 2 * 3 s = 7 s.
-    for end, ok in ((6.0, False), (7.0, True)):
-        times = np.arange(1.0, end + 0.5)
+    # The horizon ends at truth_start_time + 2 * 3 s = 7 s; the output times
+    # may jitter by up to half an output interval (1 s here).
+    for end, ok in ((6.0, False), (6.98, True), (7.0, True)):
+        times = [*np.arange(1.0, 6.0), end]
         xarray.Dataset(coords={"time": times}).to_netcdf(replica / "state.nc")
         if ok:
             check(cfg, "smoother")

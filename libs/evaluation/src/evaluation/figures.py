@@ -72,6 +72,7 @@ from matplotlib.colors import Colormap, LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import NullFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -1035,7 +1036,11 @@ def plot_parameter_pairs(
                 if j == 0 and i > 0:
                     ax.set_ylabel(_param_axis_label(names[i]), fontsize=9)
         axes[0, 0].legend(fontsize=8)
-        fig.suptitle("Final-window posterior over the prior (truth dashed)")
+        drawn_truth = truth is not None and np.isfinite(truth).any()
+        fig.suptitle(
+            "Final-window posterior over the prior"
+            + (" (truth dashed)" if drawn_truth else "")
+        )
         fig.tight_layout()
         return save_png(fig, output_path, transparent=False)
 
@@ -1173,6 +1178,7 @@ def plot_spanwise_spectra(
                 if np.isfinite(truth).any() and truth[0] > 0:
                     ax.loglog(k, truth[0] * (k / k[0]) ** (-5 / 3), ":", color="0.3")
                 ax.set_title(f"{component}, {group.replace('_', ' ')}")
+                ax.xaxis.set_minor_formatter(NullFormatter())
                 if c == 2:
                     ax.set_xlabel("k [1/m]")
                 if g == 0:
