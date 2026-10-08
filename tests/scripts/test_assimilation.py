@@ -119,7 +119,13 @@ def _check_outputs(
             "group",
             "k",
         )
-    assert "sgs_health" not in metrics  # the discrepancy is off
+    # sgs_health only when the assimilation model runs the discrepancy (uDALES).
+    discrepancy = OmegaConf.select(
+        OmegaConf.load(run_dir / "config.yaml"),
+        "assim_model.forward_model.model_discrepancy.enabled",
+        default=False,
+    )
+    assert ("sgs_health" in metrics) == bool(discrepancy)
 
 
 @pytest.mark.parametrize("method", METHODS)  # type: ignore[misc]
