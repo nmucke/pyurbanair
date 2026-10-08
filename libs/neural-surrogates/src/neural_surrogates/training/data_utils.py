@@ -15,6 +15,7 @@ see ``forward_model.py``); the normalization helpers use only numpy/xarray/torch
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,7 @@ def build_loader(cfg: DictConfig, dataset: Dataset, *, train: bool) -> DataLoade
 
 def _compute_normalization_stats(
     train_ds: "TransitionDataset",
+    source_root: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Per-channel state and param mean/std over the training split's fluid cells.
 
@@ -73,13 +75,17 @@ def _compute_normalization_stats(
     unit-variance fields. Stats are streamed file-by-file (sum / sum-of-squares
     in float64) and restricted to fluid cells via each trajectory's own geometry
     mask (multi-geometry splits have per-trajectory masks and grids) so the
-    masked-out obstacle zeros do not bias them.
+    masked-out obstacle zeros do not bias them. With ``source_root`` the state
+    values are streamed from ``<source_root>/state/<split>/`` files of the same
+    names instead (a lossless re-chunked copy reads slower than its source).
     """
     n_state = len(train_ds.state_vars)
     s_sum: np.ndarray = np.zeros(n_state, dtype=np.float64)
     s_sqsum: np.ndarray = np.zeros(n_state, dtype=np.float64)
     s_count = 0
     for traj, state_path in enumerate(train_ds._state_files):
+        if source_root is not None:
+            state_path = Path(source_root) / "state" / train_ds.split / state_path.name
         fluid = train_ds.geometry_for(traj).cpu().numpy().astype(bool)
         with xr.open_dataset(state_path) as ds:
             for c, var in enumerate(train_ds.state_vars):
@@ -109,17 +115,27 @@ def _normalization_signature(train_ds: "TransitionDataset") -> str:
     """A stable fingerprint of every input `_compute_normalization_stats` reads.
 
     The cached stats are only valid for the exact split, channel/param order and
-    on-disk state files they were computed from. We key on the dataset class, the
+    on-disk state files they were computed from. We key on the dataset family, the
     split name, the state/param variable tuples, the geometry variable (it selects
     the fluid mask), and each state file's ``(name, size, mtime)`` -- so
     regenerating or editing the training data, or changing any of these knobs,
     invalidates the cache and forces a recompute. ``pushforward_steps`` is
     deliberately absent: the stats stream every snapshot regardless of the rollout
-    horizon. The dataset class is included so a ``SnapshotDataset`` and a
-    ``TransitionDataset`` over the same root/split never read each other's cache
-    (the values coincide today, but the two could diverge in how they compute
-    stats).
+    horizon. The family -- the first of ``TransitionDataset`` / ``SnapshotDataset``
+    in the class's MRO, else the class name -- keeps a ``SnapshotDataset`` and a
+    ``TransitionDataset`` over the same root/split from reading each other's
+    cache (the values coincide today, but the two could diverge in how they
+    compute stats), while subclasses that only change the item layout share
+    their parent's cache instead of overwriting it.
     """
+    family = next(
+        (
+            cls.__name__
+            for cls in type(train_ds).__mro__
+            if cls.__name__ in ("TransitionDataset", "SnapshotDataset")
+        ),
+        type(train_ds).__name__,
+    )
     files = [
         [p.name, st.st_size, int(st.st_mtime)]
         for p in train_ds._state_files
@@ -128,7 +144,7 @@ def _normalization_signature(train_ds: "TransitionDataset") -> str:
     return json.dumps(
         {
             "version": _NORM_STATS_VERSION,
-            "dataset_class": type(train_ds).__name__,
+            "dataset_class": family,
             "split": train_ds.split,
             "state_vars": list(train_ds.state_vars),
             "param_names": list(train_ds.param_names),
@@ -161,7 +177,7 @@ def _load_cached_normalization_stats(
                 data["param_mean"],
                 data["param_std"],
             )
-    except (OSError, KeyError, ValueError) as exc:
+    except Exception as exc:  # e.g. BadZipFile/EOFError: a truncated file
         # A corrupt / stale-format cache file must never break training; just
         # fall back to recomputing (which overwrites it).
         print(f"ignoring unreadable normalization cache {path}: {exc}")
@@ -175,28 +191,36 @@ def _save_normalization_stats(
     """Persist stats next to the training data; a write failure is non-fatal."""
     path = _normalization_cache_path(train_ds)
     state_mean, state_std, param_mean, param_std = stats
+    # Runs sharing a dataset can write at once: each writes its own temporary
+    # file and renames it, so a reader never sees a half-written cache.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            path,
-            state_mean=state_mean,
-            state_std=state_std,
-            param_mean=param_mean,
-            param_std=param_std,
-            signature=_normalization_signature(train_ds),
-        )
+        with temporary.open("wb") as handle:  # a handle: np.savez keeps the name
+            np.savez(
+                handle,
+                state_mean=state_mean,
+                state_std=state_std,
+                param_mean=param_mean,
+                param_std=param_std,
+                signature=_normalization_signature(train_ds),
+            )
+        temporary.replace(path)
     except OSError as exc:
         print(f"could not cache normalization stats to {path}: {exc}")
 
 
 def get_normalization_stats(
     train_ds: "TransitionDataset",
+    source_root: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load cached normalization stats when available, else compute and cache.
 
     Computing the stats streams the whole training split from disk, which is
     slow on large datasets; caching the result in the data folder makes reruns
-    on the same data effectively free.
+    on the same data effectively free. ``source_root`` streams the state values
+    from that root's same-named files instead (e.g. the source of a re-chunked
+    copy); the cache location and signature stay those of ``train_ds``.
     """
     cached = _load_cached_normalization_stats(train_ds)
     if cached is not None:
@@ -205,7 +229,7 @@ def get_normalization_stats(
             f"{_normalization_cache_path(train_ds)}"
         )
         return cached
-    stats = _compute_normalization_stats(train_ds)
+    stats = _compute_normalization_stats(train_ds, source_root)
     _save_normalization_stats(train_ds, stats)
     print(f"cached normalization stats to {_normalization_cache_path(train_ds)}")
     return stats

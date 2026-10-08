@@ -21,7 +21,12 @@ Layout under the cache root (``<stem>`` is the state file's ``sample_XXXX``)::
 
 Like :func:`~neural_surrogates.datasets.rechunk.prepare_rechunked_dataset`,
 preparation resumes after an interruption, reuses completed files and fails
-closed when the AE, a source file or an encode setting changed.
+closed when the AE, a source file or an encode setting changed. Files are
+fingerprinted by size and mtime only, so a ``chmod``, ``chown`` or ``cp -a``
+keeps the cache valid. A complete cache is validated without locking or
+writing, so concurrent training runs can share it, read-only too. Preparing
+takes an exclusive lock, but ``flock`` is node-local on BeeGFS: run only one
+preparation of a cache at a time.
 """
 
 from __future__ import annotations
@@ -43,7 +48,24 @@ _LOG = logging.getLogger(__name__)
 _MANIFEST = "manifest.json"
 _LOCK = ".latent-cache.lock"
 _STATS = "latent_stats.npz"
-_VERSION = 1
+_VERSION = 2
+
+
+# Size and mtime: a chmod, chown or mtime-preserving copy keeps the cache valid.
+_fingerprint = _signature
+
+
+def _outputs(stem: str) -> list[str]:
+    return [f"{stem}{suffix}" for suffix in (".npy", ".geom.npy", ".sums.npz")]
+
+
+def _unchanged(directory: Path, stem: str, record: dict[str, Any]) -> bool:
+    """Whether the completed outputs of ``stem`` still match ``record``."""
+    return all(
+        (directory / name).is_file()
+        and _fingerprint(directory / name) == record["outputs"][name]
+        for name in _outputs(stem)
+    )
 
 
 def _plain(record: dict[str, Any]) -> dict[str, Any]:
@@ -62,7 +84,7 @@ def _split_record(base: SnapshotHistoryDataset) -> dict[str, Any]:
             "dtype": str(base.dtype),
             "sdf_features": base.sdf_feature_mode,
             "sdf_clamp_cells": base.sdf_clamp_cells,
-            "sources": {path.stem: _signature(path) for path in base._state_files},
+            "sources": {path.stem: _fingerprint(path) for path in base._state_files},
         }
     )
 
@@ -109,6 +131,8 @@ def _encode_trajectory(
             geometry, features, torch.float32
         )
     geom = branch_cond if geom_raw is None else geom_raw
+    if not torch.isfinite(geom).all():
+        raise ValueError(f"Non-finite geometry conditioning for {path}")
     temporary = directory / f"{path.stem}.geom.npy.tmp"
     with temporary.open("wb") as handle:
         np.save(handle, geom[0].cpu().numpy())
@@ -134,7 +158,10 @@ def _encode_trajectory(
         step = int(chunks[first.dims.index("time")]) if chunks else 1
         for t0 in range(0, frames, step):
             block = [
-                np.asarray(ds[v].isel(time=slice(t0, t0 + step)).values)
+                # Time first, whatever the source's dim order.
+                np.asarray(
+                    ds[v].isel(time=slice(t0, t0 + step)).transpose("time", ...).values
+                )
                 for v in base.state_vars
             ]
             for k in range(block[0].shape[0]):
@@ -143,9 +170,11 @@ def _encode_trajectory(
                 state = state.to(base.dtype).unsqueeze(0).to(device)
                 with torch.no_grad(), model._autocast_off(device):
                     z_raw, geom_b, *_ = model._encode_raw(state, geometry, features)
-                latents[t0 + k] = z_raw[0].cpu().numpy()
                 # The sums compute_latent_normalization accumulates.
                 work = z_raw if geom_b is None else torch.cat([z_raw, geom_b], dim=1)
+                if not torch.isfinite(work).all():
+                    raise ValueError(f"Non-finite latents at frame {t0 + k} of {path}")
+                latents[t0 + k] = z_raw[0].cpu().numpy()
                 w64 = work.cpu().to(torch.float64)
                 total += w64.sum(dim=(0, 2, 3, 4))
                 total_sq += (w64 * w64).sum(dim=(0, 2, 3, 4))
@@ -181,7 +210,8 @@ def prepare_latent_cache(
     (``ae_kwargs``) and every split's source state files and dataset
     settings. If any of it changed, or a completed file is missing or
     changed, this raises: use a new ``output_root``. Interrupted trajectories
-    are encoded again.
+    are encoded again, and a trajectory with non-finite latents raises.
+    A complete, unchanged cache returns without locking or writing.
     """
     if model.ae_fingerprint is None:
         raise ValueError(
@@ -202,13 +232,36 @@ def prepare_latent_cache(
         }
     )
     output = Path(output_root).expanduser().resolve()
+    manifest_path = output / _MANIFEST
+    if manifest_path.exists():
+        # Validate a complete cache without the lock: concurrent and
+        # read-only users never block each other.
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("version") != _VERSION:
+            raise ValueError(
+                f"Latent cache {output} was made by an older version of this "
+                "code; use a new output_root"
+            )
+        files = manifest.get("files", {})
+        if (
+            manifest.get("complete")
+            and (output / _STATS).is_file()
+            and {key: manifest.get(key) for key in recorded} == recorded
+            and all(
+                files.get(f"{split}/{path.stem}") is not None
+                and _unchanged(output / split, path.stem, files[f"{split}/{path.stem}"])
+                for split in splits
+                for path in datasets[split]._state_files
+            )
+        ):
+            _LOG.info("Latent cache valid: %d trajectories in %s", len(files), output)
+            return output
     output.mkdir(parents=True, exist_ok=True)
     with (output / _LOCK).open("a") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(f"Another process is preparing {output}") from exc
-        manifest_path = output / _MANIFEST
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text())
             if {key: manifest.get(key) for key in recorded} != recorded:
@@ -228,29 +281,29 @@ def prepare_latent_cache(
             for traj, path in enumerate(base._state_files):
                 index += 1
                 key = f"{split}/{path.stem}"
-                names = [f"{path.stem}{s}" for s in (".npy", ".geom.npy", ".sums.npz")]
                 record = files.get(key)
                 if record is not None:
-                    for name in names:
-                        target = directory / name
-                        if (
-                            not target.is_file()
-                            or _signature(target) != record["outputs"][name]
-                        ):
-                            raise ValueError(
-                                f"Completed latent cache file changed or is missing: {target}"
-                            )
+                    if not _unchanged(directory, path.stem, record):
+                        raise ValueError(
+                            f"Completed latent cache file changed or is missing: {key}"
+                        )
                     continue
                 files[key] = None
                 manifest["complete"] = False
                 _save_manifest(output, manifest)
                 _LOG.info("Encoding latents %d/%d: %s", index, total, key)
                 frames = _encode_trajectory(model, base, traj, directory, device)
-                if _signature(path) != recorded["splits"][split]["sources"][path.stem]:
+                if (
+                    _fingerprint(path)
+                    != recorded["splits"][split]["sources"][path.stem]
+                ):
                     raise ValueError(f"Source changed during encoding: {path}")
                 files[key] = {
                     "frames": frames,
-                    "outputs": {name: _signature(directory / name) for name in names},
+                    "outputs": {
+                        name: _fingerprint(directory / name)
+                        for name in _outputs(path.stem)
+                    },
                 }
                 _save_manifest(output, manifest)
             if split == "train":

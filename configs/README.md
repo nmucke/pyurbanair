@@ -111,7 +111,7 @@ the composed config is already complete. Examples:
 ```bash
 'architecture=${architectures.unet_convnext_small}'                 # train_stepper
 data.geometry.mode=fixed 'data.geometry.name=${case_name}'          # generate_data
-prechunk.output_root=<dir>  # train_autoencoder, train_dft: train on a re-chunked copy
+prechunk.output_root=<dir>  # any train_* (training.yaml): train on a re-chunked copy
 latent_cache.output_root=<dir>  # train_latent_generator: train on precomputed latents
 ```
 

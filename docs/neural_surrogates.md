@@ -1537,8 +1537,21 @@ Only the physical storage changes: every split, frame, value, coordinate and
 attribute is kept, packed values are copied as stored. A manifest of source and
 output file fingerprints makes an interrupted preparation resume, and a changed
 source or option fails rather than mixing data (pick a new directory to
-rebuild); a lock stops two writers. `config.yaml` keeps the source
+rebuild); a lock stops two writers. A complete copy is validated without the
+lock and without writing, so runs can share it and it may be read-only. The
+lock is node-local on BeeGFS (`tuneUseGlobalFileLocks = false`): never let two
+preparations of one directory run at once (submit training with
+`--dependency` on the prep job). `config.yaml` keeps the source
 `dataset.root_dir`, while the normalization stats are cached under the copy.
+The `prechunk` block lives in `training.yaml` (whole frames,
+`spatial_chunks: null`) and this config overrides it with tiles; `stepper`,
+`finetune_stepper` (so the baselines too) and `dft` read whole frames, so one
+whole-frame copy of a corpus serves all of them. They read their params from
+`dataset.root_dir` (`TransitionDataset(param_root=...)`), and the steppers
+stream their state normalization stats from the source, whose big chunks read
+a whole split faster than the copy. The stats cache keys on the dataset family
+(`TransitionDataset` / `SnapshotDataset`), so subclasses such as
+`RolloutTransitionDataset` share their parent's cache.
 `prechunk.prepare_only=true` makes the copy and exits without building a model,
 so it can run as a CPU job before the GPU one
 (`job_scripts/<machine>/surrogate_prechunk_data.slurm`, see
@@ -1707,8 +1720,8 @@ The stepper's geometry settings (`encode_geometry`, `sdf_features`,
 `geometry_branch`, `size`, `normalize`) must match the AE's: nothing
 cross-checks them beyond the strict encoder/decoder weight load.
 
-**Pre-chunked data (optional).** The same `prechunk` block as the autoencoder
-(§29), but with `spatial_chunks: null`: one chunk per frame and variable,
+**Pre-chunked data (optional).** The `prechunk` block of `training.yaml`
+(§29), whole frames (`spatial_chunks: null`): one chunk per frame and variable,
 since every sample reads two whole domains (`t` and `t+K`). Give it its own
 `output_root`; the autoencoder's crop-sized tiles make each whole-frame read
 many small ones. The copy holds only `state/`, so the task reads the params
@@ -2089,8 +2102,12 @@ sources again when training starts. Training then reads `LatentCacheDataset` ite
 `params_hist`) and calls `forward_cached`, which is `forward` minus the
 encoder, so the objective is unchanged. `latent_cache.prepare_only=true`
 encodes and exits (`job_scripts/<machine>/surrogate_prepare_latents.slurm`, a
-GPU job, see [job_scripts.md](job_scripts.md)); `config.yaml` keeps the source
-data, so evaluation and deployment still encode from states.
+GPU job, see [job_scripts.md](job_scripts.md)); `config.yaml` keeps the source data, so
+evaluation and deployment still encode from states. A complete cache is
+validated without locking or writing, so several runs can share it and it may
+be read-only; fingerprints are size and mtime, so permission changes or
+`rsync -a` keep it valid. As for `prechunk`, the lock is node-local on BeeGFS:
+run one preparation per directory and submit training with `--dependency`.
 
 **Artifact layout** (`model_weights/<name>/`): `config.yaml`, `weights.pt`
 (best-val **full** state dict: velocity net + frozen `ae.*` + every buffer),

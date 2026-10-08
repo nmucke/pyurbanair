@@ -11,7 +11,9 @@ dataset, the shared snapshot batch preparation, and unchanged
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -28,8 +30,12 @@ from neural_surrogates import (
     snapshot_history_collate,
 )
 from neural_surrogates.datasets._params import load_param_table
+from neural_surrogates.datasets.snapshot import SnapshotDataset
 from neural_surrogates.datasets.snapshot_history import corpus_time_config
-from neural_surrogates.training.data_utils import get_normalization_stats
+from neural_surrogates.training.data_utils import (
+    _normalization_signature,
+    get_normalization_stats,
+)
 from torch.utils.data import DataLoader
 
 STATE_VARS = ("u", "v", "w")
@@ -441,9 +447,82 @@ def test_get_normalization_stats_covers_all_saved_times(data_root: Path) -> None
     all_rows = np.concatenate([_raw_params(data_root, i) for i in range(N_TRAJ)])
     np.testing.assert_allclose(param_mean, all_rows.mean(axis=0), rtol=1e-5)
     np.testing.assert_allclose(param_std, all_rows.std(axis=0), rtol=1e-5)
-    # Stats are keyed on the dataset class, so the cached file names it.
+    # Stats are keyed on the dataset family, so the cached file names it.
     cached = np.load(data_root / "normalization_stats" / "train.npz")
-    assert "SnapshotHistoryDataset" in str(cached["signature"])
+    assert '"dataset_class": "SnapshotDataset"' in str(cached["signature"])
+
+
+def _old_signature(ds: Any) -> str:
+    """The signature as computed before it keyed on the dataset family."""
+    files = [
+        [p.name, st.st_size, int(st.st_mtime)]
+        for p in ds._state_files
+        for st in (p.stat(),)
+    ]
+    return json.dumps(
+        {
+            "version": 1,
+            "dataset_class": type(ds).__name__,
+            "split": ds.split,
+            "state_vars": list(ds.state_vars),
+            "param_names": list(ds.param_names),
+            "geometry_var": ds.geometry_var,
+            "files": files,
+        },
+        sort_keys=True,
+    )
+
+
+def test_normalization_signature_unchanged_for_base_datasets(data_root: Path) -> None:
+    # Existing caches written by the base classes must stay valid.
+    for ds in (
+        SnapshotDataset(data_root, "train", state_vars=STATE_VARS),
+        TransitionDataset(
+            data_root, "train", state_vars=STATE_VARS, param_vars=PARAM_VARS
+        ),
+    ):
+        assert _normalization_signature(ds) == _old_signature(ds)
+
+
+def test_normalization_cache_shared_by_layout_subclasses(data_root: Path) -> None:
+    class LayoutTransitionDataset(TransitionDataset):
+        """Stands in for e.g. RolloutTransitionDataset: same data, new layout."""
+
+    kwargs: dict[str, Any] = dict(state_vars=STATE_VARS, param_vars=PARAM_VARS)
+    base = TransitionDataset(data_root, "train", **kwargs)
+    sub = LayoutTransitionDataset(data_root, "train", **kwargs)
+    assert _normalization_signature(sub) == _normalization_signature(base)
+    expected = get_normalization_stats(base)
+    cache = data_root / "normalization_stats" / "train.npz"
+    before = cache.stat().st_mtime_ns
+    for left, right in zip(expected, get_normalization_stats(sub)):
+        np.testing.assert_array_equal(left, right)
+    assert cache.stat().st_mtime_ns == before  # loaded, not recomputed
+
+
+@pytest.mark.parametrize("content", [b"", b"PK\x03\x04truncated"])
+def test_truncated_normalization_cache_is_recomputed(
+    data_root: Path, content: bytes
+) -> None:
+    ds = TransitionDataset(
+        data_root, "train", state_vars=STATE_VARS, param_vars=PARAM_VARS
+    )
+    expected = get_normalization_stats(ds)
+    cache = data_root / "normalization_stats" / "train.npz"
+    cache.write_bytes(content)  # e.g. a write cut off before the atomic rename
+    for left, right in zip(expected, get_normalization_stats(ds)):
+        np.testing.assert_array_equal(left, right)
+    assert [p.name for p in cache.parent.iterdir()] == ["train.npz"]  # no tmp left
+
+
+def test_transition_dataset_keeps_one_state_file_open(data_root: Path) -> None:
+    ds = TransitionDataset(
+        data_root, "train", state_vars=STATE_VARS, param_vars=PARAM_VARS
+    )
+    first = {traj: i for i, (traj, _) in reversed(list(enumerate(ds.sample_index)))}
+    for idx in first.values():
+        ds[idx]
+        assert ds._state_cache is not None and len(ds._state_cache) == 1
 
 
 # -- shared reader + unchanged TransitionDataset --------------------------------

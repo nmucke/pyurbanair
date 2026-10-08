@@ -1,10 +1,10 @@
 # Pre-chunked data for stepper and baseline training
 
-Note (2026-10-08). Not implemented. Whether the `stepper` and
+Note (2026-10-08). Implemented (feat/stepper-prechunk): §3, plus a stats cache shared by dataset subclasses, stats streamed from the source, and lock-free validation of a complete copy. Whether the `stepper` and
 `finetune_stepper` tasks, and with them our steppers and the baselines in
-[neural_surrogate_baselines.md](../neural_surrogate_baselines.md), should train
+[neural_surrogate_baselines.md](../../neural_surrogate_baselines.md), should train
 on a re-chunked copy of the corpus, as the autoencoder and the DFT already can
-([neural_surrogates.md](../neural_surrogates.md) §29, `prechunk`). The final
+([neural_surrogates.md](../../neural_surrogates.md) §29, `prechunk`). The final
 check is the DelftBlue measurement in §4.
 
 ## 1. Why it matters

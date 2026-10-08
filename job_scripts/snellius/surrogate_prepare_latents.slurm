@@ -13,4 +13,7 @@
 #SBATCH --output=job_scripts/snellius/out_files/%x-%j.out
 
 source job_scripts/snellius/env.sh
-run python -u scripts/surrogate/train.py --config-name surrogate/train_latent_generator "$@" latent_cache.prepare_only=true
+# The snellius env has CPU-only torch (+cpu); encode in the CUDA env
+# (`pixi install -e cuda` once on a login node).
+run_gpu() { pixi run -e cuda -- "$@"; }
+run_gpu python -u scripts/surrogate/train.py --config-name surrogate/train_latent_generator "$@" latent_cache.prepare_only=true

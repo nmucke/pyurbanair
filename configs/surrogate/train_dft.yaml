@@ -73,11 +73,3 @@ dataset:
   param_vars: null
   num_history_steps: null
   pushforward_steps: 5
-# Optional lossless re-chunked copy of the training states, as in
-# train_autoencoder.yaml but one chunk per frame: every sample reads whole
-# domains, which small tiles turn into many slow reads. Its own dir, not the
-# autoencoder's copy; the params are still read from dataset.root_dir.
-prechunk:
-  output_root: null
-  prepare_only: false   # prepare, then exit (a CPU job before the GPU run)
-  spatial_chunks: null  # whole frames

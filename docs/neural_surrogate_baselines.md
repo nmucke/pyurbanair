@@ -53,6 +53,15 @@ pixi run -e dev python scripts/surrogate/baselines/compare.py \
 On the clusters, `job_scripts/<machine>/surrogate_train_{local_fno,ssrolling}.slurm`
 run these on a GPU ([job_scripts.md](job_scripts.md)).
 
+**Data loading.** Each sample reads a few whole frames (Local-FNO t−1…t+1,
+SSRollingUrbanNet t−1…t+K; Local-FNO's patches are cut on the GPU). From a
+corpus stored in large zlib time chunks that is decompression-bound (on
+DelftBlue ~1.7 s CPU for 3 frames); a whole-frame copy (`prechunk`, see
+[neural_surrogates.md](neural_surrogates.md) §29) costs ~0.1 s CPU per frame
+and mostly waits on the file system, which more workers overlap (the configs
+use `num_workers: 16`). Pass `prechunk.output_root=<copy>`; the DFT's
+whole-frame copy of the same corpus is reused as is.
+
 Both papers' models have no inflow parameters. Ours vary in time, so both
 baselines take the z-scored `param_vars`. That is the main deviation, listed
 with the others below.

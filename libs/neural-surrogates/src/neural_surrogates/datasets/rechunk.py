@@ -21,10 +21,19 @@ _VERSION = 1
 
 def _signature(path: Path) -> dict[str, int]:
     stat = path.stat()
-    return {
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "ctime_ns": stat.st_ctime_ns,
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _content(signature: dict[str, int]) -> dict[str, int]:
+    """The part of a fingerprint a content change moves. Manifests written
+    before this also record ``ctime_ns``, which chmod/chown/``rsync -a`` move
+    too: it is ignored, so such a copy stays valid and may be made read-only."""
+    return {key: signature[key] for key in ("size", "mtime_ns")}
+
+
+def _same_sources(left: Any, right: dict[str, dict[str, int]]) -> bool:
+    return isinstance(left, dict) and {k: _content(v) for k, v in left.items()} == {
+        k: _content(v) for k, v in right.items()
     }
 
 
@@ -40,6 +49,61 @@ def _inventory(root: Path) -> dict[str, dict[str, int]]:
         for path in sorted((root / "state").glob("*/sample_*.nc"))
         if path.is_file()
     }
+
+
+def _matches(
+    manifest: dict[str, Any],
+    source: Path,
+    options: dict[str, Any],
+    sources: dict[str, dict[str, int]],
+) -> bool:
+    expected = (_VERSION, str(source), options)
+    actual = tuple(manifest.get(k) for k in ("version", "source_root", "options"))
+    return actual == expected and _same_sources(manifest.get("sources"), sources)
+
+
+def _untracked(
+    output: Path, sources: dict[str, dict[str, int]], files: dict[str, Any]
+) -> list[str]:
+    """Files in ``output`` neither the manifest nor training could have written."""
+    allowed = {_LOCK, _MANIFEST, f"{_MANIFEST}.tmp"}
+    for relative in files:
+        if relative not in sources:
+            raise ValueError(f"Unexpected manifest entry: {relative}")
+        allowed.update((relative, f"{relative}.rechunking"))
+    # normalization_stats/: training computes these against the prepared files
+    # (and their temporary files): derived artifacts, never copied data.
+    return [
+        name
+        for p in output.rglob("*")
+        if (p.is_file() or p.is_symlink())
+        and (name := str(p.relative_to(output))) not in allowed
+        and not name.startswith("normalization_stats/")
+    ]
+
+
+def _is_complete(
+    output: Path,
+    source: Path,
+    options: dict[str, Any],
+    sources: dict[str, dict[str, int]],
+) -> bool:
+    """Whether ``output`` is a finished, unchanged copy (read-only check)."""
+    manifest_path = output / _MANIFEST
+    if not manifest_path.is_file():
+        return False
+    manifest = json.loads(manifest_path.read_text())
+    if not manifest.get("complete") or not _matches(manifest, source, options, sources):
+        return False
+    files = manifest["files"]
+    if set(files) != set(sources) or _untracked(output, sources, files):
+        return False
+    return all(
+        record.get("output") is not None
+        and (output / relative).is_file()
+        and _signature(output / relative) == _content(record["output"])
+        for relative, record in files.items()
+    )
 
 
 def _save_manifest(root: Path, manifest: dict[str, Any]) -> None:
@@ -201,7 +265,8 @@ def prepare_rechunked_dataset(
     manifest permits interrupted preparation to resume and completed files to
     be reused using size/mtime/ctime fingerprints. Changed sources, options or
     completed outputs fail closed: select a new cache directory to rebuild.
-    An exclusive lock prevents concurrent preparation in the same directory.
+    An exclusive lock prevents concurrent preparation in the same directory;
+    a complete, unchanged copy is validated without the lock or any write.
     """
     source = Path(source_root).expanduser().resolve()
     output = Path(output_root).expanduser().resolve()
@@ -233,6 +298,10 @@ def prepare_rechunked_dataset(
         "compression_level": int(compression_level),
     }
     sources = _inventory(source)
+    # Validating a finished copy needs neither the lock nor any write, so
+    # concurrent training runs (or a read-only copy) can share it.
+    if _is_complete(output, source, options, sources):
+        return output
     output.mkdir(parents=True, exist_ok=True)
     with (output / _LOCK).open("a") as lock:
         try:
@@ -242,12 +311,7 @@ def prepare_rechunked_dataset(
         manifest_path = output / _MANIFEST
         if manifest_path.exists():
             manifest = json.loads(manifest_path.read_text())
-            expected = (_VERSION, str(source), options, sources)
-            actual = tuple(
-                manifest.get(k)
-                for k in ("version", "source_root", "options", "sources")
-            )
-            if actual != expected:
+            if not _matches(manifest, source, options, sources):
                 raise ValueError(
                     f"Rechunk source or options changed; use a new output directory: {output}"
                 )
@@ -261,23 +325,7 @@ def prepare_rechunked_dataset(
                 "complete": False,
             }
         files = manifest["files"]
-        allowed = {_LOCK, _MANIFEST, f"{_MANIFEST}.tmp"}
-        # Training computes these against the prepared files on its first run.
-        # They are derived artifacts, never copied from the original dataset.
-        allowed.update(
-            f"normalization_stats/{Path(relative).parent.name}.npz"
-            for relative in sources
-        )
-        for relative in files:
-            if relative not in sources:
-                raise ValueError(f"Unexpected manifest entry: {relative}")
-            allowed.update((relative, f"{relative}.rechunking"))
-        unknown = [
-            str(p.relative_to(output))
-            for p in output.rglob("*")
-            if (p.is_file() or p.is_symlink())
-            and str(p.relative_to(output)) not in allowed
-        ]
+        unknown = _untracked(output, sources, files)
         if unknown:
             raise ValueError(
                 f"Untracked files in rechunk output {output}: {unknown[:5]}"
@@ -287,9 +335,8 @@ def prepare_rechunked_dataset(
             destination = output / relative
             record = files.get(relative)
             if record is not None and record.get("output") is not None:
-                if (
-                    not destination.is_file()
-                    or _signature(destination) != record["output"]
+                if not destination.is_file() or _signature(destination) != _content(
+                    record["output"]
                 ):
                     raise ValueError(
                         f"Completed rechunk file changed or is missing: {destination}"

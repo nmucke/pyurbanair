@@ -21,3 +21,7 @@ dataloader:
 
 dataset:
   root_dir: ${paths.data_dir}
+
+# Never the user's copy: a test that wants one passes its own dir.
+prechunk:
+  output_root: null

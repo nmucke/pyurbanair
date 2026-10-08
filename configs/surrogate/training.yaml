@@ -71,3 +71,14 @@ dataset:
   sdf_clamp_cells: 32
   cache: false
   dtype: float32
+
+# Optional lossless re-chunked copy of the training states (storage only:
+# every split, frame and value kept), made or validated before training;
+# params are still read from dataset.root_dir. null: read dataset.root_dir
+# as is. Whole frames (spatial_chunks: null) suit models that read whole
+# domains; one copy serves every such model on that data (DFT, steppers,
+# baselines). train_autoencoder overrides it with crop-sized tiles.
+prechunk:
+  output_root: null
+  prepare_only: false   # prepare, then exit (a CPU job before the GPU run)
+  spatial_chunks: null  # whole frames
