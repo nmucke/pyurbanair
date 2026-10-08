@@ -1,0 +1,40 @@
+# @package _global_
+# Fine-tune the Roll-1 SSRollingUrbanNet with Roll-3 on the same data, the
+# paper's transfer-learning step (TL Roll-3):
+#   python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/finetune_roll3
+# The architecture, inputs and normalisation come from the pretrained model.
+defaults:
+  - /surrogate/training
+  - _self_
+
+task: finetune_stepper
+name: ssrolling_tl_roll3
+# A train_roll1.yaml output folder (weights + config).
+pretrained_dir: ${paths.weights_dir}/ssrolling_roll1
+# Every weight is trained, starting from the Roll-1 ones.
+method: full
+recompute_normalization: false
+trainer:
+  _target_: neural_surrogate_baselines.RolloutTrainer
+  num_epochs: 200
+  patience: 50
+  lr_warmup_epochs: null
+  grad_clip_norm: null
+  pushforward_epochs_per_step: null
+  alpha: 1.0
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-5
+  weight_decay: 0.0
+batch_sampler:
+  batch_size: 2
+dataloader:
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogate_baselines.RolloutTransitionDataset
+  param_vars: null
+  # null: take these from the pretrained model.
+  num_history_steps: null
+  pushforward_steps: 3

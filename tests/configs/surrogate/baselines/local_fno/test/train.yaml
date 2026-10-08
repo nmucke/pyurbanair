@@ -1,0 +1,16 @@
+# @package _global_
+# A tiny Local-FNO for one CPU epoch on the tests' tiny data.
+defaults:
+  - /surrogate/test/training
+
+name: local_fno
+architecture:
+  width: 8
+  modes: [2, 4, 4]
+  n_layers: 2
+  patch_core: 8
+  patch_overlap: 2
+  sdf_clamp_cells: 4
+trainer:
+  epoch_batches: 2
+  val_batches: 1

@@ -1,0 +1,44 @@
+# @package _global_
+# Train SSRollingUrbanNet (Park & Lee 2026) with Roll-3 from scratch (an ablation
+# arm; the paper fine-tunes Roll-1 instead, finetune_roll3.yaml):
+#   python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/train_roll3
+# Data, dataloader and paths come from surrogate/training.yaml, as for our steppers.
+# `architecture=${baseline_architectures.urbanaurora_512}` trains 3DSwinUrbanNet;
+# SSGen's `n_levels` (default 32) must equal the corpus' nz, e.g.
+# `+baseline_architectures.ssrolling_512.n_levels=16`; `trainer.alpha=0` is
+# the MSE-only arm.
+defaults:
+  - /surrogate/training
+  - /surrogate/baselines/architectures@baseline_architectures
+  - _self_
+
+task: stepper
+name: ssrolling_roll3
+architecture: ${baseline_architectures.ssrolling_512}
+init_weights: null
+trainer:
+  _target_: neural_surrogate_baselines.RolloutTrainer
+  # Constant learning rate, no clipping, until 50 epochs without improvement.
+  num_epochs: 1000
+  patience: 50
+  lr_warmup_epochs: null
+  grad_clip_norm: null
+  pushforward_epochs_per_step: null
+  # Weight of the spectral loss.
+  alpha: 1.0
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-5
+  weight_decay: 0.0
+batch_sampler:
+  batch_size: 2
+dataloader:
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogate_baselines.RolloutTransitionDataset
+  param_vars: null
+  # Two input steps; the loss covers every one of the `pushforward_steps`.
+  num_history_steps: 2
+  pushforward_steps: 3

@@ -8,6 +8,7 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `pylbm/`, `pyudales/`, `pypalm/` | the CFD backends (`libs/py*`) |
 | `data_assimilation/` | ESMDA, filters, localization, observation operator/error, state reduction |
 | `neural_surrogates/` | architectures, datasets, training, generative spin-up |
+| `neural_surrogate_baselines/` | the re-implemented published surrogates (`libs/neural-surrogate-baselines`) and their comparison |
 | `evaluation/` | the `evaluation` scoring library |
 | `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers |
 | `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |

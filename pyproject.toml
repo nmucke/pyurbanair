@@ -160,6 +160,15 @@ p3d-surrogate = ">=0.0.4"
 # installs); here it is unconditional so the pixi dev/cuda envs always have it.
 peft = ">=0.11"
 
+# Re-implemented published surrogates for comparison with ours
+# (docs/neural_surrogate_baselines.md). Microsoft Aurora (MIT) is
+# SSRollingUrbanNet's backbone; pinned because the adapter builds on its
+# internals. Besides deps already in the env it adds azure-storage-blob and
+# pydantic (its checkpoint-download helpers), unused here.
+[tool.pixi.feature.baselines.pypi-dependencies]
+neural-surrogate-baselines = { path = "libs/neural-surrogate-baselines", editable = true }
+microsoft-aurora = "==2.0.1"
+
 # Development tasks
 [tool.black]
 line-length = 88
@@ -353,11 +362,11 @@ ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "benchmark_geometry", "cpu"] }
-delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "cpu"] }
+delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
-snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm"] }
-cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "lbm", "palm", "cuda"] }
+snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
+cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
 mcp = { features = ["mcp", "visualization", "evaluation", "dev", "py312", "cpu"] }
 rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }

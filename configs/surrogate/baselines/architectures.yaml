@@ -1,0 +1,52 @@
+# @package baseline_architectures
+# Re-implemented published surrogates (libs/neural-surrogate-baselines; see
+# docs/neural_surrogate_baselines.md). Pick one with
+# `architecture=${baseline_architectures.<name>}` in a configs/surrogate/baselines/ config.
+
+# --- Local-FNO (Qin et al. 2025), the paper's model -----------------------------
+# Modes (z, y, x); a 64-cell core plus 6 cells of overlap on each side is their
+# 304 m inference patch at our 4 m spacing. `periodic_axes` must match the
+# corpus' lateral boundaries.
+local_fno:
+  _target_: neural_surrogate_baselines.LocalFNOStepper
+  width: 36
+  modes: [8, 16, 16]
+  n_layers: 4
+  mlp_ratio: 2.0
+  patch_core: 64
+  patch_overlap: 6
+  periodic_axes: [y]
+  sdf_features: sdf
+  sdf_clamp_cells: 32
+
+# --- 3DSwinUrbanNet / SSRollingUrbanNet (Park et al. 2026) ----------------------
+# Aurora with AuroraSmall's depths and heads. embed_dim 512 is the papers' 451 M
+# model; 256 is AuroraSmall's width (113 M), the size-matched arm. `ssgen` adds
+# the small-scale generator (SSRollingUrbanNet); without it this is 3DSwinUrbanNet.
+# SSGen folds height into channels, so it is built for `n_levels` = the corpus' nz.
+urbanaurora_512:
+  _target_: neural_surrogate_baselines.SSRollingUrbanNet
+  embed_dim: 512
+  num_heads: 16
+  ssgen: false
+  periodic_axes: [y]
+urbanaurora_256:
+  _target_: neural_surrogate_baselines.SSRollingUrbanNet
+  embed_dim: 256
+  num_heads: 8
+  ssgen: false
+  periodic_axes: [y]
+ssrolling_512:
+  _target_: neural_surrogate_baselines.SSRollingUrbanNet
+  n_levels: 32
+  embed_dim: 512
+  num_heads: 16
+  ssgen: true
+  periodic_axes: [y]
+ssrolling_256:
+  _target_: neural_surrogate_baselines.SSRollingUrbanNet
+  n_levels: 32
+  embed_dim: 256
+  num_heads: 8
+  ssgen: true
+  periodic_axes: [y]

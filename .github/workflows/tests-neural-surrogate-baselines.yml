@@ -1,0 +1,48 @@
+# tests/neural_surrogate_baselines.
+# Pull requests run it when the package or something it depends on changes;
+# every push to main and a manual run (Actions tab) run it unconditionally.
+name: "Tests: neural_surrogate_baselines"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "libs/neural-surrogate-baselines/**"
+      - "libs/neural-surrogates/**"
+      - "tests/neural_surrogate_baselines/**"
+      - "configs/surrogate/**"
+      - "configs/model/neural_surrogate.yaml"
+      - "scripts/surrogate/**"
+      - "scripts/utils/**"
+      - "scripts/run_forward.py"
+      - "tests/configs/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "pixi.lock"
+      - "tests/conftest.py"
+      - "scripts/setup_dev_env.sh"
+      - ".github/actions/setup/**"
+      - ".github/workflows/tests-neural-surrogate-baselines.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests/neural_surrogate_baselines (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup
+      - name: Run tests
+        run: pixi run -e dev python -m pytest tests/neural_surrogate_baselines --durations=10

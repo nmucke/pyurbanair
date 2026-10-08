@@ -32,8 +32,9 @@ scripts/    the scripts you run (run_*, compute_metrics, visualize_*,
 workflows/  shell pipelines: a run followed by its post-processing
 geometries/ case inputs: one folder per case (STL, namoptions, _p3d), urbantales/
 src/        pyurbanair: base classes every backend inherits
-libs/       pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
-            evaluation, visualization, mcp-server (each an editable package)
+libs/       pylbm, pyudales, pypalm, neural-surrogates, neural-surrogate-baselines,
+            data-assimilation, evaluation, visualization, mcp-server (each an
+            editable package)
 tests/      one folder per package; tests/scripts/ for scripts, configs, workflows
 docs/       reference docs; plans/, research/, archive/ are working notes
 archive/    the retired setup: dead code, never edit, import or run it
@@ -60,6 +61,7 @@ Before editing, read the doc for the area you touch, and only that one.
 | PALM (`libs/pypalm`) | [docs/pypalm.md](docs/pypalm.md) |
 | Data assimilation (`libs/data-assimilation`) | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates (`libs/neural-surrogates`, `scripts/surrogate/`) | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
+| Published baselines (`libs/neural-surrogate-baselines`, `configs/surrogate/baselines/`) | [docs/neural_surrogate_baselines.md](docs/neural_surrogate_baselines.md) |
 | Metrics and figures (`libs/evaluation`) | [docs/evaluation.md](docs/evaluation.md) |
 | MCP server (`libs/mcp-server`) | [docs/mcp.md](docs/mcp.md) |
 | HTML forward-run viewer (`libs/visualization`) | [docs/visualization.md](docs/visualization.md) |
