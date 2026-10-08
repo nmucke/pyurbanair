@@ -209,8 +209,11 @@ configuration with only the turbulence seed changed, covering the same horizon
 It is read like `truth_dir`, from `truth_start_time` on; `check_config` checks
 that its `state.nc` reaches the horizon's end. `compute_metrics.py` scores it
 as a one-member prediction under `replica`: the best score a perfect model can
-reach against one turbulent realisation. For an existing run dir, set the key
-in its `config.yaml` and rerun `compute_metrics.py`. The seed to change:
+reach against one turbulent realisation. For an existing run dir, pass it on
+the command line, `python scripts/compute_metrics.py <run dir>
+assimilation.replica_dir=<replica run dir>` (any `key=value` after the run dir
+overrides its `config.yaml`), then rerun `visualize_assimilation.py`. The seed
+to change:
 
 - uDALES: `model.forward_model.inlet_turbulence.seed` (null derives it from
   the experiment name, so a rerun under the same name repeats the truth's
@@ -237,8 +240,8 @@ state (`window_{w}_filter_obs.nc`, and `window_{w}_filter_params.nc` in
 
 | Script | Input | Writes |
 |---|---|---|
-| `compute_metrics.py <run dir>` | a DA run dir | `metrics.yaml`: parameter RMSE/CRPS (+ prior and reduction, per window), parameter correlations, SGS health (with model discrepancy), ensemble-mean \|U\| RMSE, per sensor set (assimilated and validation) RMSE and energy score, spread–skill, climatology baseline, per-window sensor statistics (+ `replica` with `assimilation.replica_dir`); observation-space fit and Desroziers per stage; `diagnostics.nc`: per-window parameter members and correlations |
-| `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the rank histogram) | `figures/`: parameter evolution, parameter pairs, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
+| `compute_metrics.py <run dir> [key=value ...]` | a DA run dir (+ config overrides) | `metrics.yaml`: the scores are the statistics (field statistics and canopy profiles, per-window sensor statistics, sensor value distributions, spanwise spectra), each per source (posterior, prior, forecast, `replica` with `assimilation.replica_dir`); plus parameter RMSE/CRPS (+ prior and reduction, per window), parameter correlations, SGS health (with model discrepancy), the instantaneous sensor RMSE, energy score and spread–skill (sanity checks), climatology baseline, observation-space fit and Desroziers per stage; `diagnostics.nc`: the arrays the figures read |
+| `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the figures from `diagnostics.nc` and `metrics.yaml`) | `figures/`: parameter evolution, parameter pairs, canopy profiles, sensor distributions, spectra, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
 | `visualize_forward.py <run dir>` | a forward run dir | `figures/`: field snapshot, animation, parameters (with inlet-recovered angle/speed) |
 
 Both read window files one member at a time, so multi-GB runs fit in memory.

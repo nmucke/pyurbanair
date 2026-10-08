@@ -106,8 +106,10 @@ parameters and end state, made before seeing window `w`'s data. Its scores in
    `pixi run -e dev python -m pytest tests/pyudales -k "discrepancy or replay" -m integration`
    If they fail, stop and report. Nothing below is meaningful without them.
 4. **Keep every run directory, including the window state files.** The
-   turbulence metrics in [da_turbulence_metrics.md](da_turbulence_metrics.md)
-   are not implemented yet; they will be recomputed from these files later.
+   turbulence metrics of
+   [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md) are
+   computed from these files: rerun `compute_metrics.py` and
+   `visualize_assimilation.py` on them.
    Budget disk accordingly. One frame is 30·40·16 cells × 4 variables ×
    4 B ≈ 0.3 MB. A window file is then 180 frames × 32 members ≈ 1.8 GB, so a
    smoother run with prior states is about 11 GB. Check `df` before starting.
@@ -334,7 +336,7 @@ deployment where the best coefficients for reality are unknown. Consequences:
 
 - **Judge predictions only.** Score what the DA never sees: the held-out
   validation sensors and the window-1/2 forecasts after the coefficients are
-  frozen. Use the statistics from [da_turbulence_metrics.md](da_turbulence_metrics.md),
+  frozen. Use the statistics from [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md),
   not instantaneous errors:
   - `sensor_statistics`;
   - sensor distributions (W2);
@@ -388,8 +390,10 @@ get worse. The coefficients must also be stable across seeds and windows.
   the `sgs_bias_*` entries in `static_truth` (remove them with `~` if it
   doesn't). Then point the DA at it with `assimilation.truth_dir=<run dir>` and
   `assimilation.truth_start_time=<spinup>`. Make the PALM replica the same way
-  with another seed (check which random seed `pypalm` exposes), for
-  `assimilation.replica_dir`.
+  with another seed, for `assimilation.replica_dir`. `pypalm` exposes no seed
+  today: PALM seeds its random generator from `ensemble_member_nr`, which
+  pypalm does not write, so add that key first (see
+  [scripts_and_configs.md](../scripts_and_configs.md)).
 - **Align the solvers:** inlet turbulence differs (PALM disturbances vs the
   uDALES driver planes), and so do the spinup, the grid staggering of the
   sensor sampling, and the time origin. Read [pypalm.md](../pypalm.md) first.
