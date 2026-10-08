@@ -19,6 +19,7 @@ job_scripts/
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
+│   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
 └── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
 ```

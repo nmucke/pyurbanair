@@ -87,8 +87,8 @@ workflows/   shell pipelines: a run followed by its post-processing
 geometries/  case inputs, one folder per case (STL, uDALES and PALM
              templates), plus the UrbanTALES training-geometry templates
 src/         pyurbanair: the base classes every backend inherits
-libs/        pylbm, pyudales, pypalm, neural-surrogates, data-assimilation,
-             evaluation, visualization, mcp-server
+libs/        pylbm, pyudales, pypalm, neural-surrogates, neural-surrogate-baselines,
+             data-assimilation, evaluation, visualization, mcp-server
 tests/       one folder per package, plus tests of scripts/ and configs/
 docs/        reference documentation
 archive/     the previous configs, scripts and tests (not maintained)
@@ -103,6 +103,7 @@ archive/     the previous configs, scripts and tests (not maintained)
 | Cases and geometries | [geometries/README.md](geometries/README.md) |
 | Data assimilation | [docs/data_assimilation.md](docs/data_assimilation.md) |
 | Neural surrogates | [docs/neural_surrogates.md](docs/neural_surrogates.md) |
+| Published surrogate baselines | [docs/neural_surrogate_baselines.md](docs/neural_surrogate_baselines.md) |
 | Evaluation metrics and figures | [docs/evaluation.md](docs/evaluation.md) |
 | Backends | [pylbm](docs/pylbm.md), [pyudales](docs/pyudales.md), [pypalm](docs/pypalm.md) |
 | Tests | [tests/README.md](tests/README.md) |

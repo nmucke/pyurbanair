@@ -1,0 +1,7 @@
+# @package _global_
+# Roll-3 fine-tuning of the tiny Roll-1 model (train_roll1.yaml), one CPU epoch.
+defaults:
+  - /surrogate/test/training
+
+name: ssrolling_tl_roll3
+pretrained_dir: ${paths.weights_dir}/ssrolling_roll1

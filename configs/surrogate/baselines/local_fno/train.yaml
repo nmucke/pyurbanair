@@ -1,0 +1,39 @@
+# @package _global_
+# Train Local-FNO (Qin et al. 2025) with the paper's recipe on our data:
+#   python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/train
+# Data, dataloader and paths come from surrogate/training.yaml, as for our steppers.
+defaults:
+  - /surrogate/training
+  - /surrogate/baselines/architectures@baseline_architectures
+  - _self_
+
+task: stepper
+name: local_fno
+architecture: ${baseline_architectures.local_fno}
+init_weights: null
+trainer:
+  _target_: neural_surrogate_baselines.LocalFNOTrainer
+  # Halve the learning rate after every epoch, stop at the first validation
+  # rise, at most 12 epochs. An epoch is capped at about the paper's length.
+  num_epochs: 12
+  patience: 1
+  lr_step_gamma: 0.5
+  epoch_batches: 2000
+  val_batches: 200
+  lr_warmup_epochs: null
+  grad_clip_norm: null
+  pushforward_epochs_per_step: null
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 2.0e-3
+  weight_decay: 1.0e-4
+dataloader:
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  param_vars: null
+  # Two input steps, one step ahead, no pushforward.
+  num_history_steps: 2
+  pushforward_steps: 1

@@ -18,6 +18,9 @@ parameter / state estimation.
   - `pypalm` — PALM model system. Imports lazily (compiles on first import).
 - **`neural-surrogates`** — a learned one-step surrogate usable as a fourth
   backend.
+- **`neural-surrogate-baselines`** — re-implemented published surrogates
+  (Local-FNO, SSRollingUrbanNet) behind the same stepper contract, for
+  comparison.
 - **`data-assimilation`** implements ESMDA, the EnKF family and the
   ESMDA × filter hybrid in JAX.
 - **`pyurbanair`** (top-level package) holds the base classes that *every*
@@ -37,6 +40,7 @@ guide only summarizes:
 | Hydra configs (`configs/`), the scripts (`scripts/`) and `workflows/` | [scripts_and_configs.md](scripts_and_configs.md); every key and override in [configs/README.md](../configs/README.md) |
 | ESMDA, filtering, the hybrid, observation operator, localization, state reduction | [data_assimilation.md](data_assimilation.md) |
 | Neural surrogates (architectures, training, rollout, domain decomposition) | [neural_surrogates.md](neural_surrogates.md) |
+| Published surrogate baselines and their comparison | [neural_surrogate_baselines.md](neural_surrogate_baselines.md) |
 | The LBM backend (compile, `infile.in`, STL geometry, CUDA, warm starts) | [pylbm.md](pylbm.md) |
 | The uDALES backend (`namoptions`, staggered grid, nudging, dt watchdog, discrepancy) | [pyudales.md](pyudales.md) |
 | The PALM backend (lazy import, `_p3d` namelists, direct-run path, topography) | [pypalm.md](pypalm.md) |
@@ -125,6 +129,7 @@ libs/neural-surrogates/src/neural_surrogates/   # Learned one-step CFD surrogate
   forward_model.py, ensemble_forward_model.py   # NeuralSurrogate{,Ensemble}ForwardModel
   architectures/                   # p3d, unet_convnext, upt, simple_conv, domain_decomposed, tadpole_*
   datasets/, training/, finetuning/
+libs/neural-surrogate-baselines/src/neural_surrogate_baselines/   # Published surrogates (Local-FNO, SSRollingUrbanNet)
 
 scripts/                           # Scripts you run; their shared helpers are in utils/.
   run_forward.py                   # Forward sim — single/ensemble, extra windows

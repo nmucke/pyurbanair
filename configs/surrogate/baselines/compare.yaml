@@ -1,0 +1,25 @@
+# @package _global_
+# Fair comparison of trained steppers (scripts/surrogate/baselines/compare.py):
+# same test trajectories and start frame, errors on fluid cells only, against
+# persistence, with turbulence statistics.
+defaults:
+  - /common
+  - _self_
+
+paths:
+  results_dir: ${paths.weights_dir}
+
+device: cuda
+split: test
+# Training-data root to evaluate on; null -> the first model's training data.
+data_dir: null
+# Trained model folders (config.yaml + weights.pt), all trained on the same data.
+models: []
+output_dir: ${paths.weights_dir}/baselines_compare
+sample_indices: [0]
+# Rollout length in steps after the start frame; null -> the whole trajectory.
+max_steps: null
+# Also score "repeat the start frame", the reference to beat.
+persistence: true
+# Heights (z indices) of the lateral spectra.
+levels: [0, 4, 8]
