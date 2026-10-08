@@ -30,7 +30,11 @@ from neural_surrogates.finetuning import (
     save_adapter,
 )
 from neural_surrogates.generative_spinup import geometry_fingerprint
-from neural_surrogates.training.data_utils import build_loader, get_normalization_stats
+from neural_surrogates.training.data_utils import (
+    build_loader,
+    get_normalization_stats,
+    get_param_normalization_stats,
+)
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -189,16 +193,21 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
 def _dft(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     ae_dir = pathlib.Path(cfg.pretrained_dir)
     _inherit_dataset(cfg, OmegaConf.load(ae_dir / "config.yaml"))
-    train, val = _datasets(cfg)
+    # A prechunked copy holds only the states: params stay in the source.
+    root = prechunked_root(cfg)
+    train, val = (
+        _datasets(cfg)
+        if root is None
+        else _datasets(cfg, root_dir=root, param_root=cfg.dataset.root_dir)
+    )
     cfg.architecture.pretrained_ae_dir = str(ae_dir)
     # Keep the autoencoder's state normalization unless asked to recompute it.
     cfg.architecture.require_ae_state_stats = not cfg.recompute_normalization
     model = _build_stepper(cfg, train)
-    s_mean, s_std, p_mean, p_std = get_normalization_stats(train)
     if cfg.recompute_normalization:
-        model.set_normalization(s_mean, s_std, p_mean, p_std)
-    else:
-        model.set_normalization(None, None, p_mean, p_std)
+        model.set_normalization(*get_normalization_stats(train))
+    else:  # the state stats would stream the whole split only to be dropped
+        model.set_normalization(None, None, *get_param_normalization_stats(train))
 
     peft = _with_lora(model, cfg.lora)
     for name, p in peft.named_parameters():  # the new modules train fully
@@ -269,7 +278,13 @@ def prechunked_root(cfg: DictConfig) -> str | None:
         return None
     from neural_surrogates.datasets.rechunk import prepare_rechunked_dataset
 
-    return str(prepare_rechunked_dataset(cfg.dataset.root_dir, prechunk.output_root))
+    return str(
+        prepare_rechunked_dataset(
+            cfg.dataset.root_dir,
+            prechunk.output_root,
+            spatial_chunks=prechunk.spatial_chunks,
+        )
+    )
 
 
 def _build_stepper(cfg: DictConfig, train: Any) -> Any:

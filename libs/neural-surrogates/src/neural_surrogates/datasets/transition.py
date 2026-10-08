@@ -119,6 +119,10 @@ class TransitionDataset(Dataset):
     inside obstacles (pylbm); uDALES fielddumps carry tiny non-zero
     values there, so uDALES datasets must ship ``blanking`` explicitly.
 
+    Parameters are read from ``<param_root>/param/<split>/`` (``param_root``
+    defaults to ``root_dir``), so the states can come from a re-chunked copy
+    of the data that holds only ``state/``.
+
     State snapshots are read lazily from netCDF on each ``__getitem__``
     via ``xr.open_dataset(..., cache=cache).isel(time=...)`` so only the
     sample's own slices (the ``H`` history frames and ``t+K``) leave disk;
@@ -146,6 +150,7 @@ class TransitionDataset(Dataset):
         num_history_steps: int = 1,
         sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
+        param_root: str | Path | None = None,
     ) -> None:
         if pushforward_steps < 1:
             raise ValueError(f"pushforward_steps must be >= 1, got {pushforward_steps}")
@@ -174,7 +179,7 @@ class TransitionDataset(Dataset):
         self.sdf_clamp_cells = float(sdf_clamp_cells)
 
         state_dir = self.root / "state" / split
-        param_dir = self.root / "param" / split
+        param_dir = Path(param_root or root_dir) / "param" / split
         if not state_dir.is_dir():
             raise FileNotFoundError(f"missing state split dir: {state_dir}")
         if not param_dir.is_dir():

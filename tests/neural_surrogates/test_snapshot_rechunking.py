@@ -92,6 +92,27 @@ def test_rechunk_preserves_every_file_value_and_temporal_remainder(
             assert ds["packed"].dtype == np.dtype("int16")
 
 
+# 0.0005 MB holds less than one frame: blocks then split an output chunk.
+@pytest.mark.parametrize("max_buffer_mb", [1, 0.0005])
+def test_whole_frame_rechunk_preserves_every_value(
+    source_root: Path, tmp_path: Path, max_buffer_mb: float
+) -> None:
+    output = prepare_rechunked_dataset(
+        source_root,
+        tmp_path / "prepared",
+        spatial_chunks=None,
+        max_buffer_mb=max_buffer_mb,
+    )
+    for path in source_root.rglob("*.nc"):
+        relative = path.relative_to(source_root)
+        with xr.open_dataset(path, decode_cf=False) as original:
+            with xr.open_dataset(output / relative, decode_cf=False) as converted:
+                xr.testing.assert_identical(original, converted)
+        with netCDF4.Dataset(output / relative) as ds:
+            assert ds["u"].chunking() == [1, 3, 5, 7]
+            assert ds["blanking"].chunking() == [3, 5, 7]
+
+
 @pytest.mark.parametrize("crop_size", [None, 2])
 @pytest.mark.parametrize("time_stride", [1, 2])
 def test_rechunk_keeps_sample_index_crops_and_all_sampler_remainders(

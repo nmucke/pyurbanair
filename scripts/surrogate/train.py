@@ -13,8 +13,9 @@ config's `task` (tasks.py), then fit with the configured `trainer`,
 Outputs, in `<paths.weights_dir>/<name>/`: config.yaml (everything needed to
 rebuild the model), weights.pt (best validation weights) and the trainer's
 checkpoint; plus encoder.pt/decoder.pt for an autoencoder and adapter/ for LoRA.
-An autoencoder with `prechunk.output_root` trains on a re-chunked copy of the
-data; `prechunk.prepare_only=true` only makes that copy.
+An autoencoder or DFT with `prechunk.output_root` trains on a re-chunked copy
+of the data (`prechunk.spatial_chunks`: tiles, or null for whole frames);
+`prechunk.prepare_only=true` only makes that copy.
 """
 
 from __future__ import annotations

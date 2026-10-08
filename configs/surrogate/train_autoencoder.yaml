@@ -55,3 +55,4 @@ dataset:
 prechunk:
   output_root: null
   prepare_only: false   # prepare, then exit (a CPU job before the GPU run)
+  spatial_chunks: [16, 64, 64]  # tiles near the crop size

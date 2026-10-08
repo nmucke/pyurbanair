@@ -90,11 +90,19 @@ def _compute_normalization_stats(
             s_count += masked.shape[0] * masked.shape[1]
     state_mean = s_sum / s_count
     state_std = np.sqrt(np.maximum(s_sqsum / s_count - state_mean**2, 0.0))
+    return (state_mean, state_std, *get_param_normalization_stats(train_ds))
 
+
+def get_param_normalization_stats(
+    train_ds: "TransitionDataset",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-param mean/std over every saved step of the training split.
+
+    The param tables are already in memory, so unlike the state stats this
+    reads nothing from disk and is not cached.
+    """
     params = torch.cat([p for p in train_ds._params], dim=0).cpu().numpy()  # (sum_T,P)
-    param_mean = params.mean(axis=0)
-    param_std = params.std(axis=0)
-    return state_mean, state_std, param_mean, param_std
+    return params.mean(axis=0), params.std(axis=0)
 
 
 def _normalization_signature(train_ds: "TransitionDataset") -> str:
