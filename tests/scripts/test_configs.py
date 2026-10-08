@@ -8,7 +8,9 @@ import re
 import warnings
 from typing import Any
 
+import numpy as np
 import pytest
+import xarray
 from omegaconf import OmegaConf
 
 from tests.conftest import CONFIGS, REPO, TEST_CONFIGS, compose, load_script
@@ -259,3 +261,30 @@ def test_check_config_skips_memory_guard_for_parameter_smoother(
     monkeypatch.setattr(module, "_physical_memory", lambda: 1)
     overrides = [*LOCALIZED_STATE_SMOOTHER, "smoothing.smoother=${smoother.dynamic}"]
     module.check_config(compose("assimilation", *overrides, root=tmp_path), "smoother")
+
+
+def test_check_config_checks_the_replica_horizon(tmp_path: pathlib.Path) -> None:
+    """assimilation.replica_dir needs a state.nc that covers the horizon."""
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    replica = tmp_path / "replica"
+    replica.mkdir()
+    overrides = [
+        "+test=assimilation",
+        "time.simulation_time=3.0",
+        "assimilation.num_windows=2",
+        "assimilation.truth_start_time=1.0",
+        f"assimilation.replica_dir={replica}",
+    ]
+    cfg = compose("assimilation", *overrides, root=tmp_path)
+    with pytest.raises(ValueError, match="replica_dir has no state.nc"):
+        check(cfg, "smoother")
+    # The horizon ends at truth_start_time + 2 * 3 s = 7 s; the output times
+    # may jitter by up to half an output interval (1 s here).
+    for end, ok in ((6.0, False), (6.98, True), (7.0, True)):
+        times = [*np.arange(1.0, 6.0), end]
+        xarray.Dataset(coords={"time": times}).to_netcdf(replica / "state.nc")
+        if ok:
+            check(cfg, "smoother")
+        else:
+            with pytest.raises(ValueError, match="before the horizon's end"):
+                check(cfg, "smoother")

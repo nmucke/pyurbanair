@@ -99,15 +99,26 @@ def case_stl_path(cfg: DictConfig) -> pathlib.Path:
 def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
     """A run's truth state over its horizon, opened lazily.
 
-    `run_dir/true_state.nc` for a simulated truth, else `<truth_dir>/state.nc`
-    from `assimilation.truth_start_time` on, with that time rebased to t=0.
+    `run_dir/true_state.nc` for a simulated truth, else the state of
+    `assimilation.truth_dir` (see `open_forward_run`).
     """
     truth_dir = cfg.assimilation.truth_dir
     if truth_dir is None:
         return xarray.open_dataset(run_dir / "true_state.nc")
+    return open_forward_run(cfg, truth_dir)
+
+
+def open_forward_run(cfg: DictConfig, directory: str) -> xarray.Dataset:
+    """`<directory>/state.nc` of a forward run over the assimilation horizon.
+
+    Read from `assimilation.truth_start_time` on, with that time rebased to
+    t=0, so it lines up with the truth: used for `truth_dir` and `replica_dir`.
+    Both ends are matched within half an output interval: uDALES output times
+    jitter (the last frame of a 60 s run may sit at 60.05 s).
+    """
     horizon = cfg.assimilation.num_windows * cfg.time.simulation_time
     start = float(cfg.assimilation.truth_start_time or 0.0)
-    path = pathlib.Path(truth_dir) / "state.nc"
+    path = pathlib.Path(directory) / "state.nc"
     state = xarray.open_dataset(path)
     # Output frames sit in (0, simulation_time], so a frame at t=0 marks a
     # state.nc written before the backends stamped time that way (PR #163).
@@ -117,18 +128,24 @@ def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
             f"{path} has a frame at t=0: it predates output on "
             "(0, simulation_time] and would be read one frame off. Regenerate it."
         )
-    return _time_window(state, start, horizon)
+    tolerance = 0.5 * float(cfg.time.output_frequency)
+    return _time_window(state, start, horizon, tolerance=tolerance)
 
 
 def _time_window(
-    ds: xarray.Dataset, start: float, length: float, keep_start: bool = False
+    ds: xarray.Dataset,
+    start: float,
+    length: float,
+    keep_start: bool = False,
+    tolerance: float = 1e-6,
 ) -> xarray.Dataset:
     """Keep (start, start + length] and shift the time axis so `start` is t=0.
 
     That is where a run's output frames sit (the first one is one output
-    interval in). `keep_start` also keeps t=start, for parameter knots.
+    interval in). `keep_start` also keeps t=start, for parameter knots. Both
+    ends are matched within `tolerance`.
     """
-    eps = 1e-6
+    eps = tolerance
     after_start = ds.time >= start - eps if keep_start else ds.time > start + eps
     ds = ds.sel(time=after_start & (ds.time <= start + length + eps))
     return ds.assign_coords(time=ds.time - start)

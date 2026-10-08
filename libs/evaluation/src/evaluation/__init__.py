@@ -15,8 +15,8 @@ docstring says what has actually landed there:
   energy score, z-score, rank, spread--skill, hit rate) and the parameter /
   sensor metric bundles built on them.
 - :mod:`evaluation.turbulence` -- flow statistics: streaming moment
-  accumulation over state files, the state RMSE and its building mask, block
-  bootstrap, spectra.
+  accumulation over state files, field statistics and their building mask,
+  block bootstrap, spectra.
 - :mod:`evaluation.sensors` -- reductions of pre-extracted sensor / probe
   series to window statistics. Extraction itself stays in the scripts: it
   needs the observation-operator machinery from ``data_assimilation`` (jax).

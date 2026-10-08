@@ -48,6 +48,11 @@ assimilation:
   # Start the horizon partway into a disk-loaded truth (skips a spin-up): keep
   # frames from this time onward and rebase it to t=0. null/0 -> first frame.
   truth_start_time: null
+  # Noise floor: a forward run of the truth configuration with another
+  # turbulence seed (see docs/scripts_and_configs.md), read like truth_dir.
+  # compute_metrics.py scores it as a one-member prediction (`replica` keys).
+  # null -> no replica scores.
+  replica_dir: null
   # Write ensemble forecasts to disk (one NetCDF per member) instead of holding
   # one in-memory ensemble Dataset.
   ensemble_save_on_disk: false

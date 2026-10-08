@@ -22,8 +22,18 @@ or pinned ensemble produces constantly.
 """
 
 import numpy as np
+import pytest
 import xarray
-from evaluation.scores import compute_parameter_metrics, crps_ensemble, per_knot_in_band
+from evaluation.scores import (
+    compute_parameter_metrics,
+    crps_ensemble,
+    distribution_scores,
+    kl_divergence,
+    per_knot_in_band,
+    shared_histograms,
+    wasserstein2,
+    window_series_stats,
+)
 from evaluation.sensors import window_masks
 
 
@@ -159,3 +169,89 @@ def test_window_masks_put_a_boundary_frame_in_the_window_it_closes() -> None:
     for w, mask in enumerate(masks):
         np.testing.assert_array_equal(np.flatnonzero(mask) // frames, w)
         assert mask.sum() == frames
+
+
+def test_wasserstein2_of_two_gaussians_is_location_plus_scale() -> None:
+    # For Gaussians W2² = (Δμ)² + (Δσ)² exactly: the quantile functions differ
+    # only by a shift and a stretch, so the shape term is zero.
+    rng = np.random.default_rng(0)
+    truth = rng.normal(1.0, 0.5, 200_000)
+    pred = rng.normal(1.3, 0.8, 200_000)
+    d = wasserstein2(truth, pred)
+
+    assert d["w2"] ** 2 == pytest.approx(d["location"] + d["scale"] + d["shape"])
+    assert d["location"] == pytest.approx(0.3**2, rel=0.02)
+    # The 99-level midpoint grid sees ~99 % of a Gaussian's sigma.
+    assert d["scale"] == pytest.approx(0.3**2, rel=0.05)
+    assert d["shape"] < 1e-3
+    assert d["w2"] ** 2 == pytest.approx(0.3**2 + 0.3**2, rel=0.05)
+
+
+def test_wasserstein2_sees_shape_when_moments_match() -> None:
+    # A uniform with the Gaussian's mean and std differs only in shape.
+    rng = np.random.default_rng(1)
+    truth = rng.normal(0.0, 1.0, 200_000)
+    pred = rng.uniform(-np.sqrt(3.0), np.sqrt(3.0), 200_000)
+    d = wasserstein2(truth, pred)
+
+    assert d["shape"] > 10 * (d["location"] + d["scale"])
+
+
+def test_kl_divergence_of_two_gaussians_matches_closed_form() -> None:
+    rng = np.random.default_rng(2)
+    m1, s1, m2, s2 = 0.0, 1.0, 0.5, 1.5
+    truth = rng.normal(m1, s1, 1_000_000)
+    pred = rng.normal(m2, s2, 1_000_000)
+    exact = np.log(s2 / s1) + (s1**2 + (m1 - m2) ** 2) / (2 * s2**2) - 0.5
+
+    # 30 bins over the union range: a few percent of binning error.
+    assert kl_divergence(truth, pred) == pytest.approx(exact, rel=0.05)
+
+
+def test_identical_samples_have_zero_distance_and_nans_are_dropped() -> None:
+    x = np.random.default_rng(3).normal(size=5_000)
+    with_nan = np.concatenate([x, [np.nan, np.nan]])
+
+    d = wasserstein2(x, with_nan)
+    assert d["w2"] == pytest.approx(0.0, abs=1e-12)
+    assert kl_divergence(x, with_nan) == pytest.approx(0.0, abs=1e-12)
+    assert np.isnan(wasserstein2(x, [np.nan])["w2"])
+    assert np.isnan(kl_divergence([], x))
+
+
+def test_distribution_scores_expose_cancelling_sensors_and_member_spread() -> None:
+    rng = np.random.default_rng(3)
+    truth = rng.normal([0.0, 1.0], 1.0, (20_000, 2))  # (frame, sensor)
+    # Sensors swapped: the pooled mixture matches, each sensor is 1 std off.
+    swapped = truth[None, :, ::-1]
+    d = distribution_scores(truth, swapped)
+    assert d["w2"] < 0.05
+    assert d["w2_per_sensor"] == pytest.approx(1.0, abs=0.05)
+
+    # Two members shifted by -/+1: the pooled ensemble is wider, each member
+    # is 1 off.
+    members = np.stack([truth - 1.0, truth + 1.0])
+    d = distribution_scores(truth, members)
+    assert d["w2_member_median"] == pytest.approx(1.0, abs=0.01)
+    assert d["location"] == pytest.approx(0.0, abs=1e-6)
+    assert d["kl"] > 0 and d["kl_member_median"] > 0
+
+
+def test_shared_histograms_share_the_bins_and_integrate_to_one() -> None:
+    rng = np.random.default_rng(4)
+    edges, densities, quantiles = shared_histograms(
+        {"a": rng.normal(0.0, 1.0, 5000), "b": rng.normal(2.0, 1.0, 5000), "c": []}
+    )
+    assert edges.size == 31
+    for name in ("a", "b"):
+        assert np.sum(densities[name] * np.diff(edges)) == pytest.approx(1.0)
+    assert quantiles["b"][49] == pytest.approx(2.0, abs=0.1)  # the median
+    assert np.isnan(densities["c"]).all() and np.isnan(quantiles["c"]).all()
+
+
+def test_window_series_stats_averages_within_windows() -> None:
+    """Two knots per window are averaged; an all-NaN window is None."""
+    stats = window_series_stats(np.array([1.0, 3.0, np.nan, np.nan, 5.0, 7.0]), 3)
+    assert stats is not None
+    assert stats["per_window"] == [2.0, None, 6.0]
+    assert stats["mean"] == pytest.approx(4.0)

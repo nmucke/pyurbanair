@@ -1,11 +1,10 @@
-"""The state RMSE leaves building cells out, and the mask is the solvers' own."""
+"""The building mask is the solvers' own; `on_grid` moves a field between grids."""
 
 import pathlib
 
 import numpy as np
-import pytest
 import xarray as xr
-from evaluation.turbulence import stl_solid_mask, streaming_state_rmse
+from evaluation.turbulence import on_grid, stl_solid_mask
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 XIE_CASTRO = REPO / "geometries/xie_and_castro/xie_castro_2008_STL.stl"
@@ -109,91 +108,20 @@ def test_xie_castro_mask_is_pylbms_voxelisation():
     assert (mask == lbm.transpose(2, 1, 0)).all()
 
 
-def _state(u, z, y, x, ensemble=False):
-    dims = ("time", "z", "y", "x")
-    ds = xr.Dataset(
-        {"u": (dims, u), "v": (dims, np.zeros_like(u)), "w": (dims, np.zeros_like(u))},
-        coords={"time": np.arange(u.shape[0]) + 1.0, "z": z, "y": y, "x": x},
+def test_on_grid_interpolates_only_the_axes_that_differ():
+    z_fine, z, y = np.arange(7.0) / 2, np.arange(4.0), np.arange(3.0)
+    dims = ("z", "y", "x")
+    field = xr.DataArray(
+        np.broadcast_to(z_fine[:, None, None], (7, 3, 2)),
+        dims=dims,
+        coords={"z": z_fine, "y": y, "x": [0.0, 1.0]},
     )
-    return ds.expand_dims(ensemble=1) if ensemble else ds
-
-
-def test_state_rmse_is_the_fluid_only_rmse(tmp_path):
-    box = ((2.0, 6.0), (2.0, 6.0), (0.0, 3.0))
-    stl = _write_boxes(tmp_path / "box.stl", [box])
-    z, y, x = np.arange(4.0) + 0.5, np.arange(10.0) + 0.5, np.arange(10.0) + 0.5
-    solid = _below_roofs([box], z, y, x)
-    rng = np.random.default_rng(0)
-    truth = rng.uniform(1.0, 2.0, (3, z.size, y.size, x.size))
-    member = truth + rng.normal(0.0, 0.1, truth.shape)
-    # Inside the building: zeros in the truth, arbitrary values in the member
-    # (pylbm's solid nodes); both must drop out.
-    truth[:, solid] = 0.0
-    member[:, solid] = 5.0
-
-    rmse = streaming_state_rmse(
-        _state(truth, z, y, x), _state(member, z, y, x, ensemble=True), stl
+    grid = xr.DataArray(
+        np.zeros((4, 3, 2)), dims=dims, coords={"z": z, "y": y, "x": [0.0, 1.0]}
     )
 
-    expected = np.sqrt(((truth - member)[:, ~solid] ** 2).mean(axis=1))
-    assert solid.any()
-    assert rmse == pytest.approx(expected)
+    moved = on_grid(field, grid)
 
-
-def test_state_rmse_takes_the_truth_at_the_ensembles_heights(tmp_path):
-    # The truth has twice the levels: picked by index, its 4 levels would sit
-    # at other heights than the ensemble's.
-    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
-    y = x = np.arange(4.0) + 0.5
-    z_member, z_truth = np.arange(4.0) + 0.5, np.arange(8.0) / 2 + 0.25
-
-    def u_equals_z(z):
-        return np.broadcast_to(z[None, :, None, None], (2, z.size, 4, 4))
-
-    rmse = streaming_state_rmse(
-        _state(u_equals_z(z_truth), z_truth, y, x),
-        _state(u_equals_z(z_member) + 0.1, z_member, y, x),
-        stl,
+    np.testing.assert_allclose(
+        moved.values, np.broadcast_to(z[:, None, None], (4, 3, 2))
     )
-
-    assert rmse == pytest.approx([0.1, 0.1])
-
-
-def test_state_rmse_refuses_ensemble_levels_above_the_truth(tmp_path):
-    # Interpolated, the truth would be NaN at z = 3.5 and the level would drop
-    # out of the mean unnoticed.
-    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
-    y = x = np.arange(4.0) + 0.5
-    z_member, z_truth = np.arange(4.0) + 0.5, np.arange(3.0) + 0.5
-    ones = np.ones((2, 1, 4, 4))
-
-    with pytest.raises(ValueError, match=r"z = \[3\.5\].*\[0\.5, 2\.5\]"):
-        streaming_state_rmse(
-            _state(ones * z_truth[:, None, None], z_truth, y, x),
-            _state(ones * z_member[:, None, None], z_member, y, x),
-            stl,
-        )
-
-
-def test_state_rmse_takes_a_level_a_sliver_above_the_truth_as_its_top(tmp_path):
-    # The truth's top level 1e-6 below the ensemble's, as float32 coordinates
-    # give: it is the same level, and it must not drop out as NaN. The error
-    # grows with height, so a dropped level changes the RMSE.
-    stl = _write_boxes(tmp_path / "far.stl", [((50.0, 51.0), (50.0, 51.0), (0.0, 1.0))])
-    y = x = np.arange(4.0) + 0.5
-    # z = 1.25 lies between truth levels, so the truth is interpolated.
-    z_member = np.array([0.5, 1.25, 2.5, 3.5])
-    z_truth = np.arange(7.0) / 2 + 0.5
-    z_truth[-1] -= 1e-6
-
-    def u_equals_z(z):
-        return np.broadcast_to(z[None, :, None, None], (2, z.size, 4, 4))
-
-    rmse = streaming_state_rmse(
-        _state(u_equals_z(z_truth), z_truth, y, x),
-        _state(1.1 * u_equals_z(z_member), z_member, y, x),
-        stl,
-    )
-
-    expected = np.sqrt(np.mean((0.1 * z_member) ** 2))
-    assert rmse == pytest.approx([expected, expected], abs=1e-5)

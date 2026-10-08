@@ -2,7 +2,8 @@
 
     check_config(cfg, "smoother")   # forward | smoother | filtering | hybrid
 
-Reads only the composed config (nothing is sampled or simulated), so a bad
+Reads only the composed config (nothing is sampled or simulated; the one file
+read is the time axis of `assimilation.replica_dir`), so a bad
 combination fails in seconds instead of after the truth run. Every problem
 found is reported at once, in a single ValueError.
 """
@@ -15,6 +16,7 @@ import pathlib
 import warnings
 from typing import Any
 
+import xarray
 from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import (
@@ -94,7 +96,28 @@ def _assimilation(cfg: DictConfig) -> list[str]:
         for name in ("state.nc", "params.nc"):
             if not (pathlib.Path(da.truth_dir) / name).is_file():
                 problems.append(f"assimilation.truth_dir has no {name}.")
+    if da.get("replica_dir") is not None:
+        problems += _replica(cfg)
     return problems
+
+
+def _replica(cfg: DictConfig) -> list[str]:
+    """The replica's state.nc must cover the truth's horizon."""
+    da = cfg.assimilation
+    path = pathlib.Path(da.replica_dir) / "state.nc"
+    if not path.is_file():
+        return ["assimilation.replica_dir has no state.nc."]
+    end = float(da.truth_start_time or 0.0) + da.num_windows * cfg.time.simulation_time
+    with xarray.open_dataset(path) as state:
+        last = float(state.time[-1])
+    # Matched within half an output interval, as `open_forward_run` reads it.
+    if last < end - 0.5 * float(cfg.time.output_frequency):
+        return [
+            f"assimilation.replica_dir's state.nc ends at t={last:g} s, before the "
+            f"horizon's end at {end:g} s (truth_start_time + num_windows * "
+            "simulation_time)."
+        ]
+    return []
 
 
 def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:

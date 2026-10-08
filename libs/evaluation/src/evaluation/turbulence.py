@@ -19,6 +19,7 @@ probes and the log-spectral distance).
 
 from __future__ import annotations
 
+import functools
 import logging
 import pathlib
 import warnings
@@ -26,7 +27,8 @@ from typing import NamedTuple
 
 import numpy as np
 import xarray
-from scipy import signal
+from evaluation.scores import window_series_stats
+from scipy import ndimage, signal
 
 logger = logging.getLogger(__name__)
 
@@ -183,110 +185,20 @@ def select_z_plane(ds, z_level):
     return ds.isel(sel) if sel else ds
 
 
-def _centre_coord(ds, names):
-    for n in names:
-        if n in ds.coords:
-            return np.asarray(ds[n].values, dtype=float)
-    return None
+def on_grid(field, grid, dims=("z", "y", "x")):
+    """``field`` on the coordinates of ``grid``, interpolated linearly along
+    each of ``dims`` whose coordinates differ (NaN reaches every point it
+    touches, and lies outside ``field``'s range).
 
-
-def _vel_levels(state, n_time, z_idx, stl_path):
-    """Velocity magnitude on the levels ``z_idx``, NaN in the building cells.
-
-    Returns a ``(time, z, y, x)`` DataArray on the cell centres. Only those
-    levels (across all time) are read from disk, bounding memory to a small
-    fraction of the full 3-D field. The components are combined by index
-    (matching ``get_velocity_magnitude_field``).
+    Both carry ``dims``: how a truth on another grid (another solver) is
+    compared with the ensemble's.
     """
-    s = state.isel(time=slice(0, n_time))
-
-    def _sel_var(name):
-        da = s[name]
-        for d in _Z_DIMS:
-            if d in da.dims:
-                da = da.isel({d: z_idx})
-                break
-        return np.asarray(da.values)
-
-    vel = np.sqrt(_sel_var("u") ** 2 + _sel_var("v") ** 2 + _sel_var("w") ** 2)
-
-    z = _centre_coord(state, ("zt", "z"))[z_idx]
-    y = _centre_coord(state, ("yt", "y"))
-    x = _centre_coord(state, ("xt", "x"))
-    vel[:, stl_solid_mask(stl_path, z, y, x)] = np.nan
-    return xarray.DataArray(
-        vel, dims=("time", "z", "y", "x"), coords={"z": z, "y": y, "x": x}
-    )
-
-
-def _bracketing_levels(levels, heights):
-    """Indices of the ``levels`` that linear interpolation to ``heights`` reads:
-    the level at a height where there is one, else the levels around it."""
-    above = np.clip(np.searchsorted(levels, heights), 0, levels.size - 1)
-    below = np.clip(above - 1, 0, levels.size - 1)
-    on_level = np.isclose(levels[above], heights)
-    return np.unique(np.concatenate([above, below[~on_level]]))
-
-
-def _on_grid(field, grid):
-    """``field`` on the cell centres of ``grid``, interpolated linearly along
-    each axis whose centres differ (NaN reaches every point it touches)."""
-    for dim in ("z", "y", "x"):
+    for dim in dims:
         if field.sizes[dim] == grid.sizes[dim] and np.allclose(field[dim], grid[dim]):
             field = field.assign_coords({dim: grid[dim]})
         else:
             field = field.interp({dim: grid[dim]})
     return field
-
-
-def streaming_state_rmse(true_state, esmda_state, stl_path, n_z_slices=4):
-    """Per-timestep RMSE of |U| between truth and the ensemble-mean state.
-
-    Streams over ``n_z_slices`` evenly-spaced z-levels of the ensemble grid and
-    all time steps rather than materialising the full 4-D velocity field; the
-    truth is read at the same heights. Building cells (:func:`stl_solid_mask`
-    of the case STL at ``stl_path``) are NaN on each grid before anything else,
-    so they never enter the mean: inside a building the backends write zeros
-    (PALM), near-zero leftovers (uDALES) or arbitrary values (pylbm's solid
-    nodes). When the grids differ, the truth is interpolated linearly onto the
-    ensemble's cell centres (only the levels it needs are read), and a cell
-    whose interpolation reaches a building cell drops out too.
-
-    Raises:
-        ValueError: If an ensemble level lies outside the truth's height range,
-            where the truth can't be interpolated to it. A level within
-            ``SURFACE_TOLERANCE`` times the truth's level spacing of an end
-            level counts as on it (float32 coordinates).
-    """
-    true_s = (
-        true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-    )
-    esmda_s = (
-        esmda_state.mean(dim="ensemble")
-        if "ensemble" in esmda_state.dims
-        else esmda_state
-    )
-
-    n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
-
-    esmda_z = _centre_coord(esmda_s, ("zt", "z"))
-    esmda_idx = evenly_spaced_levels(esmda_z.size, n_z_slices)
-    true_z = _centre_coord(true_s, ("zt", "z"))
-    heights = esmda_z[esmda_idx]
-    tol = SURFACE_TOLERANCE * min(np.diff(true_z), default=1.0)
-    outside = heights[(heights < true_z[0] - tol) | (heights > true_z[-1] + tol)]
-    if outside.size:
-        raise ValueError(
-            f"ensemble levels z = {outside.tolist()} lie outside the truth's "
-            f"height range [{true_z[0]:g}, {true_z[-1]:g}]"
-        )
-    esmda_vel = _vel_levels(esmda_s, n_time, esmda_idx, stl_path)
-    # Onto the end level, or interp gives NaN a sliver outside it.
-    at = np.clip(heights, true_z[0], true_z[-1])
-    true_vel = _vel_levels(true_s, n_time, _bracketing_levels(true_z, at), stl_path)
-
-    diff = _on_grid(true_vel, esmda_vel.assign_coords(z=at)).values - esmda_vel.values
-    return np.sqrt(np.nanmean(diff**2, axis=(1, 2, 3)))
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +680,7 @@ def colocate_components(ds, solver_name):
     they are not: uDALES stores ``u`` on the x-faces, ``v`` on the y-faces and
     ``w`` on the z-faces; PALM stores ``u`` on ``xu`` and ``v`` on ``yv``.
 
-    Why not combine by index, as :func:`streaming_state_rmse` does for ``|U|``:
+    Why not combine by index, as a plain ``|U|`` would:
     ``u[k,j,i]`` and ``w[k,j,i]`` sit half a cell apart in both x and z, so an
     ``<u'w'>`` formed from them is a *two-point* correlation at lag
     ``(dx/2, 0, dz/2)`` while the diagonal ``<u'u'>`` is a one-point moment --
@@ -873,11 +785,7 @@ def extrapolated_centre_dims(ds, solver_name):
 
 
 def evenly_spaced_levels(n_levels, n_wanted):
-    """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
-
-    Shared with :func:`streaming_state_rmse` -- one implementation, so the accumulated
-    slabs and the z-levels the ``|U|`` RMSE is streamed over cannot drift apart.
-    """
+    """Indices of ``n_wanted`` evenly spaced levels, endpoints included."""
     if n_levels < 1:
         raise ValueError(f"n_levels must be positive, got {n_levels}")
     if n_wanted < 1:
@@ -2279,3 +2187,390 @@ def spectral_metric_summary(spectra: dict) -> dict:
             log_spectral_distance(truth, median_spectrum(spectra["prior"])[:, band])
         )
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Field statistics and spanwise spectra (assimilation turbulence metrics)
+# ---------------------------------------------------------------------------
+#
+# The truth and every member are driven by different turbulent realisations, so
+# instantaneous fields are not comparable; their statistics are. These are the
+# per-member reductions behind the ``field_statistics``, ``canopy_profiles`` and
+# ``spectra`` blocks of ``compute_metrics.py``, and their scoring. Every spatial
+# array is ``(z, y, x)``.
+
+# Spanwise wavelength bands in grid spacings Δ, ``lo <= λ/Δ < hi``: large scales
+# show inflow errors, the band near the 2Δ cutoff shows an SGS change first.
+SPECTRAL_BANDS = {"large": (8.0, np.inf), "mid": (4.0, 8.0), "near_cutoff": (2.0, 4.0)}
+
+# The canopy profiles (``field_statistics`` keys) and the height groups of
+# :func:`spanwise_spectra`, in their array order.
+PROFILE_QUANTITIES = ("u", "tke", "uw")
+SPECTRUM_GROUPS = ("above_canopy", "in_canopy")
+# The one-member sources on the truth's grid, which may differ from the ensemble's.
+ON_TRUTH_GRID = ("truth", "replica")
+
+# Top levels left out of the above-canopy spectra: the top boundary shapes them.
+_SPECTRA_TOP_CELLS = 2
+# Cells before the outflow left out of the spectra: the outflow boundary shapes them.
+_SPECTRA_OUTFLOW_CELLS = 2
+
+
+def field_statistics(u, v, w):
+    """Time-mean ``u``, ``v``, ``w``, TKE and resolved ``u'w'`` of one member.
+
+    ``u``, ``v``, ``w`` are ``(time, z, y, x)`` on the cell centres (the output of
+    :func:`colocate_components`): TKE and ``u'w'`` are one-point moments.
+    Moments are :class:`MomentAccumulator`'s (``ddof=1``, NaN frames skipped per
+    cell). Returns a dict of ``(z, y, x)`` arrays keyed ``u``, ``v``, ``w``,
+    ``tke``, ``uw``. Average each member's statistics over the ensemble, never
+    the statistics of the ensemble-mean field.
+    """
+    moments = MomentAccumulator()
+    moments.update(u, v, w)
+    mean = moments.mean()
+    return {
+        "u": mean[0],
+        "v": mean[1],
+        "w": mean[2],
+        "tke": moments.tke(),
+        "uw": moments.reynolds_stress()[0, 2],
+    }
+
+
+def fluid_mask(stl_path, z, y, x):
+    """``(z, y, x)`` fluid cells for colocated statistics: not solid, not next to it.
+
+    :func:`stl_solid_mask` dilated by one cell along each axis, so that a centre
+    whose colocation reads a solid face drops out.
+    """
+    return ~ndimage.binary_dilation(_solid_mask(stl_path, z, y, x))
+
+
+def _solid_mask(stl_path, z, y, x):
+    """:func:`stl_solid_mask`, computed once per grid: every member and window
+    of a run reuses it."""
+    return _cached_solid_mask(
+        stl_path, *(np.asarray(c, dtype=float).tobytes() for c in (z, y, x))
+    )
+
+
+@functools.cache
+def _cached_solid_mask(stl_path, z: bytes, y: bytes, x: bytes) -> np.ndarray:
+    return stl_solid_mask(stl_path, *(np.frombuffer(c) for c in (z, y, x)))
+
+
+def intrinsic_profile(field, fluid):
+    """Per-level mean of ``field`` over the fluid cells of that level.
+
+    ``field`` and ``fluid`` are ``(z, y, x)``. Returns ``(z,)``, NaN at a level
+    with no fluid (or no finite) cell.
+    """
+    values = np.where(fluid, np.asarray(field, dtype=float), np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-solid levels
+        return np.nanmean(values, axis=(1, 2))
+
+
+def statistic_rmse(prediction, truth, fluid):
+    """RMSE of a statistic over the fluid cells, total and per level.
+
+    All three are ``(z, y, x)``; cells where either field is not finite drop out
+    too. Returns ``(rmse, profile)``: a float and a ``(z,)`` array, NaN where
+    nothing is left.
+    """
+    error = np.asarray(prediction, dtype=float) - np.asarray(truth, dtype=float)
+    squared = np.where(fluid, error**2, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return float(np.sqrt(np.nanmean(squared))), np.sqrt(
+            np.nanmean(squared, axis=(1, 2))
+        )
+
+
+def spanwise_spectra(field, fluid, dy):
+    """Spanwise spectra of the fluctuations on the fully fluid ``(x, z)`` lines.
+
+    The fluctuations are about the time mean of ``field`` (the window's, for
+    one member), so a steady pattern, such as the mean flow around the
+    buildings, carries no energy. ``y`` is periodic in every backend, so each
+    line is FFT'd as it is, with no window or detrending. Pass a component on
+    its **native** grid with the fluid mask of that grid (``~stl_solid_mask`` at
+    the component's own coordinates): interpolation would low-pass the tail
+    being measured. Only ``x`` from the first column holding a solid cell (on a
+    level that is not entirely solid, such as a ground plane) up to
+    ``_SPECTRA_OUTFLOW_CELLS`` before the outflow is used. Groups:
+
+    - ``above_canopy``: levels with no solid cell, below the top
+      ``_SPECTRA_TOP_CELLS``;
+    - ``in_canopy``: the fully fluid lines (open streets along ``y``) of levels
+      that have solid cells.
+
+    Args:
+        field: ``(time, z, y, x)``.
+        fluid: ``(z, y, x)`` bool.
+        dy: Spanwise grid spacing in m.
+
+    Returns:
+        ``(k, spectra)``: ``k`` the wavenumbers in cycles/m without the
+        ``k = 0`` bin, and ``spectra`` a dict ``{group: (n_k,) | None}``, the
+        one-sided spectral density averaged over lines and frames (so
+        ``sum(E) * dk`` is the fluctuation variance along ``y``). ``None`` for a group with no
+        line; the caller logs that.
+    """
+    values = np.asarray(field, dtype=float)
+    values = values - values.mean(axis=0)
+    fluid = np.asarray(fluid, dtype=bool)
+    n_z, n_y, n_x = fluid.shape
+    partly_solid = (~fluid).any(axis=(1, 2)) & fluid.any(axis=(1, 2))
+    solid_columns = np.flatnonzero((~fluid[partly_solid]).any(axis=(0, 1)))
+    x_slice = slice(
+        solid_columns[0] if solid_columns.size else 0, n_x - _SPECTRA_OUTFLOW_CELLS
+    )
+    line_fluid = fluid[:, :, x_slice].all(axis=1)  # (z, x)
+    has_solid = (~fluid).any(axis=(1, 2))
+
+    k = np.fft.rfftfreq(n_y, d=dy)
+    # One-sided: every bin but the mean and the Nyquist bin stands for two.
+    weight = np.full(k.size, 2.0)
+    weight[0] = 1.0
+    if n_y % 2 == 0:
+        weight[-1] = 1.0
+    scale = weight / (n_y**2 * k[1])  # |FFT/n|², per unit wavenumber
+
+    spectra = {}
+    for group, levels in (
+        ("above_canopy", ~has_solid & (np.arange(n_z) < n_z - _SPECTRA_TOP_CELLS)),
+        ("in_canopy", has_solid),
+    ):
+        total, n_lines = np.zeros(k.size), 0
+        for level in np.flatnonzero(levels):
+            lines = values[:, level, :, x_slice][:, :, line_fluid[level]]
+            if lines.shape[-1]:
+                total += (np.abs(np.fft.rfft(lines, axis=1)) ** 2).sum(axis=(0, 2))
+                n_lines += lines.shape[0] * lines.shape[-1]
+        spectra[group] = (total * scale / n_lines)[1:] if n_lines else None
+    return k[1:], spectra
+
+
+def band_energy_ratio(k, prediction, truth, dy):
+    """Energy ratio prediction/truth in dB in each of :data:`SPECTRAL_BANDS`.
+
+    ``k`` (cycles/m) and ``dy`` as returned by and passed to
+    :func:`spanwise_spectra`; ``prediction`` and ``truth`` are ``(..., n_k)``
+    and broadcast. Returns ``{band: array}`` of the broadcast leading shape (0-d
+    for two 1-D spectra), NaN for a band with no bin or no truth energy.
+    """
+    wavelengths = np.round(1.0 / (np.asarray(k, dtype=float) * dy), 6)
+    prediction = np.asarray(prediction, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    out = {}
+    for band, (lo, hi) in SPECTRAL_BANDS.items():
+        inside = (wavelengths >= lo) & (wavelengths < hi)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = prediction[..., inside].sum(-1) / truth[..., inside].sum(-1)
+            out[band] = np.where(
+                inside.any() & np.isfinite(ratio) & (ratio > 0),
+                10.0 * np.log10(ratio),
+                np.nan,
+            )
+    return out
+
+
+def member_field_reductions(member, solver_name, stl_path):
+    """One member's field statistics, canopy profiles and spanwise spectra.
+
+    ``member`` is a ``(time, ...)`` Dataset of ``u``, ``v``, ``w`` as the solver
+    wrote them. Returns a Dataset of ``stat_<q>`` ``(z, y, x)``, the
+    :func:`field_statistics` on the cell centres (:func:`colocate_components`);
+    ``profile`` ``(profile_quantity, z)``, their :func:`intrinsic_profile` over
+    the :func:`fluid_mask`; ``spectrum`` ``(component, group, k)``, each
+    component's :func:`spanwise_spectra` on its native grid (interpolation would
+    low-pass them), NaN for a group with no line; and the attribute ``dy``.
+    """
+    # (..., z, y, x) by dim name: every backend's spatial dims start with z, y, x.
+    member = member.assign(
+        {
+            c: member[c].transpose(
+                ..., *(d for a in "zyx" for d in member[c].dims if d[0] == a)
+            )
+            for c in ("u", "v", "w")
+        }
+    )
+    centred = colocate_components(member, solver_name)
+    coords = {d: centred[0][c].values for d, c in zip("zyx", centred[0].dims[-3:])}
+    stats = field_statistics(*(c.values for c in centred))
+    fluid = fluid_mask(stl_path, *coords.values())
+    spectra = []
+    for component in ("u", "v", "w"):
+        field = member[component]
+        native = [field[d].values for d in field.dims[-3:]]
+        dy = float(native[1][1] - native[1][0])
+        fluid_native = ~_solid_mask(stl_path, *native)
+        # Levels at or below the ground (uDALES' w at zm = 0, part of it under
+        # the STL's ground plane) are wall, not fluid.
+        fluid_native[native[0] <= 0] = False
+        k, groups = spanwise_spectra(field.values, fluid_native, dy)
+        spectra.append(
+            [
+                np.full(k.size, np.nan) if groups[g] is None else groups[g]
+                for g in SPECTRUM_GROUPS
+            ]
+        )
+    profile = [intrinsic_profile(stats[q], fluid) for q in PROFILE_QUANTITIES]
+    return xarray.Dataset(
+        {
+            **{f"stat_{q}": (("z", "y", "x"), v) for q, v in stats.items()},
+            "profile": (("profile_quantity", "z"), np.array(profile)),
+            "spectrum": (("component", "group", "k"), np.array(spectra)),
+        },
+        coords={
+            **coords,
+            "profile_quantity": list(PROFILE_QUANTITIES),
+            "component": ["u", "v", "w"],
+            "group": list(SPECTRUM_GROUPS),
+            "k": k,
+        },
+        attrs={"dy": dy},
+    )
+
+
+def score_window_fields(reduced, stl_path):
+    """One window's field reductions per source, scored on the posterior's grid.
+
+    ``reduced`` maps each source (``truth`` and ``posterior`` among them) to its
+    :func:`member_field_reductions` over the members: ``stat_<q>`` averaged,
+    ``profile`` and ``spectrum`` stacked on ``ensemble``. The statistics of the
+    sources in :data:`ON_TRUTH_GRID` are put :func:`on_grid` of the posterior
+    and their profiles recomputed there; every spectrum is put on the
+    posterior's wavenumbers. Returns per source its ``profile`` and
+    ``spectrum`` and, but for the truth, the ``rmse`` ``(statistic)`` and
+    ``level_rmse`` ``(statistic, z)`` of its statistics against the truth's
+    (:func:`statistic_rmse`). The posterior's carries ``dy`` and the
+    ``building_height`` range (lowest and highest roof) as attributes.
+    """
+    grid = reduced["posterior"]
+    centres = [grid[d].values for d in "zyx"]
+    fluid = fluid_mask(stl_path, *centres)
+    statistics = [str(v).removeprefix("stat_") for v in grid.data_vars if "stat_" in v]
+    stats = {
+        kind: {q: on_grid(ds[f"stat_{q}"], grid[f"stat_{q}"]) for q in statistics}
+        for kind, ds in reduced.items()
+    }
+    out = {}
+    for kind, ds in reduced.items():
+        profile = ds.profile
+        if kind in ON_TRUTH_GRID:
+            profile = xarray.DataArray(
+                [
+                    [
+                        intrinsic_profile(stats[kind][q], fluid)
+                        for q in PROFILE_QUANTITIES
+                    ]
+                ],
+                dims=profile.dims,
+                coords={"profile_quantity": profile.profile_quantity, "z": grid.z},
+            )
+        scored = xarray.Dataset(
+            {"profile": profile, "spectrum": on_grid(ds.spectrum, grid, dims=("k",))}
+        )
+        if kind != "truth":
+            errors = [
+                statistic_rmse(stats[kind][q], stats["truth"][q], fluid)
+                for q in statistics
+            ]
+            scored["rmse"] = ("statistic", [e[0] for e in errors])
+            scored["level_rmse"] = (("statistic", "z"), [e[1] for e in errors])
+            scored = scored.assign_coords(statistic=statistics)
+        out[kind] = scored
+
+    solid = _solid_mask(stl_path, *centres)
+    # The roof: the upper face of the top solid cell.
+    z = centres[0]
+    roofs = np.append(0.5 * (z[1:] + z[:-1]), 1.5 * z[-1] - 0.5 * z[-2])
+    tops = np.where(solid, roofs[:, None, None], -np.inf).max(axis=0)
+    tops = tops[solid.any(axis=0)]
+    out["posterior"].attrs = {
+        "dy": grid.attrs["dy"],
+        "building_height": [tops.min(), tops.max()] if tops.size else [np.nan] * 2,
+    }
+    return out
+
+
+def field_metric_blocks(windows):
+    """The ``field_statistics``, ``canopy_profiles`` and ``spectra`` blocks of
+    ``metrics.yaml`` from the per-window :func:`score_window_fields`, and the
+    arrays for ``diagnostics.nc``: ``profile_<source>`` and
+    ``spectrum_<source>`` (without an ensemble dim for :data:`ON_TRUTH_GRID`),
+    ``spectrum_dy`` and ``building_height``.
+
+    Per source and window: the statistics' RMSE (``level_rmse``: RMS over the
+    windows), the RMSE over z of the ensemble-mean profile, and the
+    :func:`band_energy_ratio` and :func:`log_spectral_distance` of the
+    ensemble's :func:`median_spectrum`, each against the truth's.
+    """
+    num_windows = len(windows)
+    by_kind = {
+        kind: xarray.concat([f[kind] for f in windows], dim="window", join="override")
+        for kind in windows[0]
+    }
+    truth = by_kind["truth"].isel(ensemble=0)
+    first = windows[0]["posterior"]
+    k, dy = first.k.values, float(first.attrs["dy"])
+    blocks: dict = {
+        "field_statistics": {"z": first.z.values.tolist()},
+        "canopy_profiles": {},
+        "spectra": {},
+    }
+    with warnings.catch_warnings():  # a level or band with nothing in it is null
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for kind, ds in by_kind.items():
+            if kind == "truth":
+                continue
+            for q in ds.statistic.values:
+                level = np.sqrt((ds.level_rmse.sel(statistic=q) ** 2).mean("window"))
+                blocks["field_statistics"].setdefault(str(q), {})[kind] = {
+                    "rmse": window_series_stats(ds.rmse.sel(statistic=q), num_windows),
+                    "level_rmse": [
+                        float(v) if np.isfinite(v) else None for v in level.values
+                    ],
+                }
+            error = ds.profile.mean("ensemble") - truth.profile
+            profile_rmse = np.sqrt((error**2).mean("z"))
+            for q in PROFILE_QUANTITIES:
+                blocks["canopy_profiles"].setdefault(q, {})[kind] = {
+                    "profile_rmse": window_series_stats(
+                        profile_rmse.sel(profile_quantity=q), num_windows
+                    )
+                }
+            median = median_spectrum(ds.spectrum.transpose("ensemble", ...).values)
+            scores = band_energy_ratio(k, median, truth.spectrum.values, dy)
+            scores["log_spectral_distance"] = log_spectral_distance(
+                truth.spectrum.values, median
+            )
+            for c, component in enumerate(ds.component.values):
+                for g, group in enumerate(ds.group.values):
+                    blocks["spectra"].setdefault(str(component), {}).setdefault(
+                        str(group), {}
+                    )[kind] = {
+                        name: window_series_stats(values[:, c, g], num_windows)
+                        for name, values in scores.items()
+                    }
+    for group in SPECTRUM_GROUPS:
+        if by_kind["posterior"].spectrum.sel(group=group).isnull().all():
+            logger.warning(
+                "No fully fluid %s lines along y: no %s spectra", group, group
+            )
+
+    diagnostics = {
+        "spectrum_dy": xarray.DataArray(dy),
+        "building_height": xarray.DataArray(
+            first.attrs["building_height"], dims="bound"
+        ),
+    }
+    for kind, ds in by_kind.items():
+        if kind in ON_TRUTH_GRID:
+            ds = ds.isel(ensemble=0)
+        diagnostics[f"profile_{kind}"] = ds.profile
+        diagnostics[f"spectrum_{kind}"] = ds.spectrum
+    return blocks, diagnostics

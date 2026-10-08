@@ -440,11 +440,8 @@ def test_parameter_metrics_and_plotting_cover_static_knobs(
     plot_rollout_time_evolution(
         esmda_params=posterior,
         true_params=truth,
-        esmda_state=None,
-        true_state=None,
         output_path=out,
         prior_params=posterior,
-        rmse=np.array([1.0, 0.5, 0.25]),
     )
     assert out.exists()
 

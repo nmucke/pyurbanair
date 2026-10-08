@@ -5,8 +5,15 @@
 The run dir is what an assimilation script wrote (e.g.
 `<paths.results_dir>/smoother`). Figures, written into `<run dir>/figures/`:
 
-  parameter_evolution.png   parameter trajectories (prior, posterior, truth) and
-                            the ensemble-mean |U| RMSE over time
+  parameter_evolution.png   parameter trajectories (prior, posterior, truth)
+  parameter_pairs.png       corner plot of the final-window posterior members
+                            over the prior, truth marked when static
+  canopy_profiles.png       final-window canopy profiles of time-mean u, TKE and
+                            u'w': truth, replica, prior/posterior members
+  sensor_distributions_<set>.png  sensor value densities and Q-Q plots against
+                            the truth, pooled over sensors and windows
+  spectra.png               final-window spanwise spectra of u, v, w above and
+                            in the canopy
   animation.mp4             truth, ensemble mean, spread and error of |U| over time
   final_state.png           the same at the final time, with the sensors marked
   mean_slices.png           time-mean streamwise velocity at a few heights:
@@ -16,7 +23,11 @@ The run dir is what an assimilation script wrote (e.g.
   sensor_timeseries_<set>.png  truth vs ensemble |U| at each sensor set
   tke_evolution.png         rolling TKE at the sensors, truth vs ensemble
   rank_histogram.png        rank of the truth in the ensemble, from the window
-                            statistics in metrics.yaml (run compute_metrics.py first)
+                            statistics in metrics.yaml
+
+parameter_pairs, canopy_profiles, sensor_distributions, spectra and
+rank_histogram are drawn from compute_metrics.py's diagnostics.nc and
+metrics.yaml: run it first.
 
 The prior columns/bands are drawn only when the prior states were saved. The
 truth and the ensemble are assumed to be on the same grid (same backend).
@@ -42,10 +53,14 @@ import numpy as np  # noqa: E402
 import xarray  # noqa: E402
 import yaml  # noqa: E402
 from evaluation.figures import (  # noqa: E402
+    plot_canopy_profiles,
     plot_final_state_with_obs,
+    plot_parameter_pairs,
     plot_rank_histogram,
     plot_rollout_time_evolution,
+    plot_sensor_distributions,
     plot_sensor_timeseries,
+    plot_spanwise_spectra,
     plot_tke_time_evolution,
 )
 from evaluation.sensors import sensor_magnitude  # noqa: E402
@@ -53,7 +68,6 @@ from evaluation.turbulence import (  # noqa: E402
     colocate_components,
     select_z_plane,
     sensor_tke_evolution,
-    streaming_state_rmse,
 )
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
@@ -63,7 +77,6 @@ from pyurbanair.utils.run_utils import add_velocity_magnitude  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
-    case_stl_path,
     concat_windows,
     global_time,
     open_truth,
@@ -80,8 +93,6 @@ def run(run_dir: pathlib.Path) -> None:
     assert isinstance(cfg, DictConfig)
     num_windows = int(cfg.assimilation.num_windows)
     sim_time = float(cfg.time.simulation_time)
-    # Truth frames are matched to the ensemble's by time, within half a frame.
-    tolerance = 0.5 * float(cfg.time.output_frequency)
     out = run_dir / "figures"
     out.mkdir(exist_ok=True)
 
@@ -96,27 +107,15 @@ def run(run_dir: pathlib.Path) -> None:
 
     # --- One pass over truth and ensembles, window by window ---------------------
     truth = open_truth(cfg, run_dir)
-    stl_path = case_stl_path(cfg)
     frames = truth.sizes["time"] // num_windows
     stations = _station_points(sets)
     truth_c = Collector(cfg.truth_model.solver_name, sets, stations)
     post_c = Collector(cfg.assim_model.solver_name, sets, stations)
     prior_c = Collector(cfg.assim_model.solver_name, sets, stations)
-    rmse = []
     for w in range(num_windows):
-        window_truth = truth.isel(time=slice(w * frames, (w + 1) * frames))
-        truth_c.add_window(window_truth, None)
+        truth_c.add_window(truth.isel(time=slice(w * frames, (w + 1) * frames)), None)
         with xarray.open_dataset(window_files("posterior_state")[w]) as ds:
-            mean_state = post_c.add_window(ds, global_time(ds.time, w, sim_time))
-        rmse.append(
-            streaming_state_rmse(
-                window_truth.sel(
-                    time=mean_state.time, method="nearest", tolerance=tolerance
-                ),
-                mean_state,
-                stl_path,
-            )
-        )
+            post_c.add_window(ds, global_time(ds.time, w, sim_time))
         if has_prior:
             with xarray.open_dataset(prior_files[w]) as ds:
                 prior_c.add_window(ds, global_time(ds.time, w, sim_time))
@@ -129,8 +128,6 @@ def run(run_dir: pathlib.Path) -> None:
     plot_rollout_time_evolution(
         esmda_params=posterior_params,
         true_params=xarray.load_dataset(run_dir / "true_params.nc"),
-        esmda_state=None,
-        true_state=None,
         output_path=out / "parameter_evolution.png",
         prior_params=prior_params,
         window_edges=(
@@ -138,8 +135,26 @@ def run(run_dir: pathlib.Path) -> None:
             if dynamic and num_windows > 1
             else None
         ),
-        rmse=np.concatenate(rmse),
     )
+
+    diagnostics_path = run_dir / "diagnostics.nc"
+    if diagnostics_path.exists():
+        with xarray.open_dataset(diagnostics_path) as diag:
+            if "posterior_parameter_members" in diag:
+                truth_values = diag.true_parameter.values
+                # A static truth: the run's own prior (window 0); else the
+                # final window's, at the same time as the posterior.
+                prior_window = 0 if np.isfinite(truth_values).all() else -1
+                plot_parameter_pairs(
+                    diag.posterior_parameter_members.isel(window=-1).values,
+                    [str(n) for n in diag.parameter.values],
+                    out / "parameter_pairs.png",
+                    prior=diag.prior_parameter_members.isel(window=prior_window).values,
+                    truth=truth_values,
+                )
+            _plot_statistics(diag, out)
+    else:
+        print("No diagnostics.nc: skipping its figures (run compute_metrics.py)")
 
     # --- |U| fields --------------------------------------------------------------------
     truth_plane = xarray.concat(truth_c.planes, dim="time")
@@ -239,8 +254,8 @@ class Collector:
         self.columns: tuple[np.ndarray, np.ndarray] = (np.array([]), np.array([]))
         self.is_ensemble = True
 
-    def add_window(self, ds: xarray.Dataset, time: np.ndarray | None) -> xarray.Dataset:
-        """Add one window; return its ensemble-mean (u, v, w) state.
+    def add_window(self, ds: xarray.Dataset, time: np.ndarray | None) -> None:
+        """Add one window.
 
         `time` is the window's global time axis (see `global_time`); None keeps
         the file's own.
@@ -252,13 +267,11 @@ class Collector:
         n_members = ds.sizes.get("ensemble", 1)
         self.n_members = n_members
         series: dict[str, list] = {name: [] for name in self.sets}
-        total = None
         plane_sum = plane_sumsq = None
         for m in range(n_members):
             member = (ds.isel(ensemble=m) if "ensemble" in ds.dims else ds).load()
             for name, points in self.sets.items():
                 series[name].append(sensor_series(member, points, self.solver_name))
-            total = member if total is None else total + member
             plane = select_z_plane(member, z_level=0)
             vel = add_velocity_magnitude(plane)["vel_magnitude"]
             plane_sum = vel if plane_sum is None else plane_sum + vel
@@ -270,10 +283,9 @@ class Collector:
         for name in self.sets:
             stacked = xarray.concat(series[name], dim="ensemble")
             self.series[name].append(stacked.transpose("component", "ensemble", ...))
-        assert total is not None and plane_sum is not None and plane_sumsq is not None
+        assert plane_sum is not None and plane_sumsq is not None
         self.plane_sum.append(plane_sum)
         self.plane_sumsq.append(plane_sumsq)
-        return total / n_members
 
     def _add_moments(self, m: int, member: xarray.Dataset) -> None:
         """Accumulate per-member time sums on the slice heights and columns."""
@@ -318,6 +330,46 @@ class Collector:
     def sensor_series(self, name: str) -> xarray.DataArray:
         series: xarray.DataArray = xarray.concat(self.series[name], dim="time")
         return series if self.is_ensemble else series.isel(ensemble=0)
+
+
+def _plot_statistics(diag: xarray.Dataset, out: pathlib.Path) -> None:
+    """canopy_profiles.png, sensor_distributions_<set>.png and spectra.png from
+    diagnostics.nc; the profiles and spectra of the final window."""
+    sources = [
+        str(v).removeprefix("profile_") for v in diag if v.startswith("profile_")
+    ]
+    if sources:
+        final = diag.isel(window=-1)
+        plot_canopy_profiles(
+            diag.z.values,
+            {s: final[f"profile_{s}"].values for s in sources},
+            out / "canopy_profiles.png",
+            building_height=diag.building_height.values,
+        )
+        plot_spanwise_spectra(
+            diag.k.values,
+            {s: final[f"spectrum_{s}"].values for s in sources},
+            float(diag.spectrum_dy),
+            [str(g) for g in diag.group.values],
+            out / "spectra.png",
+        )
+    sets = [
+        str(v).removeprefix("sensor_density_")
+        for v in diag
+        if v.startswith("sensor_density_")
+    ]
+    for name in sets:
+        density = diag[f"sensor_density_{name}"]
+        quantiles = diag[f"sensor_quantiles_{name}"]
+        kinds = [str(s) for s in density.source.values]
+        plot_sensor_distributions(
+            diag[f"sensor_bin_edges_{name}"].values,
+            {s: density.sel(source=s).values for s in kinds},
+            {s: quantiles.sel(source=s).values for s in kinds},
+            [str(q) for q in density.quantity.values],
+            out / f"sensor_distributions_{name}.png",
+            title=f"Sensor values at the {name} sensors",
+        )
 
 
 def _station_points(sets: dict) -> np.ndarray:

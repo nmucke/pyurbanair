@@ -60,6 +60,7 @@ from evaluation.style import (
     save_png,
 )
 from evaluation.turbulence import (
+    SPECTRAL_BANDS,
     SensorTKEEvolution,
     evenly_spaced_levels,
     log_spectral_distance,
@@ -71,6 +72,7 @@ from matplotlib.colors import Colormap, LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import NullFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -133,14 +135,6 @@ def _add_velocity_magnitude(state: xarray.Dataset) -> xarray.Dataset:
         return state
     vel_magnitude = np.sqrt(state.u.values**2 + state.v.values**2 + state.w.values**2)
     return state.assign(vel_magnitude=(state["u"].dims, vel_magnitude))
-
-
-def _get_velocity_magnitude_field(state: xarray.Dataset) -> np.ndarray:
-    """Get the velocity magnitude field from a state."""
-    u = state.u.values
-    v = state.v.values
-    w = state.w.values
-    return np.sqrt(u**2 + v**2 + w**2)
 
 
 def _save(fig: Figure, output_path: str | pathlib.Path) -> None:
@@ -226,25 +220,16 @@ def _extract_2d_slice_with_extent(
 def plot_rollout_time_evolution(
     esmda_params: xarray.Dataset,
     true_params: xarray.Dataset,
-    esmda_state: xarray.Dataset | None,
-    true_state: xarray.Dataset | None,
     output_path: str | pathlib.Path,
     prior_params: xarray.Dataset | None = None,
     window_edges: list[float] | None = None,
-    rmse: np.ndarray | None = None,
 ) -> None:
-    """Plot parameter and RMSE time evolution over rollout assimilation windows.
+    """Plot the parameter evolution over rollout assimilation windows.
 
     For each parameter every ensemble member is drawn faintly (``alpha=0.35``)
     for both the prior (if ``prior_params`` is given) and the posterior, with the
     ensemble mean overlaid on top (opaque, thicker). The truth is a dashed line.
     ``window_edges`` (if given) lightly shades alternating assimilation windows.
-
-    ``rmse`` may be supplied precomputed (one value per time step). Callers
-    handling a large truth should pass a streamed ``rmse`` here so the full 4-D
-    velocity field is never materialised; ``esmda_state``/``true_state`` are then
-    unused and may be ``None``. If ``rmse`` is ``None`` it is computed in full
-    from the two states (the original whole-domain behaviour).
     """
 
     def _plot_ensemble(
@@ -254,49 +239,13 @@ def plot_rollout_time_evolution(
         ax.plot(x, members.T, color=color, alpha=0.35, linewidth=0.9)
         ax.plot(x, members.mean(axis=0), color=color, alpha=1.0, linewidth=2.5)
 
-    if rmse is None:
-        # Fallback: whole-domain RMSE between the ensemble-mean state and the
-        # truth. This materialises the full velocity fields; callers handling a
-        # large truth should precompute a streamed ``rmse`` and pass it in.
-        #
-        # The two states are declared optional because the streamed-``rmse``
-        # path -- which is what every caller in the repo uses -- leaves them
-        # unset. This branch is exactly the case where they are required, so
-        # they are cast rather than guarded: a ``raise`` here would change what
-        # a mis-call does at run time, and this pass adds types only. Calling
-        # with ``rmse=None`` and no states still fails, as it always has.
-        truth_states = cast(xarray.Dataset, true_state)
-        esmda_states = cast(xarray.Dataset, esmda_state)
-        true_state_mean = (
-            truth_states.mean(dim="ensemble")
-            if "ensemble" in truth_states.dims
-            else truth_states
-        )
-        esmda_state_mean = (
-            esmda_states.mean(dim="ensemble")
-            if "ensemble" in esmda_states.dims
-            else esmda_states
-        )
-
-        true_vel = np.asarray(_get_velocity_magnitude_field(true_state_mean))
-        esmda_vel = np.asarray(_get_velocity_magnitude_field(esmda_state_mean))
-        min_t = min(true_vel.shape[0], esmda_vel.shape[0])
-        rmse = np.sqrt(
-            np.mean(
-                (true_vel[:min_t] - esmda_vel[:min_t]) ** 2,
-                axis=tuple(range(1, true_vel.ndim)),
-            )
-        )
-    else:
-        rmse = np.asarray(rmse)
-
     param_names = _plotted_param_names(esmda_params)
     n_params = len(param_names)
     has_prior = prior_params is not None
 
     with plt.rc_context(_RC):
         fig, axes = plt.subplots(
-            n_params + 1, 1, figsize=(11, 3.2 * (n_params + 1)), constrained_layout=True
+            n_params, 1, figsize=(11, 3.2 * n_params), constrained_layout=True
         )
         axes = np.atleast_1d(axes)
 
@@ -341,20 +290,6 @@ def plot_rollout_time_evolution(
             ax.set_xlabel("Time")
             ax.margins(x=0.01)
             ax.legend(handles=_param_legend_handles(has_prior), loc="best", ncol=1)
-
-        ax_rmse = axes[n_params]
-        ax_rmse.plot(
-            np.arange(len(rmse)),
-            rmse,
-            color=_COLOR_POSTERIOR,
-            linewidth=2.0,
-            marker="o",
-            markersize=4,
-        )
-        ax_rmse.set_xlabel("Time step")
-        ax_rmse.set_ylabel("RMSE  |U|")
-        ax_rmse.set_title("State error")
-        ax_rmse.margins(x=0.01)
 
         fig.suptitle(
             "Parameter evolution over assimilation windows",
@@ -1032,6 +967,225 @@ def plot_parameter_marginals(
         ]
         axes[0, 0].legend(handles=handles, loc="lower left", fontsize=8)
         fig.suptitle("Parameter marginals: prior vs posterior")
+        return save_png(fig, output_path, transparent=False)
+
+
+def plot_parameter_pairs(
+    posterior: np.ndarray,
+    names: Sequence[str],
+    output_path: str | pathlib.Path,
+    *,
+    prior: np.ndarray | None = None,
+    truth: np.ndarray | None = None,
+) -> pathlib.Path:
+    """Corner plot of the joint posterior: member scatter over the prior.
+
+    ``posterior`` and ``prior`` are ``(member, parameter)``; ``truth`` is one
+    value per parameter, NaN where there is none to mark (a time-varying truth).
+    The diagonal holds each parameter's histograms, the lower triangle the
+    member pairs with their correlation; the upper triangle is left empty.
+    """
+    n = len(names)
+    drawn = [
+        (k, m) for k, m in (("prior", prior), ("posterior", posterior)) if m is not None
+    ]
+    with _styled():
+        fig, axes = plt.subplots(
+            n, n, figsize=(2.6 * n + 0.6, 2.6 * n + 0.6), squeeze=False
+        )
+        for i in range(n):
+            for j in range(n):
+                ax = axes[i, j]
+                if j > i:
+                    ax.set_axis_off()
+                    continue
+                if i == j:
+                    bins = np.histogram_bin_edges(
+                        _finite(np.concatenate([m[:, i] for _, m in drawn])), 15
+                    )
+                    for kind, members in drawn:
+                        ax.hist(
+                            _finite(members[:, i]),
+                            bins=bins,
+                            color=COLORS[kind],
+                            alpha=0.5,
+                            label=kind,
+                        )
+                    ax.set_yticks([])
+                else:
+                    for kind, members in drawn:
+                        ax.scatter(
+                            members[:, j],
+                            members[:, i],
+                            s=12,
+                            color=COLORS[kind],
+                            alpha=0.7,
+                            label=kind,
+                        )
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        r = np.corrcoef(posterior[:, j], posterior[:, i])[0, 1]
+                    ax.set_title(f"posterior r = {r:.2f}", fontsize=9, loc="left")
+                    if truth is not None and np.isfinite(truth[[i, j]]).all():
+                        ax.scatter(
+                            truth[j], truth[i], marker="*", s=120, color=COLORS["truth"]
+                        )
+                if truth is not None and np.isfinite(truth[j]):
+                    ax.axvline(truth[j], color=COLORS["truth"], ls="--", lw=1.0)
+                if i == n - 1:
+                    ax.set_xlabel(_param_axis_label(names[j]), fontsize=9)
+                if j == 0 and i > 0:
+                    ax.set_ylabel(_param_axis_label(names[i]), fontsize=9)
+        axes[0, 0].legend(fontsize=8)
+        drawn_truth = truth is not None and np.isfinite(truth).any()
+        fig.suptitle(
+            "Final-window posterior over the prior"
+            + (" (truth dashed)" if drawn_truth else "")
+        )
+        fig.tight_layout()
+        return save_png(fig, output_path, transparent=False)
+
+
+# ---------------------------------------------------------------------------
+# Turbulence statistics of an assimilation run (from its diagnostics.nc)
+# ---------------------------------------------------------------------------
+
+# Colours of the sources beyond truth, prior and posterior.
+_SOURCE_COLORS = {**COLORS, "replica": COLORS["orange"], "forecast": COLORS["amber"]}
+
+
+def plot_canopy_profiles(
+    z: np.ndarray,
+    profiles: Mapping[str, np.ndarray],
+    output_path: str | pathlib.Path,
+    *,
+    building_height: Sequence[float] | None = None,
+) -> pathlib.Path:
+    """Canopy profiles of time-mean u, TKE and resolved u'w' against z.
+
+    ``profiles`` maps a source to ``(quantity, z)`` (truth, replica: lines) or
+    ``(member, quantity, z)`` (ensembles: min-max band and mean), with the
+    quantities ``u``, ``tke``, ``uw`` in that order. ``building_height`` (lowest,
+    highest top, cell centres) is shaded.
+    """
+    labels = ("⟨ū⟩ [m/s]", "⟨TKE⟩ [m²/s²]", "⟨u′w′⟩ [m²/s²]")
+    with _styled():
+        fig, axes = plt.subplots(1, 3, figsize=(11, 4.5), sharey=True)
+        for i, (ax, label) in enumerate(zip(axes, labels)):
+            if building_height is not None and np.isfinite(building_height).all():
+                ax.axhspan(*building_height, color="0.5", alpha=0.15, lw=0)
+                for top in building_height:  # visible when all tops are equal
+                    ax.axhline(top, color="0.5", ls=":", lw=1)
+            for source, values in profiles.items():
+                color = _SOURCE_COLORS.get(source, COLORS["charcoal"])
+                if values.ndim == 2:
+                    style = "--" if source == "truth" else "-"
+                    ax.plot(values[i], z, style, color=color, lw=2, label=source)
+                    continue
+                with warnings.catch_warnings():  # all-solid levels
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    low, high = np.nanmin(values[:, i], 0), np.nanmax(values[:, i], 0)
+                    mean = np.nanmean(values[:, i], 0)
+                ax.fill_betweenx(z, low, high, color=color, alpha=0.3, lw=0)
+                ax.plot(mean, z, color=color, lw=1.5, label=source)
+            ax.set_xlabel(label)
+        axes[0].set_ylabel("z [m]")
+        axes[0].legend(fontsize=8)
+        fig.suptitle("Canopy profiles, final window (buildings shaded)")
+        fig.tight_layout()
+        return save_png(fig, output_path, transparent=False)
+
+
+def plot_sensor_distributions(
+    edges: np.ndarray,
+    densities: Mapping[str, np.ndarray],
+    quantiles: Mapping[str, np.ndarray],
+    quantities: Sequence[str],
+    output_path: str | pathlib.Path,
+    *,
+    title: str = "",
+) -> pathlib.Path:
+    """Sensor value distributions: densities (left) and Q-Q against the truth (right).
+
+    One row per quantity. ``edges`` is ``(quantity, bin + 1)``; ``densities``
+    and ``quantiles`` map each source (``truth`` among them) to ``(quantity,
+    bin)`` and ``(quantity, level)``.
+    """
+    n = len(quantities)
+    with _styled():
+        fig, axes = plt.subplots(n, 2, figsize=(10, 2.8 * n), squeeze=False)
+        for i, quantity in enumerate(quantities):
+            hist, qq = axes[i]
+            truth_q = quantiles["truth"][i]
+            for source, density in densities.items():
+                color = _SOURCE_COLORS.get(source, COLORS["charcoal"])
+                hist.stairs(density[i], edges[i], color=color, lw=1.5, label=source)
+                if source != "truth":
+                    qq.plot(
+                        truth_q, quantiles[source][i], ".", color=color, label=source
+                    )
+            lims = finite_limits(np.concatenate([q[i] for q in quantiles.values()]))
+            if lims is not None:
+                qq.plot(lims, lims, color=COLORS["truth"], ls="--", lw=1)
+            hist.set_xlabel(f"{quantity} [m/s]")
+            hist.set_ylabel("density")
+            qq.set_xlabel(f"truth {quantity} quantile [m/s]")
+            qq.set_ylabel("predicted quantile [m/s]")
+        axes[0, 0].legend(fontsize=8)
+        fig.suptitle(title or "Sensor value distributions")
+        fig.tight_layout()
+        return save_png(fig, output_path, transparent=False)
+
+
+def plot_spanwise_spectra(
+    k: np.ndarray,
+    spectra: Mapping[str, np.ndarray],
+    dy: float,
+    groups: Sequence[str],
+    output_path: str | pathlib.Path,
+) -> pathlib.Path:
+    """Spanwise spectra: rows u, v, w; one column per height group.
+
+    ``spectra`` maps a source to ``(component, group, k)`` (truth, replica) or
+    ``(member, component, group, k)`` (ensembles: the median, and for the
+    posterior its 10-90 % range). The wavelength bands of
+    :data:`evaluation.turbulence.SPECTRAL_BANDS` are shaded and a ``k^(-5/3)``
+    guide drawn through the truth.
+    """
+    with _styled():
+        fig, axes = plt.subplots(
+            3, len(groups), figsize=(4.5 * len(groups), 9), squeeze=False, sharex=True
+        )
+        for c, component in enumerate("uvw"):
+            for g, group in enumerate(groups):
+                ax = axes[c, g]
+                for shade, (lo, hi) in zip((0.04, 0.09, 0.15), SPECTRAL_BANDS.values()):
+                    ax.axvspan(
+                        1 / (hi * dy), 1 / (lo * dy), color="0.5", alpha=shade, lw=0
+                    )
+                for source, values in spectra.items():
+                    color = _SOURCE_COLORS.get(source, COLORS["charcoal"])
+                    if values.ndim == 4:
+                        members = values[:, c, g]
+                        line = median_spectrum(members)
+                        if source == "posterior" and np.isfinite(members).any():
+                            low, high = np.nanpercentile(members, [10, 90], axis=0)
+                            ax.fill_between(k, low, high, color=color, alpha=0.25, lw=0)
+                    else:
+                        line = values[c, g]
+                    style = "--" if source == "truth" else "-"
+                    ax.loglog(k, line, style, color=color, lw=1.5, label=source)
+                truth = spectra["truth"][c, g]
+                if np.isfinite(truth).any() and truth[0] > 0:
+                    ax.loglog(k, truth[0] * (k / k[0]) ** (-5 / 3), ":", color="0.3")
+                ax.set_title(f"{component}, {group.replace('_', ' ')}")
+                ax.xaxis.set_minor_formatter(NullFormatter())
+                if c == 2:
+                    ax.set_xlabel("k [1/m]")
+                if g == 0:
+                    ax.set_ylabel("E(k) [m³/s²]")
+        axes[0, 0].legend(fontsize=8)
+        fig.suptitle("Spanwise spectra, final window (bands: >8Δ, 4-8Δ, 2-4Δ)")
+        fig.tight_layout()
         return save_png(fig, output_path, transparent=False)
 
 

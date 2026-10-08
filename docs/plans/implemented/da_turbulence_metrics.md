@@ -1,7 +1,13 @@
 # Turbulence-aware metrics and figures for assimilation runs
 
-Status: proposed, not implemented. Written 2026-10-08 against `5eba7bc`. This
-adds what [sgs_discrepancy_twin_tests.md](sgs_discrepancy_twin_tests.md) needs
+Status: implemented 2026-10-08 on `feat/da-turbulence-metrics` (items 1-5;
+structure functions deferred, as below). The reference is
+[evaluation.md](../../evaluation.md). As built: everything is scored on the
+posterior's grid (a truth on another grid is interpolated onto its centres,
+its spectra onto its wavenumbers); the figures show the final window; the
+per-level RMSE in `metrics.yaml` is the RMS over windows; `compute_metrics.py`
+takes `assimilation.replica_dir=<dir>` on its command line for existing runs. Written 2026-10-08 against `5eba7bc`. This
+adds what [sgs_discrepancy_twin_tests.md](../sgs_discrepancy_twin_tests.md) needs
 to judge its runs. It is also needed for any assimilation run with turbulent
 inflow.
 
@@ -201,14 +207,17 @@ Two facts make spectra tractable here:
 
 The single setup is spanwise spectra on **fully fluid lines**. One function in
 `turbulence.py` takes a component on its native grid and the fluid mask. It
-FFTs along y every (x, z) line that is entirely fluid, and averages
+FFTs along y the fluctuations about the window time mean on every (x, z)
+line that is entirely fluid (the raw field's spectrum in the canopy is mostly
+the steady flow pattern around the buildings), and averages
 `|FFT|²` over lines, frames and the x-range downstream of the first building
 (dropping the last two cells before the outflow). Group the lines by height:
 
 - **Above canopy:** levels with no solid cell, below the top two cells, to
   avoid the top boundary.
 - **In canopy:** lines through open streets parallel to y. In Xie–Castro
-  these are the N–S lanes at x = 10, 20 and 30 m. The mask finds them
+  the case domain has exactly one open N–S lane (x ≈ 16–24 m, centre
+  20 m). The mask finds it
   automatically, so no case configuration is needed. A case without such
   lines (likely Barcelona) gets no in-canopy spectrum, and a log line says so.
 

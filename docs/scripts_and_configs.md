@@ -28,6 +28,7 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Switch CFD backend | `model=...` (forward) or `model@truth_model=... model@assim_model=...` (assimilation) |
 | Change a setting (run size, DA components, observations, paths) | every key and the common overrides: [`configs/README.md`](../configs/README.md) |
 | Use a saved truth | `assimilation.truth_dir=<forward run dir>` (+ `assimilation.truth_start_time`) |
+| Score a noise floor | `assimilation.replica_dir=<forward run dir>`: the truth rerun with another turbulence seed (see below) |
 | Generate surrogate training data | `python scripts/surrogate/generate_data.py` (§2.3) |
 | Train / fine-tune a surrogate | `python scripts/surrogate/train.py --config-name surrogate/<config>` |
 | Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` |
@@ -202,6 +203,28 @@ The forward run covers 1 + `forward.rollout_steps` windows of
 `time.simulation_time`, each starting from the previous window's last state.
 Its `state.nc` + `params.nc` are what `assimilation.truth_dir` loads.
 
+`assimilation.replica_dir` (default null) names a second such run: the truth
+configuration with only the turbulence seed changed, covering the same horizon
+(`params=<truth params>`, `time.simulation_time=num_windows·simulation_time`).
+It is read like `truth_dir`, from `truth_start_time` on; `check_config` checks
+that its `state.nc` reaches the horizon's end. `compute_metrics.py` scores it
+as a one-member prediction under `replica`: the best score a perfect model can
+reach against one turbulent realisation. For an existing run dir, pass it on
+the command line, `python scripts/compute_metrics.py <run dir>
+assimilation.replica_dir=<replica run dir>` (any `key=value` after the run dir
+overrides its `config.yaml`), then rerun `visualize_assimilation.py`. The seed
+to change:
+
+- uDALES: `model.forward_model.inlet_turbulence.seed` (null derives it from
+  the experiment name, so a rerun under the same name repeats the truth's
+  turbulence; set an integer). With `per_member_irandom: true`, the cold-start
+  `&RUN irandom` is also derived from the experiment name.
+- PALM: `pypalm` exposes no seed. PALM's random generator is seeded from
+  `ensemble_member_nr` (`&initialization_parameters`), which pypalm does not
+  write; a PALM replica needs that key added first.
+- A time-varying truth: the same sampler seed and horizon must reproduce the
+  truth's parameter trajectory.
+
 All DA run dirs share one layout: `config.yaml`, `run_info.yaml`,
 `true_state.nc` (inline truth), `true_params.nc` and
 `windows/window_{w}_{prior,posterior}_{params,state}.nc` plus
@@ -217,8 +240,8 @@ state (`window_{w}_filter_obs.nc`, and `window_{w}_filter_params.nc` in
 
 | Script | Input | Writes |
 |---|---|---|
-| `compute_metrics.py <run dir>` | a DA run dir | `metrics.yaml`: parameter RMSE/CRPS (+ prior and reduction), ensemble-mean \|U\| RMSE, per sensor set (assimilated and validation) RMSE and energy score, spread–skill, climatology baseline, per-window sensor statistics; observation-space fit and Desroziers per stage |
-| `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the rank histogram) | `figures/`: parameter evolution, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
+| `compute_metrics.py <run dir> [key=value ...]` | a DA run dir (+ config overrides) | `metrics.yaml`: the scores are the statistics (field statistics and canopy profiles, per-window sensor statistics, sensor value distributions, spanwise spectra), each per source (posterior, prior, forecast, `replica` with `assimilation.replica_dir`); plus parameter RMSE/CRPS (+ prior and reduction, per window), parameter correlations, SGS health (with model discrepancy), the instantaneous sensor RMSE, energy score and spread–skill (sanity checks), climatology baseline, observation-space fit and Desroziers per stage; `diagnostics.nc`: the arrays the figures read |
+| `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the figures from `diagnostics.nc` and `metrics.yaml`) | `figures/`: parameter evolution, parameter pairs, canopy profiles, sensor distributions, spectra, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
 | `visualize_forward.py <run dir>` | a forward run dir | `figures/`: field snapshot, animation, parameters (with inlet-recovered angle/speed) |
 
 Both read window files one member at a time, so multi-GB runs fit in memory.
