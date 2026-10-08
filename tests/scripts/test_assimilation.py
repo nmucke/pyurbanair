@@ -3,6 +3,7 @@ figures (compute_metrics.py, visualize_assimilation.py)."""
 
 from __future__ import annotations
 
+import json
 import pathlib
 from typing import Any
 
@@ -42,7 +43,9 @@ def _run(method: str, cfg: Any) -> pathlib.Path:
     return run_dir
 
 
-def _check_outputs(run_dir: pathlib.Path, num_windows: int = 2) -> None:
+def _check_outputs(
+    run_dir: pathlib.Path, num_windows: int = 2, replica: bool = False
+) -> None:
     for w in range(num_windows):
         posterior = xarray.load_dataset(
             run_dir / "windows" / f"window_{w}_posterior_params.nc"
@@ -53,8 +56,38 @@ def _check_outputs(run_dir: pathlib.Path, num_windows: int = 2) -> None:
     assert {"parameters", "state", "sensors"} <= set(metrics)
     for block in ("spread_skill", "climatology"):
         assert set(metrics[block]) == {"assimilation", "validation"}, block
-    for name in ("parameter_evolution.png", "mean_slices.png", "tke_slices.png"):
+    for name in (
+        "parameter_evolution.png",
+        "parameter_pairs.png",
+        "mean_slices.png",
+        "tke_slices.png",
+    ):
         assert (run_dir / "figures" / name).exists(), name
+
+    # Window-indexed series list one value per window.
+    for entry in metrics["parameters"].values():
+        assert len(entry["rmse"]["per_window"]) == num_windows
+        assert len(entry["crps"]["per_window"]) == num_windows
+    for stats in metrics["sensor_statistics"].values():
+        assert len(stats["posterior"]["mean_u"]["crps"]["per_window"]) == num_windows
+        assert ("replica" in stats) == replica
+    # The estimated parameters' correlation matrix: the final window's in the
+    # YAML, every window's in diagnostics.nc.
+    names = list(metrics["parameter_correlation"]["posterior"])
+    assert names and set(names) <= set(metrics["parameters"])
+    for kind in ("posterior", "prior"):
+        matrix = metrics["parameter_correlation"][kind]
+        assert list(matrix) == names and all(list(r) == names for r in matrix.values())
+    with xarray.open_dataset(run_dir / "diagnostics.nc") as diagnostics:
+        correlation = diagnostics.posterior_parameter_correlation
+        assert correlation.dims == ("window", "parameter", "parameter_j")
+        assert correlation.shape == (num_windows, len(names), len(names))
+        assert diagnostics.posterior_parameter_members.dims == (
+            "window",
+            "ensemble",
+            "parameter",
+        )
+    assert "sgs_health" not in metrics  # the discrepancy is off
 
 
 @pytest.mark.parametrize("method", METHODS)  # type: ignore[misc]
@@ -143,15 +176,24 @@ def test_truth_from_a_forward_run(
         root=tmp_path,
     )
     load_script("scripts/run_forward.py").run(forward)
+    # The same run doubles as the replica (a rerun with another turbulence seed
+    # in production): it is the truth, so it scores zero CRPS.
     cfg = compose(
         "assimilation",
         "+test=assimilation",
         *SURROGATE,
         *surrogate(session_root),
         f"assimilation.truth_dir={forward.paths.results_dir}",
+        f"assimilation.replica_dir={forward.paths.results_dir}",
         root=tmp_path,
     )
-    _check_outputs(_run("smoother", cfg))
+    run_dir = _run("smoother", cfg)
+    _check_outputs(run_dir, replica=True)
+    metrics = yaml.safe_load((run_dir / "metrics.yaml").read_text())
+    for stats in metrics["sensor_statistics"].values():
+        for entry in stats["replica"].values():
+            assert entry["crps"]["per_window"] == pytest.approx([0.0, 0.0], abs=1e-6)
+        assert "crps_reduction_vs_replica" in stats["posterior"]["mean_u"]
 
 
 @pytest.mark.integration  # type: ignore[misc]
@@ -300,6 +342,7 @@ def test_window_files_on_the_truth_time(
         assert rmse["max"] == pytest.approx(0.0, abs=1e-9), (name, rmse)
     rmse = metrics["parameters"]["velocity_magnitude"]["rmse"]
     assert rmse["max"] == pytest.approx(0.0, abs=1e-6), rmse
+    assert rmse["per_window"] == pytest.approx([0.0, 0.0], abs=1e-6), rmse
 
     # The sensor series visualize_assimilation.py draws.
     visualize = load_script("scripts/visualize_assimilation.py")
@@ -312,6 +355,35 @@ def test_window_files_on_the_truth_time(
         truth, members = kw["true_sensor"], kw["ensemble_sensor"]
         on_ensemble_time = truth.interp(time=members.time)
         np.testing.assert_allclose(members, on_ensemble_time.broadcast_like(members))
+
+
+def test_sgs_health_reads_the_member_diagnostics(tmp_path: pathlib.Path) -> None:
+    """sgs_health takes the multiplier range and the largest saturation fraction
+    over the members of each window from the solver's per-member report."""
+    compute_metrics = load_script("scripts/compute_metrics.py")
+
+    def report(low: float, high: float, saturated: float) -> dict[str, str]:
+        # The key=value lines pyudales copies from sgs_discrepancy.<expnr>.txt.
+        return {
+            "native_diagnostics": f"multiplier_min=  {low:.16E}\n"
+            f"multiplier_max=  {high:.16E}\n"
+            f"saturation_fraction=  {saturated:.16E}\n"
+        }
+
+    files = []
+    for w, members in enumerate(
+        [[report(0.5, 1.5, 0.0), report(0.8, 1.9, 0.1)], [report(0.6, 1.2, 0.3)]]
+    ):
+        path = tmp_path / f"window_{w}_posterior_state.nc"
+        xarray.Dataset(
+            attrs={"model_discrepancy_by_member": json.dumps(members)}
+        ).to_netcdf(path)
+        files.append(path)
+    assert compute_metrics._sgs_health(files) == {
+        "multiplier_min": [0.5, 0.6],
+        "multiplier_max": [1.9, 1.2],
+        "saturation_fraction_max": [0.1, 0.3],
+    }
 
 
 def test_a_truth_on_other_levels_than_the_ensemble(tmp_path: pathlib.Path) -> None:

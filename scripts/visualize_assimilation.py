@@ -7,6 +7,9 @@ The run dir is what an assimilation script wrote (e.g.
 
   parameter_evolution.png   parameter trajectories (prior, posterior, truth) and
                             the ensemble-mean |U| RMSE over time
+  parameter_pairs.png       corner plot of the final-window posterior members
+                            over the prior, truth marked when static; from
+                            diagnostics.nc (run compute_metrics.py first)
   animation.mp4             truth, ensemble mean, spread and error of |U| over time
   final_state.png           the same at the final time, with the sensors marked
   mean_slices.png           time-mean streamwise velocity at a few heights:
@@ -43,6 +46,7 @@ import xarray  # noqa: E402
 import yaml  # noqa: E402
 from evaluation.figures import (  # noqa: E402
     plot_final_state_with_obs,
+    plot_parameter_pairs,
     plot_rank_histogram,
     plot_rollout_time_evolution,
     plot_sensor_timeseries,
@@ -140,6 +144,26 @@ def run(run_dir: pathlib.Path) -> None:
         ),
         rmse=np.concatenate(rmse),
     )
+
+    diagnostics_path = run_dir / "diagnostics.nc"
+    if diagnostics_path.exists():
+        with xarray.open_dataset(diagnostics_path) as diag:
+            if "posterior_parameter_members" in diag:
+                truth_values = diag.true_parameter.values
+                # A static truth: the run's own prior (window 0); else the
+                # final window's, at the same time as the posterior.
+                prior_window = 0 if np.isfinite(truth_values).all() else -1
+                plot_parameter_pairs(
+                    diag.posterior_parameter_members.isel(window=-1).values,
+                    [str(n) for n in diag.parameter.values],
+                    out / "parameter_pairs.png",
+                    prior=diag.prior_parameter_members.isel(window=prior_window).values,
+                    truth=truth_values,
+                )
+    else:
+        print(
+            "No diagnostics.nc: skipping parameter_pairs.png (run compute_metrics.py)"
+        )
 
     # --- |U| fields --------------------------------------------------------------------
     truth_plane = xarray.concat(truth_c.planes, dim="time")

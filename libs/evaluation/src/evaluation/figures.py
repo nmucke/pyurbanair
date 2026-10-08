@@ -1035,6 +1035,76 @@ def plot_parameter_marginals(
         return save_png(fig, output_path, transparent=False)
 
 
+def plot_parameter_pairs(
+    posterior: np.ndarray,
+    names: Sequence[str],
+    output_path: str | pathlib.Path,
+    *,
+    prior: np.ndarray | None = None,
+    truth: np.ndarray | None = None,
+) -> pathlib.Path:
+    """Corner plot of the joint posterior: member scatter over the prior.
+
+    ``posterior`` and ``prior`` are ``(member, parameter)``; ``truth`` is one
+    value per parameter, NaN where there is none to mark (a time-varying truth).
+    The diagonal holds each parameter's histograms, the lower triangle the
+    member pairs with their correlation; the upper triangle is left empty.
+    """
+    n = len(names)
+    with _styled():
+        fig, axes = plt.subplots(
+            n, n, figsize=(2.6 * n + 0.6, 2.6 * n + 0.6), squeeze=False
+        )
+        for i in range(n):
+            for j in range(n):
+                ax = axes[i, j]
+                if j > i:
+                    ax.set_axis_off()
+                    continue
+                sources = [("prior", prior), ("posterior", posterior)]
+                drawn = [(k, m) for k, m in sources if m is not None]
+                if i == j:
+                    bins = np.histogram_bin_edges(
+                        _finite(np.concatenate([m[:, i] for _, m in drawn])), 15
+                    )
+                    for kind, members in drawn:
+                        ax.hist(
+                            _finite(members[:, i]),
+                            bins=bins,
+                            color=COLORS[kind],
+                            alpha=0.5,
+                            label=kind,
+                        )
+                    ax.set_yticks([])
+                else:
+                    for kind, members in drawn:
+                        ax.scatter(
+                            members[:, j],
+                            members[:, i],
+                            s=12,
+                            color=COLORS[kind],
+                            alpha=0.7,
+                            label=kind,
+                        )
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        r = np.corrcoef(posterior[:, j], posterior[:, i])[0, 1]
+                    ax.set_title(f"posterior r = {r:.2f}", fontsize=9, loc="left")
+                    if truth is not None and np.isfinite(truth[[i, j]]).all():
+                        ax.scatter(
+                            truth[j], truth[i], marker="*", s=120, color=COLORS["truth"]
+                        )
+                if truth is not None and np.isfinite(truth[j]):
+                    ax.axvline(truth[j], color=COLORS["truth"], ls="--", lw=1.0)
+                if i == n - 1:
+                    ax.set_xlabel(_param_axis_label(names[j]), fontsize=9)
+                if j == 0 and i > 0:
+                    ax.set_ylabel(_param_axis_label(names[i]), fontsize=9)
+        axes[0, 0].legend(fontsize=8)
+        fig.suptitle("Final-window posterior over the prior (truth dashed)")
+        fig.tight_layout()
+        return save_png(fig, output_path, transparent=False)
+
+
 # ---------------------------------------------------------------------------
 # S1 -- vertical profiles at the station columns
 # ---------------------------------------------------------------------------

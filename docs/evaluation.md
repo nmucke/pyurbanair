@@ -153,24 +153,28 @@ Shared colours and labels (`COLORS`, `MODEL_*`, `METHOD_*`, `PARAM_LABELS`,
 
 | Script | Uses |
 |---|---|
-| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `series_stats`, `vector_sensor_metrics`, `spread_skill`, `_skill_score`, `window_statistics_summary`, `window_statistics`, `window_sampling_std`, `observation_fit`, `data_mismatch`, `data_mismatch_summary`, `streaming_state_rmse` |
-| [scripts/visualize_assimilation.py](../scripts/visualize_assimilation.py) | `plot_rollout_time_evolution`, `plot_final_state_with_obs`, `plot_sensor_timeseries`, `plot_tke_time_evolution`, `plot_rank_histogram`, `sensor_magnitude`, `colocate_components`, `select_z_plane`, `sensor_tke_evolution`, `streaming_state_rmse` |
+| [scripts/compute_metrics.py](../scripts/compute_metrics.py) | `compute_parameter_metrics`, `crps_ensemble`, `series_stats`, `vector_sensor_metrics`, `spread_skill`, `_skill_score`, `window_statistics_summary`, `window_statistics`, `window_sampling_std`, `observation_fit`, `data_mismatch`, `data_mismatch_summary`, `streaming_state_rmse` |
+| [scripts/visualize_assimilation.py](../scripts/visualize_assimilation.py) | `plot_rollout_time_evolution`, `plot_final_state_with_obs`, `plot_sensor_timeseries`, `plot_tke_time_evolution`, `plot_rank_histogram`, `plot_parameter_pairs`, `sensor_magnitude`, `colocate_components`, `select_z_plane`, `sensor_tke_evolution`, `streaming_state_rmse` |
 | [scripts/visualize_forward.py](../scripts/visualize_forward.py) | `colocate_components` |
 
 Both assimilation scripts take a finished run directory (`config.yaml`,
 `run_info.yaml`, `true_params.nc`, the truth state and
 `windows/window_{w}_{prior,posterior}_{params,state}.nc`, `window_{w}_obs.nc`).
 `compute_metrics.py` writes `metrics.yaml` with these blocks (each series
-summarised as `{mean, final, max, min}`):
+summarised as `{mean, final, max, min}`; the window-indexed ones, parameter
+RMSE/CRPS and the `sensor_statistics` CRPS, also list `per_window` values, a
+time-varying parameter's knots averaged within each window):
 
 | Block | Holds |
 |---|---|
 | `parameters` | per parameter: posterior and prior RMSE and CRPS against the truth, and the reduction |
+| `parameter_correlation` | `posterior` and `prior`: the correlation matrix of the estimated parameters over the members, final window, as a nested mapping (a time-varying parameter enters as its window mean) |
+| `sgs_health` | only with `assim_model.forward_model.model_discrepancy.enabled`: per window, `posterior` (and `prior`), the SGS multiplier min and max and the largest saturation fraction over the members, from each state file's `model_discrepancy_by_member` attribute |
 | `state` | RMSE of the ensemble-mean \|U\| over time, building cells left out (`geometry.stl_path`, relative to the repo root) |
 | `sensors` | per sensor set (`assimilation`, `validation`): RMSE and energy score of the `(u, v, w)` vector |
 | `spread_skill` | per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
 | `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
-| `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank; posterior, plus `prior` (`assimilation.save_prior_state`, smoother) and `forecast` (`assimilation.save_forecast_history`, filter and hybrid) when their states were saved, scored on the posterior's time stamps |
+| `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank; posterior, plus `prior` (`assimilation.save_prior_state`, smoother) and `forecast` (`assimilation.save_forecast_history`, filter and hybrid) when their states were saved, scored on the posterior's time stamps; `replica` (`assimilation.replica_dir`), the truth replica scored as a one-member prediction: the noise floor a perfect model reaches against one turbulent realisation |
 | `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N) |
 | `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation) and their `ratio` |
 
@@ -200,9 +204,17 @@ Read these with their limits:
 - **The held-out sensors have no observations**, so `observation` and
   `desroziers` cover the assimilated sensors only.
 
+It also writes `diagnostics.nc` next to `metrics.yaml`, the arrays the figures
+need: `{posterior,prior}_parameter_members` (window, ensemble, parameter),
+`{posterior,prior}_parameter_correlation` (window, parameter, parameter_j) and
+`true_parameter` (parameter; NaN where the truth varies in time).
+
 `visualize_assimilation.py`
 writes PNGs into `<run dir>/figures/` and reads `rank_counts` from
-`metrics.yaml` for `rank_histogram.png`, so run `compute_metrics.py` first.
+`metrics.yaml` for `rank_histogram.png` and `diagnostics.nc` for
+`parameter_pairs.png` (`plot_parameter_pairs`: the final-window posterior
+members over the prior, truth marked when static), so run
+`compute_metrics.py` first.
 [workflows/assimilation_workflow.sh](../workflows/assimilation_workflow.sh)
 runs both after the assimilation run.
 

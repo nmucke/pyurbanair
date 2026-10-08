@@ -1668,3 +1668,85 @@ def data_mismatch_summary(
             else "no_representativeness_error"
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Distances between 1-D value distributions (sensor values; plan item 4).
+#
+# Plain samples in, floats out: the caller decides what to pool (sensors,
+# members, frames) and how to normalise. NaNs are dropped from each sample.
+# ---------------------------------------------------------------------------
+
+# Quantile levels for W2: 99 midpoints of [0, 1] resolve the 1 % tails, and the
+# midpoint grid keeps a Gaussian's quantile std within 1 % of the true sigma.
+N_QUANTILES = 99
+
+# Histogram bins for KL: 30 over the union range is fine enough to see shape on
+# a few thousand values, coarse enough that most bins are populated.
+N_BINS = 30
+
+# Additive smoothing per bin for KL (Jeffreys prior): keeps it finite when a
+# truth bin holds no predicted value.
+_KL_SMOOTHING = 0.5
+
+
+def wasserstein2(truth: np.ndarray, pred: np.ndarray) -> dict[str, float]:
+    """1-D Wasserstein-2 distance between two samples, with its split.
+
+    Exact in 1-D from the quantile functions, on ``N_QUANTILES`` midpoint
+    levels: ``W2² = mean_p (Q_truth(p) − Q_pred(p))²``. The split uses the mean
+    and std of the two quantile vectors, so it is exact and every term is
+    non-negative: ``W2² = location + scale + shape`` with ``location =
+    (Δμ)²`` (bias), ``scale = (Δσ)²`` (wrong spread, e.g. turbulence
+    intensity) and ``shape`` the rest (skewness, tails). W2 is in the units of
+    the input and stays finite when the supports do not overlap.
+
+    Returns ``{"w2", "location", "scale", "shape"}`` (the last three are
+    squared, ``w2`` is not); all NaN if either sample is empty after dropping
+    NaNs.
+    """
+    a = np.asarray(truth, dtype=float).ravel()
+    b = np.asarray(pred, dtype=float).ravel()
+    a, b = a[~np.isnan(a)], b[~np.isnan(b)]
+    if a.size == 0 or b.size == 0:
+        return {"w2": np.nan, "location": np.nan, "scale": np.nan, "shape": np.nan}
+    levels = (np.arange(N_QUANTILES) + 0.5) / N_QUANTILES
+    qa, qb = np.quantile(a, levels), np.quantile(b, levels)
+    w2_sq = float(np.mean((qa - qb) ** 2))
+    location = float((qa.mean() - qb.mean()) ** 2)
+    scale = float((qa.std() - qb.std()) ** 2)
+    return {
+        "w2": float(np.sqrt(w2_sq)),
+        "location": location,
+        "scale": scale,
+        # Equals 2·σ_a·σ_b·(1 − corr(qa, qb)) >= 0; clip float round-off only.
+        "shape": max(w2_sq - location - scale, 0.0),
+    }
+
+
+def kl_divergence(truth: np.ndarray, pred: np.ndarray) -> float:
+    """KL(truth ‖ pred) in nats on shared histogram bins.
+
+    Both samples are binned on ``N_BINS`` equal bins over the union of their
+    ranges, with ``_KL_SMOOTHING`` counts added to every bin. Caveats: the value
+    depends on the binning (bins and smoothing), it grows without bound as the
+    supports separate (capped only by the smoothing), and it is asymmetric --
+    it penalises predicted mass missing where the truth has mass. Read it next
+    to :func:`wasserstein2`, not alone.
+
+    NaN if either sample is empty after dropping NaNs; 0 if all values are
+    equal.
+    """
+    a = np.asarray(truth, dtype=float).ravel()
+    b = np.asarray(pred, dtype=float).ravel()
+    a, b = a[~np.isnan(a)], b[~np.isnan(b)]
+    if a.size == 0 or b.size == 0:
+        return float("nan")
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    if lo == hi:
+        return 0.0
+    edges = np.linspace(lo, hi, N_BINS + 1)
+    p = np.histogram(a, edges)[0] + _KL_SMOOTHING
+    q = np.histogram(b, edges)[0] + _KL_SMOOTHING
+    p, q = p / p.sum(), q / q.sum()
+    return float(np.sum(p * np.log(p / q)))

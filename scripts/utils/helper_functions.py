@@ -99,15 +99,24 @@ def case_stl_path(cfg: DictConfig) -> pathlib.Path:
 def open_truth(cfg: DictConfig, run_dir: pathlib.Path) -> xarray.Dataset:
     """A run's truth state over its horizon, opened lazily.
 
-    `run_dir/true_state.nc` for a simulated truth, else `<truth_dir>/state.nc`
-    from `assimilation.truth_start_time` on, with that time rebased to t=0.
+    `run_dir/true_state.nc` for a simulated truth, else the state of
+    `assimilation.truth_dir` (see `open_forward_run`).
     """
     truth_dir = cfg.assimilation.truth_dir
     if truth_dir is None:
         return xarray.open_dataset(run_dir / "true_state.nc")
+    return open_forward_run(cfg, truth_dir)
+
+
+def open_forward_run(cfg: DictConfig, directory: str) -> xarray.Dataset:
+    """`<directory>/state.nc` of a forward run over the assimilation horizon.
+
+    Read from `assimilation.truth_start_time` on, with that time rebased to
+    t=0, so it lines up with the truth: used for `truth_dir` and `replica_dir`.
+    """
     horizon = cfg.assimilation.num_windows * cfg.time.simulation_time
     start = float(cfg.assimilation.truth_start_time or 0.0)
-    path = pathlib.Path(truth_dir) / "state.nc"
+    path = pathlib.Path(directory) / "state.nc"
     state = xarray.open_dataset(path)
     # Output frames sit in (0, simulation_time], so a frame at t=0 marks a
     # state.nc written before the backends stamped time that way (PR #163).

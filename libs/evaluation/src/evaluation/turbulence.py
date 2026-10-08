@@ -26,7 +26,7 @@ from typing import NamedTuple
 
 import numpy as np
 import xarray
-from scipy import signal
+from scipy import ndimage, signal
 
 logger = logging.getLogger(__name__)
 
@@ -2279,3 +2279,166 @@ def spectral_metric_summary(spectra: dict) -> dict:
             log_spectral_distance(truth, median_spectrum(spectra["prior"])[:, band])
         )
     return entry
+
+
+# ---------------------------------------------------------------------------
+# Field statistics and spanwise spectra (assimilation turbulence metrics)
+# ---------------------------------------------------------------------------
+#
+# The truth and every member are driven by different turbulent realisations, so
+# instantaneous fields are not comparable; their statistics are. These are the
+# per-member reductions behind the ``field_statistics``, ``canopy_profiles`` and
+# ``spectra`` blocks of ``compute_metrics.py``. Arrays in, arrays out, and every
+# spatial array is ``(z, y, x)``.
+
+# Spanwise wavelength bands in grid spacings Δ, ``lo <= λ/Δ < hi``: large scales
+# show inflow errors, the band near the 2Δ cutoff shows an SGS change first.
+SPECTRAL_BANDS = {"large": (8.0, np.inf), "mid": (4.0, 8.0), "near_cutoff": (2.0, 4.0)}
+
+# Top levels left out of the above-canopy spectra: the top boundary shapes them.
+_SPECTRA_TOP_CELLS = 2
+# Cells before the outflow left out of the spectra: the outflow boundary shapes them.
+_SPECTRA_OUTFLOW_CELLS = 2
+
+
+def field_statistics(u, v, w):
+    """Time-mean ``u``, ``v``, ``w``, TKE and resolved ``u'w'`` of one member.
+
+    ``u``, ``v``, ``w`` are ``(time, z, y, x)`` on the cell centres (the output of
+    :func:`colocate_components`): TKE and ``u'w'`` are one-point moments.
+    Moments are :class:`MomentAccumulator`'s (``ddof=1``, NaN frames skipped per
+    cell). Returns a dict of ``(z, y, x)`` arrays keyed ``u``, ``v``, ``w``,
+    ``tke``, ``uw``. Average each member's statistics over the ensemble, never
+    the statistics of the ensemble-mean field.
+    """
+    moments = MomentAccumulator()
+    moments.update(u, v, w)
+    mean = moments.mean()
+    return {
+        "u": mean[0],
+        "v": mean[1],
+        "w": mean[2],
+        "tke": moments.tke(),
+        "uw": moments.reynolds_stress()[0, 2],
+    }
+
+
+def fluid_mask(stl_path, z, y, x):
+    """``(z, y, x)`` fluid cells for colocated statistics: not solid, not next to it.
+
+    :func:`stl_solid_mask` dilated by one cell along each axis, so that a centre
+    whose colocation reads a solid face drops out.
+    """
+    return ~ndimage.binary_dilation(stl_solid_mask(stl_path, z, y, x))
+
+
+def intrinsic_profile(field, fluid):
+    """Per-level mean of ``field`` over the fluid cells of that level.
+
+    ``field`` and ``fluid`` are ``(z, y, x)``. Returns ``(z,)``, NaN at a level
+    with no fluid (or no finite) cell.
+    """
+    values = np.where(fluid, np.asarray(field, dtype=float), np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # all-solid levels
+        return np.nanmean(values, axis=(1, 2))
+
+
+def field_rmse(prediction, truth, fluid):
+    """RMSE of a statistic over the fluid cells, total and per level.
+
+    All three are ``(z, y, x)``; cells where either field is not finite drop out
+    too. Returns ``(rmse, profile)``: a float and a ``(z,)`` array, NaN where
+    nothing is left.
+    """
+    error = np.asarray(prediction, dtype=float) - np.asarray(truth, dtype=float)
+    squared = np.where(fluid, error**2, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        return float(np.sqrt(np.nanmean(squared))), np.sqrt(
+            np.nanmean(squared, axis=(1, 2))
+        )
+
+
+def spanwise_spectra(field, fluid, dy):
+    """Spanwise energy spectra on the fully fluid ``(x, z)`` lines, by height group.
+
+    ``y`` is periodic in every backend, so each line is FFT'd as it is, with no
+    window or detrending. Pass a component on its **native** grid with the fluid
+    mask of that grid (``~stl_solid_mask`` at the component's own coordinates):
+    interpolation would low-pass the tail being measured. Only ``x`` from the
+    first column holding a solid cell up to ``_SPECTRA_OUTFLOW_CELLS`` before the
+    outflow is used. Groups:
+
+    - ``above_canopy``: levels with no solid cell, below the top
+      ``_SPECTRA_TOP_CELLS``;
+    - ``in_canopy``: the fully fluid lines (open streets along ``y``) of levels
+      that have solid cells.
+
+    Args:
+        field: ``(time, z, y, x)``.
+        fluid: ``(z, y, x)`` bool.
+        dy: Spanwise grid spacing in m.
+
+    Returns:
+        ``(k, spectra)``: ``k`` the wavenumbers in cycles/m without the mean
+        (``k = 0``) bin, and ``spectra`` a dict ``{group: (n_k,) | None}``, the
+        one-sided spectral density averaged over lines and frames (so
+        ``sum(E) * dk`` is the variance along ``y``). ``None`` for a group with no
+        line; the caller logs that.
+    """
+    values = np.asarray(field, dtype=float)
+    fluid = np.asarray(fluid, dtype=bool)
+    n_z, n_y, n_x = fluid.shape
+    solid_columns = np.flatnonzero((~fluid).any(axis=(0, 1)))
+    x_slice = slice(
+        solid_columns[0] if solid_columns.size else 0, n_x - _SPECTRA_OUTFLOW_CELLS
+    )
+    line_fluid = fluid[:, :, x_slice].all(axis=1)  # (z, x)
+    has_solid = (~fluid).any(axis=(1, 2))
+
+    k = np.fft.rfftfreq(n_y, d=dy)
+    # One-sided: every bin but the mean and the Nyquist bin stands for two.
+    weight = np.full(k.size, 2.0)
+    weight[0] = 1.0
+    if n_y % 2 == 0:
+        weight[-1] = 1.0
+    scale = weight / (n_y**2 * k[1])  # |FFT/n|², per unit wavenumber
+
+    spectra = {}
+    for group, levels in (
+        ("above_canopy", ~has_solid & (np.arange(n_z) < n_z - _SPECTRA_TOP_CELLS)),
+        ("in_canopy", has_solid),
+    ):
+        total, n_lines = np.zeros(k.size), 0
+        for level in np.flatnonzero(levels):
+            lines = values[:, level, :, x_slice][:, :, line_fluid[level]]
+            if lines.shape[-1]:
+                total += (np.abs(np.fft.rfft(lines, axis=1)) ** 2).sum(axis=(0, 2))
+                n_lines += lines.shape[0] * lines.shape[-1]
+        spectra[group] = (total * scale / n_lines)[1:] if n_lines else None
+    return k[1:], spectra
+
+
+def band_energy_ratio(k, prediction, truth, dy):
+    """Energy ratio prediction/truth in dB in each of :data:`SPECTRAL_BANDS`.
+
+    ``k`` (cycles/m) and ``dy`` as returned by and passed to
+    :func:`spanwise_spectra`; ``prediction`` and ``truth`` are ``(..., n_k)``
+    and broadcast. Returns ``{band: array}`` of the broadcast leading shape (0-d
+    for two 1-D spectra), NaN for a band with no bin or no truth energy.
+    """
+    wavelengths = np.round(1.0 / (np.asarray(k, dtype=float) * dy), 6)
+    prediction = np.asarray(prediction, dtype=float)
+    truth = np.asarray(truth, dtype=float)
+    out = {}
+    for band, (lo, hi) in SPECTRAL_BANDS.items():
+        inside = (wavelengths >= lo) & (wavelengths < hi)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = prediction[..., inside].sum(-1) / truth[..., inside].sum(-1)
+            out[band] = np.where(
+                inside.any() & np.isfinite(ratio) & (ratio > 0),
+                10.0 * np.log10(ratio),
+                np.nan,
+            )
+    return out
