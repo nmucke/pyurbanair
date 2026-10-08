@@ -30,6 +30,11 @@ most likely way to misread the results:
    posterior spread?
 3. **Benefit:** does estimating SGS improve predictions at held-out sensors and
    in the next window's forecast, compared with estimating inflow alone?
+   This is the question that decides whether the SGS terms are worth keeping.
+   Estimating `b` is only worth it if T3 beats T2 (inflow only, `b = 0`) by
+   more than the noise floor on the scores. If T2 does just as well, the
+   answer is "no added value", even when T1/T3 recover `b`. Report that
+   plainly; it is a likely and useful outcome.
 
 A negative or inconclusive result is a valid outcome. Report it as such. Do not
 tune until something passes.
@@ -106,8 +111,10 @@ parameters and end state, made before seeing window `w`'s data. Its scores in
    `pixi run -e dev python -m pytest tests/pyudales -k "discrepancy or replay" -m integration`
    If they fail, stop and report. Nothing below is meaningful without them.
 4. **Keep every run directory, including the window state files.** The
-   turbulence metrics in [da_turbulence_metrics.md](da_turbulence_metrics.md)
-   are not implemented yet; they will be recomputed from these files later.
+   turbulence metrics of
+   [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md) are
+   computed from these files: rerun `compute_metrics.py` and
+   `visualize_assimilation.py` on them.
    Budget disk accordingly. One frame is 30·40·16 cells × 4 variables ×
    4 B ≈ 0.3 MB. A window file is then 180 frames × 32 members ≈ 1.8 GB, so a
    smoother run with prior states is about 11 GB. Check `df` before starting.
@@ -306,6 +313,24 @@ profiles, sensor distributions (W2) and spectra. A difference counts only if it
 is clearly larger than the gap between the replica and the truth. With 1–3
 seeds this is evidence, not a statistical claim. Say so in the report.
 
+**Value of the SGS terms (T3 vs T2).** Independently of the pass/fail above,
+give a verdict on whether estimating `b` adds value over not estimating it:
+
+- **Adds value:** T3 is better than T2 on the held-out scores (posterior and
+  window-1/2 forecasts), by more than the replica floor and consistently
+  across seeds.
+- **No added value:** T3 and T2 are within the floor or the seed spread of
+  each other. Inflow-only estimation does just as well, so the SGS terms are
+  not worth their cost here.
+- **Hurts:** T2 is better. Check for compensation between `b` and the inflow
+  parameters in the posterior correlations.
+
+Make a small table per score (validation-sensor `sensor_statistics` CRPS, W2,
+field-statistic and canopy-profile RMSE, near-cutoff band ratio): T2, T3, their
+difference, the replica floor and the seed spread. Recovery of `b` (T1/T3) and
+value are separate: a recovered `b` with no gain on the scores means the
+correction is identifiable but its effect is too small to matter.
+
 ## Deliverables
 
 On the branch `exp/sgs-twin-tests` (never main), commit
@@ -316,6 +341,8 @@ On the branch `exp/sgs-twin-tests` (never main), commit
 - A per-run parameter table (truth / prior / posterior mean ± std / verdict)
   and the sensor and forecast scores.
 - Failures, and anything that surprised you.
+- The T3-vs-T2 value table and its verdict (adds value / no added value /
+  hurts).
 - A one-paragraph verdict on execution, recovery and benefit.
 
 Commit compact figures only if they are small. Push the branch; do not open a
@@ -332,12 +359,19 @@ coefficients mean different things in the two solvers. The DA should find
 whatever values make uDALES resemble PALM most closely, as in a real
 deployment where the best coefficients for reality are unknown. Consequences:
 
-- **Judge predictions only.** The primary scores are the ones the DA never
-  sees: held-out validation sensors, the window-1/2 forecasts after the
-  coefficients are frozen, and the full-field state RMSE against PALM where
-  the grids allow it. Check how `compute_metrics.py` samples a PALM truth on
-  the uDALES grid before trusting the state RMSE. Calibration (spread–skill,
-  χ²) is secondary.
+- **Judge predictions only.** Score what the DA never sees: the held-out
+  validation sensors and the window-1/2 forecasts after the coefficients are
+  frozen. Use the statistics from [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md),
+  not instantaneous errors:
+  - `sensor_statistics`;
+  - sensor distributions (W2);
+  - field statistics and canopy profiles against PALM, with PALM interpolated
+    onto the uDALES cell centres;
+  - spectra in physical wavenumber, up to the coarser grid's cutoff. The
+    near-cutoff band partly measures the two codes' numerical dissipation.
+
+  Read every score against a **PALM replica** (the PALM truth rerun with only
+  its random seed changed). Calibration (z-scores, ranks, χ²) is secondary.
 - **The coefficients are diagnostics, not targets.** There is no "recovered"
   or "wrong" verdict for `b`. Report their posteriors, and check that they are
   consistent across windows, seeds and sensor layouts. Coefficients that drift
@@ -366,10 +400,15 @@ deployment where the best coefficients for reality are unknown. Consequences:
   between the sparse-sensor T3 and this reference separates "the correction
   cannot mimic PALM" from "the sensors cannot pin it down".
 
-**Passes when:** T3 beats both T2 and the `sgs_constant` baseline on held-out
-sensors and on forecasts after assimilation stops. Use the same ≥10% threshold
-as Round 1, and calibration must not get worse. The coefficients must also be
-stable across seeds and windows.
+**Passes when:** T3 beats both T2 and the `sgs_constant` baseline on the
+held-out statistics above (validation sensors and the forecasts after
+assimilation stops). Use the same ≥10% threshold as Round 1. The improvement
+must be clearly larger than the PALM-replica floor, and calibration must not
+get worse. The coefficients must also be stable across seeds and windows.
+Give the same value verdict as in Round 1 (adds value / no added value /
+hurts), for T3 against T2 and against the `sgs_constant` baseline. This is the
+round where "no added value" matters most: it would mean inflow estimation
+(or one closure constant) is enough to match PALM.
 
 **Setup:**
 
@@ -379,7 +418,11 @@ stable across seeds and windows.
   PALM keeps its own SGS closure (`sgs_constant: null`). Check that PALM ignores
   the `sgs_bias_*` entries in `static_truth` (remove them with `~` if it
   doesn't). Then point the DA at it with `assimilation.truth_dir=<run dir>` and
-  `assimilation.truth_start_time=<spinup>`.
+  `assimilation.truth_start_time=<spinup>`. Make the PALM replica the same way
+  with another seed, for `assimilation.replica_dir`. `pypalm` exposes no seed
+  today: PALM seeds its random generator from `ensemble_member_nr`, which
+  pypalm does not write, so add that key first (see
+  [scripts_and_configs.md](../scripts_and_configs.md)).
 - **Align the solvers:** inlet turbulence differs (PALM disturbances vs the
   uDALES driver planes), and so do the spinup, the grid staggering of the
   sensor sampling, and the time origin. Read [pypalm.md](../pypalm.md) first.
