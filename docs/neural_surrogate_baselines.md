@@ -50,6 +50,9 @@ pixi run -e dev python scripts/surrogate/baselines/compare.py \
     'models=[model_weights/local_fno,model_weights/ssrolling_tl_roll3,model_weights/p3d_idealized]'
 ```
 
+On the clusters, `job_scripts/<machine>/surrogate_train_{local_fno,ssrolling}.slurm`
+run these on a GPU ([job_scripts.md](job_scripts.md)).
+
 Both papers' models have no inflow parameters. Ours vary in time, so both
 baselines take the z-scored `param_vars`. That is the main deviation, listed
 with the others below.

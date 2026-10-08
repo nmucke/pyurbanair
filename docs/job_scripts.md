@@ -21,6 +21,7 @@ job_scripts/
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
+│   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
 └── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
 ```
@@ -172,6 +173,34 @@ settings, so a retrained one is refused (use a new `output_root`). The cache is 
 latent generator's batch is bounded by `max_latent_tokens` (`B` x latent cells
 must stay at or below 4096); the default `cell_budget` counts full grids and
 gives one frame per batch here, hence `null` and a fixed batch size.
+
+## Example: the neural-surrogate baselines (GPU)
+
+Local-FNO and SSRollingUrbanNet ([neural_surrogate_baselines.md](neural_surrogate_baselines.md))
+have GPU training jobs of their own: `train.py` on their configs in
+`configs/surrogate/baselines/`, with `trainer.checkpoint_every=1`. Train them
+on the corpus of the stepper you compare them with; SSRollingUrbanNet is two
+stages, Roll-1 and then the TL Roll-3 fine-tuning that reads its weights:
+
+```bash
+args=(paths.weights_dir=/projects/urbanair/model_weights
+  paths.data_dir=/projects/urbanair/training_data/pyudales_realistic)
+sbatch job_scripts/delftblue/surrogate_train_local_fno.slurm "${args[@]}"
+roll1=$(sbatch --parsable job_scripts/delftblue/surrogate_train_ssrolling.slurm train_roll1 "${args[@]}")
+sbatch --dependency=afterok:$roll1 job_scripts/delftblue/surrogate_train_ssrolling.slurm finetune_roll3 "${args[@]}"
+```
+
+The outputs are `local_fno`, `ssrolling_roll1` and `ssrolling_tl_roll3` in
+`paths.weights_dir`. A job cut off at its time limit resumes when resubmitted
+with the same line; a Roll-1 job that hits the limit is not `afterok`, so
+resubmit Roll-1 and then the fine-tuning. Further arms need their own `name`
+(e.g. `train_roll1 'architecture=${baseline_architectures.urbanaurora_512}'
+name=urbanaurora_roll1` for 3DSwinUrbanNet). On Snellius the same lines with
+`job_scripts/snellius/` train in the `cuda` env (the `snellius` env has
+CPU-only torch): run `pixi install -e cuda` once on a login node. A 40 GB A100
+may be tight for the 451 M SSRollingUrbanNet with Roll-3; pass
+`--partition=gpu_h100` (Snellius) before the job script if it runs out of
+memory.
 
 ## Machine notes
 
