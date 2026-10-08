@@ -7,6 +7,8 @@ frames given, as the papers do for their statistics.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 
 
@@ -53,10 +55,15 @@ def lateral_spectrum(
 
 
 def profiles(
-    fields: np.ndarray, fluid: np.ndarray, u: int = 0, w: int = 2
+    fields: np.ndarray,
+    fluid: np.ndarray,
+    u: int = 0,
+    w: int = 2,
+    velocity: Sequence[int] = (0, 1, 2),
 ) -> dict[str, np.ndarray]:
     """Horizontally averaged ``(nz,)`` profiles over fluid cells: mean
-    streamwise velocity, resolved TKE and Reynolds shear stress ``-<u'w'>``."""
+    streamwise velocity, resolved TKE (over the ``velocity`` channels) and
+    Reynolds shear stress ``-<u'w'>``."""
     prime = fluctuations(fields, fluid)
     count = np.maximum(fluid.sum(axis=(-2, -1)), 1)
 
@@ -66,6 +73,6 @@ def profiles(
 
     return {
         "mean_u": average(fields[:, u]),
-        "tke": average(0.5 * (prime**2).sum(axis=1)),
+        "tke": average(0.5 * (prime[:, list(velocity)] ** 2).sum(axis=1)),
         "uw": -average(prime[:, u] * prime[:, w]),
     }

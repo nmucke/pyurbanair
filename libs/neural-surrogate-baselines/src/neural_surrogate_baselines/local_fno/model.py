@@ -148,13 +148,13 @@ class LocalFNOStepper(nn.Module):
     def _sdf_features_for(self, geometry: torch.Tensor) -> torch.Tensor:
         """``(B, C_g, *grid)`` SDF features of the fluid mask, cached.
 
-        The forward model passes the same geometry object every step, so the
-        EDT runs once per rollout (identity hit); an equal mask also hits.
+        The EDT runs once per geometry: the key is a copy of the mask, compared
+        by value, so an in-place edit of the caller's mask is never served stale.
         """
         cached = self._sdf_cache
         if cached is not None:
             key, feat = cached
-            if key is geometry or (
+            if (
                 key.shape == geometry.shape
                 and key.device == geometry.device
                 and torch.equal(key, geometry)
@@ -162,8 +162,9 @@ class LocalFNOStepper(nn.Module):
                 return feat
 
         def sdf(g: torch.Tensor) -> torch.Tensor:
+            # The EDT needs a float32/64 mask (the model may run in bf16).
             return compute_sdf_features(
-                g, clamp_cells=self.sdf_clamp_cells, mode=self.sdf_feature_mode
+                g.float(), clamp_cells=self.sdf_clamp_cells, mode=self.sdf_feature_mode
             )
 
         # An ensemble stacks identical masks: one EDT for all equal members.
@@ -172,7 +173,7 @@ class LocalFNOStepper(nn.Module):
             first if torch.equal(g, geometry[0]) else sdf(g) for g in geometry[1:]
         ]
         feat = torch.stack(feats).to(geometry.device)
-        self._sdf_cache = (geometry, feat)
+        self._sdf_cache = (geometry.clone(), feat)
         return feat
 
     def forward_patches(

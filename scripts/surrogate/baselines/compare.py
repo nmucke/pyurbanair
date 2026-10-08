@@ -9,8 +9,10 @@ Config: configs/surrogate/baselines/compare.yaml.
 Every model starts from the same frame, the latest any model needs as history
 (``max(H) - 1``), each from its own last ``H`` true frames up to it, and rolls
 out to the trajectory's end with the trajectory's parameters. The models must
-have been trained on the same data (state and parameter variables, cadence);
-the script refuses to compare them otherwise. Persistence (repeat the start
+have been trained on the same data: the same training-data folder name, state
+and parameter variables and, where the corpus' config.yaml is readable, the
+same output frequency; the script refuses to compare them otherwise. Models are
+labelled by their folder name (by the path given, if two names clash). Persistence (repeat the start
 frame) is the reference every model must beat.
 
 Outputs, in `output_dir`:
@@ -59,17 +61,19 @@ def run(cfg: DictConfig) -> None:
     out.mkdir(parents=True, exist_ok=True)
     if not cfg.models:
         raise ValueError("list at least one trained model in `models`")
+    if cfg.max_steps is not None and int(cfg.max_steps) < 1:
+        raise ValueError(f"max_steps must be at least 1, got {cfg.max_steps}")
 
+    labels = _labels(list(cfg.models))
     _check_same_data(
         {
-            pathlib.Path(d).name: OmegaConf.load(pathlib.Path(d) / "config.yaml")
-            for d in cfg.models
+            label: OmegaConf.load(pathlib.Path(d) / "config.yaml")
+            for label, d in labels.items()
         }
     )
     models = {}
-    for model_dir in cfg.models:
-        model, train_cfg = load_model(model_dir, dev)
-        models[pathlib.Path(model_dir).name] = (model, train_cfg)
+    for label, model_dir in labels.items():
+        models[label] = load_model(model_dir, dev)
     first_cfg = next(iter(models.values()))[1]
     data = open_dataset(first_cfg, cfg.data_dir, cfg.split, sdf_features="none")
     histories = {
@@ -79,11 +83,12 @@ def run(cfg: DictConfig) -> None:
     start = max(histories.values()) - 1
     state_vars = list(data.state_vars)
     u, w = state_vars.index("u"), state_vars.index("w")
+    velocity = [state_vars.index(v) for v in ("u", "v", "w") if v in state_vars]
 
     rows: list[dict] = []
     dy = 1.0
     curves: dict[str, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
-    first: dict[str, np.ndarray] = {}
+    first: dict[str, Any] = {}
     for sample in cfg.sample_indices:
         truth = load_states(data, sample)
         if cfg.max_steps is not None:
@@ -129,31 +134,63 @@ def run(cfg: DictConfig) -> None:
     names = list(curves)
     write_csv(rows + _means(rows, names), out / "metrics.csv")
     write_csv(_per_step(curves, state_vars), out / "per_step.csv")
-    write_csv(_statistics(first, names, u, w), out / "statistics.csv")
+    write_csv(_statistics(first, names, u, w, velocity), out / "statistics.csv")
     _plot_curves(curves, out / "rmse.png", out / "energy.png", state_vars)
-    _plot_spectra(first, names, list(cfg.levels), u, dy, out / "spectra.png")
-    _plot_profiles(first, names, u, w, out / "profiles.png")
+    levels = [lv for lv in cfg.levels if 0 <= lv < first["fluid"].shape[0]]
+    if levels:
+        _plot_spectra(first, names, levels, u, dy, out / "spectra.png")
+    else:
+        print(f"no `levels` inside the grid's {first['fluid'].shape[0]}: no spectra")
+    _plot_profiles(first, names, u, w, velocity, out / "profiles.png")
     print(f"Saved comparison in {out}")
 
 
+def _labels(model_dirs: list[str]) -> dict[str, str]:
+    """A unique label per model: its folder name, or the path if names clash."""
+    names = [pathlib.Path(d).name for d in model_dirs]
+    if len(set(model_dirs)) != len(model_dirs):
+        raise ValueError(f"a model is listed twice: {model_dirs}")
+    labels = names if len(set(names)) == len(names) else [str(d) for d in model_dirs]
+    reserved = {"truth", "fluid", PERSISTENCE} & set(labels)
+    if reserved:
+        raise ValueError(
+            f"model labels {sorted(reserved)} are reserved; rename the folder"
+        )
+    return dict(zip(labels, model_dirs))
+
+
 def _check_same_data(train_cfgs: dict[str, Any]) -> None:
-    """Refuse models trained on different data."""
+    """Refuse models trained on different data.
+
+    Compares the training-data folder name (paths may differ between machines),
+    the state and parameter variables, and the corpus' output frequency where
+    its config.yaml can be read. A root that does not resolve on this machine
+    is left out of the folder comparison rather than compared as raw text.
+    """
 
     def signature(cfg: Any) -> dict[str, Any]:
         dataset = cfg.dataset
         try:
-            root = OmegaConf.to_container(cfg, resolve=True)["dataset"]["root_dir"]
-        except Exception:  # unresolvable on this machine: compare the raw value
-            root = OmegaConf.to_container(dataset)["root_dir"]
+            root = pathlib.Path(str(OmegaConf.select(cfg, "dataset.root_dir")))
+        except Exception:
+            root = None
+        frequency = None
+        if root is not None and (root / "config.yaml").exists():
+            frequency = OmegaConf.select(
+                OmegaConf.load(root / "config.yaml"), "time.output_frequency"
+            )
         return {
-            "root_dir": pathlib.Path(str(root)).name,
+            "data": root.name if root is not None else None,
+            "output_frequency": frequency,
             "state_vars": list(dataset.state_vars),
             "param_vars": list(dataset.get("param_vars") or []),
         }
 
     signatures = {name: signature(cfg) for name, cfg in train_cfgs.items()}
-    reference = next(iter(signatures.values()))
-    different = {n: s for n, s in signatures.items() if s != reference}
+    different = False
+    for key in ("data", "output_frequency", "state_vars", "param_vars"):
+        known = {str(s[key]) for s in signatures.values() if s[key] is not None}
+        different |= len(known) > 1
     if different:
         raise ValueError(
             "models trained on different data:\n  "
@@ -216,11 +253,13 @@ def _per_step(curves: dict, state_vars: list[str]) -> list[dict]:
     return rows
 
 
-def _statistics(first: dict, names: list[str], u: int, w: int) -> list[dict]:
-    truth = diagnostics.profiles(first["truth"], first["fluid"], u, w)
+def _statistics(
+    first: dict, names: list[str], u: int, w: int, velocity: list[int]
+) -> list[dict]:
+    truth = diagnostics.profiles(first["truth"], first["fluid"], u, w, velocity)
     rows = []
     for name in names:
-        pred = diagnostics.profiles(first[name], first["fluid"], u, w)
+        pred = diagnostics.profiles(first[name], first["fluid"], u, w, velocity)
         for level in range(len(truth["tke"])):
             rows.append(
                 {"model": name, "level": level}
@@ -305,12 +344,17 @@ def _plot_spectra(
 
 
 def _plot_profiles(
-    first: dict, names: list[str], u: int, w: int, path: pathlib.Path
+    first: dict,
+    names: list[str],
+    u: int,
+    w: int,
+    velocity: list[int],
+    path: pathlib.Path,
 ) -> None:
     labels = {"mean_u": "mean u", "tke": "resolved TKE", "uw": "-<u'w'>"}
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     for name in ["truth", *names]:
-        prof = diagnostics.profiles(first[name], first["fluid"], u, w)
+        prof = diagnostics.profiles(first[name], first["fluid"], u, w, velocity)
         style = {"color": "k", "lw": 2} if name == "truth" else {}
         for ax, key in zip(axes, labels):
             ax.plot(prof[key], np.arange(len(prof[key])), label=name, **style)

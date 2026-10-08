@@ -23,8 +23,10 @@ def spectral_loss(
     (Park & Lee 2026, Eq. 10; ``dim`` is the lateral axis).
 
     By Parseval this equals ``n * MSE`` (``norm="backward"``, ``n`` the axis
-    length), ``MSE`` (``"ortho"``) or ``MSE / n`` (``"forward"``): the spectral
-    term only rescales the MSE. Kept for fidelity to the paper.
+    length), ``MSE`` (``"ortho"``) or ``MSE / n`` (``"forward"``), the MSE
+    taken over every cell of the fields given (with buildings zeroed by the
+    caller, ``n`` × fluid fraction × the fluid-cell MSE): the spectral term only
+    rescales the MSE. Kept for fidelity to the paper.
     """
     diff = torch.fft.fft(pred.float(), dim=dim, norm=norm) - torch.fft.fft(
         target.float(), dim=dim, norm=norm

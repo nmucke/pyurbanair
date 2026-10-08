@@ -3,10 +3,13 @@
 #   python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/train_roll1
 # then fine-tune it with Roll-3 (finetune_roll3.yaml). Data, dataloader and
 # paths come from surrogate/training.yaml, as for our steppers.
-# `architecture=${baseline_architectures.urbanaurora_512}` trains 3DSwinUrbanNet;
-# SSGen's `n_levels` (default 32) must equal the corpus' nz, e.g.
-# `+baseline_architectures.ssrolling_512.n_levels=16`; `trainer.alpha=0` is
-# the MSE-only arm.
+# Arms: give each its own `name`, or it resumes and overwrites this run (the
+# output folder is weights_dir/<name> and training.yaml sets `resume: true`):
+#   3DSwinUrbanNet: 'architecture=${baseline_architectures.urbanaurora_512}' name=urbanaurora_roll1
+#   MSE only:       trainer.alpha=0 name=ssrolling_roll1_mse
+# `architecture` is an interpolation, so change its keys at the source,
+# baseline_architectures.<name>.<key>=..., e.g. SSGen's `n_levels`, which must
+# equal the corpus' nz: baseline_architectures.ssrolling_512.n_levels=16
 defaults:
   - /surrogate/training
   - /surrogate/baselines/architectures@baseline_architectures

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from neural_surrogate_baselines import LocalFNOStepper
@@ -114,17 +115,29 @@ def test_forward_shape_masking_and_any_grid() -> None:
     assert odd.shape == (1, 3, NZ, 13, 27)
 
 
-def test_forward_is_the_stitched_patch_prediction() -> None:
+def test_a_patch_core_sees_only_its_patch() -> None:
+    """Local-FNO is local: input outside a patch (overlap included) leaves the
+    patch's core prediction unchanged, input inside it does not."""
     torch.manual_seed(0)
     model = _tiny()
     state, params, geometry = (
-        torch.randn(2, 6, NZ, NY, NX),
-        torch.randn(2, 2),
-        _geometry(),
+        torch.randn(1, 6, NZ, NY, NX),
+        torch.randn(1, 2),
+        torch.ones(1, NZ, NY, NX),
     )
-    patches = model.forward_patches(state, params, geometry)
-    expected = model.patch_grid(NY, NX).stitch(patches) * geometry.unsqueeze(1)
-    torch.testing.assert_close(model(state, params, geometry), expected)
+    base = model(state, params, geometry)
+    # Patch (0, 0): core y, x in 0..7; with the overlap it reads y in -2..9
+    # (wrapping to 18, 19) and x in 0..9 (x is not periodic).
+    far = state.clone()
+    far[..., 12:16, 13:17] += 5.0
+    torch.testing.assert_close(
+        model(far, params, geometry)[..., :8, :8], base[..., :8, :8]
+    )
+    near = state.clone()
+    near[..., 18:20, 9:10] += 5.0  # in its wrapped y overlap and its x overlap
+    assert not torch.allclose(
+        model(near, params, geometry)[..., :8, :8], base[..., :8, :8]
+    )
 
 
 def test_sdf_features_are_cached_per_geometry() -> None:
@@ -134,11 +147,9 @@ def test_sdf_features_are_cached_per_geometry() -> None:
     assert first.shape == (2, 1, NZ, NY, NX)
     assert model._sdf_features_for(geometry) is first
     assert model._sdf_features_for(geometry.clone()) is first
-    # Shipped features (the training path) give the same prediction.
-    state, params = torch.randn(2, 6, NZ, NY, NX), torch.randn(2, 2)
-    torch.testing.assert_close(
-        model(state, params, geometry), model(state, params, geometry, first)
-    )
+    # An in-place edit of the mask is not served from the cache.
+    geometry[:, 4, 3, 3] = 0.0
+    assert not torch.equal(model._sdf_features_for(geometry), first)
 
 
 def test_normalization_round_trip() -> None:
@@ -164,8 +175,9 @@ def test_paper_size() -> None:
     assert spectral == 2 * 4 * 4 * 36 * 36 * 8 * 16 * 16
 
 
-def test_float_casts_keep_the_spectral_weights() -> None:
-    """The forward model casts with ``.to(dtype)``; the weights must survive."""
+def test_dtype_casts() -> None:
+    """The forward model casts the model with ``.to(dtype)``: the spectral
+    weights survive, and every dtype runs end to end in that dtype."""
     torch.manual_seed(0)
     model = _tiny()
     state, params, geometry = (
@@ -176,6 +188,31 @@ def test_float_casts_keep_the_spectral_weights() -> None:
     expected = model(state, params, geometry)
     torch.testing.assert_close(
         model.to(torch.float32)(state, params, geometry), expected
+    )
+    double = model.to(torch.float64)(state.double(), params.double(), geometry.double())
+    assert double.dtype == torch.float64
+    torch.testing.assert_close(double.float(), expected, rtol=1e-4, atol=1e-4)
+    half = model.to(torch.bfloat16)(
+        state.bfloat16(), params.bfloat16(), geometry.bfloat16()
+    )
+    assert half.dtype == torch.bfloat16 and torch.isfinite(half).all()
+
+
+def test_spectral_conv_matches_a_numpy_low_pass() -> None:
+    """With unit weights the layer is the low-pass filter of its kept modes,
+    computed here independently with a full numpy FFT. z and y keep all their
+    modes, so the filter is |k_x| < m_x (a real FFT keeps both signs)."""
+    conv = SpectralConv3d(1, 1, (2, 3, 3))
+    for w in conv.weights:
+        torch.nn.init.zeros_(w)
+        with torch.no_grad():
+            w[..., 0] = 1.0
+    nz, ny, nx = 4, 6, 12
+    x = torch.randn(1, 1, nz, ny, nx)
+    kx = np.fft.fftfreq(nx, 1 / nx).round().astype(int)
+    expected = np.fft.ifftn(np.fft.fftn(x[0, 0].numpy()) * (np.abs(kx) < 3)).real
+    torch.testing.assert_close(
+        conv(x)[0, 0], torch.from_numpy(expected).float(), atol=1e-5, rtol=1e-4
     )
 
 

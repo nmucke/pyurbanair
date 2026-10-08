@@ -34,6 +34,14 @@ expose `num_history_steps`, `n_state_channels`, `set_normalization` and
 Each paper's training recipe is a trainer subclass of
 `neural_surrogates.training.base.BaseTraining`.
 
+**Overrides.** A config's `architecture` is an interpolation
+(`${baseline_architectures.<name>}`), so `architecture.<key>=...` fails on the
+command line. Change the key at its source,
+`baseline_architectures.<name>.<key>=...` (no `+`), or pick another entry with
+`'architecture=${baseline_architectures.<other>}'`. Give every arm its own
+`name`: the output folder is `weights_dir/<name>`, and with `resume: true`
+(training.yaml) a run with a reused name resumes and overwrites the other.
+
 ```bash
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/train
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/train_roll1
@@ -63,7 +71,10 @@ with the others below.
   One shared network predicts all patches, and the output is stitched from the
   cores, so each overlap cell comes from the neighbour that owns it ("split
   evenly"). The default 64 + 2×6 = 76 cells is their 304 m inference patch at
-  our 4 m spacing.
+  our 4 m spacing. **Deviation:** they trained on 2× downsampled data with
+  38-cell patches (8 m) and applied the model at full resolution only for
+  inference; we train and infer on 76-cell patches at our native 4 m. The
+  smallest resolved wavelength is the same (about 19 m).
 - **Domain edges:** the domain is first extended to whole cores plus the
   overlap, by wrapping on axes in `periodic_axes` and repeating the edge cell
   otherwise. `PatchGrid.valid` marks repeated cells so the loss skips them.
@@ -136,7 +147,9 @@ Two corrections to the papers' descriptions:
   separates them, as for a non-periodic axis. With patch 4 the wrap is fully
   effective only for an axis of 48·2^s cells per stage s. Most of our grids
   (multiples of 16) therefore behave as non-periodic in Aurora, whatever
-  `periodic_axes` says.
+  `periodic_axes` says. When the periodic axis is not a multiple of the patch
+  size, its circular padding repeats cells inside the wrapped axis, so the
+  period Aurora sees is the padded length.
 
 **SSGen** (paper 2 Eqs. 1–8) folds height into channels, so it is built for
 `n_levels` = the corpus' nz (default 32). It runs on the z-scored, masked
@@ -149,8 +162,9 @@ parameters do not follow from its description; ours has 0.1 M at 96 channels.
   `(K, C, *grid)`.
 - `RolloutTrainer` unrolls all K steps with gradients and sums
   `MSE_i + α·L_spec,i` without dividing by K. `L_spec` is the spectral loss
-  along y on the masked fields; by Parseval it equals `ny · MSE`, so it only
-  rescales the MSE (see [losses.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/losses.py)).
+  along y on the masked fields; by Parseval it equals `ny` times the MSE over
+  all cells with the buildings zeroed (`ny` × fluid fraction × the fluid-cell
+  MSE of the other term), so it only rescales the MSE (see [losses.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/losses.py)).
 - `train_roll1.yaml` and `train_roll3.yaml` train from scratch;
   `finetune_roll3.yaml` is TL Roll-3 from a Roll-1 run.
 - Adam at a constant 1e-5, batch 2, patience 50, no gradient clipping.
@@ -172,7 +186,9 @@ any steppers, ours and the baselines, on the same test trajectories:
 - **Persistence reference.** Repeating the start frame is scored as well, and
   every RMSE is also reported relative to it.
 - **Same data enforced.** It refuses models trained on different data: the
-  training-data folder, `state_vars` and `param_vars` must match.
+  training-data folder name, `state_vars`, `param_vars` and, where the corpus'
+  `config.yaml` is readable, its output frequency must match. Models are
+  labelled by folder name, or by the given path when two names clash.
 - **Turbulence statistics** ([diagnostics.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/diagnostics.py)):
   - each component's spatial std relative to the truth against lead time,
     which shows smoothing or laminarisation;

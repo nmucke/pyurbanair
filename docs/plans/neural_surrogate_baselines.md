@@ -33,9 +33,9 @@ configs alone.
 |---|---|
 | `libs/neural-surrogate-baselines/` | `scripts/surrogate/train.py`, `tasks.py` (`stepper`, `finetune_stepper`) |
 | `configs/surrogate/baselines/{local_fno,ssrolling}/*.yaml` | `configs/surrogate/training.yaml` (data, dataloader, paths), composed as the base |
-| `tests/neural_surrogate_baselines/`, `tests/configs/test/baselines_*.yaml` | `TransitionDataset`, `TrajectoryBatchSampler`, `get_normalization_stats`, `sdf.sdf_features` |
+| `tests/neural_surrogate_baselines/`, `tests/configs/surrogate/baselines/<baseline>/test/*.yaml` | `TransitionDataset`, `TrajectoryBatchSampler`, `get_normalization_stats`, `sdf.sdf_features` |
 | `scripts/surrogate/baselines/compare.py` | `BaseTraining`: AMP, checkpoint/resume, early stopping, metrics.csv, `_aux_terms`, `_after_optimizer_step` |
-| `job_scripts/<machine>/baselines_train.slurm` (GPU) | `scripts/surrogate/evaluate_stepper.py` (several models per run) |
+| `job_scripts/<machine>/surrogate_baselines_compare.slurm` (GPU training jobs: phase 5) | `scripts/surrogate/evaluate_stepper.py` (several models per run) |
 | `docs/neural_surrogate_baselines.md` (once implemented) | `evaluation.turbulence` |
 
 Rules:
@@ -216,7 +216,7 @@ How Aurora works, and what that means here:
   stepper contract.
   - **Grid to Aurora `Batch`.** Our `(B, H·C, nz, ny, nx)` maps to atmospheric
     variables `(B, T = 2, levels = nz, H = ny, W = nx)`.
-    - Levels are cell-centre heights in metres.
+    - Levels are the layer indices `1 … nz`.
     - Latitude and longitude are fixed-scale pseudo-degrees near the equator,
       the same for every sample. Phase 3 checks they stay inside Aurora's
       encoding ranges.
@@ -247,11 +247,11 @@ How Aurora works, and what that means here:
 
 | Config | What it trains |
 |---|---|
-| `architectures.yaml` | `urbanaurora_512` (451 M) and `urbanaurora_256` (113 M, size-matched arm), each with `ssgen: true/false` |
+| `architectures.yaml` | `urbanaurora_512` / `urbanaurora_256` (3DSwinUrbanNet, 451 M / 113 M) and `ssrolling_512` / `ssrolling_256` (with SSGen) |
 | `train_roll1.yaml` | `task: stepper`, N = 1, `grad_clip_norm: null`, no warmup/cosine |
 | `finetune_roll3.yaml` | `task: finetune_stepper`, `method: full`, N = 3 |
 | `train_roll3.yaml` | N = 3 from scratch |
-| ablation | `loss.alpha: 0` (SSGen + MSE only) |
+| ablation | `trainer.alpha=0` (SSGen + MSE only), with its own `name` |
 
 **Compute.** Measured on CPU with the FLOP counter: 3.9–5.1 TFLOP per training
 sample. Matching their number of gradient samples is roughly 30–75 A100-hours

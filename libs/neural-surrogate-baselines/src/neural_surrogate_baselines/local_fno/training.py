@@ -13,9 +13,9 @@ the RMSE.
 
 from __future__ import annotations
 
-import itertools
 from typing import Any, Iterator
 
+import numpy as np
 import torch
 from neural_surrogate_baselines.losses import masked_rmse
 from neural_surrogates.training.base import BaseTraining
@@ -26,8 +26,8 @@ class _Batches:
 
     ``cycle`` continues where the last pass stopped (restarting the loader when
     it runs out), so capped training epochs still see the whole dataset;
-    otherwise every pass takes the loader's first ``n`` batches, a fixed
-    validation subset.
+    otherwise every pass takes the same ``n`` batches spread evenly over the
+    loader, a fixed validation subset covering every trajectory.
     """
 
     def __init__(self, loader: Any, n: int, cycle: bool) -> None:
@@ -36,11 +36,16 @@ class _Batches:
         self._it: Iterator | None = None
 
     def __len__(self) -> int:
-        return min(self.n, len(self.loader))
+        return self.n if self.cycle else min(self.n, len(self.loader))
 
     def __iter__(self) -> Iterator:
         if not self.cycle:
-            yield from itertools.islice(self.loader, self.n)
+            # Evenly spaced batches: the loader is in trajectory order, so its
+            # first n would leave the last trajectories out.
+            keep = set(
+                np.linspace(0, len(self.loader) - 1, len(self)).round().astype(int)
+            )
+            yield from (b for i, b in enumerate(self.loader) if i in keep)
             return
         for _ in range(self.n):
             batch = None

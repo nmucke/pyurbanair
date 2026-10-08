@@ -3,9 +3,12 @@
 Follows Li et al.'s reference ``SpectralConv3d``: a real FFT over
 ``(z, y, x)``, a learned complex linear map on the lowest ``modes`` of each
 axis, and an inverse FFT. The x axis is the halved real-FFT axis, so its
-modes are ``0 .. m_x - 1``; z and y keep ``±m`` (the four corner blocks). By
-Hermitian symmetry that covers ``|k_j| <= m_j`` on every axis, Qin et al.'s
-Eq. (7).
+modes are ``0 .. m_x - 1``; z and y keep ``0 .. m - 1`` and ``-m .. -1`` (the
+four corner blocks). By Hermitian symmetry that is Qin et al.'s Eq. (7)
+(``|k_j| <= m_j``) without the ``+m_j`` modes, Li et al.'s layout.
+
+The FFTs run in float32 (float64 for a float64 input; half-precision FFTs need
+power-of-two sizes) and the result is returned in the input's dtype.
 """
 
 from __future__ import annotations
@@ -37,16 +40,17 @@ class SpectralConv3d(nn.Module):
         mz = min(self.modes[0], nz // 2)
         my = min(self.modes[1], ny // 2)
         mx = min(self.modes[2], nx // 2 + 1)
-        # FFTs in fp32: half-precision FFTs need power-of-two sizes.
+        real = torch.float64 if x.dtype == torch.float64 else torch.float32
+        cplx = torch.cdouble if real == torch.float64 else torch.cfloat
         with torch.autocast(device_type=x.device.type, enabled=False):
-            x_ft = torch.fft.rfftn(x.float(), dim=(-3, -2, -1))
+            x_ft = torch.fft.rfftn(x.to(real), dim=(-3, -2, -1))
             out = torch.zeros(
                 b,
                 self.weights[0].shape[1],
                 nz,
                 ny,
                 nx // 2 + 1,
-                dtype=torch.cfloat,
+                dtype=cplx,
                 device=x.device,
             )
             zs = (slice(0, mz), slice(nz - mz, nz))
@@ -55,10 +59,11 @@ class SpectralConv3d(nn.Module):
                 self.weights,
                 ((zs[0], ys[0]), (zs[1], ys[0]), (zs[0], ys[1]), (zs[1], ys[1])),
             ):
-                w = torch.view_as_complex(weight.float())
+                w = torch.view_as_complex(weight.to(real))
                 out[:, :, sz, sy, :mx] = torch.einsum(
                     "bizyx,iozyx->bozyx",
                     x_ft[:, :, sz, sy, :mx],
                     w[:, :, :mz, :my, :mx],
                 )
-            return torch.fft.irfftn(out, s=(nz, ny, nx), dim=(-3, -2, -1))
+            out = torch.fft.irfftn(out, s=(nz, ny, nx), dim=(-3, -2, -1))
+        return out.to(x.dtype)
