@@ -11,7 +11,7 @@ from evaluation.turbulence import (
     spanwise_spectra,
 )
 
-from .test_evaluation_state_rmse import _write_boxes
+from .test_evaluation_solid_mask import _write_boxes
 
 
 def test_field_statistics_known_moments():

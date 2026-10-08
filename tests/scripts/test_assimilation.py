@@ -53,16 +53,40 @@ def _check_outputs(
         assert posterior.sizes["ensemble"] == 2
         assert (run_dir / "windows" / f"window_{w}_posterior_state.nc").exists()
     metrics = yaml.safe_load((run_dir / "metrics.yaml").read_text())
-    assert {"parameters", "state", "sensors"} <= set(metrics)
-    for block in ("spread_skill", "climatology"):
+    assert {"parameters", "sensors", "field_statistics", "canopy_profiles"} <= set(
+        metrics
+    )
+    assert "state" not in metrics  # instantaneous |U| RMSE: superseded
+    for block in ("spread_skill", "climatology", "sensor_distributions"):
         assert set(metrics[block]) == {"assimilation", "validation"}, block
     for name in (
         "parameter_evolution.png",
         "parameter_pairs.png",
         "mean_slices.png",
         "tke_slices.png",
+        "canopy_profiles.png",
+        "spectra.png",
+        "sensor_distributions_assimilation.png",
+        "sensor_distributions_validation.png",
     ):
         assert (run_dir / "figures" / name).exists(), name
+
+    # The statistics blocks score every source, the replica only when given.
+    sources = set(metrics["field_statistics"]["tke"])
+    assert "posterior" in sources and ("replica" in sources) == replica
+    assert set(metrics["canopy_profiles"]["uw"]) == sources
+    assert set(metrics["spectra"]["u"]["above_canopy"]) == sources
+    assert set(metrics["spectra"]["u"]["above_canopy"]["posterior"]) == {
+        "large",
+        "mid",
+        "near_cutoff",
+        "log_spectral_distance",
+    }
+    distributions = metrics["sensor_distributions"]["validation"]
+    assert set(distributions) == {"u", "v", "w", "magnitude"}
+    assert set(distributions["magnitude"]) == sources | {"truth_halves"}
+    w2 = distributions["magnitude"]["posterior"]["w2"]
+    assert len(w2["per_window"]) == num_windows
 
     # Window-indexed series list one value per window.
     for entry in metrics["parameters"].values():
@@ -86,6 +110,14 @@ def _check_outputs(
             "window",
             "ensemble",
             "parameter",
+        )
+        assert ("profile_replica" in diagnostics) == replica
+        assert diagnostics.spectrum_posterior.dims == (
+            "window",
+            "ensemble",
+            "component",
+            "group",
+            "k",
         )
     assert "sgs_health" not in metrics  # the discrepancy is off
 
@@ -194,6 +226,12 @@ def test_truth_from_a_forward_run(
         for entry in stats["replica"].values():
             assert entry["crps"]["per_window"] == pytest.approx([0.0, 0.0], abs=1e-6)
         assert "crps_reduction_vs_replica" in stats["posterior"]["mean_u"]
+    # The replica is the truth: its statistics and distributions match exactly.
+    for statistic in ("u", "tke", "uw"):
+        rmse = metrics["field_statistics"][statistic]["replica"]["rmse"]
+        assert rmse["max"] == pytest.approx(0.0, abs=1e-6), statistic
+    for block in metrics["sensor_distributions"].values():
+        assert block["u"]["replica"]["w2"]["max"] == pytest.approx(0.0, abs=1e-6)
 
 
 @pytest.mark.integration  # type: ignore[misc]
@@ -394,9 +432,15 @@ def test_a_truth_on_other_levels_than_the_ensemble(tmp_path: pathlib.Path) -> No
     load_script("scripts/visualize_assimilation.py").run(run_dir)
 
     metrics = yaml.safe_load((run_dir / "metrics.yaml").read_text())
-    rmse = metrics["state"]["vel_magnitude_rmse"]
-    assert rmse["max"] == pytest.approx(0.0, abs=1e-9), rmse
-    assert (run_dir / "figures" / "station_profiles.png").exists()
+    assert len(metrics["field_statistics"]["z"]) == 6
+    for statistic in ("u", "tke", "uw"):
+        for kind in ("posterior", "prior"):
+            rmse = metrics["field_statistics"][statistic][kind]["rmse"]
+            assert rmse["max"] == pytest.approx(0.0, abs=1e-6), (statistic, rmse)
+            profile = metrics["canopy_profiles"][statistic][kind]["profile_rmse"]
+            assert profile["max"] == pytest.approx(0.0, abs=1e-6), (statistic, profile)
+    for name in ("station_profiles.png", "canopy_profiles.png", "spectra.png"):
+        assert (run_dir / "figures" / name).exists(), name
 
 
 def test_a_truth_from_before_the_time_axis_change_is_refused(

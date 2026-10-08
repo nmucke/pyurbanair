@@ -183,110 +183,19 @@ def select_z_plane(ds, z_level):
     return ds.isel(sel) if sel else ds
 
 
-def _centre_coord(ds, names):
-    for n in names:
-        if n in ds.coords:
-            return np.asarray(ds[n].values, dtype=float)
-    return None
-
-
-def _vel_levels(state, n_time, z_idx, stl_path):
-    """Velocity magnitude on the levels ``z_idx``, NaN in the building cells.
-
-    Returns a ``(time, z, y, x)`` DataArray on the cell centres. Only those
-    levels (across all time) are read from disk, bounding memory to a small
-    fraction of the full 3-D field. The components are combined by index
-    (matching ``get_velocity_magnitude_field``).
-    """
-    s = state.isel(time=slice(0, n_time))
-
-    def _sel_var(name):
-        da = s[name]
-        for d in _Z_DIMS:
-            if d in da.dims:
-                da = da.isel({d: z_idx})
-                break
-        return np.asarray(da.values)
-
-    vel = np.sqrt(_sel_var("u") ** 2 + _sel_var("v") ** 2 + _sel_var("w") ** 2)
-
-    z = _centre_coord(state, ("zt", "z"))[z_idx]
-    y = _centre_coord(state, ("yt", "y"))
-    x = _centre_coord(state, ("xt", "x"))
-    vel[:, stl_solid_mask(stl_path, z, y, x)] = np.nan
-    return xarray.DataArray(
-        vel, dims=("time", "z", "y", "x"), coords={"z": z, "y": y, "x": x}
-    )
-
-
-def _bracketing_levels(levels, heights):
-    """Indices of the ``levels`` that linear interpolation to ``heights`` reads:
-    the level at a height where there is one, else the levels around it."""
-    above = np.clip(np.searchsorted(levels, heights), 0, levels.size - 1)
-    below = np.clip(above - 1, 0, levels.size - 1)
-    on_level = np.isclose(levels[above], heights)
-    return np.unique(np.concatenate([above, below[~on_level]]))
-
-
-def _on_grid(field, grid):
+def on_grid(field, grid):
     """``field`` on the cell centres of ``grid``, interpolated linearly along
-    each axis whose centres differ (NaN reaches every point it touches)."""
+    each axis whose centres differ (NaN reaches every point it touches).
+
+    Both are DataArrays with ``z``, ``y``, ``x`` dims: how a truth on another
+    grid (another solver) is compared with the ensemble's.
+    """
     for dim in ("z", "y", "x"):
         if field.sizes[dim] == grid.sizes[dim] and np.allclose(field[dim], grid[dim]):
             field = field.assign_coords({dim: grid[dim]})
         else:
             field = field.interp({dim: grid[dim]})
     return field
-
-
-def streaming_state_rmse(true_state, esmda_state, stl_path, n_z_slices=4):
-    """Per-timestep RMSE of |U| between truth and the ensemble-mean state.
-
-    Streams over ``n_z_slices`` evenly-spaced z-levels of the ensemble grid and
-    all time steps rather than materialising the full 4-D velocity field; the
-    truth is read at the same heights. Building cells (:func:`stl_solid_mask`
-    of the case STL at ``stl_path``) are NaN on each grid before anything else,
-    so they never enter the mean: inside a building the backends write zeros
-    (PALM), near-zero leftovers (uDALES) or arbitrary values (pylbm's solid
-    nodes). When the grids differ, the truth is interpolated linearly onto the
-    ensemble's cell centres (only the levels it needs are read), and a cell
-    whose interpolation reaches a building cell drops out too.
-
-    Raises:
-        ValueError: If an ensemble level lies outside the truth's height range,
-            where the truth can't be interpolated to it. A level within
-            ``SURFACE_TOLERANCE`` times the truth's level spacing of an end
-            level counts as on it (float32 coordinates).
-    """
-    true_s = (
-        true_state.mean(dim="ensemble") if "ensemble" in true_state.dims else true_state
-    )
-    esmda_s = (
-        esmda_state.mean(dim="ensemble")
-        if "ensemble" in esmda_state.dims
-        else esmda_state
-    )
-
-    n_time = min(true_s.sizes["time"], esmda_s.sizes["time"])
-
-    esmda_z = _centre_coord(esmda_s, ("zt", "z"))
-    esmda_idx = evenly_spaced_levels(esmda_z.size, n_z_slices)
-    true_z = _centre_coord(true_s, ("zt", "z"))
-    heights = esmda_z[esmda_idx]
-    tol = SURFACE_TOLERANCE * min(np.diff(true_z), default=1.0)
-    outside = heights[(heights < true_z[0] - tol) | (heights > true_z[-1] + tol)]
-    if outside.size:
-        raise ValueError(
-            f"ensemble levels z = {outside.tolist()} lie outside the truth's "
-            f"height range [{true_z[0]:g}, {true_z[-1]:g}]"
-        )
-    esmda_vel = _vel_levels(esmda_s, n_time, esmda_idx, stl_path)
-    # Onto the end level, or interp gives NaN a sliver outside it.
-    at = np.clip(heights, true_z[0], true_z[-1])
-    true_vel = _vel_levels(true_s, n_time, _bracketing_levels(true_z, at), stl_path)
-
-    diff = _on_grid(true_vel, esmda_vel.assign_coords(z=at)).values - esmda_vel.values
-    return np.sqrt(np.nanmean(diff**2, axis=(1, 2, 3)))
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +677,7 @@ def colocate_components(ds, solver_name):
     they are not: uDALES stores ``u`` on the x-faces, ``v`` on the y-faces and
     ``w`` on the z-faces; PALM stores ``u`` on ``xu`` and ``v`` on ``yv``.
 
-    Why not combine by index, as :func:`streaming_state_rmse` does for ``|U|``:
+    Why not combine by index, as a plain ``|U|`` would:
     ``u[k,j,i]`` and ``w[k,j,i]`` sit half a cell apart in both x and z, so an
     ``<u'w'>`` formed from them is a *two-point* correlation at lag
     ``(dx/2, 0, dz/2)`` while the diagonal ``<u'u'>`` is a one-point moment --
@@ -873,11 +782,7 @@ def extrapolated_centre_dims(ds, solver_name):
 
 
 def evenly_spaced_levels(n_levels, n_wanted):
-    """Indices of ``n_wanted`` evenly spaced levels, endpoints included.
-
-    Shared with :func:`streaming_state_rmse` -- one implementation, so the accumulated
-    slabs and the z-levels the ``|U|`` RMSE is streamed over cannot drift apart.
-    """
+    """Indices of ``n_wanted`` evenly spaced levels, endpoints included."""
     if n_levels < 1:
         raise ValueError(f"n_levels must be positive, got {n_levels}")
     if n_wanted < 1:

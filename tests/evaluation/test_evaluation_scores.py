@@ -27,8 +27,10 @@ import xarray
 from evaluation.scores import (
     compute_parameter_metrics,
     crps_ensemble,
+    distribution_scores,
     kl_divergence,
     per_knot_in_band,
+    shared_histograms,
     wasserstein2,
 )
 from evaluation.sensors import window_masks
@@ -214,3 +216,33 @@ def test_identical_samples_have_zero_distance_and_nans_are_dropped() -> None:
     assert kl_divergence(x, with_nan) == pytest.approx(0.0, abs=1e-12)
     assert np.isnan(wasserstein2(x, [np.nan])["w2"])
     assert np.isnan(kl_divergence([], x))
+
+
+def test_distribution_scores_expose_cancelling_sensors_and_member_spread() -> None:
+    rng = np.random.default_rng(3)
+    truth = rng.normal([0.0, 1.0], 1.0, (20_000, 2))  # (frame, sensor)
+    # Sensors swapped: the pooled mixture matches, each sensor is 1 std off.
+    swapped = truth[None, :, ::-1]
+    d = distribution_scores(truth, swapped)
+    assert d["w2"] < 0.05
+    assert d["w2_per_sensor"] == pytest.approx(1.0, abs=0.05)
+
+    # Two members shifted by -/+1: the pooled ensemble is wider, each member
+    # is 1 off.
+    members = np.stack([truth - 1.0, truth + 1.0])
+    d = distribution_scores(truth, members)
+    assert d["w2_member_median"] == pytest.approx(1.0, abs=0.01)
+    assert d["location"] == pytest.approx(0.0, abs=1e-6)
+    assert d["kl"] > 0 and d["kl_member_median"] > 0
+
+
+def test_shared_histograms_share_the_bins_and_integrate_to_one() -> None:
+    rng = np.random.default_rng(4)
+    edges, densities, quantiles = shared_histograms(
+        {"a": rng.normal(0.0, 1.0, 5000), "b": rng.normal(2.0, 1.0, 5000), "c": []}
+    )
+    assert edges.size == 31
+    for name in ("a", "b"):
+        assert np.sum(densities[name] * np.diff(edges)) == pytest.approx(1.0)
+    assert quantiles["b"][49] == pytest.approx(2.0, abs=0.1)  # the median
+    assert np.isnan(densities["c"]).all() and np.isnan(quantiles["c"]).all()

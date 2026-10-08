@@ -45,7 +45,7 @@ def sensor_magnitude(components: xr.DataArray) -> xr.DataArray:
     return np.sqrt((components**2).sum("component"))
 
 
-def _quantity_series(series: xr.DataArray) -> xr.DataArray:
+def quantity_series(series: xr.DataArray) -> xr.DataArray:
     """``(component, ...)`` series -> ``(quantity, ...)`` with |U| appended.
 
     One array over :data:`QUANTITIES` so every downstream reduction is a single
@@ -104,7 +104,7 @@ def _windowed(
     label: str = "",
 ) -> xr.DataArray:
     """Apply ``reduce_fn(window_slice)`` per window and stack on a ``window`` dim."""
-    quantities = _quantity_series(series)
+    quantities = quantity_series(series)
     masks = window_masks(quantities["time"].values, sim_time, num_windows)
     reduced = []
     for w, mask in enumerate(masks):

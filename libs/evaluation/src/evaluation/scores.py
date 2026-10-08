@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 import numpy as np
 import xarray as xr
@@ -1060,9 +1060,14 @@ def _score_window_statistic(
             return np.nanmean(flat.reshape(n_windows, -1), axis=1)
 
     crps_per_window = _per_window(crps)
+    crps_stats = series_stats(crps_per_window)
+    if crps_stats is not None:
+        crps_stats["per_window"] = [
+            float(v) if np.isfinite(v) else None for v in crps_per_window
+        ]
     finite_ranks = ranks[np.isfinite(ranks)].astype(int)
     entry = {
-        "crps": series_stats(crps_per_window),
+        "crps": crps_stats,
         "z_score": z_score_stats(z, n_members),
         # Counts per rank, not the raw rank list. A rank histogram is what
         # figure D1 consumes, and pooling it over sensors and windows loses
@@ -1680,6 +1685,7 @@ def data_mismatch_summary(
 # Quantile levels for W2: 99 midpoints of [0, 1] resolve the 1 % tails, and the
 # midpoint grid keeps a Gaussian's quantile std within 1 % of the true sigma.
 N_QUANTILES = 99
+QUANTILE_LEVELS = (np.arange(N_QUANTILES) + 0.5) / N_QUANTILES
 
 # Histogram bins for KL: 30 over the union range is fine enough to see shape on
 # a few thousand values, coarse enough that most bins are populated.
@@ -1710,8 +1716,7 @@ def wasserstein2(truth: np.ndarray, pred: np.ndarray) -> dict[str, float]:
     a, b = a[~np.isnan(a)], b[~np.isnan(b)]
     if a.size == 0 or b.size == 0:
         return {"w2": np.nan, "location": np.nan, "scale": np.nan, "shape": np.nan}
-    levels = (np.arange(N_QUANTILES) + 0.5) / N_QUANTILES
-    qa, qb = np.quantile(a, levels), np.quantile(b, levels)
+    qa, qb = np.quantile(a, QUANTILE_LEVELS), np.quantile(b, QUANTILE_LEVELS)
     w2_sq = float(np.mean((qa - qb) ** 2))
     location = float((qa.mean() - qb.mean()) ** 2)
     scale = float((qa.std() - qb.std()) ** 2)
@@ -1750,3 +1755,85 @@ def kl_divergence(truth: np.ndarray, pred: np.ndarray) -> float:
     q = np.histogram(b, edges)[0] + _KL_SMOOTHING
     p, q = p / p.sum(), q / q.sum()
     return float(np.sum(p * np.log(p / q)))
+
+
+def distribution_scores(truth: np.ndarray, members: np.ndarray) -> dict[str, float]:
+    """W2 (with its split) and KL of an ensemble's values against the truth's.
+
+    ``truth`` is ``(frame, sensor)`` and ``members`` ``(member, frame, sensor)``
+    on the same sensors. Three readings:
+
+    - pooled over sensors and members: ``w2``, ``location``, ``scale``,
+      ``shape`` (:func:`wasserstein2`) and ``kl`` -- the headline;
+    - per sensor, both samples divided by that sensor's truth std, averaged
+      over sensors: ``w2_per_sensor``, ``kl_per_sensor``. Pooling sensors makes
+      a mixture in which a too-fast and a too-slow sensor can cancel; this
+      does not;
+    - the median over members of each member's own pooled distance:
+      ``w2_member_median``, ``kl_member_median``. A pooled ensemble can match
+      the truth's spread through its parameter spread rather than turbulence;
+      this shows whether it did.
+
+    NaN where a sample is empty; a sensor with no truth variance drops out of
+    the per-sensor mean.
+    """
+    truth = np.asarray(truth, dtype=float)
+    members = np.asarray(members, dtype=float)
+    out: dict[str, float] = dict(wasserstein2(truth, members))
+    out["kl"] = kl_divergence(truth, members)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)  # empty or still sensors
+        std = np.nanstd(truth, axis=0)
+        per_sensor = [
+            (
+                wasserstein2(truth[:, s] / std[s], members[:, :, s] / std[s])["w2"],
+                kl_divergence(truth[:, s] / std[s], members[:, :, s] / std[s]),
+            )
+            for s in range(truth.shape[1])
+            if std[s] > 0
+        ]
+        per_member = [
+            (wasserstein2(truth, m)["w2"], kl_divergence(truth, m)) for m in members
+        ]
+        out["w2_per_sensor"], out["kl_per_sensor"] = (
+            np.nanmean(per_sensor, axis=0) if per_sensor else (np.nan, np.nan)
+        )
+        out["w2_member_median"], out["kl_member_median"] = np.nanmedian(
+            per_member, axis=0
+        )
+    return {key: float(value) for key, value in out.items()}
+
+
+def shared_histograms(
+    samples: Mapping[str, np.ndarray],
+) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Densities on shared bins and quantiles of several samples, for a figure.
+
+    Returns ``(edges, densities, quantiles)``: ``N_BINS + 1`` edges over the
+    union range of all samples, each sample's density on them and its
+    ``QUANTILE_LEVELS`` quantiles (all NaN for an empty sample). NaNs are
+    dropped.
+    """
+    values = {
+        name: np.asarray(sample, dtype=float).ravel()
+        for name, sample in samples.items()
+    }
+    values = {name: v[~np.isnan(v)] for name, v in values.items()}
+    pooled = np.concatenate([v for v in values.values()] + [np.zeros(0)])
+    if pooled.size == 0 or pooled.min() == pooled.max():
+        lo = float(pooled[0]) if pooled.size else 0.0
+        edges = np.linspace(lo - 0.5, lo + 0.5, N_BINS + 1)
+    else:
+        edges = np.linspace(pooled.min(), pooled.max(), N_BINS + 1)
+    densities, quantiles = {}, {}
+    for name, v in values.items():
+        empty = v.size == 0
+        densities[name] = (
+            np.full(N_BINS, np.nan)
+            if empty
+            else np.histogram(v, edges, density=True)[0]
+        )
+        quantiles[name] = (
+            np.full(N_QUANTILES, np.nan) if empty else np.quantile(v, QUANTILE_LEVELS)
+        )
+    return edges, densities, quantiles
