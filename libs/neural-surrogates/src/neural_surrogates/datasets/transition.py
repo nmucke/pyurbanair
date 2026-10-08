@@ -132,9 +132,9 @@ class TransitionDataset(Dataset):
     ``cache=True`` xarray keeps every already-read slice in memory, so
     after one epoch the visited trajectory endpoints are resident and
     later epochs hit RAM instead of disk. Per-trajectory parameter
-    tensors are small and are kept in memory. State file handles are
-    cached per process, so the cache is rebuilt independently in each
-    ``DataLoader`` worker.
+    tensors are small and are kept in memory. Each process keeps one state
+    file open (every visited one with ``cache=True``), so the cache is
+    rebuilt independently in each ``DataLoader`` worker.
     """
 
     def __init__(
@@ -354,6 +354,15 @@ class TransitionDataset(Dataset):
             self._state_cache = {}
         ds = self._state_cache.get(traj)
         if ds is None:
+            # Each open file holds its netCDF chunk caches (~0.1-0.2 GB on the
+            # realistic corpus) and batches come shuffled across trajectories,
+            # so keeping every visited file open exhausts worker RAM mid-epoch.
+            # One open file per worker, as in SnapshotDataset, unless `cache`
+            # asks to keep the read data in memory.
+            if not self.cache:
+                for old_ds in self._state_cache.values():
+                    old_ds.close()
+                self._state_cache.clear()
             ds = xr.open_dataset(self._state_files[traj], cache=self.cache)
             self._state_cache[traj] = ds
         return ds

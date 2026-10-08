@@ -500,6 +500,31 @@ def test_normalization_cache_shared_by_layout_subclasses(data_root: Path) -> Non
     assert cache.stat().st_mtime_ns == before  # loaded, not recomputed
 
 
+@pytest.mark.parametrize("content", [b"", b"PK\x03\x04truncated"])
+def test_truncated_normalization_cache_is_recomputed(
+    data_root: Path, content: bytes
+) -> None:
+    ds = TransitionDataset(
+        data_root, "train", state_vars=STATE_VARS, param_vars=PARAM_VARS
+    )
+    expected = get_normalization_stats(ds)
+    cache = data_root / "normalization_stats" / "train.npz"
+    cache.write_bytes(content)  # e.g. a write cut off before the atomic rename
+    for left, right in zip(expected, get_normalization_stats(ds)):
+        np.testing.assert_array_equal(left, right)
+    assert [p.name for p in cache.parent.iterdir()] == ["train.npz"]  # no tmp left
+
+
+def test_transition_dataset_keeps_one_state_file_open(data_root: Path) -> None:
+    ds = TransitionDataset(
+        data_root, "train", state_vars=STATE_VARS, param_vars=PARAM_VARS
+    )
+    first = {traj: i for i, (traj, _) in reversed(list(enumerate(ds.sample_index)))}
+    for idx in first.values():
+        ds[idx]
+        assert ds._state_cache is not None and len(ds._state_cache) == 1
+
+
 # -- shared reader + unchanged TransitionDataset --------------------------------
 
 

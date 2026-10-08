@@ -21,10 +21,19 @@ _VERSION = 1
 
 def _signature(path: Path) -> dict[str, int]:
     stat = path.stat()
-    return {
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-        "ctime_ns": stat.st_ctime_ns,
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _content(signature: dict[str, int]) -> dict[str, int]:
+    """The part of a fingerprint a content change moves. Manifests written
+    before this also record ``ctime_ns``, which chmod/chown/``rsync -a`` move
+    too: it is ignored, so such a copy stays valid and may be made read-only."""
+    return {key: signature[key] for key in ("size", "mtime_ns")}
+
+
+def _same_sources(left: Any, right: dict[str, dict[str, int]]) -> bool:
+    return isinstance(left, dict) and {k: _content(v) for k, v in left.items()} == {
+        k: _content(v) for k, v in right.items()
     }
 
 
@@ -48,11 +57,9 @@ def _matches(
     options: dict[str, Any],
     sources: dict[str, dict[str, int]],
 ) -> bool:
-    expected = (_VERSION, str(source), options, sources)
-    actual = tuple(
-        manifest.get(k) for k in ("version", "source_root", "options", "sources")
-    )
-    return actual == expected
+    expected = (_VERSION, str(source), options)
+    actual = tuple(manifest.get(k) for k in ("version", "source_root", "options"))
+    return actual == expected and _same_sources(manifest.get("sources"), sources)
 
 
 def _untracked(
@@ -60,19 +67,18 @@ def _untracked(
 ) -> list[str]:
     """Files in ``output`` neither the manifest nor training could have written."""
     allowed = {_LOCK, _MANIFEST, f"{_MANIFEST}.tmp"}
-    # Training computes these against the prepared files on its first run.
-    # They are derived artifacts, never copied from the original dataset.
-    allowed.update(
-        f"normalization_stats/{Path(relative).parent.name}.npz" for relative in sources
-    )
     for relative in files:
         if relative not in sources:
             raise ValueError(f"Unexpected manifest entry: {relative}")
         allowed.update((relative, f"{relative}.rechunking"))
+    # normalization_stats/: training computes these against the prepared files
+    # (and their temporary files): derived artifacts, never copied data.
     return [
-        str(p.relative_to(output))
+        name
         for p in output.rglob("*")
-        if (p.is_file() or p.is_symlink()) and str(p.relative_to(output)) not in allowed
+        if (p.is_file() or p.is_symlink())
+        and (name := str(p.relative_to(output))) not in allowed
+        and not name.startswith("normalization_stats/")
     ]
 
 
@@ -95,7 +101,7 @@ def _is_complete(
     return all(
         record.get("output") is not None
         and (output / relative).is_file()
-        and _signature(output / relative) == record["output"]
+        and _signature(output / relative) == _content(record["output"])
         for relative, record in files.items()
     )
 
@@ -329,9 +335,8 @@ def prepare_rechunked_dataset(
             destination = output / relative
             record = files.get(relative)
             if record is not None and record.get("output") is not None:
-                if (
-                    not destination.is_file()
-                    or _signature(destination) != record["output"]
+                if not destination.is_file() or _signature(destination) != _content(
+                    record["output"]
                 ):
                     raise ValueError(
                         f"Completed rechunk file changed or is missing: {destination}"

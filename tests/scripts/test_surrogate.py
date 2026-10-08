@@ -6,7 +6,6 @@ import json
 import pathlib
 from typing import Any
 
-import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -85,10 +84,20 @@ def test_prechunked_training_keeps_the_source_root(
 
 
 def test_prechunked_stepper_reads_source_params_and_stats(
-    tmp_path: pathlib.Path, training_data: pathlib.Path
+    tmp_path: pathlib.Path,
+    training_data: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from neural_surrogates.training.data_utils import _compute_normalization_stats
+    from neural_surrogates.training import data_utils
 
+    compute = data_utils._compute_normalization_stats
+    streamed: list[Any] = []
+
+    def spy(train_ds: Any, source_root: Any = None) -> Any:
+        streamed.append(source_root)
+        return compute(train_ds, source_root=source_root)
+
+    monkeypatch.setattr(data_utils, "_compute_normalization_stats", spy)
     eval_common = load_script("scripts/utils/eval_common.py")
     prepared = tmp_path / "prechunked"
     cfg = compose(
@@ -101,23 +110,14 @@ def test_prechunked_stepper_reads_source_params_and_stats(
     )
     load_script("scripts/surrogate/train.py").run(cfg)
     assert not (prepared / "param").exists()  # params come from the source
+    # The state stats stream from the source and are cached under the copy.
+    assert streamed == [str(training_data)]
+    assert (prepared / "normalization_stats" / "train.npz").is_file()
     model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
     assert OmegaConf.load(model_dir / "config.yaml").dataset.root_dir == str(
         training_data
     )
-    # The stats cached under the copy are the source's.
     model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
-    with np.load(prepared / "normalization_stats" / "train.npz") as cached:
-        mean = cached["state_mean"]
-    train = load_script("scripts/utils/tasks.py")._datasets(
-        compose(
-            "surrogate/train_stepper",
-            "+test=train_stepper",
-            f"paths.data_dir={training_data}",
-            root=tmp_path / "plain",
-        )
-    )[0]
-    np.testing.assert_array_equal(mean, _compute_normalization_stats(train)[0])
     assert sum(p.numel() for p in model.parameters()) > 0
 
 

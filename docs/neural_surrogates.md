@@ -1720,8 +1720,8 @@ The stepper's geometry settings (`encode_geometry`, `sdf_features`,
 `geometry_branch`, `size`, `normalize`) must match the AE's: nothing
 cross-checks them beyond the strict encoder/decoder weight load.
 
-**Pre-chunked data (optional).** The same `prechunk` block as the autoencoder
-(§29), but with `spatial_chunks: null`: one chunk per frame and variable,
+**Pre-chunked data (optional).** The `prechunk` block of `training.yaml`
+(§29), whole frames (`spatial_chunks: null`): one chunk per frame and variable,
 since every sample reads two whole domains (`t` and `t+K`). Give it its own
 `output_root`; the autoencoder's crop-sized tiles make each whole-frame read
 many small ones. The copy holds only `state/`, so the task reads the params
@@ -2101,9 +2101,8 @@ changed autoencoder or data (pick a new dir); `LatentCacheDataset` checks the
 sources again when training starts. Training then reads `LatentCacheDataset` items (`latent`, `geom`,
 `params_hist`) and calls `forward_cached`, which is `forward` minus the
 encoder, so the objective is unchanged. `latent_cache.prepare_only=true`
-encodes and exits (`job_scripts/delftblue/surrogate_prepare_latents.slurm`, a
-GPU job; Snellius's environment is CPU-only, see
-[job_scripts.md](job_scripts.md)); `config.yaml` keeps the source data, so
+encodes and exits (`job_scripts/<machine>/surrogate_prepare_latents.slurm`, a
+GPU job, see [job_scripts.md](job_scripts.md)); `config.yaml` keeps the source data, so
 evaluation and deployment still encode from states. A complete cache is
 validated without locking or writing, so several runs can share it and it may
 be read-only; fingerprints are size and mtime, so permission changes or

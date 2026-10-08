@@ -297,14 +297,32 @@ def test_prepared_cache_reused_after_training_writes_normalization_stats(
 def test_normalization_stats_stream_from_source_root(
     source_root: Path, tmp_path: Path
 ) -> None:
-    from neural_surrogates.training.data_utils import get_normalization_stats
+    from neural_surrogates.training.data_utils import (
+        _compute_normalization_stats,
+        get_normalization_stats,
+    )
 
     output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
-    expected = get_normalization_stats(cast(Any, SnapshotDataset(source_root, "train")))
-    actual = get_normalization_stats(
-        cast(Any, SnapshotDataset(output, "train")), source_root=source_root
+    # A copy is lossless, so stats from the copy and from the source agree:
+    # stream from a different "source" to see that `source_root` is read.
+    other = tmp_path / "other"
+    for split, lengths in (("train", (5, 7)), ("val", (3,)), ("test", (2,))):
+        for index, frames in enumerate(lengths):
+            _write_trajectory(
+                other / "state" / split / f"sample_{index}.nc", frames, 1000 + index
+            )
+    copy = cast(Any, SnapshotDataset(output, "train"))
+    expected = _compute_normalization_stats(cast(Any, SnapshotDataset(other, "train")))
+    from_other = _compute_normalization_stats(copy, source_root=other)
+    for left, right in zip(expected, from_other):
+        np.testing.assert_array_equal(left, right)
+    assert not np.array_equal(_compute_normalization_stats(copy)[0], expected[0])
+
+    actual = get_normalization_stats(copy, source_root=source_root)
+    reference = get_normalization_stats(
+        cast(Any, SnapshotDataset(source_root, "train"))
     )
-    for left, right in zip(expected, actual):
+    for left, right in zip(reference, actual):
         np.testing.assert_array_equal(left, right)
     assert (output / "normalization_stats/train.npz").is_file()
 
@@ -326,17 +344,39 @@ def test_complete_cache_validates_while_another_process_holds_the_lock(
 
 def test_read_only_complete_cache_validates(source_root: Path, tmp_path: Path) -> None:
     output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
-    # chmod changes a file's ctime, which the manifest records for each copied
-    # trajectory, so those stay as they are: every directory plus the lock and
-    # manifest read-only already rules out any write.
+    # Everything read-only (chmod moves the ctime, which the check ignores),
+    # the source's permissions changed too.
     paths = sorted(output.rglob("*"), key=lambda p: len(p.parts), reverse=True)
-    modes = {
-        p: p.stat().st_mode for p in [*paths, output] if not p.name.endswith(".nc")
-    }
+    modes = {p: p.stat().st_mode for p in [*paths, output]}
     try:
         for path in modes:
             path.chmod(0o555 if path.is_dir() else 0o444)
+        for path in source_root.rglob("*.nc"):
+            path.chmod(0o640)
         assert prepare_rechunked_dataset(source_root, output) == output
     finally:
         for path in reversed(list(modes)):
             path.chmod(modes[path])
+    assert prepare_rechunked_dataset(source_root, output) == output
+
+
+def test_manifest_with_ctime_and_stats_temporaries_still_validates(
+    source_root: Path, tmp_path: Path
+) -> None:
+    """Manifests written before ctime was dropped record it; a crashed stats
+    write leaves a temporary file. Neither invalidates the copy."""
+    import json
+
+    output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
+    path = output / ".rechunk-manifest.json"
+    manifest = json.loads(path.read_text())
+    for record in [*manifest["sources"].values(), *manifest["files"].values()]:
+        (record.get("output") or record)["ctime_ns"] = 1
+    path.write_text(json.dumps(manifest))
+    (output / "normalization_stats").mkdir()
+    (output / "normalization_stats" / ".train.npz.123.tmp").write_bytes(b"x")
+    with (output / ".rechunk.lock").open("a") as lock:
+        import fcntl
+
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert prepare_rechunked_dataset(source_root, output) == output

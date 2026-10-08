@@ -18,7 +18,7 @@ job_scripts/
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
-│   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU; DelftBlue only)
+│   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)

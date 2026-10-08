@@ -40,6 +40,7 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 import xarray as xr
+from neural_surrogates.datasets.rechunk import _signature
 from neural_surrogates.datasets.snapshot_history import SnapshotHistoryDataset
 from torch.utils.data import Dataset
 
@@ -50,11 +51,8 @@ _STATS = "latent_stats.npz"
 _VERSION = 2
 
 
-def _fingerprint(path: Path) -> dict[str, int]:
-    """Size and mtime of ``path``: unlike ``rechunk._signature`` no ctime, which
-    a ``chmod``, ``chown`` or copy preserving mtime changes."""
-    stat = path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+# Size and mtime: a chmod, chown or mtime-preserving copy keeps the cache valid.
+_fingerprint = _signature
 
 
 def _outputs(stem: str) -> list[str]:
@@ -239,9 +237,15 @@ def prepare_latent_cache(
         # Validate a complete cache without the lock: concurrent and
         # read-only users never block each other.
         manifest = json.loads(manifest_path.read_text())
+        if manifest.get("version") != _VERSION:
+            raise ValueError(
+                f"Latent cache {output} was made by an older version of this "
+                "code; use a new output_root"
+            )
         files = manifest.get("files", {})
         if (
             manifest.get("complete")
+            and (output / _STATS).is_file()
             and {key: manifest.get(key) for key in recorded} == recorded
             and all(
                 files.get(f"{split}/{path.stem}") is not None

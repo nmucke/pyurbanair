@@ -385,7 +385,9 @@ def test_chmod_keeps_the_cache_but_a_rewrite_does_not(tmp_path):
     LatentCacheDataset(root, reread["train"])
     assert _mtimes(root, every=True) == every
 
-    cached.write_bytes(cached.read_bytes())  # same content, new mtime
+    cached.write_bytes(cached.read_bytes())  # a rewrite: new mtime
+    info = cached.stat()  # (explicitly: some filesystems keep whole seconds)
+    os.utime(cached, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
     with pytest.raises(ValueError, match="changed or is missing"):
         prepare_latent_cache(model, reread, root, device="cpu")
 
@@ -415,3 +417,20 @@ def test_non_finite_latents_raise_right_after_their_trajectory(tmp_path, monkeyp
     assert not manifest["complete"]
     assert manifest["files"]["val/sample_0000"] is None
     assert manifest["files"]["train/sample_0001"] is not None
+
+
+def test_old_version_and_missing_stats_are_not_served(tmp_path):
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir)
+    datasets = _datasets(data_dir, "fold")
+    root = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
+    stats = root / "latent_stats.npz"
+    stats.unlink()  # the locked path rebuilds it from the per-trajectory sums
+    assert prepare_latent_cache(model, datasets, root, device="cpu") == root
+    assert stats.is_file()
+    path = root / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["version"] = 1
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="older version"):
+        prepare_latent_cache(model, datasets, root, device="cpu")

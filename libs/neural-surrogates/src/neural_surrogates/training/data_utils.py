@@ -15,6 +15,7 @@ see ``forward_model.py``); the normalization helpers use only numpy/xarray/torch
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -176,7 +177,7 @@ def _load_cached_normalization_stats(
                 data["param_mean"],
                 data["param_std"],
             )
-    except (OSError, KeyError, ValueError) as exc:
+    except Exception as exc:  # e.g. BadZipFile/EOFError: a truncated file
         # A corrupt / stale-format cache file must never break training; just
         # fall back to recomputing (which overwrites it).
         print(f"ignoring unreadable normalization cache {path}: {exc}")
@@ -190,16 +191,21 @@ def _save_normalization_stats(
     """Persist stats next to the training data; a write failure is non-fatal."""
     path = _normalization_cache_path(train_ds)
     state_mean, state_std, param_mean, param_std = stats
+    # Runs sharing a dataset can write at once: each writes its own temporary
+    # file and renames it, so a reader never sees a half-written cache.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(
-            path,
-            state_mean=state_mean,
-            state_std=state_std,
-            param_mean=param_mean,
-            param_std=param_std,
-            signature=_normalization_signature(train_ds),
-        )
+        with temporary.open("wb") as handle:  # a handle: np.savez keeps the name
+            np.savez(
+                handle,
+                state_mean=state_mean,
+                state_std=state_std,
+                param_mean=param_mean,
+                param_std=param_std,
+                signature=_normalization_signature(train_ds),
+            )
+        temporary.replace(path)
     except OSError as exc:
         print(f"could not cache normalization stats to {path}: {exc}")
 
