@@ -113,8 +113,10 @@ For another dataset, `surrogate_prechunk_data.slurm paths.data_dir=<dataset>
 prechunk.output_root=<copy>` makes its copy; train with the same two
 overrides. A job cut off at its time limit resumes where it stopped when
 resubmitted. The copy takes about 1.5 min per 700 MB trajectory (about 13 h
-for the 520-file corpus, the whole-frame one a little longer). The DFT has its own whole-frame copy: append
-`--config-name surrogate/train_dft` (the last one wins) with its own
+for the 520-file corpus); the DFT's whole-frame copy about half that, using up
+to about 1 GB of memory. The DFT has its own whole-frame copy: start the
+arguments with `--config-name surrogate/train_dft` (the last one wins, and
+`key=value` overrides must all come after it) and give it its own
 `prechunk.output_root`. Without the CPU job the GPU job makes
 the copy itself; with a complete copy it only validates it in seconds, so once
 the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It

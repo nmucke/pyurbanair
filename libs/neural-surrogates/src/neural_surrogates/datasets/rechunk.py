@@ -184,7 +184,9 @@ def prepare_rechunked_dataset(
     time_chunk: int = 1,
     spatial_chunks: Sequence[int] | None = (16, 64, 64),
     compression_level: int = 1,
-    max_buffer_mb: float = 64,
+    # Room for a whole-frame block spanning a 40-frame source chunk, so each
+    # source chunk is decompressed once (halves the whole-frame copy time).
+    max_buffer_mb: float = 1024,
 ) -> Path:
     """Repack every state trajectory before returning a training-ready root.
 

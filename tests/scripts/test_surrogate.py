@@ -94,6 +94,7 @@ def test_prechunked_dft_reads_whole_frames_and_source_params(
         f"paths.data_dir={training_data}",
         f"pretrained_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
         f"prechunk.output_root={prepared}",
+        "prechunk.spatial_chunks=null",
         root=tmp_path,
     )
     load_script("scripts/surrogate/train.py").run(cfg)
