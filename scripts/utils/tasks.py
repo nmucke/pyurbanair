@@ -66,12 +66,12 @@ def _stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     cfg.dataset.sdf_clamp_cells = cfg.architecture.get(
         "sdf_clamp_cells", cfg.dataset.sdf_clamp_cells
     )
-    train, val = _datasets(cfg)
+    train, val, source = _prechunked_datasets(cfg)
     model = _build_stepper(cfg, train)
     if cfg.init_weights is not None:
         model.load_state_dict(torch.load(cfg.init_weights, map_location="cpu"))
     if hasattr(model, "set_normalization"):
-        model.set_normalization(*get_normalization_stats(train))
+        model.set_normalization(*get_normalization_stats(train, source_root=source))
     return Setup(model, train, val)
 
 
@@ -173,6 +173,8 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
             LatentCacheDataset(root, train),
             LatentCacheDataset(root, val),
             {"_recursive_": False, "_convert_": "all"},
+            # The seed the latent_statistics pass would set before fitting.
+            before_fit=lambda trainer: torch.manual_seed(int(cfg.latent_stats.seed)),
         )
 
     def latent_statistics(trainer: Any) -> None:
@@ -196,19 +198,13 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
 def _dft(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     ae_dir = pathlib.Path(cfg.pretrained_dir)
     _inherit_dataset(cfg, OmegaConf.load(ae_dir / "config.yaml"))
-    # A prechunked copy holds only the states: params stay in the source.
-    root = prechunked_root(cfg)
-    train, val = (
-        _datasets(cfg)
-        if root is None
-        else _datasets(cfg, root_dir=root, param_root=cfg.dataset.root_dir)
-    )
+    train, val, source = _prechunked_datasets(cfg)
     cfg.architecture.pretrained_ae_dir = str(ae_dir)
     # Keep the autoencoder's state normalization unless asked to recompute it.
     cfg.architecture.require_ae_state_stats = not cfg.recompute_normalization
     model = _build_stepper(cfg, train)
     if cfg.recompute_normalization:
-        model.set_normalization(*get_normalization_stats(train))
+        model.set_normalization(*get_normalization_stats(train, source_root=source))
     else:  # the state stats would stream the whole split only to be dropped
         model.set_normalization(None, None, *get_param_normalization_stats(train))
 
@@ -239,11 +235,11 @@ def _finetune_stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     pretrained = OmegaConf.load(pretrained_dir / "config.yaml")
     _inherit_dataset(cfg, pretrained)
     cfg.architecture = pretrained.architecture
-    train, val = _datasets(cfg)
+    train, val, source = _prechunked_datasets(cfg)
     model = _build_stepper(cfg, train)
     model.load_state_dict(torch.load(pretrained_dir / "weights.pt", map_location="cpu"))
     if cfg.recompute_normalization:
-        model.set_normalization(*get_normalization_stats(train))
+        model.set_normalization(*get_normalization_stats(train, source_root=source))
     if cfg.method == "full":
         return Setup(model, train, val)
     peft = _with_lora(model, cfg.lora)
@@ -276,6 +272,18 @@ def _datasets(cfg: DictConfig, **overrides: Any) -> tuple[Any, Any]:
         instantiate(cfg.dataset, split="train", dtype=dtype, **overrides),
         instantiate(cfg.dataset, split="val", dtype=dtype, **overrides),
     )
+
+
+def _prechunked_datasets(cfg: DictConfig) -> tuple[Any, Any, str | None]:
+    """Train/val data, read from the `prechunk` copy when there is one, and
+    the source root it was copied from (None without a copy). The copy holds
+    only the states: params stay in the source, and the source's big chunks
+    stream the whole split faster for the normalization stats."""
+    root = prechunked_root(cfg)
+    if root is None:
+        return (*_datasets(cfg), None)
+    source = str(cfg.dataset.root_dir)
+    return (*_datasets(cfg, root_dir=root, param_root=source), source)
 
 
 def prechunked_root(cfg: DictConfig) -> str | None:

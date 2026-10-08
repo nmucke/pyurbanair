@@ -6,6 +6,7 @@ import json
 import pathlib
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
@@ -81,6 +82,43 @@ def test_prechunked_training_keeps_the_source_root(
     assert saved.dataset.root_dir == str(training_data)
     assert (prepared / "normalization_stats" / "train.npz").exists()
     assert (model_dir / "weights.pt").exists()
+
+
+def test_prechunked_stepper_reads_source_params_and_stats(
+    tmp_path: pathlib.Path, training_data: pathlib.Path
+) -> None:
+    from neural_surrogates.training.data_utils import _compute_normalization_stats
+
+    eval_common = load_script("scripts/utils/eval_common.py")
+    prepared = tmp_path / "prechunked"
+    cfg = compose(
+        "surrogate/train_stepper",
+        "+test=train_stepper",
+        f"paths.data_dir={training_data}",
+        f"prechunk.output_root={prepared}",
+        "prechunk.spatial_chunks=null",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert not (prepared / "param").exists()  # params come from the source
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    assert OmegaConf.load(model_dir / "config.yaml").dataset.root_dir == str(
+        training_data
+    )
+    # The stats cached under the copy are the source's.
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    with np.load(prepared / "normalization_stats" / "train.npz") as cached:
+        mean = cached["state_mean"]
+    train = load_script("scripts/utils/tasks.py")._datasets(
+        compose(
+            "surrogate/train_stepper",
+            "+test=train_stepper",
+            f"paths.data_dir={training_data}",
+            root=tmp_path / "plain",
+        )
+    )[0]
+    np.testing.assert_array_equal(mean, _compute_normalization_stats(train)[0])
+    assert sum(p.numel() for p in model.parameters()) > 0
 
 
 def test_prechunked_dft_reads_whole_frames_and_source_params(

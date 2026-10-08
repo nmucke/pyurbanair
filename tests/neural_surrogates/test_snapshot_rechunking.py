@@ -292,3 +292,51 @@ def test_prepared_cache_reused_after_training_writes_normalization_stats(
         np.testing.assert_array_equal(left, right)
     assert (output / "normalization_stats/train.npz").is_file()
     assert prepare_rechunked_dataset(source_root, output) == output
+
+
+def test_normalization_stats_stream_from_source_root(
+    source_root: Path, tmp_path: Path
+) -> None:
+    from neural_surrogates.training.data_utils import get_normalization_stats
+
+    output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
+    expected = get_normalization_stats(cast(Any, SnapshotDataset(source_root, "train")))
+    actual = get_normalization_stats(
+        cast(Any, SnapshotDataset(output, "train")), source_root=source_root
+    )
+    for left, right in zip(expected, actual):
+        np.testing.assert_array_equal(left, right)
+    assert (output / "normalization_stats/train.npz").is_file()
+
+
+def test_complete_cache_validates_while_another_process_holds_the_lock(
+    source_root: Path, tmp_path: Path
+) -> None:
+    import fcntl
+
+    output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
+    manifest = output / ".rechunk-manifest.json"
+    before = manifest.stat().st_mtime_ns
+    with (output / ".rechunk.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert prepare_rechunked_dataset(source_root, output) == output
+        assert prepare_rechunked_dataset(source_root, output) == output
+    assert manifest.stat().st_mtime_ns == before
+
+
+def test_read_only_complete_cache_validates(source_root: Path, tmp_path: Path) -> None:
+    output = prepare_rechunked_dataset(source_root, tmp_path / "prepared")
+    # chmod changes a file's ctime, which the manifest records for each copied
+    # trajectory, so those stay as they are: every directory plus the lock and
+    # manifest read-only already rules out any write.
+    paths = sorted(output.rglob("*"), key=lambda p: len(p.parts), reverse=True)
+    modes = {
+        p: p.stat().st_mode for p in [*paths, output] if not p.name.endswith(".nc")
+    }
+    try:
+        for path in modes:
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        assert prepare_rechunked_dataset(source_root, output) == output
+    finally:
+        for path in reversed(list(modes)):
+            path.chmod(modes[path])

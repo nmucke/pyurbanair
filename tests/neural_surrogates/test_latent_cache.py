@@ -3,14 +3,17 @@
 On CPU smoke shapes via the shared fixtures in ``_latent_generator_fixtures``:
 the cache holds exactly what the frozen encoder gives every frame, its train
 statistics match ``compute_latent_normalization``, it resumes and refuses like
-the rechunk cache, and :class:`LatentCacheDataset` batches through a loader.
+the rechunk cache, a complete cache is validated without the lock (shared,
+read-only), and :class:`LatentCacheDataset` batches through a loader.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pickle
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +42,7 @@ from tests.neural_surrogates._latent_generator_fixtures import (
     NET,
     PARAM_VARS,
     STATE_VARS,
+    T_LEN,
     C,
     P,
     fixture_inputs,
@@ -93,13 +97,16 @@ def _batch(item: dict[str, Any]) -> tuple[Any, Any, Any]:
     )
 
 
-def _mtimes(root: Path) -> dict[str, int]:
+def _mtimes(root: Path, every: bool = False) -> dict[str, int]:
     return {
         str(p.relative_to(root)): p.stat().st_mtime_ns
         for p in root.rglob("*")
-        # The manifest and the train stats are rewritten on every call.
+        # Preparing rewrites the manifest and the train stats.
         if p.is_file()
-        and p.name not in ("manifest.json", ".latent-cache.lock", "latent_stats.npz")
+        and (
+            every
+            or p.name not in ("manifest.json", ".latent-cache.lock", "latent_stats.npz")
+        )
     }
 
 
@@ -111,6 +118,19 @@ def prepared(request, tmp_path_factory):
     datasets = _datasets(data_dir, request.param)
     root = prepare_latent_cache(model, datasets, tmp / "cache", device="cpu")
     return request.param, model, data_dir, datasets, root
+
+
+def _rewrite_sources(data_dir: Path, dims: tuple[str, ...], step: int) -> None:
+    """Store the state variables with ``dims`` order in zlib ``time`` chunks of
+    ``step`` frames."""
+    for path in sorted((data_dir / "state").glob("*/*.nc")):
+        with xr.open_dataset(path) as ds:
+            ds = ds.load()
+        ds = ds.transpose(*dims)
+        sizes = ds["u"].sizes
+        chunks = tuple(step if d == "time" else sizes[d] for d in dims)
+        chunked = {"zlib": True, "chunksizes": chunks}
+        ds.to_netcdf(path, encoding={v: chunked for v in STATE_VARS})
 
 
 def test_cache_equals_the_frozen_encoder_on_every_frame(prepared):
@@ -144,12 +164,25 @@ def test_time_chunked_sources_are_read_in_whole_chunks(prepared, tmp_path):
     whole chunks and give the same latents."""
     geometry, model, _, _, root = prepared
     data_dir = write_history_dataset(tmp_path / "data")  # the fixture's data
-    for path in sorted((data_dir / "state").glob("*/*.nc")):
-        with xr.open_dataset(path) as ds:
-            ds = ds.load()
-        chunked = {"zlib": True, "chunksizes": (4, *ds["u"].shape[1:])}
-        ds.to_netcdf(path, encoding={v: chunked for v in STATE_VARS})
+    _rewrite_sources(data_dir, ("time", "z", "y", "x"), step=4)
     datasets = _datasets(data_dir, geometry)
+    cache = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
+    for path in sorted(root.glob("*/*.npy")):
+        np.testing.assert_array_equal(
+            np.load(cache / path.relative_to(root)), np.load(path)
+        )
+
+
+def test_sources_with_time_not_first_give_the_same_latents(prepared, tmp_path):
+    """``SnapshotDataset`` reads frames by name (``isel(time=t)``), so must the
+    cache: a source whose ``time`` dim isn't first gives the same latents."""
+    geometry, model, _, _, root = prepared
+    data_dir = write_history_dataset(tmp_path / "data")  # the fixture's data
+    _rewrite_sources(data_dir, ("z", "time", "y", "x"), step=4)
+    datasets = _datasets(data_dir, geometry)
+    frames = _every_frame(data_dir, "train", geometry)
+    with xr.open_dataset(frames._state_files[0]) as ds:
+        assert ds["u"].dims[0] == "z"
     cache = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
     for path in sorted(root.glob("*/*.npy")):
         np.testing.assert_array_equal(
@@ -222,10 +255,12 @@ def test_second_call_reuses_and_an_interrupted_file_is_redone(tmp_path):
     datasets = _datasets(data_dir, "fold")
     root = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
     before = _mtimes(root)
+    every = _mtimes(root, every=True)
     first = np.load(root / "train" / "sample_0001.npy")
     stats = load_latent_stats(root)
+    # A complete cache is validated without writing anything.
     assert prepare_latent_cache(model, datasets, root, device="cpu") == root
-    assert _mtimes(root) == before
+    assert _mtimes(root, every=True) == every
     for new, old in zip(load_latent_stats(root), stats):
         np.testing.assert_array_equal(new, old)
 
@@ -290,3 +325,93 @@ def test_changed_ae_source_or_setting_is_refused(tmp_path):
         LatentCacheDataset(root, changed["train"])
     # The unchanged split still loads.
     LatentCacheDataset(root, changed["val"])
+
+
+def test_complete_cache_validates_while_the_lock_is_held(tmp_path):
+    """Training runs validating one complete cache don't contend for the lock;
+    preparing an incomplete one still does."""
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir)
+    datasets = _datasets(data_dir, "fold")
+    root = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
+    with (root / ".latent-cache.lock").open("a") as other:  # another preparer
+        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert prepare_latent_cache(model, datasets, root, device="cpu") == root
+        LatentCacheDataset(root, datasets["train"])
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest["files"]["val/sample_0000"] = None
+        manifest["complete"] = False
+        (root / "manifest.json").write_text(json.dumps(manifest))
+        with pytest.raises(RuntimeError, match="Another process"):
+            prepare_latent_cache(model, datasets, root, device="cpu")
+
+
+def test_read_only_complete_cache_validates_and_loads(tmp_path):
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir)
+    datasets = _datasets(data_dir, "fold")
+    root = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
+    every = _mtimes(root, every=True)
+    paths = [root, *root.rglob("*")]
+    modes = {p: p.stat().st_mode for p in paths}
+    try:
+        for p in paths:
+            p.chmod(modes[p] & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        assert prepare_latent_cache(model, datasets, root, device="cpu") == root
+        load_latent_stats(root)
+        ds = LatentCacheDataset(root, datasets["train"])
+        assert ds[0]["latent"].shape[0] == model.state_latent_dim
+    finally:
+        for p in reversed(paths):
+            p.chmod(modes[p])
+    assert _mtimes(root, every=True) == every
+
+
+def test_chmod_keeps_the_cache_but_a_rewrite_does_not(tmp_path):
+    """Fingerprints are size + mtime: a permission change (ctime only) of a
+    source or a cache file keeps the cache valid; rewriting a file doesn't."""
+    ae_dir, _ = fixture_inputs(tmp_path)
+    data_dir = write_history_dataset(tmp_path / "own_data")
+    model = _model(ae_dir)
+    datasets = _datasets(data_dir, "fold")
+    root = prepare_latent_cache(model, datasets, tmp_path / "cache", device="cpu")
+    every = _mtimes(root, every=True)
+    source = data_dir / "state" / "train" / "sample_0000.nc"
+    cached = root / "val" / "sample_0000.npy"
+    for path in (source, cached):
+        path.chmod(path.stat().st_mode & ~stat.S_IROTH)
+    reread = _datasets(data_dir, "fold")
+    assert prepare_latent_cache(model, reread, root, device="cpu") == root
+    LatentCacheDataset(root, reread["train"])
+    assert _mtimes(root, every=True) == every
+
+    cached.write_bytes(cached.read_bytes())  # same content, new mtime
+    with pytest.raises(ValueError, match="changed or is missing"):
+        prepare_latent_cache(model, reread, root, device="cpu")
+
+
+def test_non_finite_latents_raise_right_after_their_trajectory(tmp_path, monkeypatch):
+    """NaN latents of the val trajectory raise naming its file, before the
+    cache is marked complete; the train trajectories stay completed."""
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir)
+    datasets = _datasets(data_dir, "fold")
+    encode = model._encode_raw
+    calls = []
+
+    def nan_for_val(*args, **kwargs):
+        z_raw, *rest = encode(*args, **kwargs)
+        calls.append(None)
+        if len(calls) > 2 * T_LEN:  # past the two train trajectories
+            z_raw = torch.full_like(z_raw, float("nan"))
+        return (z_raw, *rest)
+
+    monkeypatch.setattr(model, "_encode_raw", nan_for_val)
+    root = tmp_path / "cache"
+    with pytest.raises(ValueError, match="Non-finite latents.*val/sample_0000"):
+        prepare_latent_cache(model, datasets, root, device="cpu")
+    assert len(calls) == 2 * T_LEN + 1
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert not manifest["complete"]
+    assert manifest["files"]["val/sample_0000"] is None
+    assert manifest["files"]["train/sample_0001"] is not None

@@ -28,6 +28,8 @@ optimizer:
   lr: 2.0e-3
   weight_decay: 1.0e-4
 dataloader:
+  # Whole-frame reads mostly wait on the file system: more workers overlap it.
+  num_workers: 16
   collate_fn:
     _target_: neural_surrogates.datasets.transition.transition_collate
     _partial_: true
