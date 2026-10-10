@@ -238,6 +238,11 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # Optional H(actual returned trajectory) after final-time smoothing.
         self.collect_analyzed_observations = False
         self.analyzed_pred_obs: np.ndarray | None = None
+        # Each step's state attrs with ``return_state_history`` (entry 0 the
+        # prior, -1 the posterior): per-step provenance such as a backend's
+        # per-member discrepancy coefficients differs between steps, so the
+        # stacked history keeps only the attrs every step shares.
+        self.state_history_attrs: list[dict[str, Any]] = []
 
         if self.forward_model.save_on_disk:
             assert self.forward_model.results_dir is not None
@@ -691,6 +696,7 @@ sensor_observation_coords` (shared with the filtering package); see its
         # the caller may still hold the previous window's list.
         self.pred_obs_history = []
         self.analyzed_pred_obs = None
+        self.state_history_attrs = []
 
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
         state_history: list[xarray.Dataset] = []
@@ -795,8 +801,12 @@ sensor_observation_coords` (shared with the filtering package); see its
             return result_params
 
         if return_state_history:
+            self.state_history_attrs = [dict(step.attrs) for step in state_history]
             result_state = xarray.concat(
-                state_history, dim="esmda_step", join="override"
+                state_history,
+                dim="esmda_step",
+                join="override",
+                combine_attrs="drop_conflicts",
             )
             return result_params, result_state
 

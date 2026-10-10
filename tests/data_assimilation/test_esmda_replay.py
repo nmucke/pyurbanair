@@ -1,5 +1,6 @@
 """ESMDA must replay hidden solver state, while accepting analyzed inputs."""
 
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -277,3 +278,36 @@ def test_posterior_donor_coefficients_match_returned_forecast(
         params = params.isel(esmda_step=-1)
     assert params.a.values[0] == params.a.values[2]
     np.testing.assert_array_equal(state.u.values[0], state.u.values[2])
+
+
+def test_state_history_keeps_each_steps_own_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-forecast provenance (pyudales' per-member discrepancy coefficients)
+    must describe the step's own members, not the prior's."""
+    model = HiddenStateEnsemble()
+    forecast = model.run_ensemble
+
+    def with_provenance(**kwargs: Any) -> xr.Dataset | None:
+        result = forecast(**kwargs)
+        assert result is not None
+        result.attrs["coefficients"] = json.dumps(kwargs["params"].a.values.tolist())
+        result.attrs["solver"] = "fake"
+        return result
+
+    monkeypatch.setattr(model, "run_ensemble", with_provenance)
+    smoother = make_smoother(model)
+    params, states = smoother(
+        params=prior(),
+        observations=np.array([4.0]),
+        return_params_history=True,
+        return_state_history=True,
+    )
+    # The stacked history keeps only what every step shares.
+    assert states.attrs == {"solver": "fake"}
+    steps = smoother.state_history_attrs
+    assert len(steps) == states.sizes["esmda_step"] == 3
+    for step, attrs in zip([0, -1], [steps[0], steps[-1]]):
+        expected = params.isel(esmda_step=step).a.values.tolist()
+        assert json.loads(attrs["coefficients"]) == expected
+    assert steps[0]["coefficients"] != steps[-1]["coefficients"]
