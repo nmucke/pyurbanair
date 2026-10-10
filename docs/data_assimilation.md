@@ -400,6 +400,12 @@ multi-window caller reads one window's entries per call. With
 `run_smoother.py` and `run_hybrid.py` turn it on and persist the arrays per
 window (`window_{w}_obs.nc`).
 
+**State history attrs.** With `return_state_history=True` the
+`esmda_step`-stacked history keeps only the attrs every step shares; each
+step's own (e.g. pyudales' per-member `model_discrepancy_by_member`) are in
+`state_history_attrs`, entry 0 the prior, −1 the posterior. `run_smoother.py`
+restores them on `window_{w}_prior_state.nc` / `_posterior_state.nc`.
+
 ### Five variants
 
 | Class | Augmented state | Notes |

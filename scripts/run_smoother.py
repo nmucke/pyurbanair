@@ -164,10 +164,12 @@ def run(cfg: DictConfig) -> None:
         else:
             states = output[1]
             if save_prior_state:
-                states.isel(esmda_step=0).to_netcdf(
-                    windows_dir / f"window_{w}_prior_state.nc"
-                )
+                # The stacked history drops per-step attrs; restore each step's.
+                prior_state = states.isel(esmda_step=0)
+                prior_state.attrs = smoother.state_history_attrs[0]
+                prior_state.to_netcdf(windows_dir / f"window_{w}_prior_state.nc")
                 states = states.isel(esmda_step=-1)
+                states.attrs = smoother.state_history_attrs[-1]
             states.to_netcdf(windows_dir / f"window_{w}_posterior_state.nc")
             state = states.isel(time=-1)
 
