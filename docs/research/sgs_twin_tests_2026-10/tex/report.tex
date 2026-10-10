@@ -1,0 +1,550 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{siunitx}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage[section]{placeins}
+\usepackage[colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black]{hyperref}
+
+\graphicspath{{figures/}}
+\sisetup{detect-all}
+\captionsetup{font=small,labelfont=bf}
+\setlist{nosep,leftmargin=*}
+
+\newcommand{\bstar}{\ensuremath{b^\ast}}
+\newcommand{\seff}{\ensuremath{\sigma_{\mathrm{eff}}}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\good}[1]{\textcolor{green!45!black}{#1}}
+\newcommand{\bad}[1]{\textcolor{red!65!black}{#1}}
+
+\title{Joint inflow and SGS-bias estimation in uDALES:\\
+       twin tests, Round~1}
+\author{pyurbanair SGS discrepancy study}
+\date{October 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+We test whether a three-coefficient strain/rotation correction to the Vreman
+sub-grid-scale (SGS) viscosity in uDALES can be estimated together with the
+inflow angle and speed from sparse velocity sensors. Both the truth and the
+assimilation model are uDALES. The study uses parameter-only ES-MDA with 32
+members over three \SI{180}{s} windows on the Xie \& Castro staggered-cube
+array. Twenty-eight assimilation runs were made, plus a pilot.
+
+\begin{itemize}
+\item \textbf{Without inlet turbulence} (a near-deterministic twin), the
+  coefficients are recovered on average: the T3 seed means are within 0.03 of
+  the truth. This holds even though the pre-registered per-observation
+  signal-to-noise gate predicted otherwise.
+\item In that setting, estimating the correction lowers the held-out sensor
+  and field errors by 40--90\,\% against inflow-only estimation, which is a
+  clear added value.
+\item The posteriors are 3--4$\times$ overconfident.
+\item \textbf{With realistic inlet turbulence}, every ensemble collapses onto
+  turbulence realisation noise within the first window, and the correction
+  adds nothing.
+\item The cause is the error model, not the correction. The observation error
+  omits a realisation noise about $2.5\times$ larger than it, while 324
+  observations face 32 members without localisation.
+\item We also report a diagnostics bug: the posterior SGS-health values were
+  copies of the prior's. It is now fixed.
+\end{itemize}
+\end{abstract}
+
+\section{Questions and test design}
+
+The correction multiplies the Vreman eddy viscosity by
+\begin{equation}
+  m = \exp\!\Bigl(L \tanh\frac{b_0 + b_1\,\phi(z) + b_2\,q}{L}\Bigr),
+  \qquad L = \log 1.5,
+  \label{eq:multiplier}
+\end{equation}
+where $\phi\in[0,1]$ is a sine-squared height band over
+$z/H\in[0.5,2]$ (5--\SI{20}{m} for a canopy height $H=\SI{10}{m}$) and
+$q\in[-1,1]$ compares the squared rotation and strain norms. The multiplier
+stays within $[0.67,1.5]$, and a cell is counted as saturated when the tanh
+argument exceeds about 0.74.
+
+Round~1 asks three separate questions:
+\begin{enumerate}
+\item \textbf{Execution:} do the runs finish without solver failures or
+  saturation?
+\item \textbf{Recovery:} are the true coefficients
+  $\bstar=(0.3,-0.3,0.2)$ and the true inflow (\ang{10},
+  \SI{6.0}{m/s}) recovered within the posterior spread?
+\item \textbf{Benefit:} does estimating $b$ improve the predictions at
+  held-out sensors and the next window's forecast, compared with estimating
+  the inflow alone?
+\end{enumerate}
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Assimilation tests. Each runs in two stages: A without inlet
+turbulence, B with the synthetic digital-filter inlet. L2 is the main
+layout. Seeds 2 and 3 vary the assimilation seed, the prior seed and the
+truth inlet seed together.}
+\label{tab:tests}
+\begin{tabularx}{\linewidth}{@{}llllX@{}}
+\toprule
+Test & Truth $b$ & Prior SGS & Estimated & Question \\
+\midrule
+T1 & \bstar & $\mathcal N(0,0.2^2)$ & $b$ (inflow pinned) & Is SGS identifiable at all? \\
+T3 & \bstar & $\mathcal N(0,0.2^2)$ & inflow + $b$ & The main test \\
+T2 & \bstar & none ($b=0$) & inflow & Uncorrected baseline for T3 \\
+T0 & 0 & $\mathcal N(0,0.2^2)$ & inflow + $b$ & Does the fit invent a correction? \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\paragraph{Fixed setup.}
+\begin{itemize}
+\item \textbf{Case:} \code{xie\_and\_castro}, 30$\times$40$\times$16 cells
+  over 60$\times$80$\times$\SI{32}{m}, with cubes 2.8--\SI{17.2}{m} tall.
+\item \textbf{Closure:} Vreman with $c_v=0.24$ for both truth and model.
+\item \textbf{Windows:} three windows of \SI{180}{s} after a \SI{30}{s}
+  spinup, with \SI{1}{Hz} output.
+\item \textbf{Observations:} $u$ and $v$ averaged over \SI{20}{s}, with
+  instrument error \SI{0.25}{m/s} and representation error \SI{0.1}{m/s}.
+  One aggregated observation then has $\seff=\SI{0.060}{m/s}$.
+\item \textbf{Smoother:} ES-MDA with 4 steps and no localisation, and
+  \code{failure.policy=raise}, so a diverging member stops the run.
+\item \textbf{Sensors} (Figure~\ref{fig:geometry}):
+  \begin{itemize}
+  \item L1: six street-level sensors at $z=\SI{2}{m}$.
+  \item L2: the same six $(x,y)$ positions at $z=2$, 8 and \SI{14}{m}.
+  \item VAL: four held-out validation sensors, one of them above the canopy.
+  \end{itemize}
+  Every sensor stencil node is a fluid cell.
+\item \textbf{Configuration:} everything was set on the command line from a
+  fresh clone of \code{main} (\code{06249b0}); no config was edited.
+\end{itemize}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{geometry_sensors.pdf}
+\caption{Domain and sensors. (a)~Top view of the building footprints, shaded
+by height (voxelised STL), with the assimilation sensors and the held-out validation sensors.
+The arrow gives the true inflow direction (\ang{10}). (b)~Side view of the
+building heights, with the SGS height band (5--\SI{20}{m}) where $\phi>0$ and
+the sensor heights.}
+\label{fig:geometry}
+\end{figure}
+
+\section{Pilot: stability and signal-to-noise}
+
+\paragraph{Stability (P1).}
+We ran single-member forward runs over three windows. Every coefficient value
+tested, $b_0\in\{\pm0.3,\pm0.6\}$ and $b_1,b_2\in\{\pm0.6\}$, ran stably at
+$c_v=0.24$:
+\begin{itemize}
+\item the minimum $\Delta t$ was \SI{0.068}{s} against \SI{0.076}{s} for
+  $b=0$;
+\item no cell saturated;
+\item $\pm0.6$ already reaches multipliers of 0.69 and 1.44, close to the
+  cap.
+\end{itemize}
+So $c_v=0.24$ and $\sigma_b=0.2$ were kept: $\pm3\sigma_b$ lies inside the
+tested range.
+
+\paragraph{Signal-to-noise (P2).}
+Figure~\ref{fig:pilot} compares pairs of runs through
+$D=\mathrm{RMS}(\Delta\text{\SI{20}{s} means})/\seff$.
+
+The plan's gate needed $D_{\mathrm{sgs}}\ge2$ and
+$D_{\mathrm{sgs}}\ge2D_{\mathrm{seed}}$, and it \bad{failed}:
+\begin{itemize}
+\item $D_{\mathrm{sgs}}$ was only 0.5--0.7 for \bstar.
+\item The largest single coefficient, $b_0=\pm0.6$, reaches only
+  $D\le1.6$, so a larger \bstar\ cannot pass under the cap.
+\item With inlet turbulence on, the realisation noise is
+  $D_{\mathrm{seed}}\approx3$--4, about \SI{0.2}{m/s} per \SI{20}{s} mean.
+\item With it off, the realisation noise almost vanishes
+  ($D_{\mathrm{seed}}\approx0.01$), but $D_{\mathrm{sgs}}$ stays at about
+  0.6.
+\end{itemize}
+
+The gate is per observation, whereas one L2 window assimilates
+$9\times18\times2=324$ observations jointly
+($D\sqrt N\approx10$). We therefore ran the full matrix as a clearly labelled
+\emph{post-gate exploratory} set, with \bstar\ unchanged.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{pilot_snr.pdf}
+\caption{Pilot signal-to-noise. $D$ is the RMS difference of \SI{20}{s}
+sensor means between two runs, divided by the effective observation error
+$\seff=\SI{0.060}{m/s}$, pooled over three windows. The pairs are the SGS
+signal ($b=0$ against \bstar), the realisation noise (inlet seed or initial
+perturbation changed) and the inflow signal (\ang{+5}, \SI{+0.5}{m/s}).
+The dashed line is the gate, $D=2$.}
+\label{fig:pilot}
+\end{figure}
+
+\section{Results}
+
+\subsection{Execution}
+
+All 24 parameter-only smoother runs finished, in 85--\SI{112}{min} each with
+two side by side at 8 workers. The two state-updating methods did not:
+\begin{itemize}
+\item \textbf{Inlet-off joint filter: failed.} One second into its second
+  cycle, just after the first joint state and parameter analysis, five
+  members' $\Delta t$ fell below \SI{e-4}{s}. The diffusion number was
+  pinned at 0.255 while the divergence stayed at machine precision, so the
+  analysed state made the eddy viscosity blow up.
+\item \textbf{Inlet-off hybrid: ran away}
+  (Section~\ref{sec:methods}).
+\end{itemize}
+
+Saturation could not be judged. The posterior state files carried the
+prior's SGS diagnostics (Section~\ref{sec:bug}), so the reported posterior
+saturation of 14--41\,\% belongs to the prior ensemble. The posterior means
+lie well inside the unsaturated range: their largest tanh argument is about
+0.5, against 0.74.
+
+\subsection{Recovery}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{recovery_windows.pdf}
+\caption{Coefficient posteriors per window, as mean $\pm$ std, for T3-L2
+seeds 1--3 and T1-L2 seed 1. Lines mark the truth \bstar; the band is the
+prior $\pm1\sigma$.
+Top, stage~A (inlet off): the estimates approach the truth with very small
+error bars, and the seed-to-seed scatter is larger than those bars.
+Bottom, stage~B (inlet on): the ensembles collapse to a point in window~0,
+at seed-dependent wrong values.}
+\label{fig:recovery}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=0.55\linewidth]{inflow_recovery.pdf}
+\caption{Inflow posteriors per window for T3 (with SGS estimated) and T2
+(inflow only), seeds 1--3; the axes are zoomed, so the wide prior bars are clipped. Lines mark the truth (\ang{10}, \SI{6.0}{m/s}).}
+\label{fig:inflow}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Final-window posteriors on L2: the mean over seeds 1--3 of the
+posterior means, with the seed-to-seed standard deviation and the mean
+posterior standard deviation in parentheses.}
+\label{tab:recovery}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}llccccc@{}}
+\toprule
+Stage & Test & $b_0$ (0.3) & $b_1$ ($-0.3$) & $b_2$ (0.2) & angle (\ang{10}) & speed (6.0) \\
+\midrule
+A & T1 & 0.301 (0.052, 0.018) & $-0.276$ (0.121, 0.034) & 0.256 (0.024, 0.023) & pinned & pinned \\
+A & T3 & 0.288 (0.054, 0.018) & $-0.316$ (0.136, 0.031) & 0.193 (0.051, 0.022) & 10.06 (0.15, 0.06) & 6.06 (0.01, 0.00) \\
+B & T1 & 0.094 (0.137, 0.000) & $-0.094$ (0.120, 0.000) & 0.006 (0.064, 0.000) & pinned & pinned \\
+B & T3 & 0.094 (0.025, 0.000) & 0.029 (0.175, 0.000) & 0.037 (0.198, 0.000) & 12.50 (1.87, 0.00) & 5.96 (0.06, 0.00) \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\paragraph{Stage A: recovered on average, overconfident.}
+Table~\ref{tab:recovery} and Figure~\ref{fig:recovery} give the numbers.
+\begin{itemize}
+\item \textbf{Accuracy.} The T3 seed means are within 0.03 of \bstar, and
+  window~0 alone is close. For example, A-T1-L2 seed~1 reaches
+  $(0.298,-0.339,0.162)$ after window~0.
+\item \textbf{Drift.} In windows~1--2 the estimates drift while the spread
+  shrinks: $b_2$ rises in every run.
+\item \textbf{Overconfidence.} The posterior std is 3--4$\times$ smaller
+  than the seed scatter, and the validation spread/skill ratio is only
+  0.1--0.3. By the pre-registered rule
+  ($|\text{mean}-\text{truth}|\le2\,\text{std}$ and
+  $\text{std}\le0.5\,\sigma_b$):
+  \begin{itemize}
+  \item T1 passes only on L1, where the posterior is wider;
+  \item it fails on L2 in all three seeds;
+  \item every T3 run has at least one ``wrong'' coefficient, although the
+    misses are only 0.1--0.6 prior std.
+  \end{itemize}
+\item \textbf{No invented correction.} The T0 control stays within 0.03 of
+  $b=0$.
+\item \textbf{Combinations, not single values.} The posterior correlations,
+  $\rho(b_0,b_1)\approx-0.6$ and $\rho(b_0,b_2)\approx+0.5$, show that the
+  sensors constrain combinations of the coefficients.
+\item \textbf{Inflow.} It is collapsed and slightly biased: the speed is
+  $6.06\pm0.003$\,m/s (Figure~\ref{fig:inflow}).
+\end{itemize}
+
+\paragraph{Stage B: collapse.}
+\begin{itemize}
+\item Every ensemble collapses to a std of about 0.001 in window~0.
+\item The estimates scatter by seed with wrong signs.
+\item T0 invents $b_1=+0.22$ and $b_2=-0.18$.
+\item In two of three seeds the angle sticks at \ang{13.4}--\ang{13.7}.
+\end{itemize}
+
+\FloatBarrier
+\subsection{Why stage B collapses}
+
+Figure~\ref{fig:collapse} shows the mechanism. In stage~A the predicted
+observations really depend on the parameters: across the ES-MDA steps, the
+member spread and the ensemble-mean misfit shrink together, from 0.030 to
+\SI{0.003}{m/s}. In stage~B the members' predicted-observation spread stays
+at about \SI{0.125}{m/s} at every step. That spread is turbulence
+realisation noise, since each member has its own inlet seed.
+
+Two things then drive the collapse:
+\begin{itemize}
+\item With 324 observations, 32 members and no localisation, the 31
+  parameter anomalies are always an exact linear function of the
+  observation anomalies. The update therefore treats noise correlations as
+  information.
+\item The observation error ($\seff=\SI{0.06}{m/s}$) leaves out the
+  realisation noise (0.13--\SI{0.16}{m/s} between the ensemble mean and the
+  clean truth). Nothing restrains the update, and the parameter spread falls
+  200-fold in one window.
+\end{itemize}
+The Desroziers ratio of 2.3--3.1, and the underfit flag on every stage-B
+run, both say the observation error should be about three times larger.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{collapse_mechanism.pdf}
+\caption{Collapse mechanism, window~0. (a)~Median member spread of the
+predicted observations, and the RMS error of the ensemble mean against the
+noise-free truth, per ES-MDA step; the line marks $\seff$. (b)~Ensemble std
+of $b_0$, normalised by the prior std, per window. Stage~A shrinks in step
+with a genuinely informative misfit. Stage~B collapses even though its
+observation spread never shrinks.}
+\label{fig:collapse}
+\end{figure}
+
+\FloatBarrier
+\subsection{Benefit: T3 against T2}
+
+Figure~\ref{fig:value} and Table~\ref{tab:value} compare the held-out
+scores. ``Posterior'' is the mean over all three windows; ``forecast'' is
+the window-1/2 prior, a forecast from the previous posterior made before
+seeing the window's data. A row counts only if $|T3-T2|$ exceeds both the
+replica floor and the seed std, with the same sign in all three seeds. The
+replica floor is the truth rerun with only its seed changed.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{value_t3_vs_t2.pdf}
+\caption{Relative change of held-out scores when the SGS coefficients are
+estimated, $(T3-T2)/T2$ (negative is better), averaged over seeds 1--3, for
+the posterior and the window-1/2 forecast. Filled markers are significant by
+the rule in the text; hollow markers are within noise. The dashed line marks
+the plan's $-10\,\%$ threshold.}
+\label{fig:value}
+\end{figure}
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Selected held-out scores, as means over seeds 1--3. CRPS is for
+window means and variances of the velocity magnitude at the validation
+sensors; W2 is the member-median Wasserstein distance; field and canopy
+scores are RMSE against the truth.}
+\label{tab:value}
+\begin{tabular}{@{}lllllll@{}}
+\toprule
+Score & Stage & T2 & T3 & $\Delta$ & Replica & Verdict \\
+\midrule
+CRPS mean, posterior      & A & 0.0327 & 0.0109 & $-67\,\%$ & \num{6e-5} & \good{T3 better} \\
+CRPS mean, forecast       & A & 0.0441 & 0.0235 & $-47\,\%$ & \num{8e-5} & \good{T3 better} \\
+CRPS variance, posterior  & A & \num{6.0e-5} & \num{7.5e-6} & $-88\,\%$ & \num{2e-6} & \good{T3 better} \\
+CRPS variance, forecast   & A & \num{1.47e-5} & \num{1.52e-5} & $+3\,\%$ & \num{2e-8} & T2 better (small) \\
+W2 magnitude, posterior   & A & 0.0476 & 0.0186 & $-61\,\%$ & \num{1e-4} & \good{T3 better} \\
+Field TKE, posterior      & A & 0.0048 & 0.0019 & $-60\,\%$ & \num{2e-4} & \good{T3 better} \\
+Canopy TKE, posterior     & A & \num{4.6e-4} & \num{1.3e-4} & $-72\,\%$ & \num{1e-5} & \good{T3 better} \\
+\midrule
+CRPS mean, posterior      & B & 0.0846 & 0.0852 & $+1\,\%$ & 0.064 & within noise \\
+CRPS mean, forecast       & B & 0.0883 & 0.0872 & $-1\,\%$ & 0.052 & within noise \\
+CRPS variance, posterior  & B & 0.0131 & 0.0126 & $-4\,\%$ & 0.020 & within noise \\
+Field TKE, posterior      & B & 0.0359 & 0.0358 & $0\,\%$ & 0.054 & within noise \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Stage A: adds value.}
+\begin{itemize}
+\item T3 is clearly better on 10 of the 12 validation CRPS rows, and all 10
+  clear the $\ge10\,\%$ threshold.
+\item It is also clearly better on 27 of the 34 W2, field, canopy and
+  spectra rows, and clearly worse on none.
+\item The plan's T3-vs-T2 pass requires $\ge10\,\%$ for the forecast
+  variances too, and these fall short ($+2$ and $+3\,\%$, tiny in absolute
+  terms).
+\item The T3 inflow error is no larger than T2's.
+\item The correctly specified T0 run gives the best reference. It scores
+  0.0108 on the posterior CRPS of window means against 0.0105 for T3 and
+  0.0327 for T2. Estimating $b$ thus removes essentially the whole SGS-misfit
+  penalty.
+\item The remaining gap to the near-zero replica floor comes from the
+  biased, collapsed inflow speed.
+\end{itemize}
+Figure~\ref{fig:runs-canopy} shows the difference in the canopy profiles.
+
+\paragraph{Stage B: no added value.}
+T3 and T2 differ by $-4$ to $+2\,\%$, far less than the seed spread. Both
+sit within $1.3\times$ the replica floor, and T0 scores the same. With
+realistic inlet turbulence, the held-out scores are dominated by realisation
+noise that no parameter can reduce (Figure~\ref{fig:runs-sensors}).
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\linewidth}
+  \includegraphics[width=\linewidth]{run_A_T2_canopy_profiles.png}
+  \caption{A-T2-L2 (inflow only)}
+\end{subfigure}\hfill
+\begin{subfigure}{0.49\linewidth}
+  \includegraphics[width=\linewidth]{run_A_T3_canopy_profiles.png}
+  \caption{A-T3-L2 (inflow and SGS)}
+\end{subfigure}
+\caption{Canopy profiles against the truth and the replica, stage~A,
+seed~1 (pipeline figures from \code{visualize\_assimilation.py}).}
+\label{fig:runs-canopy}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\begin{subfigure}{0.49\linewidth}
+  \includegraphics[width=\linewidth]{run_A_T3_sensor_timeseries_validation.png}
+  \caption{Stage A (inlet off)}
+\end{subfigure}\hfill
+\begin{subfigure}{0.49\linewidth}
+  \includegraphics[width=\linewidth]{run_B_T3_sensor_timeseries_validation.png}
+  \caption{Stage B (inlet on)}
+\end{subfigure}
+\caption{Validation-sensor time series for T3-L2, seed~1: the truth against
+the posterior ensemble. With inlet turbulence on, the truth's fluctuations
+are a realisation the members cannot reproduce.}
+\label{fig:runs-sensors}
+\end{figure}
+
+\subsection{Layout}
+
+On stage~A seed~1, L2 beats L1 for T3 on the sensor, field and
+above-canopy spectral scores; L1 is better only on the canopy-$u$ profile.
+T1-L1 recovers all three coefficients, even though $b_1$ is seen there only
+indirectly. Its posterior is wider (std of $b_1$ 0.08 against 0.03), so the
+strict rule is easier to pass.
+
+\subsection{Methods: smoother, hybrid, joint filter}
+\label{sec:methods}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{methods.pdf}
+\caption{T3-L2 seed~1 posterior scores by method. The dashed ticks mark the
+replica floor. The inlet-off joint filter failed.}
+\label{fig:methods}
+\end{figure}
+
+The parameter-only smoother is the only usable method here
+(Figure~\ref{fig:methods}):
+\begin{itemize}
+\item \textbf{Hybrid, stage~A: runs away.} Its window-0 posterior is
+  reasonable, but window~1 jumps to $b_0=0.97$ and $b_2=1.35$, and window~2
+  reaches $b_0=1.13$, $b_2=1.57$ and a speed of \SI{6.50}{m/s}. These values
+  are far outside the prior and deep in saturation, and the CRPS is
+  $10\times$ the smoother's.
+\item \textbf{Hybrid, stage~B:} collapsed, like the smoothers.
+\item \textbf{Joint filter, stage~B:} all members end up identical. Its TKE
+  error is $6\times$ the smoother's.
+\end{itemize}
+The estimated coefficients do not survive the state filter.
+
+\section{Bug: stale SGS diagnostics}
+\label{sec:bug}
+
+\code{ParameterESMDA} stacks the per-step states with
+\code{xarray.concat(..., join="override")}. The default
+\code{combine\_attrs="override"} stamps the prior step's attributes on the
+whole stack. With \code{save\_prior\_state=true}, \code{run\_smoother.py}
+writes the posterior state from that stack, so it carries the prior members'
+coefficients and native multiplier diagnostics, and \code{sgs\_health}
+reported the prior twice.
+
+The fix (branch \code{fix/posterior-sgs-diagnostics}, with a regression
+test) keeps each step's own attributes. The posterior values of the existing
+runs need a rerun; their prior diagnostics and all posterior parameters are
+correct.
+
+Two related problems are not yet fixed:
+\begin{itemize}
+\item hybrid and filter forecast states keep only their first cycle's
+  attributes;
+\item on-disk ensembles copy member~0's attributes onto the whole ensemble.
+\end{itemize}
+
+\section{Conclusions}
+
+\begin{description}
+\item[Execution.] The parameter-only smoother is robust. The joint filter
+  and the hybrid destabilise uDALES or drive the coefficients out of range.
+\item[Recovery.] The correction is identifiable from sparse velocity sensors
+  when realisation noise is small, despite a per-observation SNR of about
+  0.6. The pre-registered gate is too conservative, and $D\sqrt N$ is the
+  better predictor. The posteriors are 3--4$\times$ overconfident, however.
+\item[Benefit.] Without inlet turbulence, estimating the correction
+  \good{adds value}: it gives 40--90\,\% lower held-out errors and matches a
+  correctly specified model. With realistic inlet turbulence it gives
+  \bad{no added value}, because the ensemble collapses onto noise.
+\end{description}
+With 1--3 seeds per configuration, these results are evidence rather than a
+statistical claim.
+
+\paragraph{Before Round~2 (PALM truth).}
+The realistic case fails on the error model, so Round~2 should not start as
+planned. Test these first:
+\begin{enumerate}
+\item a representation error that includes the realisation noise, about
+  \SI{0.15}{m/s};
+\item statistics that average the noise down, such as longer aggregation or
+  window means and variances, as observations;
+\item localisation or a larger ensemble, to break the rank-deficient
+  parameter--observation regression;
+\item a rerun of the saturation diagnostics with the fix.
+\end{enumerate}
+
+\appendix
+\section{Runs}
+
+Every run used \code{ensemble\_size=32}, \code{num\_parallel\_processes=8}
+and \code{ncpu=1}. The exact commands, the per-run parameter tables and the
+full score tables are in the Markdown appendices next to this report
+(\code{appendix\_commands.md}, \code{appendix\_params.md},
+\code{appendix\_value.md}).
+
+\begin{table}[!htbp]
+\centering\small
+\caption{Assimilation runs. Wall time includes the inline truth, metrics and
+figures.}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+Stage & Tests & Layout & Seeds & Status \\
+\midrule
+A, B & T1, T3, T2 & L2 & 1, 2, 3 & all done, 85--\SI{112}{min} (two at about \SI{200}{min} under outside load) \\
+A, B & T0 & L2 & 1 & done \\
+A, B & T1, T3 & L1 & 1 & done \\
+A, B & T3 hybrid & L2 & 1 & done, about \SI{215}{min} \\
+B & T3 joint filter & L2 & 1 & done, \SI{165}{min} \\
+A & T3 joint filter & L2 & 1 & \bad{failed} (diffusion-limited $\Delta t$ collapse) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\end{document}
