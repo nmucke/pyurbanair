@@ -13,6 +13,7 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers |
 | `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |
 | `visualization/` | the forward-run viewer and renderer (`libs/visualization`) |
+| `pycity4cfd/` | map area -> OSM buildings -> City4CFD -> case overrides (`libs/pycity4cfd`); osmnx mocked, City4CFD runs are `integration` |
 | `scripts/` | `scripts/`, `configs/` and `workflows/`; relative links in the Markdown docs |
 
 ```bash

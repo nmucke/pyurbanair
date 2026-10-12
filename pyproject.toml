@@ -347,6 +347,39 @@ torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/
 [tool.pixi.feature.visualization.pypi-dependencies]
 visualization = { path = "libs/visualization", editable = true }
 
+# City area from a map: OSM footprints (osmnx/geopandas) and City4CFD
+# (libs/pycity4cfd/City4CFD, AGPL-3.0 submodule pinned to 0.8.1):
+# buildings GeoJSON -> CFD-ready STL. Not on conda-forge, so `build-city4cfd`
+# compiles it from the submodule into libs/pycity4cfd/build/<env>/ (one build
+# per pixi env, a few minutes, hence not part of setup-dev). Eigen is pinned to 3.4: City4CFD and its
+# bundled CGAL support are untested with Eigen 5.
+[tool.pixi.feature.city4cfd.dependencies]
+cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
+make = "*"
+cgal-cpp = ">=6.0.1,<6.3"
+libboost-devel = "*"
+eigen = "3.4.*"
+gmp = "*"
+mpfr = "*"
+libgdal-core = ">=3"
+osmnx = ">=2.1.1,<3"
+geopandas = ">=1.2.0,<2"
+
+# Bare compilers, not `cxx-compiler`: its activation would export CC/CXX/
+# LDFLAGS into every env with this feature and change the solver builds.
+[tool.pixi.feature.city4cfd.target.linux-64.dependencies]
+gxx = ">=15.2.0"
+
+[tool.pixi.feature.city4cfd.target.osx-arm64.dependencies]
+clangxx = "*"
+llvm-openmp = "*"
+
+[tool.pixi.feature.city4cfd.pypi-dependencies]
+pycity4cfd = { path = "libs/pycity4cfd", editable = true }
+
+[tool.pixi.feature.city4cfd.tasks]
+build-city4cfd = { cmd = "bash libs/pycity4cfd/build_city4cfd.sh", description = "Compile City4CFD from its submodule into libs/pycity4cfd/build/<env>/" }
+
 # Optional local agent interface; workers do not require the MCP SDK.
 [tool.pixi.feature.mcp.pypi-dependencies]
 mcp-server = { path = "libs/mcp-server", editable = true }
@@ -362,11 +395,11 @@ ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "cpu"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "city4cfd", "cpu"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "visualization", "evaluation", "dev", "py312", "cpu"] }
+mcp = { features = ["mcp", "city4cfd", "visualization", "evaluation", "dev", "py312", "cpu"] }
 rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }

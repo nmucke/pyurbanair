@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import shutil
 import sys
+import threading
 from typing import Any
 from urllib.parse import quote
 
+from mcp_server.area_selector import MAX_AREA_KM2, AreaSelector, validate_bbox
 from mcp_server.jobs.preparation import PreparationService
 from mcp_server.jobs.rendering_environment import select_render_environment
 from mcp_server.jobs.results import contained_file, inspect_results
@@ -38,6 +41,11 @@ class Tools:
         )
         self.preparation = PreparationService(self.repo_root, self.store_root)
         self.jobs = SupervisorClient(self.repo_root, self.store_root)
+        self.area_selector: AreaSelector | None = None
+        # MCP sync tools run on worker threads: guard the selector swap and
+        # give each city case one builder at a time.
+        self._lock = threading.Lock()
+        self._case_locks: dict[str, threading.Lock] = {}
 
     def get_capabilities(self) -> dict[str, Any]:
         """Inspect available configurations and installed environments without building solvers."""
@@ -206,6 +214,100 @@ class Tools:
             offset,
             limit,
         )
+
+    def open_area_selector(self, max_area_km2: float = MAX_AREA_KM2) -> dict[str, Any]:
+        """Open a local map page where the user draws the rectangle of a city area to simulate.
+
+        Give the user the returned `url` to open in their browser, then call
+        `get_selected_area(selection_id)` until it returns the bbox. If the
+        user would rather type the area, they may paste a bbox as west, south,
+        east, north in degrees (EPSG:4326); use that directly instead, without
+        this page. Areas above `max_area_km2` are rejected on the page.
+        """
+        with self._lock:
+            if self.area_selector is None or self.area_selector.closed:
+                self.area_selector = AreaSelector()
+            selection_id, url = self.area_selector.open(max_area_km2)
+        return {
+            "selection_id": selection_id,
+            "url": url,
+            "status": "pending",
+            "max_area_km2": max_area_km2,
+            "instructions": (
+                f"Open {url} in a browser on this machine, click 'Draw rectangle', "
+                "drag over the area, then press 'Use this area'."
+            ),
+        }
+
+    def get_selected_area(
+        self, selection_id: str, wait_s: float = 30
+    ) -> dict[str, Any]:
+        """Return the area drawn on the `open_area_selector` page.
+
+        Blocks up to `wait_s` seconds (at most 60). Returns status "selected"
+        with `bbox` {west, south, east, north, area_km2} in EPSG:4326 degrees,
+        or status "pending": ask the user to finish on the page and call again.
+        Status "expired" means the page server shut down or the id is unknown
+        to it; open a new selector.
+        """
+        selector = self.area_selector
+        expired = {"selection_id": selection_id, "status": "expired"}
+        if selector is None:
+            return expired
+        try:
+            selection = selector.wait(selection_id, min(max(wait_s, 0), 60))
+        except ValueError:
+            return expired
+        result: dict[str, Any] = {"selection_id": selection_id, **selection}
+        if result["status"] == "pending" and selector.closed:
+            result["status"] = "expired"
+        return result
+
+    def prepare_city_case(
+        self,
+        bbox: dict[str, float] | list[float],
+        resolution: float = 4.0,
+        default_height: float = 10.0,
+        max_area_km2: float = MAX_AREA_KM2,
+    ) -> dict[str, Any]:
+        """Turn a city area into a simulation case: OSM buildings -> City4CFD STL.
+
+        `bbox` is {west, south, east, north} (or a 4-list) in EPSG:4326, e.g.
+        the one `get_selected_area` returned. Building heights come from OSM
+        `height`, else `building:levels` x 3 m, else `default_height` (m).
+        Takes minutes (the OpenStreetMap download dominates). Returns
+        `overrides`: pass `["model=pylbm", *overrides]` to
+        `prepare_forward_run`. `resolution` is the grid spacing (m); check
+        `domain` before launching, the run cost grows with nx * ny * nz.
+        `max_area_km2` is the area limit; pass the one the selector was
+        opened with. A finished case for the same inputs is reused.
+        """
+        from pycity4cfd.case import make_case
+
+        area = validate_bbox(bbox, max_area_km2)
+        west, south, east, north = (area[k] for k in ("west", "south", "east", "north"))
+        key = ",".join(
+            f"{value:.5f}"
+            for value in (west, south, east, north, resolution, default_height)
+        )
+        name = "area_" + hashlib.sha1(key.encode()).hexdigest()[:10]
+        case_dir = self.repo_root / ".temp" / "city_cases" / name
+        with self._lock:
+            case_lock = self._case_locks.setdefault(name, threading.Lock())
+        # A retry waits for a running build of the same case, then reuses it.
+        with case_lock:
+            case_json = case_dir / "case.json"
+            if case_json.is_file():
+                case: dict[str, Any] = json.loads(case_json.read_text(encoding="utf-8"))
+                case.pop("bbox", None)
+            else:
+                case = make_case(
+                    (west, south, east, north),
+                    case_dir,
+                    resolution=resolution,
+                    default_height=default_height,
+                )
+        return case
 
     def render_simulation(
         self, run_id: str, idempotency_key: str, options: dict[str, Any] | None = None

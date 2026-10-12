@@ -123,6 +123,37 @@ startup does not intentionally install packages and all diagnostics use stderr.
 Preparation is a technical validation step. It does not add an extra user
 confirmation when the run has already been requested.
 
+### Picking a city area on a map
+
+`open_area_selector(max_area_km2=4.0)` returns `{selection_id, url, status:
+"pending", max_area_km2, instructions}`. The user opens `url`, a Leaflet/OSM
+map (`mcp_server/web/area_selector.html`), draws a rectangle (the page shows
+its km² and bbox) and presses "Use this area". `get_selected_area(selection_id,
+wait_s=30)` blocks up to `wait_s` (at most 60 s) and returns status `pending`
+(call again), `expired` (the page server shut down or the id is unknown to
+the current one; open a new selector) or `selected` with `bbox`
+`{west, south, east, north, area_km2}` in EPSG:4326 degrees. A user may
+instead paste a bbox; the agent then uses it directly, no page needed.
+`mcp_server.area_selector.validate_bbox` is the one check: finite lon/lat in
+range, `west < east`, `south < north` and the area limit. The page needs
+internet access for Leaflet (unpkg) and the OSM tiles; search uses Nominatim.
+
+The page server lives in the MCP process (not the supervisor) and mirrors the
+asset server below: loopback, Host/Origin checks, an unguessable token per
+selection in the URL, JSON-only POSTs, and shutdown after 30 idle minutes.
+
+`prepare_city_case(bbox, resolution=4.0, default_height=10.0,
+max_area_km2=4.0)` then builds the case with `pycity4cfd.case.make_case` (see
+[pycity4cfd.md](pycity4cfd.md)) in `.temp/city_cases/area_<hash>/` and returns
+`{case_dir, overrides, n_buildings, height_sources, max_height, domain}`. Pass
+the `max_area_km2` the selector was opened with, and
+`["model=pylbm", *overrides]` to `prepare_forward_run`. A folder that already
+has a `case.json` is reused; a per-case lock makes a retry wait for a running
+build instead of racing it. It runs in the MCP process and takes minutes: the
+OpenStreetMap (Overpass) download dominates. Known limit: the build blocks the
+tool call rather than running in the supervisor. It needs City4CFD built
+(`pixi run -e mcp build-city4cfd`).
+
 ## Configuration and artifacts
 
 Scientific configuration is the `configs/` tree. Trusted `_target_`s are the
