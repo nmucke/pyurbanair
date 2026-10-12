@@ -29,7 +29,7 @@
 \newcommand{\bad}[1]{\textcolor{red!65!black}{#1}}
 
 \title{Joint inflow and SGS-bias estimation in uDALES:\\
-       twin tests, Round~1}
+       twin tests, Rounds~1 and~1b}
 \author{pyurbanair SGS discrepancy study}
 \date{October 2026}
 
@@ -62,6 +62,11 @@ array. Twenty-eight assimilation runs were made, plus a pilot.
   observations face 32 members without localisation.
 \item We also report a diagnostics bug: the posterior SGS-health values were
   copies of the prior's. It is now fixed.
+\item \textbf{Round 1b} replaced the error with the measured realisation noise
+  and compared averaging intervals. The honest error fixes the bulk
+  calibration statistics. Only \SI{180}{s} window means avoid collapse, and
+  they give the best held-out scores. With turbulent inflow, the SGS
+  correction still adds no value.
 \end{itemize}
 \end{abstract}
 
@@ -520,6 +525,150 @@ planned. Test these first:
 \item a rerun of the saturation diagnostics with the fix.
 \end{enumerate}
 
+\FloatBarrier
+\section{Round 1b: an error model for turbulent inflow}
+\label{sec:r1b}
+
+Round~1b (26 runs, none failed) asks two things. Can the correction add value
+with a turbulent truth once the observation error is honest? And does
+averaging the observations into bins help? It uses existing options only:
+\begin{itemize}
+\item a \emph{persistent} representation error, which is not divided by
+  $\sqrt n$ inside a bin;
+\item averaging over no bins (raw \SI{1}{s} frames), \SI{20}{s} or
+  \SI{180}{s} windows;
+\item the same truth, replicas, priors and smoother as Round~1.
+\end{itemize}
+
+\paragraph{E0: realisation noise.}
+The collapsed Round~1 stage-B ensembles share near-identical parameters but
+have different inlet seeds, so their spread is pure realisation noise
+(Figure~\ref{fig:r1b-noise}).
+\begin{itemize}
+\item Per averaging interval, it is $\sigma_r=0.285$, 0.17, 0.115 and
+  \SI{0.085}{m/s} (none, 20, 60, \SI{180}{s}). Truth against replica agrees
+  within a few per cent up to \SI{20}{s} and is lower at \SI{180}{s}.
+\item Round~1's $\seff=\SI{0.060}{m/s}$ was therefore about $3\times$ too
+  small.
+\item The noise decorrelates in 5--\SI{7}{s}, so raw frames are over-counted
+  about $5$--$7\times$ when treated as independent.
+\item With honest errors, the expected SGS signal per window is weak in
+  every arm: $D\sqrt{N_\mathrm{eff}}\approx1.8$--3.1.
+\end{itemize}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r1b_noise.pdf}
+\caption{Turbulence realisation noise at the sensors with inlet turbulence on.
+(a)~Std of an observation against the averaging interval, by sensor height,
+from the members (filled) and from truth against replica (hollow); the dashed
+line is Round~1's $\seff$. (b)~Decorrelation of the member anomalies.}
+\label{fig:r1b-noise}
+\end{figure}
+
+\paragraph{Execution and saturation.}
+\begin{itemize}
+\item The stage-A reruns with the attribute fix reproduce Round~1 exactly.
+\item The posterior saturated band-cell fraction is 0 in every window,
+  against 0.24--0.42 for the prior ensemble. The execution criterion passes.
+\item One window with 6480 raw-frame observations runs in \SI{33}{min}.
+\end{itemize}
+
+\paragraph{Calibration and averaging (stage B).}
+Figures~\ref{fig:r1b-cal} and~\ref{fig:r1b-avg} show the arms side by side.
+\begin{itemize}
+\item \textbf{The honest error fixes the bulk statistics:} the Desroziers
+  ratio and the spread/skill ratio are about 1 in every new arm, against 2.9
+  in Round~1.
+\item \textbf{With raw frames and \SI{20}{s} bins, every seed still
+  collapses} onto wrong values. Those two ratios do not detect the collapse,
+  so they are not enough evidence of calibration on their own.
+\item \textbf{Only \SI{180}{s} window means avoid it.} With 36 observations
+  per window, about the ensemble size:
+  \begin{itemize}
+  \item the inflow is recovered in all seeds (angle 10.29--\ang{10.52});
+  \item $b$ keeps 0.34--0.45 of its prior std;
+  \item the held-out scores are the best of all arms, for both T3 and T2.
+    The CRPS of window means of $|U|$ is 0.046, against 0.060 (\SI{20}{s}),
+    0.073 (none) and 0.085 (Round~1), with the same sign in all seeds.
+  \end{itemize}
+\end{itemize}
+The frozen rules still return ``fail'' and ``neutral'' for \SI{180}{s}:
+\begin{itemize}
+\item The collapse rule (std $\ge0.1$ prior std) does not tell a
+  well-determined, correctly recovered inflow apart from a degenerate
+  collapse.
+\item The noise rule compares differences between arms with the replica's
+  score \emph{level} (about 0.06), which no stage-B difference can exceed.
+\end{itemize}
+We report these frozen verdicts and flag both rules for future plans.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r1b_calibration.pdf}
+\caption{Calibration by arm, stage~B. (a)~Final-window posterior std over
+prior std per parameter (T3; points are seeds). The line marks the plan's
+collapse threshold. (b)~Desroziers ratio and (c)~validation spread/skill,
+with the target bands shaded.}
+\label{fig:r1b-cal}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r1b_averaging.pdf}
+\caption{Held-out validation scores by averaging arm, stage~B, for T3 and T2
+(points are seeds). The dashed line is the replica floor.}
+\label{fig:r1b-avg}
+\end{figure}
+
+\paragraph{Value of the SGS correction (stage B).}
+\begin{itemize}
+\item There is \bad{no added value} in any arm. T3 and T2 are within noise
+  on every row, and the sign flips with the seed: for the \SI{180}{s} arm,
+  the CRPS changes by $+14$, $-16$ and $-12\,\%$.
+\item The coefficients are not recovered even at \SI{180}{s}: $b$ averages
+  $(0.14,-0.06,0.11)$ (Figure~\ref{fig:r1b-params}). This is what E0's weak
+  expected signal predicted.
+\end{itemize}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r1b_params.pdf}
+\caption{Final-window posteriors by arm, stage~B, with the truth lines and
+the prior band (points are seeds).}
+\label{fig:r1b-params}
+\end{figure}
+
+\paragraph{Stage A: averaging without noise.}
+With the Round~1 error, raw frames and \SI{180}{s} means both keep the full
+value of estimating $b$: T3 against T2 is $-73\,\%$ and $-70\,\%$, against
+$-70\,\%$ at \SI{20}{s}. Without realisation noise, averaging costs no
+information.
+
+Applying the stage-B error in stage~A has two effects:
+\begin{itemize}
+\item it widens the overconfident posterior;
+\item it doubles the CRPS, because the error is then far too large there
+  (Desroziers 0.40).
+\end{itemize}
+The error has to match each regime's actual noise.
+
+\paragraph{Round 1b verdict.}
+\begin{enumerate}
+\item An honest error alone does not prevent collapse. Fewer observations
+  than members does: \SI{180}{s} window means are the working setting.
+\item Averaging helps on calibration and, consistently across seeds, on the
+  held-out scores. It costs nothing without noise.
+\item With turbulent inflow, the SGS correction still adds no value and is
+  not identifiable.
+\item Formally, the plan's decision table says ``still miscalibrated: stop''.
+  Localisation and a 64-member ensemble were not run. In substance, the
+  blocker at \SI{180}{s} is now the weak SGS signal, not the error model.
+  The PALM round was requested regardless, and its plan carries these
+  settings forward.
+\end{enumerate}
+
+
 \appendix
 \section{Runs}
 
@@ -543,6 +692,12 @@ A, B & T1, T3 & L1 & 1 & done \\
 A, B & T3 hybrid & L2 & 1 & done, about \SI{215}{min} \\
 B & T3 joint filter & L2 & 1 & done, \SI{165}{min} \\
 A & T3 joint filter & L2 & 1 & \bad{failed} (diffusion-limited $\Delta t$ collapse) \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{Round 1b} (all done, 80--\SI{97}{min} each; tables in \code{appendix\_round1b.md})} \\
+B & T3, T2: none, 20, \SI{180}{s} & L2 & 1, 2, 3 & honest persistent error \\
+A & T1, T3 rerun (saturation) & L2 & 1 & done \\
+A & T3, T2: none, \SI{180}{s}; T3 with the stage-B error & L2 & 1 & done \\
+B & T3, raw frames, 1 window (feasibility) & L2 & 1 & done, \SI{33}{min} \\
 \bottomrule
 \end{tabular}
 \end{table}
