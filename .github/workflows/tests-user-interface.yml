@@ -1,0 +1,47 @@
+# The browser app (libs/user-interface), in the mcp pixi environment. Its
+# tests fake every Tools action except config composition: no network, no solver.
+# Pull requests run it when the package or something it depends on changes;
+# every push to main and a manual run (Actions tab) run it unconditionally.
+name: "Tests: user-interface"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "libs/user-interface/**"
+      - "libs/mcp-server/**"
+      - "libs/pycity4cfd/**"
+      - "libs/visualization/**"
+      - "tests/user_interface/**"
+      - "configs/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "pixi.lock"
+      - "tests/conftest.py"
+      - ".github/actions/setup/**"
+      - ".github/workflows/tests-user-interface.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests/user_interface (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/setup
+        with:
+          environment: mcp
+      - name: Run tests
+        run: pixi run --locked -e mcp python -m pytest tests/user_interface --durations=10

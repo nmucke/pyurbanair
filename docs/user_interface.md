@@ -1,0 +1,82 @@
+# Browser app for city simulations
+
+`libs/user-interface` (import `user_interface`) is a local web app: draw an
+area on a map, build the case, pick a model and settings, launch the run,
+watch it and open the results viewer. No LLM is involved. It runs in the `mcp`
+environment.
+
+```bash
+pixi install -e mcp
+pixi run -e mcp build-city4cfd      # once per env (see pycity4cfd.md)
+pixi run -e mcp start-ui            # = python -m user_interface --repo-root .
+```
+
+`python -m user_interface [--repo-root .] [--port 0] [--no-browser]` prints the
+URL (`http://127.0.0.1:<port>/<token>/`) and opens it unless `--no-browser`.
+Ctrl-C stops the server; launched runs keep going in the job supervisor
+([mcp.md](mcp.md)). The case build needs internet access (Overpass), and so
+does the page itself (map tiles and Leaflet).
+
+## What it reuses
+
+Every action is a call on one `mcp_server.tools.Tools(repo_root)`:
+`prepare_city_case`, `inspect_config`, `prepare_forward_run`,
+`launch_forward_run`, `get_run_status`, `get_run_logs`, `cancel_run`,
+`inspect_run_results`, `render_simulation` and `visualization`. Bbox checks are
+`mcp_server.area_selector.validate_bbox`. Runs, plans and renders therefore land
+in the same store as MCP runs (`.temp/local-jobs`), and city cases in
+`.temp/city_cases/` ([pycity4cfd.md](pycity4cfd.md)).
+
+`user_interface/app.py` holds the server and the API; `web/` the static page
+(`index.html`, `app.js`, `app.css`, no build step). The server mirrors
+`mcp_server/area_selector.py`: a stdlib `ThreadingHTTPServer` on 127.0.0.1,
+exact Host and Origin checks, an unguessable token as the first path segment,
+JSON-only POST bodies of at most 64 KiB (an empty body counts as `{}`).
+Cases, runs and renders are kept in memory for the session; a restart forgets
+them (the runs themselves stay in the store).
+
+## JSON API
+
+All routes are under `/<token>/`: the page at `/<token>/`, static files at
+`/<token>/static/<file>`, the API at `/<token>/api/...`. Errors are HTTP 4xx/5xx
+with `{"error": "<message>"}`.
+
+| Method, path | Body | Response |
+|---|---|---|
+| `GET api/options` | | `{models, fields, case_defaults: {resolution, default_height}, max_area_km2}` |
+| `POST api/cases` | `{bbox: {west, south, east, north}, resolution?, default_height?}` | 202 `{case_id}`; the build runs in a thread |
+| `GET api/cases/<id>` | | `{case_id, status: building\|ready\|failed, error?, summary?, buildings?, sensors?}` |
+| `POST api/runs` | `{case_id, model, settings: {<field key>: value}, extra_overrides?}` | `{run_id}` (prepare + launch) |
+| `GET api/runs` | | `{runs: [{run_id, case_id, model, state, created}]}`, newest first |
+| `GET api/runs/<id>` | | `{run_id, state, phase?, message?, log_tail, results?: {files, variables, dimensions, times}}` |
+| `POST api/runs/<id>/cancel` | | `{run_id, state}` |
+| `POST api/runs/<id>/visualization` | | `{visualization_id}` (409 until the run succeeded) |
+| `GET api/visualizations/<id>` | | `{state, viewer_url?, message?}` |
+
+- **Runs** compose `["model=<m>", "params=dynamic", *case overrides,
+  *settings, *extra_overrides]`. `params=dynamic` is pinned because the inflow
+  fields live in that sampler. A plan with configuration or prerequisite issues
+  is answered with a 400 listing them, and nothing is launched.
+- **Fields** (`FIELDS` in `app.py`) are curated Hydra override paths. Each
+  default is read from the composed forward config of the first model in the
+  field's `models` (all models when absent). Unknown keys are rejected, and
+  so are fields for another model; `extra_overrides` is the escape hatch.
+  The inflow angle is the flow direction, counter-clockwise from +x (east).
+- **Case geometry**: `buildings` is `case_dir/buildings.geojson` reprojected to
+  EPSG:4326 (properties `height`, `height_source`). `sensors` are the
+  assimilated `obs.x/y_points` as `[lon, lat]`. They are converted from the
+  domain frame with the origin `make_case` uses: the bbox's UTM envelope corner
+  less its default `margin`. The held-out validation sensors are not returned.
+- **Log tail**: the last 40 lines of the last 16 KiB of `worker.log`.
+
+## Tests
+
+`tests/user_interface/` starts the app on a fake `Tools`, which keeps the real
+config composition and fakes everything else: no network, no solver, no
+supervisor. It checks the token, Host and Origin checks, the body rules, that
+every field key resolves for each model it applies to, and the case and run
+lifecycles.
+
+```bash
+pixi run --locked -e mcp python -m pytest tests/user_interface
+```
