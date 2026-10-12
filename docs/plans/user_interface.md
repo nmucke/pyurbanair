@@ -11,7 +11,7 @@ libs/user-interface/src/user_interface/
   app.py        loopback HTTP server + JSON API, wraps mcp_server.tools.Tools
   __main__.py   python -m user_interface [--repo-root .] [--port 0] [--no-browser]
   web/          index.html, app.js, app.css (static, no build step)
-tests/user-interface/
+tests/user_interface/
 ```
 
 Reuse, don't duplicate: every action goes through `mcp_server.tools.Tools`
