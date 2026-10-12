@@ -2,8 +2,8 @@
 City4CFD on hand-written building footprints (``pycity4cfd.city4cfd``).
 
 The unit tests check the config ``write_config`` writes; the ``integration``
-test runs the binary from ``pixi run build-city4cfd`` (skipped when it is not
-built) on three rectangular buildings and checks the buildings STL.
+test runs the binary from the ``city4cfd`` pixi env (skipped when it is not on
+PATH) on three rectangular buildings and checks the buildings STL.
 """
 
 import json
@@ -126,30 +126,19 @@ def test_executable_missing_names_the_env(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
-    monkeypatch.setattr(city4cfd, "BUILD_DIR", tmp_path)
-    monkeypatch.setattr(city4cfd, "PIXI_ENV", "someenv")
     with pytest.raises(FileNotFoundError, match="pixi install -e city4cfd"):
         city4cfd.city4cfd_executable()
 
 
-def test_executable_on_path_comes_first(
+def test_executable_found_on_path(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for directory in ("bin", "build"):
-        binary = tmp_path / directory / "city4cfd"
-        binary.parent.mkdir()
-        binary.write_text("#!/bin/sh\n")
-        binary.chmod(0o755)
-    monkeypatch.setattr(city4cfd, "BUILD_DIR", tmp_path / "build")
+    binary = tmp_path / "bin" / "city4cfd"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     assert city4cfd.city4cfd_executable() == tmp_path / "bin" / "city4cfd"
-    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
-    assert city4cfd.city4cfd_executable() == tmp_path / "build" / "city4cfd"
-
-
-def test_build_dir_is_per_pixi_env() -> None:
-    assert city4cfd.BUILD_DIR.name == city4cfd.PIXI_ENV
-    assert city4cfd.BUILD_DIR.parent.name == "build"
 
 
 def _has_city4cfd() -> bool:

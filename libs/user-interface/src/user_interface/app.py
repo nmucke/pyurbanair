@@ -339,19 +339,36 @@ class App:
         default_height = _positive(
             payload, "default_height", CASE_DEFAULTS["default_height"], 500.0
         )
-        # A finished case is ready at once; a new one builds as a job.
-        built = self.tools.prepare_city_case(
-            bbox, resolution=resolution, default_height=default_height
-        )
+        # A finished case is ready at once; a new one builds as a job. Bad
+        # input (ValueError) is a 400; any other failure fails the case.
+        try:
+            built = self.tools.prepare_city_case(
+                bbox, resolution=resolution, default_height=default_height
+            )
+        except ValueError:
+            raise
+        except Exception as exc:  # reported to the page, not raised
+            traceback.print_exc()
+            built = {"status": "failed", "error": str(exc) or repr(exc)}
         case_id = uuid.uuid4().hex[:12]
         record: dict[str, Any] = {"case_id": case_id, "status": "building"}
-        if built["status"] == "ready":
-            record.update(self._ready(built))
-        else:
-            record["case_job_id"] = built["case_job_id"]
+        record.update(self._settle(built))
         with self._lock:
             self.cases[case_id] = record
         return 202, {"case_id": case_id}
+
+    @classmethod
+    def _settle(cls, built: dict[str, Any]) -> dict[str, Any]:
+        """The case record update for a `prepare_city_case`/`get_city_case` result."""
+        if built["status"] == "ready":
+            try:
+                return cls._ready(built)
+            except Exception as exc:  # reported to the page, not raised
+                traceback.print_exc()
+                return {"status": "failed", "error": str(exc)[:2000] or repr(exc)}
+        if built["status"] == "failed":
+            return {"status": "failed", "error": built["error"][:2000]}
+        return {"case_job_id": built["case_job_id"]}
 
     @staticmethod
     def _ready(case: dict[str, Any]) -> dict[str, Any]:
@@ -375,16 +392,7 @@ class App:
                 record.get("case_job_id") if record["status"] == "building" else None
             )
         if job_id is not None:
-            built = self.tools.get_city_case(job_id)
-            update: dict[str, Any] = {}
-            if built["status"] == "ready":
-                try:
-                    update = self._ready(built)
-                except Exception as exc:  # reported to the page, not raised
-                    traceback.print_exc()
-                    update = {"status": "failed", "error": str(exc)[:2000]}
-            elif built["status"] == "failed":
-                update = {"status": "failed", "error": built["error"][:2000]}
+            update = self._settle(self.tools.get_city_case(job_id))
             with self._lock:
                 record.update(update)
         with self._lock:

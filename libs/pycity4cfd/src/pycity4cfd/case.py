@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -258,7 +259,9 @@ def make_case(
         "crs": buildings.crs.to_string(),
         "origin": [float(xmin - margin), float(ymin - margin)],
     }
-    (case_dir / "case.json").write_text(
-        json.dumps({"bbox": list(bbox), **result}, indent=2) + "\n"
-    )
+    # case.json marks the folder finished: write it atomically, so a reader
+    # never sees it half written and a killed build leaves none.
+    temporary = case_dir / f".case.json.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps({"bbox": list(bbox), **result}, indent=2) + "\n")
+    os.replace(temporary, case_dir / "case.json")
     return result
