@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import secrets
 import threading
 import time
@@ -26,7 +27,7 @@ class BundleAssetServer:
     def __init__(self, idle_timeout: float = 1800):
         if idle_timeout <= 0:
             raise ValueError("idle_timeout must be positive")
-        self.bundles: dict[str, tuple[Path, set[str]]] = {}
+        self.bundles: dict[str, tuple[Path, set[str], str | None]] = {}
         self.last_access = time.monotonic()
         self.closed = False
         self._lock = threading.Lock()
@@ -63,7 +64,7 @@ class BundleAssetServer:
                 if bundle is None:
                     self.send_error(404)
                     return
-                root, allowed = bundle
+                root, allowed, frame_ancestor = bundle
                 relative = parts[3] or "index.html"
                 if relative not in allowed:
                     self.send_error(404)
@@ -113,7 +114,8 @@ class BundleAssetServer:
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header(
                     "Content-Security-Policy",
-                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors "
+                    + (frame_ancestor or "'none'"),
                 )
                 if range_header:
                     self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
@@ -145,7 +147,18 @@ class BundleAssetServer:
 
         threading.Thread(target=reap, daemon=True).start()
 
-    def register(self, bundle_root: str | Path) -> str:
+    def register(
+        self, bundle_root: str | Path, frame_ancestor: str | None = None
+    ) -> str:
+        """Serve a completed bundle; returns its opaque URL.
+
+        `frame_ancestor` (a loopback origin, ``http://127.0.0.1:<port>``) may
+        embed this bundle in a frame; by default no page may.
+        """
+        if frame_ancestor is not None and not re.fullmatch(
+            r"http://127\.0\.0\.1:\d{1,5}", frame_ancestor
+        ):
+            raise ValueError("frame_ancestor must be http://127.0.0.1:<port>")
         if self.closed:
             raise RuntimeError("Asset server has expired; create a new server")
         root = Path(bundle_root).resolve()
@@ -176,7 +189,7 @@ class BundleAssetServer:
                 raise ValueError(f"Missing bundle asset {relative}")
         token = secrets.token_urlsafe(24)
         with self._lock:
-            self.bundles[token] = (root, allowed)
+            self.bundles[token] = (root, allowed, frame_ancestor)
         self.last_access = time.monotonic()
         return f"http://{self.authority}/view/{token}/"
 

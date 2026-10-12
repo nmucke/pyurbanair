@@ -339,8 +339,16 @@ class Tools:
         return {**summary(job), "visualization_id": job["id"]}
 
     def visualization(
-        self, visualization_id: str, preview: str | None = None
+        self,
+        visualization_id: str,
+        preview: str | None = None,
+        frame_ancestor: str | None = None,
     ) -> tuple[dict[str, Any], bytes | None]:
+        """Metadata, a viewer URL and an optional preview PNG of a render.
+
+        `frame_ancestor` is the origin allowed to embed the viewer in a frame
+        (the browser app's own); by default none is.
+        """
         job = self.jobs.request("status", job_id=visualization_id)
         if job["kind"] != "visualization":
             raise ValueError("ID does not identify a visualization")
@@ -368,7 +376,7 @@ class Tools:
         metadata["manifest"] = transported_manifest
         try:
             metadata["viewer_url"] = self.jobs.request(
-                "viewer", job_id=visualization_id
+                "viewer", job_id=visualization_id, frame_ancestor=frame_ancestor
             )["url"]
         except (OSError, RuntimeError, ValueError) as exc:
             # PNG delivery works even where the local browser server cannot bind.

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+# Local browser app: draw an area, build the case, run a model, see results.
+# Every action goes through mcp_server.tools.Tools; the web/ assets ship as
+# package data.
+dependencies = ["mcp-server", "pycity4cfd"]
+name = "user-interface"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/user_interface"]

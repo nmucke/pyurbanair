@@ -132,7 +132,8 @@ class Supervisor:
                     self.asset_server = BundleAssetServer()
                 return {
                     "url": self.asset_server.register(
-                        pathlib.Path(job["run_root"]) / "bundle"
+                        pathlib.Path(job["run_root"]) / "bundle",
+                        args.get("frame_ancestor"),
                     )
                 }
             raise ValueError(f"Unknown supervisor operation: {operation}")

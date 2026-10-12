@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>pyurbanair · city flow</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d7c72'/%3E%3Cpath d='M8 25V15h5v10M14 25V9h5v16M20 25v-8h5v8' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<link rel="stylesheet" href="static/app.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
+<script src="static/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="panel" aria-label="Simulation setup">
+    <header class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect width="32" height="32" rx="8"/>
+        <path class="logo-buildings" d="M8 25V15h5v10M14 25V9h5v16M20 25v-8h5v8"/>
+      </svg>
+      <div class="brand-text">
+        <strong>pyurbanair</strong>
+        <span>City wind simulations</span>
+      </div>
+      <button type="button" id="runs-toggle" class="btn ghost small" aria-pressed="false">
+        Runs <span class="count" id="runs-count" hidden></span>
+      </button>
+    </header>
+
+    <nav class="stepper" aria-label="Steps">
+      <ol>
+        <li><button type="button" data-goto="1"><span class="dot">1</span><span class="label">Area</span></button></li>
+        <li><button type="button" data-goto="2"><span class="dot">2</span><span class="label">Case</span></button></li>
+        <li><button type="button" data-goto="3"><span class="dot">3</span><span class="label">Model</span></button></li>
+        <li><button type="button" data-goto="4"><span class="dot">4</span><span class="label">Run</span></button></li>
+        <li><button type="button" data-goto="5"><span class="dot">5</span><span class="label">Results</span></button></li>
+      </ol>
+    </nav>
+
+    <div class="panel-scroll">
+      <!-- 1 Area -->
+      <section class="step" data-step="1" aria-labelledby="h-area">
+        <h2 id="h-area" tabindex="-1">Choose an area</h2>
+        <p class="lede">Find a place, then drag a rectangle on the map. The buildings inside it become the simulation domain.</p>
+
+        <form id="search-form" class="search" role="search">
+          <label class="sr-only" for="search-input">Search a place</label>
+          <input type="search" id="search-input" placeholder="Search a place, e.g. Delft" autocomplete="off">
+          <button type="submit" class="btn">Search</button>
+        </form>
+        <ul id="search-results" class="search-results" hidden></ul>
+
+        <button type="button" id="draw-toggle" class="btn draw-toggle" aria-pressed="false">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3.5" y="5.5" width="13" height="9" rx="1" stroke-dasharray="2.5 2"/><path d="M14 12.5l3 3"/></svg>
+          <span id="draw-label">Draw area</span>
+        </button>
+
+        <div class="area-card" id="area-card" data-state="empty" aria-live="polite">
+          <div class="area-head">
+            <span class="area-value"><span id="area-value">—</span> <small>km²</small></span>
+            <span class="area-max" id="area-max"></span>
+          </div>
+          <div class="meter" aria-hidden="true"><span id="area-meter"></span></div>
+          <dl class="bbox" id="bbox">
+            <div><dt>W</dt><dd data-k="west">—</dd></div>
+            <div><dt>S</dt><dd data-k="south">—</dd></div>
+            <div><dt>E</dt><dd data-k="east">—</dd></div>
+            <div><dt>N</dt><dd data-k="north">—</dd></div>
+          </dl>
+          <p class="area-msg" id="area-msg">No area yet. Press <b>Draw area</b> and drag on the map.</p>
+        </div>
+
+        <form id="case-form" class="case-form" novalidate>
+          <div class="field-row">
+            <div class="field">
+              <label for="resolution">Grid resolution</label>
+              <div class="input-unit"><input type="number" id="resolution" min="0.1" step="any" required><span class="unit">m</span></div>
+            </div>
+            <div class="field">
+              <label for="default-height">Default building height</label>
+              <div class="input-unit"><input type="number" id="default-height" min="0.1" step="any" required><span class="unit">m</span></div>
+            </div>
+          </div>
+          <p class="hint">The default height is used for buildings without a height or levels tag in OpenStreetMap.</p>
+          <div class="actions">
+            <button type="submit" id="build-case" class="btn primary" disabled>Build case</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 2 Case -->
+      <section class="step" data-step="2" aria-labelledby="h-case" hidden>
+        <h2 id="h-case" tabindex="-1">Case</h2>
+
+        <div id="case-building" class="progress-block" hidden>
+          <div class="progress-title"><span class="spinner" aria-hidden="true"></span> Building the case… <span class="elapsed" id="case-elapsed"></span></div>
+          <div class="progress indeterminate" role="progressbar" aria-label="Building the case"><span></span></div>
+          <p class="hint">Downloading buildings from OpenStreetMap and meshing the domain. The download can take a few minutes for dense areas.</p>
+        </div>
+
+        <div id="case-failed" hidden>
+          <div class="callout danger" role="alert">
+            <strong>The case could not be built.</strong>
+            <p id="case-error"></p>
+          </div>
+          <div class="actions">
+            <button type="button" class="btn" data-goto="1">Change area</button>
+            <button type="button" id="case-retry" class="btn primary">Retry</button>
+          </div>
+        </div>
+
+        <div id="case-ready" hidden>
+          <div class="cards">
+            <div class="card"><span class="card-label">Buildings</span><span class="card-value" id="c-buildings">—</span></div>
+            <div class="card"><span class="card-label">Max height</span><span class="card-value"><span id="c-maxh">—</span> <small>m</small></span></div>
+            <div class="card"><span class="card-label">Grid</span><span class="card-value mono" id="c-grid">—</span><span class="card-sub" id="c-lengths"></span></div>
+            <div class="card" id="c-cells-card"><span class="card-label">Cells</span><span class="card-value" id="c-cells">—</span><span class="card-sub" id="c-cells-sub"></span></div>
+          </div>
+          <div class="card wide">
+            <span class="card-label">Building heights from</span>
+            <div class="stack-bar" id="c-sources-bar" aria-hidden="true"></div>
+            <ul class="stack-legend" id="c-sources"></ul>
+          </div>
+          <div class="callout warn" id="c-cells-warning" hidden>
+            <strong>Large grid.</strong> Runs will be slow and memory-hungry. A coarser resolution or a smaller area keeps it manageable.
+          </div>
+          <div class="actions">
+            <button type="button" class="btn" data-goto="1">Change area</button>
+            <button type="button" class="btn primary" data-goto="3">Choose model</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3 Model & settings -->
+      <section class="step" data-step="3" aria-labelledby="h-model" hidden>
+        <h2 id="h-model" tabindex="-1">Model &amp; settings</h2>
+        <fieldset class="models">
+          <legend class="sr-only">Model</legend>
+          <div id="model-cards" class="model-cards"></div>
+        </fieldset>
+        <form id="run-form" novalidate>
+          <h3 class="subhead">Settings</h3>
+          <div id="fields" class="fields"></div>
+          <details class="advanced" id="advanced">
+            <summary>Advanced</summary>
+            <label for="extra-overrides">Extra Hydra overrides <span class="muted">(one per line)</span></label>
+            <textarea id="extra-overrides" rows="4" spellcheck="false" placeholder="model.some_option=42"></textarea>
+          </details>
+          <p class="hint" id="run-blocked" hidden>Build a case first: the run needs a ready case.</p>
+          <div class="actions">
+            <button type="button" class="btn" data-goto="2">Back</button>
+            <button type="submit" id="run-start" class="btn primary">Run simulation</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- 4 Run -->
+      <section class="step" data-step="4" aria-labelledby="h-run" hidden>
+        <h2 id="h-run" tabindex="-1">Run</h2>
+        <div class="run-head">
+          <span class="badge" id="run-state" data-state="">—</span>
+          <span class="elapsed big" id="run-elapsed" title="Elapsed time"></span>
+        </div>
+        <dl class="facts">
+          <div><dt>Run</dt><dd class="mono" id="run-id">—</dd></div>
+          <div><dt>Phase</dt><dd id="run-phase">—</dd></div>
+        </dl>
+        <p class="run-message" id="run-message"></p>
+        <div class="progress indeterminate" id="run-progress" role="progressbar" aria-label="Simulation running"><span></span></div>
+        <div class="callout danger" id="run-failed" role="alert" hidden>
+          <strong id="run-failed-title">The run failed.</strong>
+          <p id="run-failed-text"></p>
+        </div>
+        <div class="log-head"><span>Log</span><span class="muted" id="log-count"></span></div>
+        <pre class="log" id="run-log" tabindex="0" aria-label="Run log">Waiting for output…</pre>
+        <div class="actions">
+          <button type="button" class="btn" data-goto="3">Settings</button>
+          <button type="button" id="run-cancel" class="btn danger">Cancel run</button>
+          <button type="button" id="run-to-results" class="btn primary" data-goto="5" hidden>View results</button>
+        </div>
+      </section>
+
+      <!-- 5 Results -->
+      <section class="step" data-step="5" aria-labelledby="h-results" hidden>
+        <h2 id="h-results" tabindex="-1">Results</h2>
+        <div id="viz-pending" class="progress-block" hidden>
+          <div class="progress-title"><span class="spinner" aria-hidden="true"></span> Rendering figures… <span class="elapsed" id="viz-elapsed"></span></div>
+          <div class="progress indeterminate" role="progressbar" aria-label="Rendering results"><span></span></div>
+          <p class="hint">Slices, animations and sensor time series are rendered from the saved results; the solver is not rerun.</p>
+        </div>
+        <div id="viz-failed" hidden>
+          <div class="callout danger" role="alert"><strong id="viz-failed-title">Rendering failed.</strong><p id="viz-error"></p></div>
+          <div class="actions"><button type="button" id="viz-retry" class="btn primary">Retry</button></div>
+        </div>
+        <div id="viz-ready" hidden>
+          <div class="callout ok"><strong>Results ready.</strong> The viewer is shown on the right.</div>
+          <div class="actions start">
+            <button type="button" id="viz-toggle" class="btn">Show map</button>
+            <a id="viz-open" class="btn" href="#" target="_blank" rel="noopener">Open in new tab
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3H3v10h10v-3M9 3h4v4M13 3L7 9"/></svg></a>
+          </div>
+        </div>
+        <dl class="facts" id="result-facts"></dl>
+        <div class="actions">
+          <button type="button" class="btn" data-goto="3">New run with other settings</button>
+        </div>
+        <h3 class="subhead">Previous runs</h3>
+        <ul class="runs-list" data-runs-list></ul>
+      </section>
+
+      <!-- Runs (not a step) -->
+      <section class="step" data-view="runs" aria-labelledby="h-runs" hidden>
+        <div class="view-head">
+          <h2 id="h-runs" tabindex="-1">Runs</h2>
+          <button type="button" class="btn ghost small" id="runs-close">Back</button>
+        </div>
+        <p class="lede">Runs started from this app. Open one to follow it or see its results.</p>
+        <ul class="runs-list" data-runs-list></ul>
+      </section>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <div id="map" aria-label="Map"></div>
+    <div class="draw-hint" id="draw-hint" hidden>Drag on the map to draw the area · <kbd>Esc</kbd> to stop</div>
+    <div class="legend" id="legend" hidden>
+      <div class="legend-title">Building height</div>
+      <div class="ramp" id="legend-ramp"></div>
+      <div class="ramp-ticks"><span>0 m</span><span id="legend-mid"></span><span id="legend-max"></span></div>
+      <ul class="legend-keys">
+        <li><span class="key-line solid"></span>From OSM tag or levels</li>
+        <li><span class="key-line dashed"></span>Default height</li>
+        <li id="legend-sensors"><span class="key-dot"></span>Sensor</li>
+      </ul>
+    </div>
+    <div class="stage-switch" id="stage-switch" role="group" aria-label="Main view" hidden>
+      <button type="button" data-stage="map" aria-pressed="true">Map</button>
+      <button type="button" data-stage="results" aria-pressed="false">Results</button>
+    </div>
+    <section class="results-view" id="results-view" hidden>
+      <iframe id="viewer-frame" title="Simulation results viewer"></iframe>
+    </section>
+  </main>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

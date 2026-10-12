@@ -213,8 +213,11 @@ with PyVista 0.46.5 / VTK 9.5.2; offscreen support remains machine-dependent.
 registered completed bundle files through unguessable URL tokens. It validates
 Host/Origin, applies a same-origin content security policy, resolves symlinks,
 rejects traversal and directory listings, and implements GET/HEAD and one HTTP
-byte range. File reads use 64 KiB chunks. There are no mutation endpoints and
-it does not open a browser. The default idle timeout is 30 minutes; clients must
+byte range. File reads use 64 KiB chunks. No page may frame a bundle
+(`frame-ancestors 'none'`) unless it was registered with
+`register(bundle, frame_ancestor="http://127.0.0.1:<port>")`: then that one
+loopback origin may (the browser app embeds its viewer so). There are no
+mutation endpoints and it does not open a browser. The default idle timeout is 30 minutes; clients must
 retrieve/register again after server expiry. The supervisor should own its
 lifetime independently from the MCP client and render workers. A remote client
 cannot assume it can access these loopback URLs.
