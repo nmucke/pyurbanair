@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -33,8 +34,11 @@ import numpy as np
 
 from pyurbanair.utils.solver_process import run_solver
 
-# libs/pycity4cfd/build/, where build_city4cfd.sh puts the binary.
-BUILD_DIR = Path(__file__).resolve().parents[2] / "build"
+# The pixi env this runs in (its prefix is .pixi/envs/<name> when not activated).
+PIXI_ENV = os.environ.get("PIXI_ENVIRONMENT_NAME") or Path(sys.prefix).name
+# libs/pycity4cfd/build/<env>/, where build_city4cfd.sh puts the binary: one
+# build per env, since CMake records that env's absolute library paths.
+BUILD_DIR = Path(__file__).resolve().parents[2] / "build" / PIXI_ENV
 
 # Output file stem; City4CFD appends "_<surface>.stl" per surface.
 OUTPUT_NAME = "city4cfd"
@@ -46,12 +50,12 @@ GROUND_POINTS = 11  # per side, edges included
 
 
 def city4cfd_executable() -> Path:
-    """Return the City4CFD binary built by ``pixi run build-city4cfd``."""
+    """Return this pixi env's City4CFD binary (``pixi run build-city4cfd``)."""
     path = BUILD_DIR / "city4cfd"
     if not path.is_file():
         raise FileNotFoundError(
-            f"City4CFD is not built ({path} is missing); "
-            "run `pixi run -e dev build-city4cfd`."
+            f"City4CFD is not built for the {PIXI_ENV} env ({path} is missing); "
+            f"run `pixi run -e {PIXI_ENV} build-city4cfd`."
         )
     return path
 
