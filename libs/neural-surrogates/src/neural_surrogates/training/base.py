@@ -58,7 +58,9 @@ def compile_submodules(
         module.compile(**compile_kwargs)
         compiled.append(name)
     if unmatched:
-        raise ValueError(f"compile_modules patterns match no module: {sorted(unmatched)}")
+        raise ValueError(
+            f"compile_modules patterns match no module: {sorted(unmatched)}"
+        )
     return compiled
 
 
@@ -772,6 +774,7 @@ class BaseTraining:
             + "\n"
         )
         print(f"  wrote {path}")
+
     @staticmethod
     def _batch_samples(batch: dict[str, torch.Tensor]) -> int:
         """Samples in a batch, from its per-sample state (the geometry may be
@@ -795,7 +798,7 @@ class BaseTraining:
         target = self.grad_accum_samples
         batch_sizes = getattr(self.train_loader.batch_sampler, "batch_sizes", None)
         if batch_sizes is None:
-            return math.ceil(len(self.train_loader.dataset) / target)  # type: ignore[arg-type]
+            return math.ceil(len(self.train_loader.dataset) / target)
         steps, seen = 0, 0
         for size in batch_sizes():
             seen += size

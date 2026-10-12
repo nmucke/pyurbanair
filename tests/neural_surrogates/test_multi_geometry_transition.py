@@ -375,7 +375,9 @@ def _sample_losses(batch: dict, p: torch.Tensor) -> list[torch.Tensor]:
     fluid = batch["geometry"][0].bool()
     pred = batch["state_n"] * (1.0 + p)
     return [
-        torch.nn.functional.mse_loss(pred[b][..., fluid], batch["state_next"][b][..., fluid])
+        torch.nn.functional.mse_loss(
+            pred[b][..., fluid], batch["state_next"][b][..., fluid]
+        )
         for b in range(pred.shape[0])
     ]
 
@@ -401,7 +403,8 @@ def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
             grad += torch.autograd.grad(loss, p)[0] / len(group)
         p = (p - lr * grad).detach().requires_grad_(True)
     assert steps == 3
-    torch.testing.assert_close(model.p.detach(), p.detach())
+    assert trainer._optimizer_steps_per_epoch() == 3
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
 
 
 @pytest.mark.parametrize("window", [None, (2, 3), (0, 2), (7, 5)])
@@ -449,8 +452,6 @@ def test_profile_window(data_root: Path, tmp_path: Path, window) -> None:
             assert text.startswith(f"profiled {count} micro-batches")
             assert "Self CPU time total" in text and "aten::" in text
     torch.testing.assert_close(params[0], params[1])
-    assert trainer._optimizer_steps_per_epoch() == 3
-    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
 
 
 @pytest.mark.parametrize(
