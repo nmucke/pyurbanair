@@ -21,11 +21,15 @@ imports pycity4cfd: the build is a `city_case` supervisor job whose worker
 `city4cfd` Pixi environment. By hand:
 
 ```bash
-pixi run -e dev build-city4cfd    # once per env, ~2 min
-pixi run -e dev python -c "from pycity4cfd.case import make_case; \
+pixi install -e city4cfd          # first time: fetches and compiles City4CFD, ~2 min
+pixi run -e city4cfd python -c "from pycity4cfd.case import make_case; \
   print(make_case((4.3555, 52.0095, 4.3600, 52.0122), '.temp/city_cases/delft'))"
 pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>  # or pypalm, pyudales
 ```
+
+pycity4cfd and City4CFD live only in the `city4cfd` pixi environment; `dev`,
+`mcp` and `ui` don't have them (the MCP tools and the browser app build cases
+as jobs in `city4cfd`).
 
 ## Modules
 
@@ -38,14 +42,16 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>  # or pypa
   minutes (504 + retry). An area with no building footprint (none in OSM, or
   only nodes, slivers below `min_area` or parts clipped away) raises a
   `ValueError`.
-- **`city4cfd`**: City4CFD 0.8.1 (`libs/pycity4cfd/City4CFD`, AGPL-3.0
-  submodule, vendored: don't edit) is not on conda-forge; `build-city4cfd`
-  compiles it with the `city4cfd` pixi feature's conda-forge deps into
-  `libs/pycity4cfd/build/<env>/` (not in `setup-dev`). Build it once per pixi
-  env you run it from (`dev`, `mcp`): CMake records that env's absolute
-  library paths. `city4cfd_executable()` takes `city4cfd` on PATH first (the
-  binary the `city4cfd` env installs), else the current env's build
-  directory; its error says to `pixi install -e city4cfd`. Each building is an LoD1.2
+- **`city4cfd`**: City4CFD 0.8.1 (AGPL-3.0, tudelft3d/City4CFD) is not on
+  conda-forge. `libs/pycity4cfd/recipe/pixi.toml` packages it as a pixi source
+  package (`pixi-build-cmake`, upstream git tag `0.8.1`, conda-forge CGAL,
+  Boost, Eigen 3.4, GMP, MPFR, GDAL and OpenMP), so the first
+  `pixi install -e city4cfd` fetches it, compiles it with conda-forge's
+  compilers (about 2 min; on macOS with the Xcode command line tools' SDK) and
+  installs `$CONDA_PREFIX/bin/city4cfd` (`city4cfd_executable()` finds it on
+  PATH); later installs reuse pixi's build
+  cache. The package's build config is not part of that cache key: after
+  editing `recipe/pixi.toml`, run `pixi clean --build` and reinstall. Each building is an LoD1.2
   extrusion to its `height`. City4CFD cannot run without a ground point cloud,
   so `write_config` writes a flat `ground.xyz` grid; every footprint must lie
   inside the `half_width` square around `point_of_interest`, or City4CFD

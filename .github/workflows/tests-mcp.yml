@@ -9,6 +9,7 @@ on:
   pull_request:
     paths:
       - "libs/mcp-server/**"
+      - "libs/user-interface/**"
       - "libs/visualization/**"
       - "tests/mcp/**"
       - "tests/configs/**"

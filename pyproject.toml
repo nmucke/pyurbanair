@@ -348,37 +348,19 @@ torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/
 visualization = { path = "libs/visualization", editable = true }
 
 # City area from a map: OSM footprints (osmnx/geopandas) and City4CFD
-# (libs/pycity4cfd/City4CFD, AGPL-3.0 submodule pinned to 0.8.1):
-# buildings GeoJSON -> CFD-ready STL. Not on conda-forge, so `build-city4cfd`
-# compiles it from the submodule into libs/pycity4cfd/build/<env>/ (one build
-# per pixi env, a few minutes, hence not part of setup-dev). Eigen is pinned to 3.4: City4CFD and its
-# bundled CGAL support are untested with Eigen 5.
+# (AGPL-3.0, tudelft3d/City4CFD 0.8.1): buildings GeoJSON -> CFD-ready STL.
+# City4CFD is not on conda-forge, so `libs/pycity4cfd/recipe` packages it as a
+# pixi source package: the first `pixi install -e city4cfd` fetches the tag,
+# compiles it (a few minutes, then cached) and installs `bin/city4cfd` into
+# the env. Only the `city4cfd` env has it, so dev/mcp/ui stay free of the C++
+# toolchain.
 [tool.pixi.feature.city4cfd.dependencies]
-cmake = {version=">3.5.0,<4.0", channel="conda-forge"}
-make = "*"
-cgal-cpp = ">=6.0.1,<6.3"
-libboost-devel = "*"
-eigen = "3.4.*"
-gmp = "*"
-mpfr = "*"
-libgdal-core = ">=3"
+city4cfd = { path = "libs/pycity4cfd/recipe" }
 osmnx = ">=2.1.1,<3"
 geopandas = ">=1.2.0,<2"
 
-# Bare compilers, not `cxx-compiler`: its activation would export CC/CXX/
-# LDFLAGS into every env with this feature and change the solver builds.
-[tool.pixi.feature.city4cfd.target.linux-64.dependencies]
-gxx = ">=15.2.0"
-
-[tool.pixi.feature.city4cfd.target.osx-arm64.dependencies]
-clangxx = "*"
-llvm-openmp = "*"
-
 [tool.pixi.feature.city4cfd.pypi-dependencies]
 pycity4cfd = { path = "libs/pycity4cfd", editable = true }
-
-[tool.pixi.feature.city4cfd.tasks]
-build-city4cfd = { cmd = "bash libs/pycity4cfd/build_city4cfd.sh", description = "Compile City4CFD from its submodule into libs/pycity4cfd/build/<env>/" }
 
 # Optional local agent interface; workers do not require the MCP SDK.
 [tool.pixi.feature.mcp.pypi-dependencies]
@@ -389,6 +371,10 @@ start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve l
 register-claude = { cmd = "bash scripts/register_claude.sh", description = "Register the pyurbanair MCP server with Claude Code (asks first)" }
 
 # Local browser app (libs/user-interface): draw an area, run a model, see results.
+# geopandas reprojects the built case's buildings to EPSG:4326 for the map.
+[tool.pixi.feature.user-interface.dependencies]
+geopandas = ">=1.2.0,<2"
+
 [tool.pixi.feature.user-interface.pypi-dependencies]
 user-interface = { path = "libs/user-interface", editable = true }
 
@@ -402,11 +388,16 @@ ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "city4cfd", "cpu"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "cpu"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "user-interface", "city4cfd", "visualization", "evaluation", "dev", "py312", "cpu"] }
+mcp = { features = ["mcp", "user-interface", "visualization", "evaluation", "dev", "py312", "cpu"], solve-group = "mcp" }
+# The browser app; it builds city cases as jobs in the `city4cfd` env.
+ui = { features = ["user-interface", "mcp", "visualization", "evaluation", "dev", "py312", "cpu"], solve-group = "mcp" }
+# Map area -> case: pycity4cfd and the City4CFD binary; the case-build worker
+# runs here (mcp_server.jobs on PYTHONPATH, like `rendering`).
+city4cfd = { features = ["city4cfd", "dev", "py312", "cpu"] }
 rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }
