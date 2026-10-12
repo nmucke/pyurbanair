@@ -201,7 +201,15 @@ def encode_spatial(
             )
 
         latents, kls, residuals = _call(encode, recompute)
-        if latent_grid is None:
+        if len(calls) == 1 and len(regions) == 1:
+            # One call on one whole-grid region (global mode, or a grid of one
+            # tile): its core latent is the grid; skip the zero-fill + copy.
+            # Contiguous like the assembled grid (the posterior mode is a view).
+            latent_grid = latents[0].contiguous()
+            if return_kl:
+                assert kls is not None
+                kl_grid = kls[0].contiguous()
+        elif latent_grid is None:
             grid_shape = tuple(n // STRIDE for n in x.shape[2:])
             latent_grid = latents[0].new_zeros(
                 folded.shape[0], latents[0].shape[1], *grid_shape
@@ -209,6 +217,8 @@ def encode_spatial(
             if return_kl:
                 kl_grid = torch.zeros_like(latent_grid)
         for j, i in enumerate(idx):
+            if len(calls) == 1 and len(regions) == 1:
+                break
             latent_grid[start:stop][regions[i].destination(STRIDE)] = latents[j]
             if return_kl:
                 assert kl_grid is not None and kls is not None
@@ -245,7 +255,10 @@ def decode_spatial(
     else:
         regions = regions_for(shape, mode, crop, halo)
         calls = tile_calls(regions, n, model.max_internal_batchsize, batch_tiles)
-    output = latent.new_zeros(n, 1, *shape)
+    # One call on one whole-grid region returns its decoded output directly
+    # (no full-resolution zero-fill + copy).
+    whole = len(calls) == 1 and len(regions) == 1
+    output = None if whole else latent.new_zeros(n, 1, *shape)
     mixed: dict[int, list[list[torch.Tensor | None]]] = {}
 
     def additions(k: int) -> list[list[torch.Tensor | None]] | None:
@@ -297,6 +310,9 @@ def decode_spatial(
             return [decoded[j * m : (j + 1) * m][c] for j, c in enumerate(cores)]
 
         pieces = _call(decode, recompute)
+        if output is None:
+            return pieces[0]
         for j, i in enumerate(idx):
             output[start:stop][regions[i].destination()] = pieces[j]
+    assert output is not None
     return output

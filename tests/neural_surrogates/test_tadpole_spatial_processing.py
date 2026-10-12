@@ -321,3 +321,34 @@ def test_batched_tiles_match_one_call_per_tile(mode: str, limit: Any) -> None:
             torch.testing.assert_close(
                 named[name].grad, g, rtol=1e-7, atol=1e-9 * scale, msg=name
             )
+
+
+def test_global_single_region_matches_generic_region_assembly() -> None:
+    """Global mode returns its one region's latent, skips and output directly
+    (no zero-fill + copy). Halo mode with a halo spanning the whole grid runs the
+    same whole-grid encoder/decoder per tile and assembles the cores the generic
+    way, so both must agree: forward exactly, gradients to rounding."""
+    torch.manual_seed(3)
+    glob = _stepper("global", encode_geometry=False)
+    halo = _stepper("halo", halo_size=16, encode_geometry=False)
+    halo.load_state_dict(glob.state_dict(), strict=True)
+    for model in (glob, halo):
+        with torch.no_grad():  # non-zero skip gates: the skips reach the output
+            for name, p in model.named_parameters():
+                if "scales" in name:
+                    p.fill_(0.5)
+    state = torch.randn(1, 2, 32, 16, 16)
+    geom = torch.ones(1, 32, 16, 16)
+    out_g = glob(state, None, geom)
+    out_h = halo(state, None, geom)
+    torch.testing.assert_close(out_g, out_h, rtol=0, atol=0)
+    out_g.square().mean().backward()
+    out_h.square().mean().backward()
+    grads = dict(halo.named_parameters())
+    checked = 0
+    for name, p in glob.named_parameters():
+        if p.grad is None:
+            continue
+        torch.testing.assert_close(p.grad, grads[name].grad, rtol=1e-4, atol=1e-6)
+        checked += 1
+    assert checked > 0
