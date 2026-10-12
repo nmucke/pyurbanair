@@ -16,8 +16,16 @@ source = { git = "https://github.com/tudelft3d/City4CFD.git", tag = "0.8.1" }
 # The backend defaults to BUILD_SHARED_LIBS=ON, which makes City4CFD's bundled
 # LASlib a shared library installed in lib/LASlib/, off the binary's rpath.
 # Static, as upstream builds it, the binary only links conda-forge libraries.
+# Bundled roofer includes CGAL headers without linking CGAL's CMake target, and
+# on Linux conda puts `-isystem $PREFIX/include` only in CPPFLAGS, which CMake
+# ignores: add the host prefix's headers to every C++ compile ($PREFIX expands
+# in the generated build script; on macOS it duplicates what CXXFLAGS has).
 [package.build.config]
-extra-args = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF"]
+extra-args = [
+    "-DCMAKE_BUILD_TYPE=Release",
+    "-DBUILD_SHARED_LIBS=OFF",
+    "-DCMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES=$PREFIX/include",
+]
 
 # Eigen is pinned to 3.4: City4CFD and its bundled CGAL support are untested
 # with Eigen 5.
