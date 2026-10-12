@@ -116,6 +116,51 @@ floor for a smooth regime is dropped.
   the comparison arm, which is ≈ 0 by construction. It is reported, not
   used as a threshold.
 
+**10. The near-wall inflow was a PALM initialisation bug (PR #189).**
+- On the `set_constant_profiles` cold start, PALM zeroes u and v at z = 1 m
+  (`init_3d_model.f90:707-720`).
+- The inflow/outflow face never restores them (`dynamics_mod.f90:1287-1288`),
+  so PALM's inlet had no wind at 1 m for the whole run.
+- Fix: initialise from an LOD=1 driver (`read_from_file`). The inflow ratio
+  is then 0.96–1.04 at every height, and the profile exponent is 0.26
+  against 0.26 for uDALES.
+- With the fix, the pilot was redone (`analysis/round2_pilot_v2.md` in the
+  experiment clone):
+  - mismatch at the sensors: 0.48 m/s (180 s means);
+  - pedestrian wind-map RMSE: 0.69 m/s, against 0.15 for the replica;
+  - exceedance bias: about 0;
+  - b* still changes the predictions by at most about 0.005 m/s.
+- PALM's realisation noise is larger now that the near-ground flow is active
+  (L2 sensors, 180 s means): **0.17 / 0.10 / 0.055 m/s at z = 2 / 8 / 14 m**,
+  0.12 pooled. That is more than 1.5× apart between heights, so height bands
+  are used (finding 8 is superseded).
+- **Separately found, not fixed:** inflow/outflow *warm starts* (LOD=2) zero
+  the whole inflow face (reported in #189). This does not affect this round,
+  where PALM is only the truth and runs as one continuous 540 s simulation.
+
+### Frozen 2026-10-12, before any DA run
+
+- **Truth:** `round2/palm_truth`, a PALM run with disturbances, outflow
+  damping 1.0 / 4 m and the LOD=1 near-wall fix; inflow 10° / 6.0 m/s,
+  `z_ref` = 64 m, `inflow_outflow`, 1 core, 540 s after a 30 s spinup.
+- **Replica:** `round2/palm_truth_rep`, the same run with `random_seed=17`.
+- **Model setups:**
+  - M-on: uDALES synthetic inlet on;
+  - M-off: inlet off, `interior_nudging=false`;
+  - both: c_vreman 0.24, the SGS features as in Round 1.
+- **Observations:** L2 + VAL sensors; 180 s window means; instrument
+  0.25 m/s; persistent representation error in height bands
+  {z < 5 m: 0.17, 5–11 m: 0.10, ≥ 11 m: 0.055, default 0.12} m/s.
+- **Priors:**
+  - inflow N(0, 10°) and N(5, 1);
+  - `b` N(0, 0.2²);
+  - `sgs_constant` N(0.24, 0.03²), min 0.18 (TC);
+  - α N(0.25, 0.05²), min 0.05 (Tα).
+- **Seeds:** `assimilation.seed` and `prior_params.seed` set to 1, 2, 3. The
+  truth is fixed.
+- **Code:** a local pilot branch, `main` + #187 + #188 + #189. Every result
+  must be re-checked against `main` after those PRs merge.
+
 ## Truth and model setups (revised)
 
 | Setup | PALM truth | uDALES model | Mismatch it carries |
