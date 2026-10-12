@@ -95,9 +95,9 @@ def _match_modules(
 def _checkpointed_forward(
     self: torch.nn.Module, *args: object, **kwargs: object
 ) -> object:
-    """The class ``forward`` under non-reentrant activation checkpointing
+    """The previous ``forward`` under non-reentrant activation checkpointing
     (plain when gradients are off: nothing would be saved anyway)."""
-    forward = type(self).forward.__get__(self)
+    forward = self._checkpoint_inner_forward
     if not torch.is_grad_enabled():
         return forward(*args, **kwargs)
     return checkpoint(forward, *args, use_reentrant=False, **kwargs)
@@ -115,11 +115,14 @@ def checkpoint_submodules(
     state and RNG are replayed). Matching follows :func:`compile_submodules`:
     peft's ``base_model.model.`` prefix is dropped, a match inside an already
     wrapped module is skipped and an unmatched pattern raises. Only the
-    instance's ``forward`` is replaced (bound to the module, so a deepcopy
-    stays self-contained); the module tree and state-dict keys are unchanged.
+    instance's ``forward`` is replaced, wrapping the one it had (both bound to
+    the module, so a deepcopy stays self-contained); the module tree and
+    state-dict keys are unchanged.
     """
     modules = _match_modules(model, patterns, "activation_checkpoint_modules")
     for module in modules:
+        # Wrap whatever forward the module has (e.g. LoRA's fused forward).
+        module._checkpoint_inner_forward = module.forward
         module.forward = types.MethodType(_checkpointed_forward, module)
     return modules
 
