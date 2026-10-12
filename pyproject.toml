@@ -40,6 +40,13 @@ conda-pypi-map = { "conda-forge" = "./conda-pypi-mapping.json" }
 
 # conda-pypi-map = { "conda-forge" = "https://raw.githubusercontent.com/prefix-dev/parselmouth/main/files/mapping_as_grayskull.json" }
 
+# Source builds (libs/pycity4cfd/recipe) use GCC 15 on Linux: GCC 16 rejects
+# City4CFD 0.8.1's bundled valijson headers (incomplete type in a SFINAE
+# context, -Wsfinae-incomplete). macOS keeps conda-forge's default clang.
+[tool.pixi.workspace.target.linux-64.build-variants]
+c_compiler_version = ["15"]
+cxx_compiler_version = ["15"]
+
 [tool.pixi.package.build]
 backend = {name = "pixi-build-python", version = "*", channel = "https://prefix.dev/conda-forge" }
 
