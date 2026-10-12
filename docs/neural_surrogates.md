@@ -1334,6 +1334,7 @@ Both wrappers expose the same architecture settings, saved with the model:
 | `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
 | `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the per-axis core shape. |
 | `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
+| `spatial_checkpoint` | DFT only, default `false`. Recompute every encoder/decoder tile call in backward (non-reentrant checkpoint) instead of keeping its activations. Same outputs and gradients; costs one more encoder and decoder forward. Training then keeps only each tile's latent core and skips, so with halo the activation memory scales with the tile size, not the domain. Without it, halo training keeps the activations of every tile (overlap included) and needs more memory than global. |
 
 In **every DFT mode**, the latent time-stepping network runs **once over the
 assembled full-domain latent grid**, joining all state variables. Halo mode
