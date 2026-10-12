@@ -58,7 +58,8 @@ class Tools:
             "backends": ["pylbm", "pyudales", "pypalm", "neural_surrogate"],
             "modes": ["single", "ensemble", "static", "dynamic", "rollout"],
             "total_windows": "1 + forward.rollout_steps",
-            "max_active_jobs": 1,
+            # The supervisor runs one job per lane at a time.
+            "max_active_jobs": {"simulation_or_render": 1, "city_case": 1},
             "python": sys.executable,
             "repo_root": str(self.repo_root),
             "store_root": str(self.store_root),
@@ -309,13 +310,23 @@ class Tools:
         )
         case_json = directory / "case.json"
 
-        def ready() -> dict[str, Any]:
-            case: dict[str, Any] = json.loads(case_json.read_text(encoding="utf-8"))
+        def ready() -> dict[str, Any] | None:
+            # A missing or unparsable case.json (e.g. one cut short by an
+            # older build) is not a finished case: build it again.
+            try:
+                case = json.loads(case_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            if not isinstance(case, dict):
+                return None
+            # Not returned: the inputs, and case_format from older folders.
             case.pop("bbox", None)
+            case.pop("case_format", None)
             return {"status": "ready", **case}
 
-        if case_json.is_file():
-            return ready()
+        case = ready()
+        if case is not None:
+            return case
         payload = {
             "kind": "city_case",
             "bbox": [west, south, east, north],
@@ -333,8 +344,10 @@ class Tools:
             job = self.jobs.request("submit", payload=payload, key=key)
             if job["state"] not in TERMINAL:
                 return {"status": "building", "case_job_id": job["id"]}
-            if job["state"] == "succeeded" and case_json.is_file():
-                return ready()
+            if job["state"] == "succeeded":
+                case = ready()
+                if case is not None:
+                    return case
             attempt += 1
 
     def get_city_case(self, case_job_id: str) -> dict[str, Any]:

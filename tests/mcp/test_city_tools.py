@@ -137,6 +137,27 @@ def test_failed_or_deleted_case_is_rebuilt(tools: Any) -> None:
     assert third not in {first, second}
 
 
+def test_unparsable_case_json_is_rebuilt(tools: Any) -> None:
+    # A case.json cut short (a build killed mid-write before writes were atomic).
+    first = tools.prepare_city_case(DELFT)["case_job_id"]
+    finish(tools, first, CASE)
+    case_dir = pathlib.Path(tools.registry.get(first)["payload"]["case_dir"])
+    (case_dir / "case.json").write_text('{"overrides": ["dom')
+    second = tools.prepare_city_case(DELFT)
+    assert second["status"] == "building" and second["case_job_id"] != first
+
+
+def test_ready_case_drops_old_case_format(tools: Any) -> None:
+    # Folders written before the format moved into the folder key record it.
+    bbox = (DELFT["west"], DELFT["south"], DELFT["east"], DELFT["north"])
+    directory = city_case.case_dir(tools.repo_root, bbox, 4.0, 10.0)
+    directory.mkdir(parents=True)
+    (directory / "case.json").write_text(
+        json.dumps({"bbox": [0, 0, 1, 1], "case_format": 1, **CASE})
+    )
+    assert tools.prepare_city_case(DELFT) == {"status": "ready", **CASE}
+
+
 def test_city_case_needs_the_city4cfd_env(tools: Any) -> None:
     (tools.repo_root / ".pixi/envs/city4cfd/bin/python").unlink()
     with pytest.raises(ValueError, match="pixi install -e city4cfd"):

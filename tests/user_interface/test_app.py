@@ -33,11 +33,14 @@ class FakeTools(Tools):
         self.jobs_state: dict[str, str] = {}
         self.fail_case = False
         self.cached = False
+        self.prepare_error: Exception | None = None
         self.release = threading.Event()
         self.release.set()
         self.frame_ancestor: str | None = None
 
     def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        if self.prepare_error is not None:
+            raise self.prepare_error
         if self.cached:
             return {"status": "ready", **self._case()}
         return {"status": "building", "case_job_id": "case1"}
@@ -275,6 +278,31 @@ def test_case_lifecycle(app: App) -> None:
     case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
     case = request(app, f"api/cases/{case_id}")[1]
     assert case["status"] == "ready" and case["summary"]["n_buildings"] == 1
+
+
+def test_case_failures_while_preparing(app: App) -> None:
+    tools = cast(FakeTools, app.tools)
+    # A reused folder without its buildings: a failed case, not a 500.
+    tools.cached = True
+    original = tools._case
+    tools._case = lambda: {**original(), "case_dir": str(tools.store / "nowhere")}  # type: ignore[method-assign]
+    status, body, _ = request(app, "api/cases", {"bbox": DELFT})
+    assert status == 202
+    case = request(app, f"api/cases/{body['case_id']}")[1]
+    assert case["status"] == "failed" and "nowhere" in case["error"]
+    # The supervisor failing to start: a failed case; bad input: a 400.
+    tools.prepare_error = RuntimeError("supervisor did not start")
+    status, body, _ = request(app, "api/cases", {"bbox": DELFT})
+    assert status == 202
+    case = request(app, f"api/cases/{body['case_id']}")[1]
+    assert case == {
+        "case_id": body["case_id"],
+        "status": "failed",
+        "error": "supervisor did not start",
+    }
+    tools.prepare_error = ValueError("needs the city4cfd env")
+    status, body, _ = request(app, "api/cases", {"bbox": DELFT})
+    assert status == 400 and "city4cfd" in body["error"]
 
 
 def test_run_lifecycle(app: App) -> None:
