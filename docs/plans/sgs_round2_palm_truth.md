@@ -363,7 +363,9 @@ both ratios for every arm alike.
 Expected, given Rounds 1 and 1b and the pilot (findings 6–7): T3 ≈ T2 is
 likely, because b* changes the predictions by about 1 % of the structural
 mismatch. A clear T3 gain would need the posterior to move `b` far from b*.
-Both outcomes are worth reporting
+Both outcomes are worth reporting. Do not tune the error model, the sensors or
+the priors after seeing the held-out scores; any change is made on the pilot
+and the calibration diagnostics only, and is recorded.
 
 ## Deliverables
 
