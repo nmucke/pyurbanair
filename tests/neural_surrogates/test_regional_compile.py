@@ -132,3 +132,21 @@ def test_compile_modules_off_compiles_nothing() -> None:
 def test_compile_modules_pattern_must_match() -> None:
     with pytest.raises(ValueError, match="match no module"):
         compile_submodules(_peft_stepper(), ["dft.no_such_module.*"])
+
+
+def test_pixel_shuffle_compiles_without_graph_break() -> None:
+    """The vendored ``PixelShuffle3d`` builds its permutation without a tensor
+    round trip, so it traces as one graph (``fullgraph``) and the axes are
+    upstream's ``arange(ndim)[:-6].tolist() + [-3, -6, -2, -5, -1, -4]``."""
+    from neural_surrogates.architectures._tadpole.architecture.p3d.modules import (
+        PixelShuffle3d,
+    )
+
+    x = torch.randn(2, 16, 3, 4, 5)
+    shuffle = PixelShuffle3d(2)
+    view = x.view(2, 2, 2, 2, 2, 3, 4, 5)
+    upstream = torch.arange(view.ndim)[:-6].tolist() + [-3, -6, -2, -5, -1, -4]
+    expected = view.permute(upstream).reshape(2, 2, 6, 8, 10)
+    torch.testing.assert_close(shuffle(x), expected, rtol=0, atol=0)
+    compiled = torch.compile(shuffle, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), expected, rtol=0, atol=0)

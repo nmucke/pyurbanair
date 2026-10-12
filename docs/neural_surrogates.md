@@ -1260,12 +1260,14 @@ Only the autoencoder subtree is vendored (like `_upt/`), **not** an external
 `tadpole` dependency: upstream's `requirements.txt` pulls in `torchfsm` (its
 online data-generation dep, unused here) → `vape4d`, an unnecessary,
 resolution-risky chain the AE path never imports. The vendored files are
-byte-for-byte upstream except **two** documented pyurbanair edits: (1) the `GIFt`
+byte-for-byte upstream except these documented pyurbanair edits: (1) the `GIFt`
 import (upstream's integer-rank LoRA library, used only by a branch we never
-take; we drive LoRA through PEFT) is made optional, and (2) the optional
+take; we drive LoRA through PEFT) is made optional, (2) the optional
 **geometry-branch projections** in `architecture/p3d/{conv,core,kl,skip_wrapper}.py`
 and `model/{autoencoder,dft}.py` (each of those files' module docstrings states
-its own injection points). The projections are created **only** when the caller
+its own injection points), and (3) `PixelShuffle3d` builds its permutation
+without a tensor round trip (`p3d/modules.py`; same axes; upstream's
+`arange(...).tolist()` is a `torch.compile` graph break). The projections are created **only** when the caller
 passes `geom_in_dims`, so on the default path nothing is added. Preserving the
 exact subtree keeps every internal relative import valid **and** the
 encoder/decoder `state_dict` keys identical, so the HF `thuerey-group/Tadpole`
