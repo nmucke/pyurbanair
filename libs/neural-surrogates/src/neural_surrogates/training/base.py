@@ -137,6 +137,19 @@ def _flagged_no_grad_forward(
     return self._unroll_inner_forward(*args, **kwargs)
 
 
+def to_channels_last_3d(model: torch.nn.Module) -> torch.nn.Module:
+    """Put every 5-D parameter and buffer of ``model`` in ``channels_last_3d``,
+    in place, and return it. ``Module.to(memory_format=channels_last_3d)``
+    raises on any 4-D tensor (``required rank 5``), which many 3-D models have;
+    this skips every tensor that is not 5-D. Values are unchanged."""
+    fmt = torch.channels_last_3d
+    with torch.no_grad():
+        for t in [*model.parameters(), *model.buffers()]:
+            if t.dim() == 5 and not t.is_contiguous(memory_format=fmt):
+                t.data = t.data.contiguous(memory_format=fmt)
+    return model
+
+
 class BaseTraining:
     def __init__(
         self,
@@ -195,7 +208,7 @@ class BaseTraining:
         # under autocast; a no-op for correctness either way.
         self.channels_last = channels_last
         if channels_last:
-            self.model = self.model.to(memory_format=torch.channels_last_3d)
+            self.model = to_channels_last_3d(self.model)
         # Keep a handle on the eager module: torch.compile wraps the model and
         # prefixes its state-dict keys with `_orig_mod.`, so saving/loading
         # must go through the unwrapped module (parameters are shared).

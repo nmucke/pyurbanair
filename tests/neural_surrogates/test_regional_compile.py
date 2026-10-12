@@ -150,3 +150,29 @@ def test_pixel_shuffle_compiles_without_graph_break() -> None:
     torch.testing.assert_close(shuffle(x), expected, rtol=0, atol=0)
     compiled = torch.compile(shuffle, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled(x), expected, rtol=0, atol=0)
+
+
+def test_channels_last_converts_only_5d_tensors() -> None:
+    """``channels_last=True`` on a model that also holds 4-D tensors (the DFT
+    does): ``Module.to(memory_format=channels_last_3d)`` raises on those, the
+    trainer converts only the 5-D ones, with unchanged values and outputs."""
+    model = _peft_stepper()
+    model.base_model.model.register_buffer("table4d", torch.randn(2, 3, 4, 5))
+    with pytest.raises(RuntimeError, match="rank 5"):
+        copy.deepcopy(model).to(memory_format=torch.channels_last_3d)
+    reference = copy.deepcopy(model)
+    trainer = _trainer(model, channels_last=True)
+    conv = model.base_model.model.dft.encoder.conv_encoder.conv_encoder
+    weight = conv.blocks[0].conv_1.base_layer.weight
+    assert weight.is_contiguous(memory_format=torch.channels_last_3d)
+    assert not weight.is_contiguous()
+    assert trainer.model is model
+    for a, b in zip(model.state_dict().values(), reference.state_dict().values()):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    with torch.no_grad():
+        torch.testing.assert_close(
+            model(*_inputs(GRIDS[0])),
+            reference(*_inputs(GRIDS[0])),
+            atol=1e-5,
+            rtol=1e-5,
+        )
