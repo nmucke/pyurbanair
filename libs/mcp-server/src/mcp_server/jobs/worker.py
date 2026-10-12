@@ -48,6 +48,7 @@ def execute(job: dict[str, Any]) -> None:
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
     outcome: dict[str, Any] = {"state": "failed"}
+    result: Any = None
     try:
         if payload["kind"] == "forward":
             from mcp_server.jobs.paths import bind_job_paths
@@ -110,10 +111,17 @@ def execute(job: dict[str, Any]) -> None:
                 root / "bundle",
                 payload.get("options"),
             )
+        elif payload["kind"] == "city_case":
+            from mcp_server.jobs.city_case import build_case
+
+            phase = "running"
+            result = build_case(payload)
         else:
             raise ValueError(f"Unsupported worker kind {payload['kind']!r}")
         phase = "finalizing"
         outcome = {"state": "succeeded", "finished": time.time()}
+        if result is not None:
+            outcome["result"] = result
     except Cancelled as exc:
         outcome = {"state": "cancelled", "error": str(exc), "phase": phase}
     except BaseException as exc:

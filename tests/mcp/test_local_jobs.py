@@ -236,3 +236,23 @@ def test_post_render_failure_preserves_simulation(tmp_path: pathlib.Path) -> Non
     )
     assert supervisor.registry.get(render_id)["state"] == "failed"
     assert supervisor.registry.get(parent["id"])["state"] == "succeeded"
+
+
+def test_city_case_build_does_not_wait_for_a_run(tmp_path: pathlib.Path) -> None:
+    supervisor = Supervisor(
+        REPO, tmp_path, command_factory=fake_command, grace_seconds=0.1
+    )
+    run = supervisor.registry.submit({"kind": "forward", "mode": "sleep"}, "run")
+    render = supervisor.registry.submit({"kind": "visualization"}, "render")
+    case = supervisor.registry.submit({"kind": "city_case"}, "case")
+    supervisor.tick()
+    assert supervisor.registry.get(run["id"])["state"] == "preparing"
+    assert supervisor.registry.get(render["id"])["state"] == "queued"
+    wait_until(
+        supervisor, lambda: supervisor.registry.get(case["id"])["state"] in TERMINAL
+    )
+    assert supervisor.registry.get(case["id"])["state"] == "succeeded"
+    supervisor.registry.cancel(run["id"])
+    wait_until(
+        supervisor, lambda: supervisor.registry.get(run["id"])["state"] == "cancelled"
+    )

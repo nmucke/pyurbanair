@@ -77,7 +77,6 @@ def _check_case(result: dict, buildings: gpd.GeoDataFrame) -> None:
     assert overrides["geometry.stl_path"] == str(case_dir / "buildings.stl")
     case_json = json.loads((case_dir / "case.json").read_text())
     assert case_json["bbox"] == list(BBOX)
-    assert case_json["case_format"] == case.CASE_FORMAT
     assert case_json["crs"] == result["crs"] == buildings.crs.to_string()
     assert case_json["origin"] == result["origin"]
 

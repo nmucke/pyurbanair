@@ -20,16 +20,25 @@ does the page itself (map tiles and Leaflet).
 ## What it reuses
 
 Every action is a call on one `mcp_server.tools.Tools(repo_root)`:
-`prepare_city_case`, `inspect_config`, `prepare_forward_run`,
+`prepare_city_case`, `get_city_case`, `inspect_config`, `prepare_forward_run`,
 `launch_forward_run`, `get_run_status`, `get_run_logs`, `cancel_run`,
-`inspect_run_results`, `render_simulation` and `visualization`. Bbox checks are
-`mcp_server.area_selector.validate_bbox`. Runs, plans and renders therefore land
-in the same store as MCP runs (`.temp/local-jobs`), and city cases in
-`.temp/city_cases/` ([pycity4cfd.md](pycity4cfd.md)).
+`inspect_run_results`, `render_simulation` and `visualization`. Runs, plans,
+renders and case builds therefore land in the same store as MCP runs
+(`.temp/local-jobs`), and city cases in `.temp/city_cases/`
+([pycity4cfd.md](pycity4cfd.md)). A case build is a `city_case` supervisor job
+in the `city4cfd` environment ([mcp.md](mcp.md)), so this process never
+imports pycity4cfd; a case built before is ready at once.
+
+`user_interface/area_selector.py` is the map selector of the MCP tools
+`open_area_selector`/`get_selected_area` (its page is
+`web/area_selector.html`) and holds the one bbox check, `validate_bbox`, and
+`MAX_AREA_KM2`, which this app uses too. The app's own page draws the area
+itself (a different UI); only the area formula is shared, mirrored in
+`app.js`.
 
 `user_interface/app.py` holds the server and the API; `web/` the static page
 (`index.html`, `app.js`, `app.css`, no build step). The server mirrors
-`mcp_server/area_selector.py`: a stdlib `ThreadingHTTPServer` on 127.0.0.1,
+`user_interface/area_selector.py`: a stdlib `ThreadingHTTPServer` on 127.0.0.1,
 exact Host and Origin checks, an unguessable token as the first path segment,
 JSON-only POST bodies of at most 64 KiB (an empty body counts as `{}`).
 Cases, runs and renders are kept in memory for the session; a restart forgets
@@ -44,7 +53,7 @@ with `{"error": "<message>"}`.
 | Method, path | Body | Response |
 |---|---|---|
 | `GET api/options` | | `{models, fields, case_defaults: {resolution, default_height}, max_area_km2}` |
-| `POST api/cases` | `{bbox: {west, south, east, north}, resolution?, default_height?}` | 202 `{case_id}`; the build runs in a thread |
+| `POST api/cases` | `{bbox: {west, south, east, north}, resolution?, default_height?}` | 202 `{case_id}`; the build runs as a supervisor job |
 | `GET api/cases/<id>` | | `{case_id, status: building\|ready\|failed, error?, summary?, buildings?, sensors?}` |
 | `POST api/runs` | `{case_id, model, settings: {<field key>: value}, extra_overrides?}` | `{run_id}` (prepare + launch) |
 | `GET api/runs` | | `{runs: [{run_id, case_id, model, state, created}]}`, newest first |
@@ -79,7 +88,8 @@ with `{"error": "<message>"}`.
 config composition and fakes everything else: no network, no solver, no
 supervisor. It checks the token, Host and Origin checks, the body rules, that
 every field key resolves for each model it applies to, and the case and run
-lifecycles.
+lifecycles. `test_area_selector.py` tests the map selector's server directly;
+its MCP tools are tested in `tests/mcp/test_city_tools.py`.
 
 ```bash
 pixi run --locked -e mcp python -m pytest tests/user_interface

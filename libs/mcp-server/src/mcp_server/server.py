@@ -17,7 +17,7 @@ def create_server(
     tools = Tools(repo_root, store_root)
     server = MCPServer(
         "pyurbanair",
-        instructions="Discover and inspect forward settings, prepare a resolved plan, then launch within the user's request. Poll persistent run IDs. Rendering reads saved results and does not rerun the solver. To pick a city area, open_area_selector gives the user a map URL; poll get_selected_area for the bbox, then prepare_city_case turns it into forward-run overrides.",
+        instructions="Discover and inspect forward settings, prepare a resolved plan, then launch within the user's request. Poll persistent run IDs. Rendering reads saved results and does not rerun the solver. To pick a city area, open_area_selector gives the user a map URL; poll get_selected_area for the bbox, then prepare_city_case turns it into forward-run overrides (a new area builds as a job: poll get_city_case).",
     )
     for name in (
         "get_capabilities",
@@ -34,6 +34,7 @@ def create_server(
         "open_area_selector",
         "get_selected_area",
         "prepare_city_case",
+        "get_city_case",
     ):
         server.tool()(getattr(tools, name))
 

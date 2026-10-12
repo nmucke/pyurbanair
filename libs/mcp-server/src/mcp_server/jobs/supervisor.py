@@ -72,9 +72,9 @@ class Supervisor:
 
     def worker_command(self, job: dict[str, Any]) -> list[str]:
         environment = job["payload"].get("environment", "dev")
-        if environment not in {"dev", "cuda", "rendering"}:
+        if environment not in {"dev", "cuda", "rendering", "city4cfd"}:
             raise ValueError(
-                "Workers require the dev, cuda or rendering Pixi environment"
+                "Workers require the dev, cuda, rendering or city4cfd Pixi environment"
             )
         python = self.repo_root / ".pixi" / "envs" / environment / "bin" / "python"
         if not python.is_file():
@@ -162,7 +162,8 @@ class Supervisor:
             env.update(
                 {TOKEN_ENV: token, "PYTHONNOUSERSITE": "1", "PYTHONUNBUFFERED": "1"}
             )
-            # The worker envs (dev, cuda, rendering) don't install mcp-server.
+            # The worker envs (dev, cuda, rendering, city4cfd) don't install
+            # mcp-server.
             env["PYTHONPATH"] = os.pathsep.join(
                 filter(
                     None,
@@ -306,10 +307,17 @@ class Supervisor:
                 if job["state"] in ACTIVE:
                     self._poll(job)
             jobs = self.registry.unfinished()
-            if not any(job["state"] in ACTIVE for job in jobs):
-                queued = next((job for job in jobs if job["state"] == "queued"), None)
-                if queued is not None:
-                    self._start(queued)
+            # One simulation or render at a time; a city case build (network
+            # and City4CFD, no solver) has its own slot so it never waits for
+            # a run.
+            for city in (False, True):
+                lane = [job for job in jobs if (job["kind"] == "city_case") == city]
+                if not any(job["state"] in ACTIVE for job in lane):
+                    queued = next(
+                        (job for job in lane if job["state"] == "queued"), None
+                    )
+                    if queued is not None:
+                        self._start(queued)
 
     def close(self) -> None:
         if self.asset_server is not None:
