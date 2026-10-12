@@ -61,6 +61,7 @@ class BaseTraining:
         grad_unroll_steps: int = 2,
         grad_accum_steps: int = 1,
         profile_steps: list[int] | tuple[int, int] | None = None,
+        grad_accum_samples: int | None = None,
         checkpoint_every: int = 1,
         resume: bool = False,
         checkpoint_metadata: dict | None = None,
@@ -190,6 +191,18 @@ class BaseTraining:
         # effective batch of ``batch_size * grad_accum_steps`` when the full
         # batch does not fit in memory. 1 steps after every batch.
         self.grad_accum_steps = max(1, int(grad_accum_steps))
+        # Or accumulate micro-batches until at least this many samples, then
+        # step on the per-sample mean: a fixed effective batch when the sampler
+        # varies the micro-batch size (``cell_budget``). None: off.
+        if grad_accum_samples is not None:
+            if self.grad_accum_steps > 1:
+                raise ValueError("set grad_accum_steps or grad_accum_samples, not both")
+            if int(grad_accum_samples) < 1:
+                raise ValueError(
+                    f"grad_accum_samples must be >= 1, got {grad_accum_samples}"
+                )
+            grad_accum_samples = int(grad_accum_samples)
+        self.grad_accum_samples = grad_accum_samples
         self.scheduler = self._build_lr_scheduler()
         # Mixed precision: autocast runs the forward pass in bf16 (default) or
         # fp16. bf16 has fp32's exponent range, so no gradient under/overflow
@@ -301,8 +314,7 @@ class BaseTraining:
         # (the peak) at epoch ``warmup``; start_factor must be > 0. Per step,
         # the same ramp spans the optimizer steps of those epochs instead.
         if self.lr_warmup_per_step:
-            steps_per_epoch = math.ceil(len(self.train_loader) / self.grad_accum_steps)
-            warmup *= max(steps_per_epoch, 1)
+            warmup *= max(self._optimizer_steps_per_epoch(), 1)
         start_factor = self.lr_warmup_start / peak_lr if peak_lr > 0 else 1.0
         start_factor = min(max(start_factor, 1e-8), 1.0)
         warmup_sched = torch.optim.lr_scheduler.LinearLR(
@@ -590,20 +602,40 @@ class BaseTraining:
         term_sums: dict[str, torch.Tensor] = {}
         # Gradients of `grad_accum_steps` micro-batches are summed before each
         # optimizer step, each loss divided by its group's size so the step
-        # sees their mean. The epoch's last group may be shorter.
+        # sees their mean; with `grad_accum_samples`, micro-batches are summed
+        # until that many samples and the step sees the per-sample mean. The
+        # epoch's last group may be shorter.
         k = self.grad_accum_steps
-        n_batches = len(self.train_loader) if k > 1 else 0
+        target = self.grad_accum_samples
+        n_batches = len(self.train_loader) if k > 1 or target is not None else 0
         group = 1
         window, self._profile_window = self._profile_window, None
         prof = self._profile_tick(None, 0, window) if window is not None else None
+        seen = 0
         for i, batch in enumerate(tqdm.tqdm(self.train_loader)):
-            if i % k == 0:
-                group = min(k, n_batches - i) if k > 1 else 1
             loss = self._forward(batch)
-            if i % k == 0:
-                self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss / group if group > 1 else loss).backward()
-            if (i + 1) % k == 0 or i + 1 == n_batches:
+            if target is None:
+                if i % k == 0:
+                    group = min(k, n_batches - i) if k > 1 else 1
+                    self.optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss / group if group > 1 else loss).backward()
+                step = (i + 1) % k == 0 or i + 1 == n_batches
+            else:
+                if seen == 0:
+                    self.optimizer.zero_grad(set_to_none=True)
+                # Weigh each micro-batch's mean loss by its sample count, then
+                # divide the summed gradients by the group's total before the
+                # unscale / clip / step (linear, so fine on still-scaled grads).
+                n_samples = self._batch_samples(batch)
+                seen += n_samples
+                self.scaler.scale(loss * n_samples).backward()
+                step = seen >= target or i + 1 == n_batches
+                if step:
+                    for p in self.model.parameters():
+                        if p.grad is not None:
+                            p.grad.div_(seen)
+                    seen = 0
+            if step:
                 if self.grad_clip_norm is not None:
                     # No-op unscale when the scaler is disabled; scaler.step
                     # detects the explicit unscale and does not repeat it.
@@ -695,6 +727,36 @@ class BaseTraining:
             + "\n"
         )
         print(f"  wrote {path}")
+    @staticmethod
+    def _batch_samples(batch: dict[str, torch.Tensor]) -> int:
+        """Samples in a batch, from its per-sample state (the geometry may be
+        shipped once for the whole batch). A shape read: no device sync."""
+        for key in ("state_n", "state", "latent", "state_n_patch"):
+            if key in batch:
+                return int(batch[key].shape[0])
+        raise KeyError(f"no per-sample state in the batch keys {list(batch)}")
+
+    def _optimizer_steps_per_epoch(self) -> int:
+        """Optimizer steps in one training epoch.
+
+        With ``grad_accum_samples`` the batch sampler's planned sizes
+        (``TrajectoryBatchSampler``) are grouped exactly as ``_train_epoch``
+        groups them: exact in unshuffled order; shuffling keeps the sizes but
+        can change where groups overshoot the target, so the count may then
+        differ by a few steps. Without planned sizes, ``ceil(samples / N)``.
+        """
+        if self.grad_accum_samples is None:
+            return math.ceil(len(self.train_loader) / self.grad_accum_steps)
+        target = self.grad_accum_samples
+        batch_sizes = getattr(self.train_loader.batch_sampler, "batch_sizes", None)
+        if batch_sizes is None:
+            return math.ceil(len(self.train_loader.dataset) / target)  # type: ignore[arg-type]
+        steps, seen = 0, 0
+        for size in batch_sizes():
+            seen += size
+            if seen >= target:
+                steps, seen = steps + 1, 0
+        return steps + (seen > 0)
 
     def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
         """Hook for a second optimizer that must step after the main one (the AE's

@@ -125,3 +125,8 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
 
     def __len__(self) -> int:
         return len(self._batches(None))
+
+    def batch_sizes(self) -> list[int]:
+        """Samples in each batch of an epoch, in unshuffled order (shuffling
+        reorders the batches but keeps their sizes)."""
+        return [len(batch) for batch in self._batches(None)]
