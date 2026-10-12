@@ -54,6 +54,8 @@ def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
                 "get_visualization",
                 "render_simulation",
                 "prepare_forward_run",
+                "open_area_selector",
+                "get_selected_area",
             } <= names
             result = await client.call_tool("list_config_options", {"group": "model"})
             assert not result.is_error
