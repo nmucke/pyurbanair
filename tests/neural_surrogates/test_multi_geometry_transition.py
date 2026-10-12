@@ -389,3 +389,50 @@ def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
         p = (p - lr * grad).detach().requires_grad_(True)
     assert steps == 3
     torch.testing.assert_close(model.p.detach(), p.detach())
+
+
+@pytest.mark.parametrize("window", [None, (2, 3), (0, 2), (7, 5)])
+def test_profile_window(data_root: Path, tmp_path: Path, window) -> None:
+    """``profile_steps=(start, count)`` profiles that window of the first
+    epoch into ``profile.txt`` (a window running past the epoch end is closed
+    there) without changing training; off writes nothing."""
+    ds = _make_ds(data_root, sdf_features=True)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+
+    class Scaled(_IdentityModel):
+        def forward(self, state, params, geometry, geom_features=None):
+            return state * (1.0 + self.p)
+
+    params = []
+    for profile_steps in (None, window):
+        model = Scaled()
+        out = tmp_path / ("off" if profile_steps is None else "on")
+        trainer = Trainer(
+            model=model,
+            train_loader=loader,
+            val_loader=loader,
+            optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+            loss_fn=torch.nn.MSELoss(),
+            num_epochs=2,
+            device="cpu",
+            amp=False,
+            grad_accum_steps=2,
+            weights_path=out / "weights.pt",
+            profile_steps=profile_steps,
+        )
+        trainer._train_epoch()
+        trainer._train_epoch()  # one-shot: the second epoch is not profiled
+        params.append(model.p.detach().clone())
+        profile = out / "profile.txt"
+        if profile_steps is None:
+            assert not profile.exists()
+        else:
+            text = profile.read_text()
+            count = min(window[1], 9 - window[0])  # 9 batches per epoch
+            assert text.startswith(f"profiled {count} micro-batches")
+            assert "Self CPU time total" in text and "aten::" in text
+    torch.testing.assert_close(params[0], params[1])

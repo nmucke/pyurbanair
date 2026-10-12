@@ -588,6 +588,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
 | `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`ceil(batches / grad_accum_steps)` per epoch). Not with the AE's discriminator |
+| `profile_steps` | `[start, count]`: run micro-batches `start .. start+count-1` (0-based) of epoch 0 under `torch.profiler` (CPU + CUDA, no shapes/stacks) and write `profile.txt` next to `weights.pt`: wall time, it/s and kernel-busy fraction of the window, then the top 40 ops by self device time (self CPU time on CPU). Place it after the cuDNN-benchmark warm-up. Default `null` (off, no syncs); a resumed run does not profile; a window past the epoch end closes there |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
 
 `fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`
