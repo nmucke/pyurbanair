@@ -337,23 +337,15 @@ def test_masked_loss_matches_boolean_indexing(data_root: Path, loss_fn) -> None:
     torch.testing.assert_close(grad, expected_grad)
 
 
-def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
-    """``grad_accum_steps=k`` takes one optimizer step per k batches on their
-    mean gradient; a short last group is averaged over its own size."""
-    ds = _make_ds(data_root, sdf_features=True)
-    loader = DataLoader(
-        ds,
-        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
-        collate_fn=transition_collate,
-    )
-    batches = list(loader)  # 9 single-sample batches -> groups of 4, 4, 1
+class _ScaledModel(_IdentityModel):
+    def forward(self, state, params, geometry, geom_features=None):
+        return state * (1.0 + self.p)
 
-    class Scaled(_IdentityModel):
-        def forward(self, state, params, geometry, geom_features=None):
-            return state * (1.0 + self.p)
 
-    model = Scaled()
-    lr = 0.1
+def _run_accum_epoch(loader: DataLoader, lr: float, **trainer_kwargs):
+    """One SGD epoch of a ``_ScaledModel`` trainer; returns the trainer and
+    its number of optimizer steps."""
+    model = _ScaledModel()
     trainer = Trainer(
         model=model,
         train_loader=loader,
@@ -363,7 +355,7 @@ def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
         num_epochs=1,
         device="cpu",
         amp=False,
-        grad_accum_steps=4,
+        **trainer_kwargs,
     )
     steps = 0
     step = trainer.optimizer.step
@@ -375,17 +367,110 @@ def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
 
     trainer.optimizer.step = counting_step  # type: ignore[method-assign]
     trainer._train_epoch()
+    return trainer, steps
+
+
+def _sample_losses(batch: dict, p: torch.Tensor) -> list[torch.Tensor]:
+    """The masked MSE of a ``_ScaledModel`` with parameter ``p``, per sample."""
+    fluid = batch["geometry"][0].bool()
+    pred = batch["state_n"] * (1.0 + p)
+    return [
+        torch.nn.functional.mse_loss(pred[b][..., fluid], batch["state_next"][b][..., fluid])
+        for b in range(pred.shape[0])
+    ]
+
+
+def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
+    """``grad_accum_steps=k`` takes one optimizer step per k batches on their
+    mean gradient; a short last group is averaged over its own size."""
+    ds = _make_ds(data_root, sdf_features=True)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+    batches = list(loader)  # 9 single-sample batches -> groups of 4, 4, 1
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, grad_accum_steps=4)
 
     p = torch.zeros(1, requires_grad=True)
     for group in (batches[0:4], batches[4:8], batches[8:9]):
         grad = torch.zeros(1)
         for batch in group:
-            fluid = batch["geometry"][0].bool()
-            pred = batch["state_n"] * (1.0 + p)
-            loss = torch.nn.functional.mse_loss(
-                pred[..., fluid], batch["state_next"][..., fluid]
-            )
+            (loss,) = _sample_losses(batch, p)
             grad += torch.autograd.grad(loss, p)[0] / len(group)
         p = (p - lr * grad).detach().requires_grad_(True)
     assert steps == 3
-    torch.testing.assert_close(model.p.detach(), p.detach())
+    assert trainer._optimizer_steps_per_epoch() == 3
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+@pytest.mark.parametrize(
+    "target, group_batches",
+    [
+        (4, (3, 4)),  # 2+1+2 = 5 overshoots, then 1+1+1+1 = 4
+        (6, (4, 3)),  # 2+1+2+1 = 6, then a partial last group of 1+1+1
+    ],
+)
+def test_grad_accum_samples_averages_over_samples(
+    data_root: Path, target: int, group_batches: tuple[int, ...]
+) -> None:
+    """``grad_accum_samples=N`` steps once at least N samples are in, on the
+    per-sample mean gradient, so variable micro-batches weigh by their size;
+    the epoch's last partial group is flushed."""
+    ds = _make_ds(data_root, sdf_features=True)
+    # 256-cell trajectories 0/1 get batches of 2 (then 1), the 512-cell
+    # trajectory 2 batches of 1: sizes 2, 1, 2, 1, 1, 1, 1.
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, shuffle=False)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    batches = list(loader)
+    assert [len(b["state_n"]) for b in batches] == [2, 1, 2, 1, 1, 1, 1]
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, grad_accum_samples=target)
+
+    p = torch.zeros(1, requires_grad=True)
+    start = 0
+    for size in group_batches:
+        losses = [
+            loss for b in batches[start : start + size] for loss in _sample_losses(b, p)
+        ]
+        start += size
+        (grad,) = torch.autograd.grad(torch.stack(losses).mean(), p)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == len(group_batches) == trainer._optimizer_steps_per_epoch()
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"grad_accum_samples": 1}])
+def test_no_accumulation_steps_every_batch(data_root: Path, kwargs: dict) -> None:
+    """Without accumulation (the default) and with ``grad_accum_samples=1``
+    every batch takes its own step on its own mean loss."""
+    ds = _make_ds(data_root, sdf_features=True)
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, shuffle=False)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, **kwargs)
+
+    p = torch.zeros(1, requires_grad=True)
+    for batch in loader:
+        (grad,) = torch.autograd.grad(torch.stack(_sample_losses(batch, p)).mean(), p)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == len(loader) == trainer._optimizer_steps_per_epoch()
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+def test_grad_accum_steps_and_samples_are_exclusive() -> None:
+    model = _IdentityModel()
+    dummy = DataLoader([0, 1], batch_size=1)
+    with pytest.raises(ValueError, match="not both"):
+        Trainer(
+            model=model,
+            train_loader=dummy,
+            val_loader=dummy,
+            optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+            loss_fn=torch.nn.MSELoss(),
+            num_epochs=1,
+            device="cpu",
+            grad_accum_steps=2,
+            grad_accum_samples=8,
+        )

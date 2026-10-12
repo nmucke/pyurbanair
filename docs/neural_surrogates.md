@@ -588,6 +588,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` | linear warmup → cosine annealing LR schedule |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
 | `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch and is unaffected. Not with the AE's discriminator |
+| `grad_accum_samples` | instead of `grad_accum_steps` (setting both raises): sum micro-batches until at least N samples, then step on the per-sample mean (each batch's loss weighted by its size, the grads divided by the group's sample total). A fixed effective batch when `cell_budget` varies the micro-batch size; a group overshoots N by less than one micro-batch, and the epoch's last group is flushed short. `null` (default) is off. Not with the AE's discriminator |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
 
 `fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`
