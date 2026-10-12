@@ -43,7 +43,7 @@ BLOCKS = [
 ]
 
 
-def _peft_stepper() -> Any:
+def _peft_stepper(fused: bool = False) -> Any:
     """A tiny DFT: random stepper wired like ``train_dft.yaml``, LoRA with
     non-zero adapters on the frozen encoder/decoder, trainable new modules."""
     torch.manual_seed(0)
@@ -63,7 +63,9 @@ def _peft_stepper() -> Any:
     )
     model.requires_grad_(False)
     targets = resolve_target_modules(model, preset="tadpole_encdec")
-    peft = inject_lora(model, rank=4, alpha=8, target_modules=targets)
+    peft = inject_lora(
+        model, rank=4, alpha=8, target_modules=targets, fused_forward=fused
+    )
     for name, p in peft.named_parameters():
         if "lora_B" in name or "geom_proj" in name or "skip_mixing" in name:
             p.data.normal_(std=0.02)
@@ -105,12 +107,13 @@ def _loss_and_grads(model: Any, amp: bool) -> tuple:
     return loss.detach(), grads
 
 
+@pytest.mark.parametrize("fused", [False, True])
 @pytest.mark.parametrize("amp", [False, True])
 @pytest.mark.parametrize("patterns", [STAGES, BLOCKS, ["dft.encoder", "dft.decoder"]])
 def test_activation_checkpointing_keeps_loss_and_grads(
-    patterns: list[str], amp: bool
+    patterns: list[str], amp: bool, fused: bool
 ) -> None:
-    plain = _peft_stepper()
+    plain = _peft_stepper(fused)
     ckpt = copy.deepcopy(plain)
     _trainer(ckpt, activation_checkpoint_modules=patterns)
     wrapped = [n for n, m in ckpt.named_modules() if "forward" in vars(m)]
@@ -133,6 +136,26 @@ def test_activation_checkpointing_keeps_loss_and_grads(
     # The merged weights a LoRA run saves are unaffected.
     merged, reference = merge_to_state_dict(ckpt), merge_to_state_dict(plain)
     assert list(merged) == list(reference)
+
+
+def test_activation_checkpointing_wraps_the_fused_lora_forward() -> None:
+    """Checkpointing a LoRA layer itself keeps ``lora.fused_forward``."""
+    from neural_surrogates.finetuning.inject import _fused_lora_forward
+
+    plain = _peft_stepper(fused=True)
+    ckpt = copy.deepcopy(plain)
+    leaves = [
+        "dft.decoder.conv_decoder.conv_decoder.decompress",
+        "dft.encoder.*.conv_1",
+    ]
+    for module in checkpoint_submodules(ckpt, leaves):
+        assert module._checkpoint_inner_forward.__func__ is _fused_lora_forward
+    loss0, grads0 = _loss_and_grads(plain, amp=True)
+    loss1, grads1 = _loss_and_grads(ckpt, amp=True)
+    torch.testing.assert_close(loss1, loss0, atol=0, rtol=0)
+    for n, g in grads0.items():
+        if g is not None:
+            torch.testing.assert_close(grads1[n], g, atol=0, rtol=0)
 
 
 def test_activation_checkpointing_off_wraps_nothing() -> None:
