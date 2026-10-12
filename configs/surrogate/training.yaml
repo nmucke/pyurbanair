@@ -25,10 +25,14 @@ trainer:
   channels_last: false
   cudnn_benchmark: true
   tf32: true
-  # Learning-rate schedule and stability
+  # Learning-rate schedule and stability: a linear warmup from lr_warmup_start
+  # to the optimizer's lr over lr_warmup_epochs, then a cosine to lr_min. The
+  # warmup steps once per epoch, or after every optimizer step with
+  # lr_warmup_per_step (peak lr is then reached at epoch lr_warmup_epochs).
   lr_warmup_epochs: 5
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
+  lr_warmup_per_step: false
   grad_clip_norm: 1.0
   # Batches whose gradients are summed into one optimizer step (an effective
   # batch of batch_size x grad_accum_steps when a larger batch does not fit).

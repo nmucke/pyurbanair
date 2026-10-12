@@ -585,9 +585,9 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
 | `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32) |
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
-| `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` | linear warmup → cosine annealing LR schedule |
+| `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
-| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch and is unaffected. Not with the AE's discriminator |
+| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`ceil(batches / grad_accum_steps)` per epoch). Not with the AE's discriminator |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
 
 `fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`
@@ -630,7 +630,15 @@ geometry `expand` are unaffected, and both `_final_loss` hooks compare a
 **LR schedule.** When `lr_warmup_epochs` is set the optimizer's LR ramps
 linearly from `lr_warmup_start` to its configured peak over the warmup
 window, then cosine-anneals down to `lr_min` over the remaining epochs.
-`lr_warmup_epochs=None` (default) keeps the LR fixed.
+`lr_warmup_epochs=None` (default) keeps the LR fixed. The LR changes once per
+epoch, so epoch 0 runs entirely at `lr_warmup_start`. With
+`lr_warmup_per_step=true` the warmup instead advances after every optimizer
+step: the first step uses `lr_warmup_start` and the peak is reached at the
+start of epoch `lr_warmup_epochs`, after which the cosine steps per epoch as
+before (`trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true` warms up
+over the first epoch only). The scheduler decides from its own step count
+whether it is still warming up, so a resumed run continues where it stopped.
+The logged `lr` is the LR at the start of each epoch.
 
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss

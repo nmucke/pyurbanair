@@ -54,6 +54,7 @@ class BaseTraining:
         lr_warmup_epochs: int | None = None,
         lr_warmup_start: float = 0.0,
         lr_min: float = 0.0,
+        lr_warmup_per_step: bool = False,
         mask_loss: bool = True,
         grad_clip_norm: float | None = None,
         grad_unroll_steps: int = 2,
@@ -176,9 +177,17 @@ class BaseTraining:
         # to the optimizer's configured (peak) LR over ``lr_warmup_epochs``,
         # then cosine-anneal down to ``lr_min`` over the remaining epochs.
         # ``lr_warmup_epochs is None`` keeps the LR fixed (original behavior).
+        # ``lr_warmup_per_step`` ramps once per optimizer step instead of once
+        # per epoch, so the peak LR is reached at the start of epoch
+        # ``lr_warmup_epochs``.
         self.lr_warmup_epochs = lr_warmup_epochs
         self.lr_warmup_start = lr_warmup_start
         self.lr_min = lr_min
+        self.lr_warmup_per_step = lr_warmup_per_step
+        # Micro-batches whose gradients are summed into one optimizer step: an
+        # effective batch of ``batch_size * grad_accum_steps`` when the full
+        # batch does not fit in memory. 1 steps after every batch.
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
         self.scheduler = self._build_lr_scheduler()
         # Mixed precision: autocast runs the forward pass in bf16 (default) or
         # fp16. bf16 has fp32's exponent range, so no gradient under/overflow
@@ -239,10 +248,6 @@ class BaseTraining:
         # improves long-rollout error at the cost of holding N steps'
         # activations.
         self.grad_unroll_steps = max(1, int(grad_unroll_steps))
-        # Micro-batches whose gradients are summed into one optimizer step: an
-        # effective batch of ``batch_size * grad_accum_steps`` when the full
-        # batch does not fit in memory. 1 steps after every batch.
-        self.grad_accum_steps = max(1, int(grad_accum_steps))
         # Persist the full (model + optimizer + scheduler + scaler + curriculum)
         # checkpoint only every ``checkpoint_every`` epochs (plus the final one).
         # The optimizer state alone is ~2x the model size, so writing it every
@@ -282,7 +287,11 @@ class BaseTraining:
         if warmup == 0:
             return cosine
         # LinearLR scales the peak LR by start_factor on epoch 0 and reaches 1.0
-        # (the peak) at epoch ``warmup``; start_factor must be > 0.
+        # (the peak) at epoch ``warmup``; start_factor must be > 0. Per step,
+        # the same ramp spans the optimizer steps of those epochs instead.
+        if self.lr_warmup_per_step:
+            steps_per_epoch = math.ceil(len(self.train_loader) / self.grad_accum_steps)
+            warmup *= max(steps_per_epoch, 1)
         start_factor = self.lr_warmup_start / peak_lr if peak_lr > 0 else 1.0
         start_factor = min(max(start_factor, 1e-8), 1.0)
         warmup_sched = torch.optim.lr_scheduler.LinearLR(
@@ -295,6 +304,17 @@ class BaseTraining:
             self.optimizer,
             schedulers=[warmup_sched, cosine],
             milestones=[warmup],
+        )
+
+    def _warming_up_per_step(self) -> bool:
+        """Whether the per-step warmup is still ramping: the scheduler then
+        steps after every optimizer step, and only once per epoch afterwards.
+        Read off the scheduler's own count, so a resumed run picks it up."""
+        sched = self.scheduler
+        return (
+            self.lr_warmup_per_step
+            and isinstance(sched, torch.optim.lr_scheduler.SequentialLR)
+            and sched.last_epoch < sched._milestones[0]
         )
 
     def _autocast(self) -> torch.autocast:
@@ -581,6 +601,8 @@ class BaseTraining:
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self._after_optimizer_step(batch)
+                if self.scheduler is not None and self._warming_up_per_step():
+                    self.scheduler.step()
             total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)
@@ -877,11 +899,14 @@ class BaseTraining:
                 epochs_since_improvement = 0
                 print(f"  train pushforward horizon -> {steps} step(s)")
             lr = self.optimizer.param_groups[0]["lr"]
+            # An epoch that began in the per-step warmup has already stepped the
+            # scheduler after each optimizer step.
+            warming_up = self._warming_up_per_step()
             epoch_start = time.monotonic()
             train_loss = self._train_epoch()
             val_loss = self._validate()
             epoch_seconds = time.monotonic() - epoch_start
-            if self.scheduler is not None:
+            if self.scheduler is not None and not warming_up:
                 self.scheduler.step()
             history["train"].append(train_loss)
             history["val"].append(val_loss)

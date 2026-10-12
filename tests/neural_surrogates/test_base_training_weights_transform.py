@@ -15,6 +15,7 @@ scripted losses so we control exactly when improvements happen.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -300,3 +301,104 @@ def test_resume_checkpoint_metadata_mismatch_preserves_model(tmp_path: Path) -> 
         second.fit()
     for k, v in before.items():
         assert torch.equal(second._eager_model.state_dict()[k], v)
+
+
+def _warmup_trainer(
+    tmp_path: Path,
+    num_epochs: int,
+    per_step: bool,
+    crash_at_epoch: int | None = None,
+) -> tuple[Trainer, list[list[float]]]:
+    """A Trainer running its real ``_train_epoch`` over 5 single-sample batches
+    with ``grad_accum_steps=2`` (optimizer steps on groups of 2, 2 and a short
+    1), a one-epoch warmup from 0.01 to 0.1 and a cosine down to 0.001.
+    Returns it with the LR of every optimizer step, one list per epoch."""
+    model = nn.Linear(2, 1)
+    loader = DataLoader(TensorDataset(torch.ones(5, 2)), batch_size=1)
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        loss_fn=nn.MSELoss(),
+        num_epochs=num_epochs,
+        device="cpu",
+        weights_path=tmp_path / "weights.pt",
+        resume=True,
+        amp=False,
+        lr_warmup_epochs=1,
+        lr_warmup_start=0.01,
+        lr_min=0.001,
+        lr_warmup_per_step=per_step,
+        grad_accum_steps=2,
+    )
+    trainer._forward = lambda batch: trainer.model(batch[0]).pow(2).mean()  # type: ignore[method-assign]
+    step_lrs: list[list[float]] = []
+    train_epoch = trainer._train_epoch
+    optimizer_step = trainer.optimizer.step
+
+    def record_epoch() -> float:
+        step_lrs.append([])
+        return float(train_epoch())
+
+    def record_step(*args, **kwargs):  # type: ignore[no-untyped-def]
+        step_lrs[-1].append(trainer.optimizer.param_groups[0]["lr"])
+        return optimizer_step(*args, **kwargs)
+
+    validate = trainer._validate
+
+    def crashing_validate() -> float:
+        if len(step_lrs) - 1 == crash_at_epoch:
+            raise RuntimeError("simulated crash mid-run")
+        return float(validate())
+
+    trainer._train_epoch = record_epoch  # type: ignore[method-assign]
+    trainer.optimizer.step = record_step  # type: ignore[method-assign]
+    trainer._validate = crashing_validate  # type: ignore[method-assign]
+    return trainer, step_lrs
+
+
+def _cosine(epoch: int, t_max: int = 3) -> float:
+    return 0.001 + (0.1 - 0.001) * (1 + math.cos(math.pi * epoch / t_max)) / 2
+
+
+def test_per_step_warmup_ramps_over_the_first_epoch(tmp_path: Path) -> None:
+    """The LR rises per optimizer step through epoch 0, is at peak for epoch 1,
+    then follows the per-epoch cosine down to ``lr_min``."""
+    trainer, step_lrs = _warmup_trainer(tmp_path, num_epochs=4, per_step=True)
+    trainer.fit()
+    expected = [
+        [0.01, 0.01 + 0.09 / 3, 0.01 + 0.09 * 2 / 3],
+        [0.1] * 3,
+        [_cosine(1)] * 3,
+        [_cosine(2)] * 3,
+    ]
+    assert step_lrs == [pytest.approx(lrs) for lrs in expected]
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
+
+
+def test_per_step_warmup_resumes_after_first_epoch(tmp_path: Path) -> None:
+    """A run resumed from the epoch-0 checkpoint continues at peak, then on the
+    cosine, exactly as the uninterrupted run."""
+    full, full_lrs = _warmup_trainer(tmp_path / "full", num_epochs=4, per_step=True)
+    full.fit()
+    crashed, _ = _warmup_trainer(
+        tmp_path, num_epochs=4, per_step=True, crash_at_epoch=1
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        crashed.fit()
+    assert torch.load(tmp_path / "checkpoint.pt")["epoch"] == 0
+    resumed, resumed_lrs = _warmup_trainer(tmp_path, num_epochs=4, per_step=True)
+    resumed.fit()
+    assert resumed_lrs == [pytest.approx(lrs) for lrs in full_lrs[1:]]
+    assert resumed.optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
+
+
+def test_per_epoch_warmup_is_the_default(tmp_path: Path) -> None:
+    """Without ``lr_warmup_per_step`` the LR still changes once per epoch: all
+    of epoch 0 runs at ``lr_warmup_start``."""
+    trainer, step_lrs = _warmup_trainer(tmp_path, num_epochs=4, per_step=False)
+    trainer.fit()
+    expected = [[0.01] * 3, [0.1] * 3, [_cosine(1)] * 3, [_cosine(2)] * 3]
+    assert step_lrs == [pytest.approx(lrs) for lrs in expected]
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(0.001)
