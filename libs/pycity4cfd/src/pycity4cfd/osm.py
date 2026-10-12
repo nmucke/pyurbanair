@@ -72,8 +72,16 @@ def fetch_buildings(
     smaller than ``min_area`` m², with columns ``id`` (``"way/123"``, suffixed
     ``"_1"``, ``"_2"`` ... for the parts of a multipolygon), ``height`` (m) and
     ``height_source`` (``"height"`` | ``"levels"`` | ``"default"``).
+
+    Raises:
+        ValueError: No building in ``bbox`` has a polygon footprint of at least
+            ``min_area`` m² (osmnx found none, or only nodes and slivers).
     """
-    raw = ox.features_from_bbox(bbox, tags={"building": True})
+    empty = ValueError(f"No buildings with polygon footprints in the area {bbox}")
+    try:
+        raw = ox.features_from_bbox(bbox, tags={"building": True})
+    except ox._errors.InsufficientResponseError as error:
+        raise empty from error
     raw = raw.reset_index()
     raw["id"] = raw["element"].astype(str) + "/" + raw["id"].astype(str)
 
@@ -88,8 +96,12 @@ def fetch_buildings(
 
     gdf = _polygons(raw[COLUMNS])
     gdf = _polygons(gdf.clip(box(*bbox)))
+    if gdf.empty:
+        raise empty
     gdf = gdf.to_crs(gdf.estimate_utm_crs())
     gdf = gdf[gdf.area >= min_area].reset_index(drop=True)
+    if gdf.empty:
+        raise empty
 
     # Unique ids: suffix the parts of a split multipolygon (or clipped polygon).
     part = gdf.groupby("id").cumcount() + 1

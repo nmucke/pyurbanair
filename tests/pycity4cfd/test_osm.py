@@ -156,3 +156,39 @@ def test_write_buildings_round_trip(
     np.testing.assert_allclose(back["height"], buildings["height"])
     assert list(back["height_source"]) == list(buildings["height_source"])
     assert back.geom_equals_exact(buildings.geometry, tolerance=1e-6).all()
+
+
+def _only(rows: list[tuple[str, int, object]]) -> gpd.GeoDataFrame:
+    """osmnx-like features with the given (element, id, geometry) rows."""
+    index = pd.MultiIndex.from_tuples([r[:2] for r in rows], names=["element", "id"])
+    return gpd.GeoDataFrame(
+        {"building": "yes"}, geometry=[r[2] for r in rows], index=index, crs="EPSG:4326"
+    )
+
+
+def _no_osm_buildings(*args: object, **kwargs: object) -> gpd.GeoDataFrame:
+    raise osm.ox._errors.InsufficientResponseError("No matching features.")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "features_from_bbox",
+    [
+        # Only nodes: no footprint at all.
+        lambda *a, **k: _only([("node", 1, Point(BBOX[0] + 0.001, BBOX[1] + 0.001))]),
+        # Only slivers below min_area.
+        lambda *a, **k: _only(
+            [("way", 1, _square(BBOX[0] + 0.001, BBOX[1] + 0.001, 1e-6))]
+        ),
+        # Only outside the bbox, so clipping drops it.
+        lambda *a, **k: _only([("way", 1, _square(BBOX[2] + 0.001, BBOX[1]))]),
+        # osmnx's error for an area without any building.
+        _no_osm_buildings,
+    ],
+    ids=["nodes", "slivers", "outside", "none"],
+)
+def test_no_buildings_raises(
+    features_from_bbox: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(osm.ox, "features_from_bbox", features_from_bbox)
+    with pytest.raises(ValueError, match="No buildings with polygon footprints"):
+        osm.fetch_buildings(BBOX)

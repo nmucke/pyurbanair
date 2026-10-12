@@ -27,6 +27,7 @@ from pycity4cfd.osm import fetch_buildings, write_buildings
 from shapely.geometry import Point, box
 
 N_SENSORS = 6
+N_VALIDATION = 3  # held-out sensors, after the assimilated ones
 SENSOR_HEIGHT = 3.0  # m above ground
 
 
@@ -37,8 +38,12 @@ def _even(n: float) -> int:
 
 def _sensors(
     footprints: gpd.GeoSeries, lx: float, ly: float, resolution: float
-) -> list[tuple[float, float]]:
-    """Pick up to ``N_SENSORS`` street-level points spread over the domain, outside buildings."""
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    """Street-level points spread over the domain, outside buildings.
+
+    Returns up to ``N_SENSORS`` assimilated and ``N_VALIDATION`` held-out
+    points, distinct, from one farthest-point sampling (at least one each).
+    """
     clearance = footprints.buffer(2 * resolution).union_all()
     candidates = [
         (lx * fx, ly * fy)
@@ -46,15 +51,17 @@ def _sensors(
         for fx in np.linspace(0.2, 0.8, 9)
         if not clearance.contains(Point(lx * fx, ly * fy))
     ]
-    if not candidates:
-        raise ValueError("No open street-level point for sensors in this area")
+    if len(candidates) < 2:
+        raise ValueError("Too few open street-level points for sensors in this area")
     # Farthest-point sampling from the domain centre for an even spread.
     pts = np.array(candidates)
     chosen = [int(np.argmin(np.linalg.norm(pts - (lx / 2, ly / 2), axis=1)))]
-    while len(chosen) < min(N_SENSORS, len(pts)):
+    while len(chosen) < min(N_SENSORS + N_VALIDATION, len(pts)):
         d = np.linalg.norm(pts[:, None] - pts[chosen][None], axis=2).min(axis=1)
         chosen.append(int(np.argmax(d)))
-    return [(round(float(x), 1), round(float(y), 1)) for x, y in pts[chosen]]
+    points = [(round(float(x), 1), round(float(y), 1)) for x, y in pts[chosen]]
+    n_assimilated = min(N_SENSORS, len(points) - 1)
+    return points[:n_assimilated], points[n_assimilated:]
 
 
 def make_case(
@@ -122,7 +129,7 @@ def make_case(
     mesh.export(stl_path)
 
     footprints = buildings.geometry.translate(-(xmin - margin), -(ymin - margin))
-    sensors = _sensors(footprints, lx, ly, resolution)
+    sensors, validation = _sensors(footprints, lx, ly, resolution)
     xs, ys = [s[0] for s in sensors], [s[1] for s in sensors]
 
     overrides = [
@@ -137,10 +144,11 @@ def make_case(
         f"obs.x_points={xs}",
         f"obs.y_points={ys}",
         f"obs.z_points={[SENSOR_HEIGHT] * len(sensors)}",
-        # Held-out sensors of the default case would sit inside buildings.
-        "~obs.validation_x_points",
-        "~obs.validation_y_points",
-        "~obs.validation_z_points",
+        # Replace (or add, ++) the case's held-out sensors: the default case's
+        # would sit inside buildings.
+        f"++obs.validation_x_points={[v[0] for v in validation]}",
+        f"++obs.validation_y_points={[v[1] for v in validation]}",
+        f"++obs.validation_z_points={[SENSOR_HEIGHT] * len(validation)}",
     ]
     result = {
         "case_dir": str(case_dir),

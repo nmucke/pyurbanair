@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Compile City4CFD from the pinned submodule into libs/pycity4cfd/build/.
+# Compile City4CFD from the pinned submodule into libs/pycity4cfd/build/<env>/.
 #
-# Run through `pixi run build-city4cfd` (dev or mcp env): every dependency comes
-# from the pixi env (CMAKE_PREFIX_PATH), the submodule is never written to, and
-# re-running only rebuilds what changed. The binary is build/city4cfd.
+# Run through `pixi run -e <env> build-city4cfd` (dev or mcp): every dependency
+# comes from that pixi env (CMAKE_PREFIX_PATH), so each env gets its own build
+# tree and binary, build/<env>/city4cfd. The submodule is never written to, and
+# re-running only rebuilds what changed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 src="$here/City4CFD"
-build="$here/build"
+build="$here/build/${PIXI_ENVIRONMENT_NAME:-$(basename "$CONDA_PREFIX")}"
 
 if [ ! -f "$src/CMakeLists.txt" ]; then
     git -C "$here" submodule update --init City4CFD

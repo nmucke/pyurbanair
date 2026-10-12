@@ -126,8 +126,14 @@ def test_executable_missing_names_the_build_task(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(city4cfd, "BUILD_DIR", tmp_path)
-    with pytest.raises(FileNotFoundError, match="build-city4cfd"):
+    monkeypatch.setattr(city4cfd, "PIXI_ENV", "someenv")
+    with pytest.raises(FileNotFoundError, match="pixi run -e someenv build-city4cfd"):
         city4cfd.city4cfd_executable()
+
+
+def test_build_dir_is_per_pixi_env() -> None:
+    assert city4cfd.BUILD_DIR.name == city4cfd.PIXI_ENV
+    assert city4cfd.BUILD_DIR.parent.name == "build"
 
 
 requires_city4cfd = pytest.mark.skipif(

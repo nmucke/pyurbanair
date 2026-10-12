@@ -15,7 +15,7 @@ From Claude Code the MCP tools drive it: `open_area_selector` ->
 `launch_forward_run` with `model=pylbm` (see [mcp.md](mcp.md)). By hand:
 
 ```bash
-pixi run -e dev build-city4cfd    # once, ~2 min
+pixi run -e dev build-city4cfd    # once per env, ~2 min
 pixi run -e dev python -c "from pycity4cfd.case import make_case; \
   print(make_case((4.3555, 52.0095, 4.3600, 52.0122), '.temp/city_cases/delft'))"
 pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>
@@ -29,12 +29,16 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>
   `building:levels` x `floor_height` (3 m), else `default_height` (10 m);
   `height_source` records which. Few buildings carry `height`: in central Delft
   4 of 439, about half fall back to the default. Overpass can stall for
-  minutes (504 + retry); an empty area raises osmnx's
-  `InsufficientResponseError`.
+  minutes (504 + retry). An area with no building footprint (none in OSM, or
+  only nodes, slivers below `min_area` or parts clipped away) raises a
+  `ValueError`.
 - **`city4cfd`**: City4CFD 0.8.1 (`libs/pycity4cfd/City4CFD`, AGPL-3.0
   submodule, vendored: don't edit) is not on conda-forge; `build-city4cfd`
   compiles it with the `city4cfd` pixi feature's conda-forge deps into
-  `libs/pycity4cfd/build/` (not in `setup-dev`). Each building is an LoD1.2
+  `libs/pycity4cfd/build/<env>/` (not in `setup-dev`). Build it once per pixi
+  env you run it from (`dev`, `mcp`): CMake records that env's absolute
+  library paths, so `city4cfd_executable()` only looks in the current env's
+  directory and its error names the env to build. Each building is an LoD1.2
   extrusion to its `height`. City4CFD cannot run without a ground point cloud,
   so `write_config` writes a flat `ground.xyz` grid; every footprint must lie
   inside the `half_width` square around `point_of_interest`, or City4CFD
@@ -46,8 +50,9 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>
   cells), even nx/ny/nz. It shifts the STL into the domain frame (the
   [geometries/README.md](../geometries/README.md) contract: metres,
   `(0, 0)` corner, flat ground at z = 0, no ground mesh), picks six
-  street-level sensors outside buildings and drops the default case's
-  held-out sensors.
+  street-level sensors outside buildings and three more as held-out
+  validation sensors (`++obs.validation_*_points`, so the overrides compose
+  on any case).
 
 ## Limits
 

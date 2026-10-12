@@ -4,7 +4,8 @@ Map area -> case folder and forward overrides (``pycity4cfd.case``).
 OpenStreetMap is replaced by two hand-built buildings. The unit test also
 replaces City4CFD (one box per building, in City4CFD's point-of-interest
 frame); the ``integration`` test runs the real binary (skipped when it is not
-built). Both check the STL lands in the domain frame, the grid and the sensors.
+built). Both check the STL lands in the domain frame, the grid and the sensors;
+the overrides compose on every case.
 """
 
 import json
@@ -16,6 +17,8 @@ import pytest
 import trimesh
 from pycity4cfd import case, city4cfd
 from shapely.geometry import Point, box
+
+from tests.conftest import compose
 
 # About 300 m x 300 m in central Delft (EPSG:4326 degrees).
 BBOX = (4.3555, 52.0095, 4.3600, 52.0122)
@@ -81,9 +84,13 @@ def _check_case(result: dict, buildings: gpd.GeoDataFrame) -> None:
     xs, ys = json.loads(overrides["obs.x_points"]), json.loads(
         overrides["obs.y_points"]
     )
+    vxs = json.loads(overrides["++obs.validation_x_points"])
+    vys = json.loads(overrides["++obs.validation_y_points"])
     assert len(xs) == len(ys) == case.N_SENSORS
+    assert len(vxs) == len(vys) == case.N_VALIDATION
+    assert not set(zip(xs, ys)) & set(zip(vxs, vys))
     shifted = buildings.geometry.translate(mx0 - fx0, my0 - fy0)
-    for x, y in zip(xs, ys):
+    for x, y in zip(xs + vxs, ys + vys):
         assert 0 < x < lx and 0 < y < ly
         assert not shifted.contains(Point(x, y)).any()
 
@@ -98,6 +105,35 @@ def test_make_case(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert result["n_buildings"] == 2
     assert result["height_sources"] == {"levels": 1, "height": 1}
     _check_case(result, buildings)
+
+
+@pytest.mark.parametrize("case_name", ["xie_and_castro", "barcelona"])  # type: ignore[misc]
+def test_overrides_compose(
+    case_name: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overrides compose whether or not the case has held-out sensors."""
+    buildings = _buildings()
+    monkeypatch.setattr(case, "fetch_buildings", lambda *a, **k: buildings)
+    monkeypatch.setattr(case, "run_city4cfd", _fake_city4cfd)
+    result = case.make_case(
+        BBOX, tmp_path / "delft", resolution=RESOLUTION, margin=MARGIN
+    )
+    cfg = compose(
+        "forward",
+        f"case={case_name}",
+        "model=pylbm",
+        *result["overrides"],
+        root=tmp_path,
+    )
+    overrides = dict(o.split("=", 1) for o in result["overrides"])
+    assert cfg.domain.nx == result["domain"]["nx"]
+    for axis in "xyz":
+        assert list(cfg.obs[f"{axis}_points"]) == json.loads(
+            overrides[f"obs.{axis}_points"]
+        )
+        assert list(cfg.obs[f"validation_{axis}_points"]) == json.loads(
+            overrides[f"++obs.validation_{axis}_points"]
+        )
 
 
 @pytest.mark.integration  # type: ignore[misc]
