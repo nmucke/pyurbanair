@@ -80,6 +80,16 @@ def inject_lora(
         bias="none",
     )
     peft_model = get_peft_model(model, config)
+    # PEFT casts each LoRA layer's input to the adapter weights' dtype (fp32)
+    # before ``lora_A``, which under bf16 autocast casts it straight back: a
+    # transient fp32 copy plus a second bf16 copy of the input kept for
+    # backward, next to the base layer's. Without the cast both branches share
+    # one bf16 input (bf16 -> fp32 -> bf16 is exact, so outputs and gradients
+    # are bit-identical); in fp32 the cast is a no-op either way. The fused
+    # forward below never casts; this covers PEFT's forward and its fallbacks.
+    for module in peft_model.modules():
+        if hasattr(module, "cast_input_dtype_enabled"):
+            module.cast_input_dtype_enabled = False
     if fused_forward:
         from peft.tuners.lora import layer as lora_layer
 
