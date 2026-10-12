@@ -638,3 +638,43 @@ def test_resumed_run_continues_the_sampler_shuffles(
     assert len(full) == 3 and len(resumed) == 2
     assert full[0] != full[1]
     assert resumed == full[1:]
+
+
+def test_per_step_warmup_counts_the_shuffled_groups(data_root: Path) -> None:
+    """With ``grad_accum_samples`` over shuffled variable batches the groups
+    overshoot the target differently than in unshuffled order; the warmup
+    counts the epoch's own shuffle, so it ends exactly with epoch 0."""
+    ds = _make_ds(data_root, sdf_features=True)
+    # Sizes 2, 1, 2, 1, 1, 1, 1 unshuffled (2 groups of >= 4 samples), drawn
+    # as 1, 2, 1, 2, 1, 1, 1 in epoch 0 of seed 0 (3 groups).
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, seed=0)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    model = _ScaledModel()
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=2,
+        device="cpu",
+        amp=False,
+        lr_warmup_epochs=1,
+        lr_warmup_start=0.01,
+        lr_warmup_per_step=True,
+        grad_accum_samples=4,
+    )
+    assert trainer._optimizer_steps_per_epoch() == 2
+    assert trainer.scheduler._milestones == [3]
+    lrs: list[float] = []
+    step = trainer.optimizer.step
+
+    def recording_step(*args, **kwargs):
+        lrs.append(trainer.optimizer.param_groups[0]["lr"])
+        return step(*args, **kwargs)
+
+    trainer.optimizer.step = recording_step  # type: ignore[method-assign]
+    trainer._validate = lambda: 0.0  # type: ignore[method-assign]
+    trainer.fit()
+    assert lrs[:3] == pytest.approx([0.01, 0.04, 0.07])
+    assert lrs[3:] == pytest.approx([0.1] * (len(lrs) - 3))

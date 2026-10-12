@@ -787,14 +787,16 @@ class BaseTraining:
                 return int(batch[key].shape[0])
         raise KeyError(f"no per-sample state in the batch keys {list(batch)}")
 
-    def _optimizer_steps_per_epoch(self) -> int:
+    def _optimizer_steps_per_epoch(self, epoch: int | None = None) -> int:
         """Optimizer steps in one training epoch.
 
         With ``grad_accum_samples`` the batch sampler's planned sizes
         (``TrajectoryBatchSampler``) are grouped exactly as ``_train_epoch``
-        groups them: exact in unshuffled order; shuffling keeps the sizes but
-        can change where groups overshoot the target, so the count may then
-        differ by a few steps. Without planned sizes, ``ceil(samples / N)``.
+        groups them, in the order epoch ``epoch`` draws them (``fit`` seeds
+        the sampler's shuffle by epoch), so the count is exact; ``None``
+        groups them unshuffled, where the overshoot of each group differs and
+        the count can be off by ~10%. Without planned sizes,
+        ``ceil(samples / N)``.
         """
         if self.grad_accum_samples is None:
             return math.ceil(len(self.train_loader) / self.grad_accum_steps)
@@ -803,26 +805,28 @@ class BaseTraining:
         if batch_sizes is None:
             return math.ceil(len(self.train_loader.dataset) / target)
         steps, seen = 0, 0
-        for size in batch_sizes():
+        for size in batch_sizes(epoch):
             seen += size
             if seen >= target:
                 steps, seen = steps + 1, 0
         return steps + (seen > 0)
 
     def _warmup_optimizer_steps(self, epochs: int) -> int:
-        """Optimizer steps in the first ``epochs`` epochs, each counted at the
-        rollout horizon the curriculum gives it: a shorter horizon leaves more
-        samples per trajectory, so counting at the dataset's built (target)
-        horizon would end the warmup before the end of its last epoch."""
+        """Optimizer steps in the first ``epochs`` epochs, each counted in its
+        own shuffle and at the rollout horizon the curriculum gives it (a
+        shorter horizon leaves more samples per trajectory), so the warmup
+        ends with the last step of its last epoch."""
         dataset = self._train_pushforward_dataset
         if dataset is None:
-            return epochs * max(self._optimizer_steps_per_epoch(), 1)
+            return sum(
+                max(self._optimizer_steps_per_epoch(e), 1) for e in range(epochs)
+            )
         built = dataset.pushforward_steps
         total = 0
         try:
             for epoch in range(epochs):
                 dataset.set_pushforward_steps(self._pushforward_steps_for_epoch(epoch))
-                total += max(self._optimizer_steps_per_epoch(), 1)
+                total += max(self._optimizer_steps_per_epoch(epoch), 1)
         finally:
             dataset.set_pushforward_steps(built)
         return total

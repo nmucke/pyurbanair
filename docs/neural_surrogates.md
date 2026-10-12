@@ -593,7 +593,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
-| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`_optimizer_steps_per_epoch()`: `ceil(batches / grad_accum_steps)`, or the planned batch sizes grouped as with `grad_accum_samples`). Not with the AE's discriminator |
+| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`_optimizer_steps_per_epoch()`: `ceil(batches / grad_accum_steps)`, or the batch sizes the sampler draws in that epoch's shuffle, grouped as with `grad_accum_samples`). Not with the AE's discriminator |
 | `profile_steps` | `[start, count]`: run micro-batches `start .. start+count-1` (0-based) of epoch 0 under `torch.profiler` (CPU + CUDA, no shapes/stacks) and write `profile.txt` next to `weights.pt`: wall time, it/s and kernel-busy fraction of the window, then the top 40 ops by self device time (self CPU time on CPU). Place it after the cuDNN-benchmark warm-up. Default `null` (off, no syncs); a resumed run does not profile; a window past the epoch end closes there |
 | `grad_accum_samples` | instead of `grad_accum_steps` (setting both raises): sum micro-batches until at least N samples, then step on the per-sample mean (each batch's loss weighted by its size, the grads divided by the group's sample total). A fixed effective batch when `cell_budget` varies the micro-batch size; a group overshoots N by less than one micro-batch, and the epoch's last group is flushed short. `null` (default) is off. Not with the AE's discriminator |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
@@ -646,8 +646,8 @@ start of epoch `lr_warmup_epochs`, after which the cosine steps per epoch as
 before (`trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true` warms up
 over the first epoch only). The scheduler decides from its own step count
 whether it is still warming up, so a resumed run continues where it stopped.
-The warmup's step count is taken per epoch at that epoch's curriculum horizon
-(a shorter rollout leaves more samples per trajectory), so the ramp ends with
+The warmup's step count is taken per epoch, in that epoch's shuffle and at its
+curriculum horizon (a shorter rollout leaves more samples per trajectory), so the ramp ends with
 the last step of epoch `lr_warmup_epochs - 1`.
 The logged `lr` is the LR at the start of each epoch. `fit()` also calls the
 batch sampler's `set_epoch(epoch)` (`TrajectoryBatchSampler` seeds its
