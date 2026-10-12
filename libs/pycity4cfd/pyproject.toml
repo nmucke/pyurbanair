@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
+# Map area -> buildings (OpenStreetMap) -> City4CFD -> domain-frame STL.
+# No backend and no MCP server; City4CFD runs through pyurbanair's run_solver.
+dependencies = []
+name = "pycity4cfd"
+requires-python = ">= 3.12,<3.13"
+version = "0.1.0"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pycity4cfd"]
