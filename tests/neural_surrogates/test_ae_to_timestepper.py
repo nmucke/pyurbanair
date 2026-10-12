@@ -381,6 +381,62 @@ def test_max_internal_batchsize_chunked_path_parity() -> None:
     assert torch.isfinite(chunked).all()
 
 
+def test_frozen_window_bias_cache_matches_upstream() -> None:
+    """The stepper reuses the P3D window-attention position bias while its MLP
+    is frozen: outputs and gradients equal upstream's recompute-every-call
+    forward exactly; a weight update (load_state_dict) or a trainable MLP
+    recomputes it."""
+    from neural_surrogates.architectures._tadpole.architecture.p3d.transformer import (
+        PosEmbMLPSwinv3D,
+    )
+
+    torch.manual_seed(0)
+    cached = _stepper(spatial_mode="global", encode_geometry=False)
+    cached.requires_grad_(False)
+    for p in cached.dft.subnetwork.parameters():
+        p.requires_grad_(True)
+    with torch.no_grad():  # live skips and decoder output, not zero-init paths
+        for name, p in cached.named_parameters():
+            if "scales" in name or "out_proj" in name:
+                p.normal_(std=0.05)
+    upstream = copy.deepcopy(cached)
+    biases = [m for m in upstream.modules() if isinstance(m, PosEmbMLPSwinv3D)]
+    assert biases
+    for m in biases:
+        del m.forward  # back to the class (upstream) forward
+    calls = {"n": 0}
+    first = next(m for m in cached.modules() if isinstance(m, PosEmbMLPSwinv3D))
+    hook = first.cpb_mlp.register_forward_hook(
+        lambda *_: calls.__setitem__("n", calls["n"] + 1)
+    )
+    x = _inputs(grid=(32, 16, 16))
+    for _ in range(3):
+        out_c, out_u = cached(*x), upstream(*x)
+        torch.testing.assert_close(out_c, out_u, rtol=0, atol=0)
+    assert calls["n"] == 1  # computed once, then reused
+    out_c.square().mean().backward()
+    out_u.square().mean().backward()
+    grads = dict(upstream.named_parameters())
+    for name, p in cached.named_parameters():
+        if p.grad is not None:
+            torch.testing.assert_close(p.grad, grads[name].grad, rtol=0, atol=0)
+    # New weights (bumped version counters) invalidate the cache.
+    state = {
+        k: v + 0.01 if "cpb_mlp" in k else v for k, v in cached.state_dict().items()
+    }
+    cached.load_state_dict(state)
+    upstream.load_state_dict(state)
+    with torch.no_grad():
+        torch.testing.assert_close(cached(*x), upstream(*x), rtol=0, atol=0)
+    assert calls["n"] == 2
+    # A trainable MLP always recomputes (upstream path).
+    first.cpb_mlp.requires_grad_(True)
+    with torch.no_grad():
+        cached(*x)
+    assert calls["n"] == 3
+    hook.remove()
+
+
 def test_encoder_crop_size_must_be_multiple_of_16() -> None:
     with pytest.raises(ValueError, match="multiple of 16"):
         _stepper(encoder_crop_size=8)

@@ -78,6 +78,53 @@ _SIZES = ("S", "B", "L")
 # the stride of the geometry branch's level-3 feature.
 _LATENT_STRIDE = 16
 
+
+def _cache_frozen_window_bias(module: nn.Module) -> None:
+    """Reuse the P3D window-attention position bias while its MLP is frozen.
+
+    Upstream ``PosEmbMLPSwinv3D.forward`` re-runs its ``cpb_mlp`` (+ gather and
+    sigmoid) on every call although the result depends only on frozen weights
+    and a constant buffer: ~800 small kernels per DFT training step. Each
+    instance gets a forward that adds the cached table instead, keyed on the
+    device, the autocast state and the version counters of the MLP weights and
+    the coordinate buffer, so the values are exactly upstream's. While any MLP
+    weight requires grad (AE pre-training) it runs upstream's forward.
+    """
+    import types
+
+    from ._tadpole.architecture.p3d.transformer import PosEmbMLPSwinv3D
+
+    for m in module.modules():
+        if isinstance(m, PosEmbMLPSwinv3D):
+            m.forward = types.MethodType(  # type: ignore[method-assign]
+                _cached_window_bias_forward, m
+            )
+
+
+def _cached_window_bias_forward(
+    self: Any, input_tensor: torch.Tensor, local_window_size: Any
+) -> torch.Tensor:
+    upstream = type(self).forward
+    params = list(self.cpb_mlp.parameters())
+    if self.deploy or any(p.requires_grad for p in params):
+        return upstream(self, input_tensor, local_window_size)
+    device = input_tensor.device.type
+    key = (
+        input_tensor.device,
+        torch.is_autocast_enabled(device),
+        torch.get_autocast_dtype(device),
+        self.relative_coords_table._version,
+        *(p._version for p in params),
+    )
+    cached = self.__dict__.get("_bias_cache")
+    if cached is None or cached[0] != key:
+        out = upstream(self, input_tensor, local_window_size)
+        self.__dict__["_bias_cache"] = (key, self.pos_emb.detach())
+        return out
+    input_tensor += cached[1]
+    return input_tensor
+
+
 # Subnetwork geometry per model size. ``latent_mult`` is the encoder's latent
 # channel count Cl (= hidden_size * 2**(len(depth)//2): 256 / 512 / 1024 for
 # S / B / L), so ``in_dim = input_channels * latent_mult`` matches the channel
@@ -511,6 +558,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             max_internal_batchsize=max_internal_batchsize,
             geom_in_dims=geom_in_dims,
         )
+
+        _cache_frozen_window_bias(self.dft)
 
         from .tadpole_skip_mixing import TadpoleSkipMixing
 
