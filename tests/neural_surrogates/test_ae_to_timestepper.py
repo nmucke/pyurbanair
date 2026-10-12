@@ -107,6 +107,26 @@ def test_sequential_checkpoint_matches_eager_forward_and_backward() -> None:
         assert torch.allclose(p_eager.grad, p_checkpointed.grad)
 
 
+def test_sequential_positional_embedding_is_cached_on_the_device() -> None:
+    """The positional embedding is copied to the input's device/dtype once per
+    grid (a host->device copy per call synchronised the GPU), with the values
+    of the previous ``torch.tensor(table).to(x)``; a new grid replaces it."""
+    from neural_surrogates.architectures._tadpole.architecture.downstream import llm
+
+    model = _nonzero_sequential(use_checkpoint=False)
+    x = torch.randn(2, 4, 1, 2, 3)
+    expected = model(x)
+    table = llm.get_3d_sincos_pos_embed(model.hidden_size, (1, 2, 3))
+    for dtype in (torch.float32, torch.bfloat16):
+        x_like = x.to(dtype)
+        cached = llm._pos_embed_on(table, x_like)
+        assert cached is llm._pos_embed_on(table, x_like)
+        assert torch.equal(cached, torch.tensor(table).to(x_like))
+    assert torch.equal(model(x), expected)
+    other = llm.get_3d_sincos_pos_embed(model.hidden_size, (1, 2, 4))
+    assert llm._pos_embed_on(other, x).shape[0] == 8
+
+
 def test_sequential_context_windows_preserve_grid_and_gradients() -> None:
     model = _nonzero_sequential(in_context_patches=3)
     x = torch.randn(2, 4, 1, 2, 4, requires_grad=True)

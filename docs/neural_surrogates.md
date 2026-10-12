@@ -589,7 +589,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `compile_model` / `compile_dynamic` | `torch.compile` the model before training |
 | `compile_modules` | regional compile: `nn.Module.compile` every submodule whose path (without peft's `base_model.model.` prefix) matches one of these globs, in place, so state-dict keys and LoRA merging are unchanged; dynamic shapes unless `compile_dynamic` says otherwise. For the DFT's conv blocks: `[dft.encoder.conv_encoder.conv_encoder.blocks.*, dft.decoder.conv_decoder.conv_decoder.blocks.*]` (untested on GPU) |
 | `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
-| `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32) |
+| `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32). The autotune runs once per new (grid, micro-batch) shape, ~100 conv configurations per grid for the DFT, and is CPU-bound cuDNN plan building while the GPU idles: ~12 s per new grid on an RTX 3090 with the S autoencoder (vs ~0.8 s with it off; `torch.backends.cudnn.benchmark_limit` does not shorten it), ~25 min per job for the 69 realistic grids on the H100. Off, steady-state steps were 4-7% slower, so keep it on for long runs and turn it off for runs shorter than ~8 h (smoke tests) |
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
