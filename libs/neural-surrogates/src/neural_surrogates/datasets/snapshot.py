@@ -40,6 +40,7 @@ from typing import Sequence
 import numpy as np
 import torch
 import xarray as xr
+from neural_surrogates.datasets.transition import share_once
 from neural_surrogates.sdf import normalize_sdf_mode
 from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch.utils.data import Dataset, default_collate
@@ -173,6 +174,10 @@ class SnapshotDataset(Dataset):
             if self.sdf_feature_mode != "none"
             else None
         )
+        # Shared before the loader workers start (see share_once).
+        self._geometries = share_once(self._geometries)
+        if self._geom_features is not None:
+            self._geom_features = share_once(self._geom_features)
         self._state_cache: dict[int, xr.Dataset] | None = None
 
     @property

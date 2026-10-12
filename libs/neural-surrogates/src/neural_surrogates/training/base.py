@@ -361,7 +361,7 @@ class BaseTraining:
         # (the peak) at epoch ``warmup``; start_factor must be > 0. Per step,
         # the same ramp spans the optimizer steps of those epochs instead.
         if self.lr_warmup_per_step:
-            warmup *= max(self._optimizer_steps_per_epoch(), 1)
+            warmup = self._warmup_optimizer_steps(warmup)
         start_factor = self.lr_warmup_start / peak_lr if peak_lr > 0 else 1.0
         start_factor = min(max(start_factor, 1e-8), 1.0)
         warmup_sched = torch.optim.lr_scheduler.LinearLR(
@@ -678,9 +678,12 @@ class BaseTraining:
                 self.scaler.scale(loss * n_samples).backward()
                 step = seen >= target or i + 1 == n_batches
                 if step:
-                    for p in self.model.parameters():
-                        if p.grad is not None:
-                            p.grad.div_(seen)
+                    # One fused launch instead of one per parameter tensor.
+                    grads = [
+                        p.grad for p in self.model.parameters() if p.grad is not None
+                    ]
+                    if grads:
+                        torch._foreach_div_(grads, seen)
                     seen = 0
             if step:
                 if self.grad_clip_norm is not None:
@@ -805,6 +808,24 @@ class BaseTraining:
             if seen >= target:
                 steps, seen = steps + 1, 0
         return steps + (seen > 0)
+
+    def _warmup_optimizer_steps(self, epochs: int) -> int:
+        """Optimizer steps in the first ``epochs`` epochs, each counted at the
+        rollout horizon the curriculum gives it: a shorter horizon leaves more
+        samples per trajectory, so counting at the dataset's built (target)
+        horizon would end the warmup before the end of its last epoch."""
+        dataset = self._train_pushforward_dataset
+        if dataset is None:
+            return epochs * max(self._optimizer_steps_per_epoch(), 1)
+        built = dataset.pushforward_steps
+        total = 0
+        try:
+            for epoch in range(epochs):
+                dataset.set_pushforward_steps(self._pushforward_steps_for_epoch(epoch))
+                total += max(self._optimizer_steps_per_epoch(), 1)
+        finally:
+            dataset.set_pushforward_steps(built)
+        return total
 
     def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
         """Hook for a second optimizer that must step after the main one (the AE's
@@ -1100,6 +1121,13 @@ class BaseTraining:
             # An epoch that began in the per-step warmup has already stepped the
             # scheduler after each optimizer step.
             warming_up = self._warming_up_per_step()
+            # A seeded batch sampler shuffles by epoch: a resumed run must not
+            # replay the shuffles of the epochs it already trained.
+            set_epoch = getattr(
+                getattr(self.train_loader, "batch_sampler", None), "set_epoch", None
+            )
+            if set_epoch is not None:
+                set_epoch(epoch)
             epoch_start = time.monotonic()
             train_loss = self._train_epoch()
             val_loss = self._validate()

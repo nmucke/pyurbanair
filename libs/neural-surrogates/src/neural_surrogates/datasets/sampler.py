@@ -115,6 +115,12 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
             batches = [batches[i] for i in order]
         return batches
 
+    def set_epoch(self, epoch: int) -> None:
+        """Shuffle the next ``__iter__`` as epoch ``epoch`` (0-based) of a
+        fresh run; the trainer calls it so a resumed run does not replay the
+        shuffles of its first epochs."""
+        self._epoch = int(epoch)
+
     def __iter__(self) -> Iterator[list[int]]:
         generator = None
         if self.shuffle:

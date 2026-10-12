@@ -321,7 +321,12 @@ see the SDF plan in [archive/sdf_features_plan.md](archive/sdf_features_plan.md)
 
 `__init__` only walks each state file to read `ds.sizes["time"]` (metadata
 only) so it can build the flat `(traj, t)` index. Parameters and the
-static geometry mask are loaded eagerly (both are small). State
+static geometry mask are loaded eagerly (both are small). The unique masks
+and their SDF features are then copied into one shared-memory buffer each
+(`share_once`, also used by `SnapshotDataset`): a loader worker otherwise
+moves every tensor it ships into shared memory first, so each worker would end
+up holding its own copy of every geometry it served (on the realistic corpus
+~12 GB per worker, ~180 GB for 15 workers). State
 snapshots are read lazily on each `__getitem__` via a single
 `xr.open_dataset(..., cache=cache).isel(...)` covering that sample's own
 slices (`[t, t+K]`, or the `H` history frames plus `t+K`) — only those
@@ -641,7 +646,13 @@ start of epoch `lr_warmup_epochs`, after which the cosine steps per epoch as
 before (`trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true` warms up
 over the first epoch only). The scheduler decides from its own step count
 whether it is still warming up, so a resumed run continues where it stopped.
-The logged `lr` is the LR at the start of each epoch.
+The warmup's step count is taken per epoch at that epoch's curriculum horizon
+(a shorter rollout leaves more samples per trajectory), so the ramp ends with
+the last step of epoch `lr_warmup_epochs - 1`.
+The logged `lr` is the LR at the start of each epoch. `fit()` also calls the
+batch sampler's `set_epoch(epoch)` (`TrajectoryBatchSampler` seeds its
+shuffle with `seed + epoch`), so a resumed run draws the batches the
+uninterrupted run would have, not the shuffles of its first epochs again.
 
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss
