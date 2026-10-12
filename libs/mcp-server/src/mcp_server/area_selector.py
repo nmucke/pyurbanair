@@ -135,7 +135,7 @@ class AreaSelector:
                 selection = self._selection("")
                 if selection is None:
                     return
-                page = PAGE.read_text().replace(
+                page = PAGE.read_text(encoding="utf-8").replace(
                     "__MAX_AREA_KM2__", f"{selection['max_area_km2']:g}"
                 )
                 self._send(200, "text/html; charset=utf-8", page.encode())

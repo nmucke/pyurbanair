@@ -65,8 +65,6 @@ def test_pending_returns_after_short_wait(tools: Tools) -> None:
     result = tools.get_selected_area(opened["selection_id"], wait_s=0.2)
     assert result["status"] == "pending"
     assert time.monotonic() - started < 2
-    with pytest.raises(ValueError, match="Unknown"):
-        tools.get_selected_area("not-a-selection", wait_s=0)
 
 
 def test_serves_page_and_rejects_bad_token(tools: Tools) -> None:
@@ -123,3 +121,58 @@ def test_validate_bbox_accepts_a_pasted_sequence() -> None:
     )
     with pytest.raises(ValueError):
         validate_bbox([4.35, 52.0])
+
+
+def test_unknown_or_replaced_selection_is_expired(tools: Tools) -> None:
+    expired = {"selection_id": "x", "status": "expired"}
+    assert tools.get_selected_area("x", wait_s=0) == expired
+    old_id = tools.open_area_selector()["selection_id"]
+    assert tools.get_selected_area("x", wait_s=0) == expired
+    assert tools.area_selector is not None
+    tools.area_selector.close()
+    # A new selector replaces the closed one; the old id is expired, not an error.
+    tools.open_area_selector()
+    result = tools.get_selected_area(old_id, wait_s=0)
+    assert result == {"selection_id": old_id, "status": "expired"}
+
+
+@pytest.fixture  # type: ignore[misc]
+def fake_make_case(monkeypatch: pytest.MonkeyPatch) -> list[pathlib.Path]:
+    """Replace the OSM + City4CFD build by one that only writes case.json."""
+    import pycity4cfd.case
+
+    calls: list[pathlib.Path] = []
+
+    def make_case(bbox: Any, case_dir: pathlib.Path, **kwargs: Any) -> Any:
+        calls.append(case_dir)
+        result = {"case_dir": str(case_dir), "overrides": ["domain.nx=8"]}
+        case_dir.mkdir(parents=True)
+        (case_dir / "case.json").write_text(json.dumps({"bbox": list(bbox), **result}))
+        return result
+
+    monkeypatch.setattr(pycity4cfd.case, "make_case", make_case)
+    return calls
+
+
+def test_city_case_area_limit(tmp_path: pathlib.Path, fake_make_case: Any) -> None:
+    # About 7 km x 5.5 km: above the default 4 km² but under 50 km².
+    big = {"west": 4.30, "south": 52.00, "east": 4.40, "north": 52.05}
+    tools = Tools(REPO, tmp_path)
+    tools.repo_root = tmp_path
+    with pytest.raises(ValueError, match="maximum is 4 km²"):
+        tools.prepare_city_case(big)
+    assert fake_make_case == []
+    case = tools.prepare_city_case(big, max_area_km2=50)
+    assert case["overrides"] == ["domain.nx=8"] and len(fake_make_case) == 1
+
+
+def test_city_case_is_reused(tmp_path: pathlib.Path, fake_make_case: Any) -> None:
+    tools = Tools(REPO, tmp_path)
+    tools.repo_root = tmp_path
+    first = tools.prepare_city_case(DELFT, resolution=4)
+    # Same inputs (4 == 4.0) map to the same folder and reuse its case.json.
+    again = tools.prepare_city_case(DELFT, resolution=4.0, default_height=10)
+    assert again == first and len(fake_make_case) == 1
+    assert "bbox" not in again
+    tools.prepare_city_case(DELFT, resolution=2.0)
+    assert len(fake_make_case) == 2 and fake_make_case[0] != fake_make_case[1]
