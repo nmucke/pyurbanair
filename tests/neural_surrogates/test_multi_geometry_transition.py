@@ -273,3 +273,119 @@ def test_normalization_stats_use_per_trajectory_masks(data_root: Path) -> None:
         assert s_std[c] == pytest.approx(allv.std(), rel=1e-6)
     assert p_mean.shape == (len(PARAM_VARS),)
     assert p_std.shape == (len(PARAM_VARS),)
+
+
+class _RecordingModel(_IdentityModel):
+    """Records the geometry tensors each call receives (identity matters: the
+    Tadpole stepper caches its frozen geometry branch on it)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+
+    def forward(self, state, params, geometry, geom_features=None):
+        self.seen.append((geometry, geom_features))
+        return state
+
+
+def test_trainer_reuses_broadcast_geometry(data_root: Path) -> None:
+    """Every model call of a batch -- and of the next batch on the same
+    geometry and batch size -- gets the same broadcast tensors; a new geometry
+    gets new ones."""
+    ds = _make_ds(data_root, sdf_features=True, pushforward_steps=3)
+    model = _RecordingModel()
+    trainer = _make_trainer(model)
+    batch_a = transition_collate([ds[0]])
+    batch_a2 = transition_collate([ds[1]])  # trajectory 1: same grid + mask
+    batch_b = transition_collate([ds[2]])  # trajectory 2: its own geometry
+
+    trainer._forward(batch_a)
+    trainer._forward(batch_a2)
+    assert len(model.seen) == 6  # three rollout steps per batch
+    geometry, features = model.seen[0]
+    assert features is not None and features.shape == (1, 4, *GRIDS[0])
+    assert all(g is geometry and f is features for g, f in model.seen)
+
+    trainer._forward(batch_b)
+    assert model.seen[-1][0] is not geometry
+    assert model.seen[-1][0].shape == (1, *GRIDS[2])
+
+
+@pytest.mark.parametrize("loss_fn", [torch.nn.MSELoss(), torch.nn.L1Loss()])
+def test_masked_loss_matches_boolean_indexing(data_root: Path, loss_fn) -> None:
+    """The sync-free masked loss equals the loss over the fluid cells only,
+    in value and gradient, even with non-finite junk inside the obstacles."""
+    ds = _make_ds(data_root, sdf_features=True)
+    batch = transition_collate([ds[6], ds[7]])  # trajectory 2
+    fluid = ds.geometry_for(2).bool()
+    batch["state_next"] = batch["state_next"].masked_fill(~fluid, float("nan"))
+
+    class Scaled(_IdentityModel):
+        def forward(self, state, params, geometry, geom_features=None):
+            return state * (1.0 + self.p)
+
+    model = Scaled()
+    trainer = _make_trainer(model)
+    trainer.loss_fn = loss_fn
+    loss = trainer._forward(batch)
+    (grad,) = torch.autograd.grad(loss, model.p)
+
+    pred = batch["state_n"] * (1.0 + model.p)
+    expected = loss_fn(pred[..., fluid], batch["state_next"][..., fluid])
+    (expected_grad,) = torch.autograd.grad(expected, model.p)
+    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(grad, expected_grad)
+
+
+def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
+    """``grad_accum_steps=k`` takes one optimizer step per k batches on their
+    mean gradient; a short last group is averaged over its own size."""
+    ds = _make_ds(data_root, sdf_features=True)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+    batches = list(loader)  # 9 single-sample batches -> groups of 4, 4, 1
+
+    class Scaled(_IdentityModel):
+        def forward(self, state, params, geometry, geom_features=None):
+            return state * (1.0 + self.p)
+
+    model = Scaled()
+    lr = 0.1
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=lr),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=1,
+        device="cpu",
+        amp=False,
+        grad_accum_steps=4,
+    )
+    steps = 0
+    step = trainer.optimizer.step
+
+    def counting_step(*args, **kwargs):
+        nonlocal steps
+        steps += 1
+        return step(*args, **kwargs)
+
+    trainer.optimizer.step = counting_step  # type: ignore[method-assign]
+    trainer._train_epoch()
+
+    p = torch.zeros(1, requires_grad=True)
+    for group in (batches[0:4], batches[4:8], batches[8:9]):
+        grad = torch.zeros(1)
+        for batch in group:
+            fluid = batch["geometry"][0].bool()
+            pred = batch["state_n"] * (1.0 + p)
+            loss = torch.nn.functional.mse_loss(
+                pred[..., fluid], batch["state_next"][..., fluid]
+            )
+            grad += torch.autograd.grad(loss, p)[0] / len(group)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == 3
+    torch.testing.assert_close(model.p.detach(), p.detach())

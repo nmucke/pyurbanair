@@ -587,6 +587,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` | linear warmup → cosine annealing LR schedule |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
+| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch and is unaffected. Not with the AE's discriminator |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
 
 `fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`

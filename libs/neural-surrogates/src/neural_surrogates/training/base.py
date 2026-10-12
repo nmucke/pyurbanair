@@ -57,6 +57,7 @@ class BaseTraining:
         mask_loss: bool = True,
         grad_clip_norm: float | None = None,
         grad_unroll_steps: int = 2,
+        grad_accum_steps: int = 1,
         checkpoint_every: int = 1,
         resume: bool = False,
         checkpoint_metadata: dict | None = None,
@@ -212,6 +213,7 @@ class BaseTraining:
         self._geometry_host: torch.Tensor | None = None
         self._geometry: torch.Tensor | None = None
         self._fluid_mask: torch.Tensor | None = None
+        self._fluid_scale: torch.Tensor | None = None
         # Optional SDF + ∇SDF geometry features, shared across the batch exactly
         # like the mask: cached on the device alongside it (as ``(4, *grid)``)
         # and broadcast to the batch at each model call. Stays ``None`` when the
@@ -219,6 +221,13 @@ class BaseTraining:
         # advertises ``n_geom_feature_channels > 0`` fails loud (see
         # ``_prepare_batch``) rather than silently training on zeros.
         self._geom_features: torch.Tensor | None = None
+        # The mask and features broadcast to the batch, ``(B, geometry,
+        # geom_features)``, rebuilt only when the geometry or B changes: the
+        # model caches its frozen geometry branch on these tensors' identity,
+        # so a fresh ``expand`` view per call would miss that cache every time.
+        self._batch_geometry: tuple[int, torch.Tensor, torch.Tensor | None] | None = (
+            None
+        )
         # mask_loss restricts the loss to fluid cells: uDALES targets carry
         # junk values inside obstacles, which would otherwise be penalised
         # against the model's (masked) zero output there.
@@ -230,6 +239,10 @@ class BaseTraining:
         # improves long-rollout error at the cost of holding N steps'
         # activations.
         self.grad_unroll_steps = max(1, int(grad_unroll_steps))
+        # Micro-batches whose gradients are summed into one optimizer step: an
+        # effective batch of ``batch_size * grad_accum_steps`` when the full
+        # batch does not fit in memory. 1 steps after every batch.
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
         # Persist the full (model + optimizer + scheduler + scaler + curriculum)
         # checkpoint only every ``checkpoint_every`` epochs (plus the final one).
         # The optimizer state alone is ~2x the model size, so writing it every
@@ -321,10 +334,17 @@ class BaseTraining:
 
         if stale:
             self._geometry_host = geom_host
-            self._geometry = geom_host.to(self.device)
+            # The loader pins the batch, so these copies need not block.
+            self._geometry = geom_host.to(self.device, non_blocking=True)
             self._fluid_mask = self._geometry.bool()
+            # Cells per fluid cell, kept on the device (no host sync): rescales
+            # a mean over the whole grid to the mean over fluid cells only.
+            self._fluid_scale = self._fluid_mask.numel() / self._fluid_mask.sum()
             feat = batch.get("geom_features")
-            self._geom_features = feat[0].to(self.device) if feat is not None else None
+            self._geom_features = (
+                feat[0].to(self.device, non_blocking=True) if feat is not None else None
+            )
+            self._batch_geometry = None
             # Fail loud on a model/dataset mismatch: a model built with SDF
             # features wired into its stem cannot train on a dataset that ships
             # none (it would either error at cat time or, worse, be fed zeros).
@@ -336,8 +356,26 @@ class BaseTraining:
                     "matching dataset.sdf_features mode (and sdf_clamp_cells)."
                 )
         assert self._geometry is not None  # set on the first (always-stale) batch
-        geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)
+        geometry, _ = self._broadcast_geometry(state.shape[0])
         return state, state_next, params, geometry
+
+    def _broadcast_geometry(
+        self, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The cached mask and SDF features broadcast to ``batch_size`` (views,
+        not copies), the same tensor objects for as long as the geometry and
+        the batch size hold (see ``_batch_geometry``)."""
+        assert self._geometry is not None
+        cached = self._batch_geometry
+        if cached is None or cached[0] != batch_size:
+            feat = self._geom_features
+            cached = (
+                batch_size,
+                self._geometry.expand(batch_size, *self._geometry.shape),
+                None if feat is None else feat.expand(batch_size, *feat.shape),
+            )
+            self._batch_geometry = cached
+        return cached[1], cached[2]
 
     def _prepare_snapshot_batch(
         self, batch: dict[str, torch.Tensor]
@@ -416,7 +454,7 @@ class BaseTraining:
         if self._geom_features is None:
             pred: torch.Tensor = self.model(state, params_i, geometry)
             return pred
-        feat = self._geom_features.expand(state.shape[0], *self._geom_features.shape)
+        _, feat = self._broadcast_geometry(state.shape[0])
         pred = self.model(state, params_i, geometry, geom_features=feat)
         return pred
 
@@ -519,20 +557,30 @@ class BaseTraining:
         total = torch.zeros((), device=self.device)
         n = 0
         term_sums: dict[str, torch.Tensor] = {}
-        for batch in tqdm.tqdm(self.train_loader):
+        # Gradients of `grad_accum_steps` micro-batches are summed before each
+        # optimizer step, each loss divided by its group's size so the step
+        # sees their mean. The epoch's last group may be shorter.
+        k = self.grad_accum_steps
+        n_batches = len(self.train_loader) if k > 1 else 0
+        group = 1
+        for i, batch in enumerate(tqdm.tqdm(self.train_loader)):
+            if i % k == 0:
+                group = min(k, n_batches - i) if k > 1 else 1
             loss = self._forward(batch)
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            if self.grad_clip_norm is not None:
-                # No-op unscale when the scaler is disabled; scaler.step
-                # detects the explicit unscale and does not repeat it.
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.grad_clip_norm
-                )
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self._after_optimizer_step(batch)
+            if i % k == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(loss / group if group > 1 else loss).backward()
+            if (i + 1) % k == 0 or i + 1 == n_batches:
+                if self.grad_clip_norm is not None:
+                    # No-op unscale when the scaler is disabled; scaler.step
+                    # detects the explicit unscale and does not repeat it.
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip_norm
+                    )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self._after_optimizer_step(batch)
             total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)

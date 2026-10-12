@@ -100,6 +100,9 @@ class AutoencoderTrainer(BaseTraining):
 
         # -- optional adversarial extension (everything below is inert when
         #    ``discriminator is None``) -------------------------------------- #
+        if discriminator is not None and self.grad_accum_steps > 1:
+            # The critic steps once per AE step, on that step's last batch only.
+            raise ValueError("grad_accum_steps > 1 does not support a discriminator")
         if (discriminator is None) != (disc_optimizer is None):
             raise ValueError(
                 "the adversarial extension needs both `discriminator` and "
