@@ -24,6 +24,11 @@ trainer:
   compile_model: false
   # Glob paths of submodules to torch.compile in place (dynamic shapes); null: off.
   compile_modules: null
+  # Glob paths of submodules to activation-checkpoint (recompute in backward); null: off.
+  activation_checkpoint_modules: null
+  # Changes the gradient (off): glob paths of submodules run under no_grad in every
+  # gradient-carrying rollout step but the last; null: off.
+  unroll_no_grad_modules: null
   channels_last: false
   cudnn_benchmark: true
   tf32: true

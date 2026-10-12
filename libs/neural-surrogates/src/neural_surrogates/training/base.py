@@ -21,12 +21,14 @@ import csv
 import json
 import math
 import time
+import types
 from pathlib import Path
 from typing import Callable
 
 import torch
 import tqdm
 from torch.autograd import DeviceType
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 
@@ -64,6 +66,77 @@ def compile_submodules(
     return compiled
 
 
+def _match_modules(
+    model: torch.nn.Module, patterns: list[str], knob: str
+) -> list[torch.nn.Module]:
+    """The outermost submodules whose path (without peft's prefix) matches."""
+    from fnmatch import fnmatchcase
+
+    names: list[str] = []
+    modules: list[torch.nn.Module] = []
+    unmatched = set(patterns)
+    for name, module in model.named_modules():
+        hits = {
+            p
+            for p in patterns
+            if fnmatchcase(name.removeprefix("base_model.model."), p)
+        }
+        if not hits:
+            continue
+        unmatched -= hits
+        if not any(name.startswith(parent + ".") for parent in names):
+            names.append(name)
+            modules.append(module)
+    if unmatched:
+        raise ValueError(f"{knob} patterns match no module: {sorted(unmatched)}")
+    return modules
+
+
+def _checkpointed_forward(
+    self: torch.nn.Module, *args: object, **kwargs: object
+) -> object:
+    """The previous ``forward`` under non-reentrant activation checkpointing
+    (plain when gradients are off: nothing would be saved anyway)."""
+    forward = self._checkpoint_inner_forward
+    if not torch.is_grad_enabled():
+        return forward(*args, **kwargs)
+    return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+
+
+def checkpoint_submodules(
+    model: torch.nn.Module, patterns: list[str]
+) -> list[torch.nn.Module]:
+    """Activation-checkpoint every submodule whose path matches a glob in
+    ``patterns``, and return the wrapped modules.
+
+    The module keeps only its inputs for backward and recomputes its forward
+    there (``torch.utils.checkpoint``, non-reentrant: gradients reach frozen
+    modules' LoRA adapters even when no input requires grad, and the autocast
+    state and RNG are replayed). Matching follows :func:`compile_submodules`:
+    peft's ``base_model.model.`` prefix is dropped, a match inside an already
+    wrapped module is skipped and an unmatched pattern raises. Only the
+    instance's ``forward`` is replaced, wrapping the one it had (both bound to
+    the module, so a deepcopy stays self-contained); the module tree and
+    state-dict keys are unchanged.
+    """
+    modules = _match_modules(model, patterns, "activation_checkpoint_modules")
+    for module in modules:
+        # Wrap whatever forward the module has (e.g. LoRA's fused forward).
+        module._checkpoint_inner_forward = module.forward
+        module.forward = types.MethodType(_checkpointed_forward, module)
+    return modules
+
+
+def _flagged_no_grad_forward(
+    self: torch.nn.Module, *args: object, **kwargs: object
+) -> object:
+    """The previous ``forward``, under ``no_grad`` while the trainer flags it."""
+    if self._unroll_no_grad:
+        with torch.no_grad():
+            return self._unroll_inner_forward(*args, **kwargs)
+    return self._unroll_inner_forward(*args, **kwargs)
+
+
 class BaseTraining:
     def __init__(
         self,
@@ -82,6 +155,8 @@ class BaseTraining:
         compile_model: bool = False,
         compile_dynamic: bool | None = None,
         compile_modules: list[str] | None = None,
+        activation_checkpoint_modules: list[str] | None = None,
+        unroll_no_grad_modules: list[str] | None = None,
         channels_last: bool = False,
         cudnn_benchmark: bool = False,
         tf32: bool = False,
@@ -134,6 +209,24 @@ class BaseTraining:
         # architectures predating the knob keep the one-step behaviour exactly.
         self.num_history_steps = int(getattr(self._eager_model, "num_history_steps", 1))
         self.n_state_channels = getattr(self._eager_model, "n_state_channels", None)
+        if activation_checkpoint_modules:
+            # Trade compute for memory: the matched submodules recompute their
+            # forward in backward instead of keeping their activations.
+            checkpoint_submodules(self.model, list(activation_checkpoint_modules))
+        # APPROXIMATE gradient, off by default: the matched submodules run under
+        # no_grad in every gradient-carrying rollout step except the last one,
+        # so their parameters only get the last step's gradient term.
+        self._unroll_no_grad_modules = (
+            _match_modules(
+                self.model, list(unroll_no_grad_modules), "unroll_no_grad_modules"
+            )
+            if unroll_no_grad_modules
+            else []
+        )
+        for module in self._unroll_no_grad_modules:
+            module._unroll_no_grad = False
+            module._unroll_inner_forward = module.forward
+            module.forward = types.MethodType(_flagged_no_grad_forward, module)
         if compile_model or compile_modules:
             # Inductor's CUDA backend generates triton kernels; without a
             # working triton, compilation raises mid-epoch. Fall back to
@@ -601,9 +694,15 @@ class BaseTraining:
                     )
         with self._autocast():
             for i in range(K - g, K - 1):
-                state = self._advance_history(
-                    state, self._model_forward(state, params[:, i, :], geometry)
-                )
+                for module in self._unroll_no_grad_modules:
+                    module._unroll_no_grad = True
+                try:
+                    state = self._advance_history(
+                        state, self._model_forward(state, params[:, i, :], geometry)
+                    )
+                finally:
+                    for module in self._unroll_no_grad_modules:
+                        module._unroll_no_grad = False
             return self._final_loss(state, state_next, params, geometry)
 
     def _final_loss(
