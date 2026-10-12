@@ -5,7 +5,7 @@ description: >
 
 inputs:
   environment:
-    description: Pixi environment to install (dev or mcp).
+    description: Pixi environment to install (dev, mcp, ui or city4cfd).
     default: dev
 
 runs:
@@ -19,7 +19,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: .pixi/envs
-        key: pixi-${{ inputs.environment }}-${{ runner.os }}-${{ hashFiles('pixi.lock', 'pyproject.toml', 'libs/**/pyproject.toml') }}
+        key: pixi-${{ inputs.environment }}-${{ runner.os }}-${{ hashFiles('pixi.lock', 'pyproject.toml', 'libs/**/pyproject.toml', 'libs/**/pixi.toml') }}
 
     - name: Install ${{ inputs.environment }} environment
       shell: bash

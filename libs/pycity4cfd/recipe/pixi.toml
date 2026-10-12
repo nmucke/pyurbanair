@@ -1,0 +1,30 @@
+# City4CFD (AGPL-3.0, tudelft3d/City4CFD) as a pixi source package: pixi
+# fetches the pinned upstream tag, builds it with CMake and installs
+# bin/city4cfd into every environment that depends on it (the `city4cfd`
+# feature). The build (a few minutes) runs once and is cached by pixi.
+[package]
+name = "city4cfd"
+version = "0.8.1"
+
+[package.build]
+backend = { name = "pixi-build-cmake", version = "*" }
+source = { git = "https://github.com/tudelft3d/City4CFD.git", tag = "0.8.1" }
+
+# The backend defaults to BUILD_SHARED_LIBS=ON, which makes City4CFD's bundled
+# LASlib a shared library installed in lib/LASlib/, off the binary's rpath.
+# Static, as upstream builds it, the binary only links conda-forge libraries.
+[package.build.config]
+extra-args = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF"]
+
+# Eigen is pinned to 3.4: City4CFD and its bundled CGAL support are untested
+# with Eigen 5.
+[package.host-dependencies]
+cgal-cpp = ">=6.0.1,<6.3"
+libboost-devel = "*"
+eigen = "3.4.*"
+gmp = "*"
+mpfr = "*"
+libgdal-core = ">=3"
+
+[package.target.osx-arm64.host-dependencies]
+llvm-openmp = "*"

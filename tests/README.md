@@ -13,7 +13,7 @@ folder (and to one CI workflow, `.github/workflows/tests-<folder>.yml`):
 | `pyurbanair/` | `src/pyurbanair`: base classes, parameter samplers |
 | `mcp/` | the MCP server (`libs/mcp-server`); runs in the `mcp` env, skipped elsewhere |
 | `visualization/` | the forward-run viewer and renderer (`libs/visualization`) |
-| `pycity4cfd/` | map area -> OSM buildings -> City4CFD -> case overrides (`libs/pycity4cfd`); osmnx mocked, City4CFD runs are `integration` |
+| `pycity4cfd/` | map area -> OSM buildings -> City4CFD -> case overrides (`libs/pycity4cfd`); osmnx mocked, City4CFD runs are `integration`; runs in the `city4cfd` env |
 | `user_interface/` | the browser app's server (`libs/user-interface`): token/Host/Origin checks, options, case and run lifecycles on a fake `Tools`; runs in the `mcp` env |
 | `scripts/` | `scripts/`, `configs/` and `workflows/`; relative links in the Markdown docs |
 
@@ -23,7 +23,8 @@ pixi run -e dev test-integration    # tiny real uDALES / LBM / PALM runs
 pixi run -e dev test-all            # both
 pixi run -e dev python -m pytest tests/scripts
 pixi run --locked -e mcp python -m pytest tests/mcp   # the MCP server's own env
-pixi run --locked -e mcp python -m pytest tests/user_interface
+pixi run --locked -e ui python -m pytest tests/user_interface
+pixi run -e city4cfd python -m pytest tests/pycity4cfd -m ''   # incl. City4CFD runs
 ```
 
 Tests that run a compiled CFD solver are marked `integration` and are skipped

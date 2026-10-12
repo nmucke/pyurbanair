@@ -2,13 +2,14 @@
 
 `libs/user-interface` (import `user_interface`) is a local web app: draw an
 area on a map, build the case, pick a model and settings, launch the run,
-watch it and open the results viewer. No LLM is involved. It runs in the `mcp`
-environment.
+watch it and open the results viewer. No LLM is involved. It runs in the `ui`
+environment and builds cases as jobs in the `city4cfd` environment, which
+compiles City4CFD on its first install (~2 min, see
+[pycity4cfd.md](pycity4cfd.md)).
 
 ```bash
-pixi install -e mcp
-pixi run -e mcp build-city4cfd      # once per env (see pycity4cfd.md)
-pixi run -e mcp start-ui            # = python -m user_interface --repo-root .
+pixi install -e ui -e city4cfd
+pixi run -e ui start-ui             # = python -m user_interface --repo-root .
 ```
 
 `python -m user_interface [--repo-root .] [--port 0] [--no-browser]` prints the
@@ -82,5 +83,5 @@ every field key resolves for each model it applies to, and the case and run
 lifecycles.
 
 ```bash
-pixi run --locked -e mcp python -m pytest tests/user_interface
+pixi run --locked -e ui python -m pytest tests/user_interface
 ```

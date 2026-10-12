@@ -36,7 +36,8 @@ build tools. Workers prepare the selected stock or discrepancy solver in the
 managed uDALES cache; the legacy `build/release/u-dales` binary is not required.
 
 CPU workers use `dev`; GPU workers use the installed `cuda` environment. The MCP
-server runs in the separate `mcp` environment. Install optional 3D support with
+server runs in the separate `mcp` environment; city cases are built in
+`city4cfd` (`pixi install --locked -e city4cfd`, compiles City4CFD once). Install optional 3D support with
 `pixi install --locked -e rendering`. It includes PyVista/VTK and ffmpeg.
 The root lockfile pins the tested MCP SDK v2 and renderer packages.
 
@@ -156,8 +157,9 @@ that already has a `case.json` is reused only if the same `make_case` format
 built it (older folders are left in place and never matched); a per-case lock makes a retry wait for a running
 build instead of racing it. It runs in the MCP process and takes minutes: the
 OpenStreetMap (Overpass) download dominates. Known limit: the build blocks the
-tool call rather than running in the supervisor. It needs City4CFD built
-(`pixi run -e mcp build-city4cfd`).
+tool call rather than running in the supervisor. It needs the `city4cfd`
+environment, which builds City4CFD on its first install
+(`pixi install -e city4cfd`, see [pycity4cfd.md](pycity4cfd.md)).
 
 ## Configuration and artifacts
 
