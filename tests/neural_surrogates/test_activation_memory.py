@@ -144,7 +144,7 @@ def test_activation_checkpointing_off_wraps_nothing() -> None:
 def test_activation_checkpointing_skips_nested_and_must_match() -> None:
     model = _peft_stepper()
     wrapped = checkpoint_submodules(model, ["dft.encoder", "dft.encoder.*"])
-    assert wrapped == ["base_model.model.dft.encoder"]
+    assert wrapped == [model.base_model.model.dft.encoder]
     with pytest.raises(ValueError, match="match no module"):
         checkpoint_submodules(model, ["dft.no_such_module.*"])
 
@@ -163,3 +163,49 @@ def test_lora_shares_its_input_with_the_base_layer() -> None:
     for n, g in grads0.items():
         if g is not None:
             torch.testing.assert_close(grads1[n], g, atol=0, rtol=0)
+
+
+def _batch(k: int) -> dict:
+    state, params, geom = _inputs()
+    return {
+        "state_n": state,
+        "state_next": torch.roll(state, 1, dims=-1),
+        "params_n": params[:, None].expand(1, k, 2).contiguous(),
+        "geometry": geom,
+    }
+
+
+def _trainer_grads(model: Any, k: int, **kw: Any) -> dict:
+    trainer = _trainer(model, grad_unroll_steps=2, **kw)
+    model.zero_grad()
+    trainer._forward(_batch(k)).backward()
+    return {n: p.grad for n, p in model.named_parameters() if p.requires_grad}
+
+
+def test_unroll_no_grad_modules_drops_only_their_early_terms() -> None:
+    """The approximate-gradient knob: with two gradient-carrying steps, the
+    encoder of the first one runs under no_grad. Every other gradient is
+    unchanged; the encoder's adapters keep only the last step's term. With a
+    single gradient step (horizon 1) it changes nothing."""
+    plain = _peft_stepper()
+    full = _trainer_grads(plain, k=2)
+    approx = _trainer_grads(
+        copy.deepcopy(plain), k=2, unroll_no_grad_modules=["dft.encoder"]
+    )
+    encoder = [n for n in full if ".dft.encoder." in n and full[n] is not None]
+    assert encoder
+    for n, g in full.items():
+        if g is None:
+            assert approx[n] is None, n
+        elif n in encoder:
+            assert approx[n] is not None and not torch.equal(approx[n], g), n
+        else:
+            torch.testing.assert_close(approx[n], g, atol=0, rtol=0)
+
+    one = _trainer_grads(plain, k=1)
+    one_approx = _trainer_grads(
+        copy.deepcopy(plain), k=1, unroll_no_grad_modules=["dft.encoder"]
+    )
+    for n, g in one.items():
+        if g is not None:
+            torch.testing.assert_close(one_approx[n], g, atol=0, rtol=0)
