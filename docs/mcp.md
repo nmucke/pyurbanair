@@ -123,6 +123,24 @@ startup does not intentionally install packages and all diagnostics use stderr.
 Preparation is a technical validation step. It does not add an extra user
 confirmation when the run has already been requested.
 
+### Picking a city area on a map
+
+`open_area_selector(max_area_km2=4.0)` returns `{selection_id, url, status:
+"pending", max_area_km2, instructions}`. The user opens `url`, a Leaflet/OSM
+map (`mcp_server/web/area_selector.html`), draws a rectangle (the page shows
+its km² and bbox) and presses "Use this area". `get_selected_area(selection_id,
+wait_s=30)` blocks up to `wait_s` (at most 60 s) and returns status `pending`
+(call again), `expired` (open a new selector) or `selected` with `bbox`
+`{west, south, east, north, area_km2}` in EPSG:4326 degrees. A user may
+instead paste a bbox; the agent then uses it directly, no page needed.
+`mcp_server.area_selector.validate_bbox` is the one check: finite lon/lat in
+range, `west < east`, `south < north` and the area limit. The page needs
+internet access for Leaflet (unpkg) and the OSM tiles; search uses Nominatim.
+
+The page server lives in the MCP process (not the supervisor) and mirrors the
+asset server below: loopback, Host/Origin checks, an unguessable token per
+selection in the URL, JSON-only POSTs, and shutdown after 30 idle minutes.
+
 ## Configuration and artifacts
 
 Scientific configuration is the `configs/` tree. Trusted `_target_`s are the

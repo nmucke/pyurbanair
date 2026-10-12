@@ -10,6 +10,7 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
+from mcp_server.area_selector import MAX_AREA_KM2, AreaSelector
 from mcp_server.jobs.preparation import PreparationService
 from mcp_server.jobs.rendering_environment import select_render_environment
 from mcp_server.jobs.results import contained_file, inspect_results
@@ -38,6 +39,7 @@ class Tools:
         )
         self.preparation = PreparationService(self.repo_root, self.store_root)
         self.jobs = SupervisorClient(self.repo_root, self.store_root)
+        self.area_selector: AreaSelector | None = None
 
     def get_capabilities(self) -> dict[str, Any]:
         """Inspect available configurations and installed environments without building solvers."""
@@ -206,6 +208,47 @@ class Tools:
             offset,
             limit,
         )
+
+    def open_area_selector(self, max_area_km2: float = MAX_AREA_KM2) -> dict[str, Any]:
+        """Open a local map page where the user draws the rectangle of a city area to simulate.
+
+        Give the user the returned `url` to open in their browser, then call
+        `get_selected_area(selection_id)` until it returns the bbox. If the
+        user would rather type the area, they may paste a bbox as west, south,
+        east, north in degrees (EPSG:4326); use that directly instead, without
+        this page. Areas above `max_area_km2` are rejected on the page.
+        """
+        if self.area_selector is None or self.area_selector.closed:
+            self.area_selector = AreaSelector()
+        selection_id, url = self.area_selector.open(max_area_km2)
+        return {
+            "selection_id": selection_id,
+            "url": url,
+            "status": "pending",
+            "max_area_km2": max_area_km2,
+            "instructions": (
+                f"Open {url} in a browser on this machine, click 'Draw rectangle', "
+                "drag over the area, then press 'Use this area'."
+            ),
+        }
+
+    def get_selected_area(
+        self, selection_id: str, wait_s: float = 30
+    ) -> dict[str, Any]:
+        """Return the area drawn on the `open_area_selector` page.
+
+        Blocks up to `wait_s` seconds (at most 60). Returns status "selected"
+        with `bbox` {west, south, east, north, area_km2} in EPSG:4326 degrees,
+        or status "pending": ask the user to finish on the page and call again.
+        Status "expired" means the page server shut down; open a new selector.
+        """
+        if self.area_selector is None:
+            raise ValueError("No area selector is open; call open_area_selector first")
+        selection = self.area_selector.wait(selection_id, min(max(wait_s, 0), 60))
+        result: dict[str, Any] = {"selection_id": selection_id, **selection}
+        if result["status"] == "pending" and self.area_selector.closed:
+            result["status"] = "expired"
+        return result
 
     def render_simulation(
         self, run_id: str, idempotency_key: str, options: dict[str, Any] | None = None
