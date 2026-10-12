@@ -30,6 +30,38 @@ from torch.autograd import DeviceType
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 
+def compile_submodules(
+    model: torch.nn.Module, patterns: list[str], **compile_kwargs: object
+) -> list[str]:
+    """``nn.Module.compile`` every submodule whose path matches a glob in
+    ``patterns``, and return the compiled paths.
+
+    Paths are relative to the bare architecture: a PEFT wrapper's
+    ``base_model.model.`` prefix is dropped before matching, so the same
+    pattern works with and without LoRA. A match inside an already compiled
+    module is skipped (its parent's graph covers it). Compiling in place keeps
+    the module tree and state-dict keys unchanged. A pattern that matches
+    nothing raises, so a typo does not silently run eager.
+    """
+    from fnmatch import fnmatchcase
+
+    compiled: list[str] = []
+    unmatched = set(patterns)
+    for name, module in model.named_modules():
+        path = name.removeprefix("base_model.model.")
+        hits = {p for p in patterns if fnmatchcase(path, p)}
+        if not hits:
+            continue
+        unmatched -= hits
+        if any(name.startswith(parent + ".") for parent in compiled):
+            continue
+        module.compile(**compile_kwargs)
+        compiled.append(name)
+    if unmatched:
+        raise ValueError(f"compile_modules patterns match no module: {sorted(unmatched)}")
+    return compiled
+
+
 class BaseTraining:
     def __init__(
         self,
@@ -47,6 +79,7 @@ class BaseTraining:
         amp_dtype: str = "bfloat16",
         compile_model: bool = False,
         compile_dynamic: bool | None = None,
+        compile_modules: list[str] | None = None,
         channels_last: bool = False,
         cudnn_benchmark: bool = False,
         tf32: bool = False,
@@ -99,7 +132,7 @@ class BaseTraining:
         # architectures predating the knob keep the one-step behaviour exactly.
         self.num_history_steps = int(getattr(self._eager_model, "num_history_steps", 1))
         self.n_state_channels = getattr(self._eager_model, "n_state_channels", None)
-        if compile_model:
+        if compile_model or compile_modules:
             # Inductor's CUDA backend generates triton kernels; without a
             # working triton, compilation raises mid-epoch. Fall back to
             # eager instead of crashing the run.
@@ -107,22 +140,12 @@ class BaseTraining:
 
             if self.device.type == "cuda" and not has_triton():
                 print(
-                    "compile_model=true but no working triton installation for "
-                    "CUDA inductor; running eager. Install triton in this env "
+                    "torch.compile requested but no working triton installation "
+                    "for CUDA inductor; running eager. Install triton in this env "
                     "to enable torch.compile."
                 )
+                compile_model, compile_modules = False, None
             else:
-                # `dynamic` controls whether inductor specialises on concrete
-                # spatial sizes. An explicit `compile_dynamic` wins; otherwise
-                # the model may request a setting via a `compile_dynamic`
-                # attribute (P3D sets False: its shape-dependent internal padding
-                # makes dynamo introduce symbolic spatial dims even on the first
-                # trace, and inductor then mis-infers the backward strides of its
-                # reshape/PixelShuffle ops -- an `assert_size_stride` crash in the
-                # compiled backward. Forcing static specialisation avoids it).
-                dynamic = compile_dynamic
-                if dynamic is None:
-                    dynamic = getattr(self._eager_model, "compile_dynamic", None)
                 # The pushforward loop calls the model under both no_grad and
                 # grad (plus separate autocast contexts), so a single forward
                 # legitimately needs several compiled graph variants. The
@@ -137,7 +160,29 @@ class BaseTraining:
                             _attr,
                             max(getattr(_dynamo.config, _attr), 64),
                         )
-                self.model = torch.compile(self.model, dynamic=dynamic)
+        if compile_modules:
+            # Regional compile: only the matched submodules, in place
+            # (``nn.Module.compile``), so state-dict keys, LoRA merging and
+            # checkpoints are untouched. Dynamic shapes by default, so one
+            # graph serves every grid of a multi-geometry dataset.
+            compile_submodules(
+                self.model,
+                compile_modules,
+                dynamic=True if compile_dynamic is None else compile_dynamic,
+            )
+        if compile_model:
+            # `dynamic` controls whether inductor specialises on concrete
+            # spatial sizes. An explicit `compile_dynamic` wins; otherwise
+            # the model may request a setting via a `compile_dynamic`
+            # attribute (P3D sets False: its shape-dependent internal padding
+            # makes dynamo introduce symbolic spatial dims even on the first
+            # trace, and inductor then mis-infers the backward strides of its
+            # reshape/PixelShuffle ops -- an `assert_size_stride` crash in the
+            # compiled backward. Forcing static specialisation avoids it).
+            dynamic = compile_dynamic
+            if dynamic is None:
+                dynamic = getattr(self._eager_model, "compile_dynamic", None)
+            self.model = torch.compile(self.model, dynamic=dynamic)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer

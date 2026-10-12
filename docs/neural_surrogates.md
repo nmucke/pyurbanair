@@ -582,6 +582,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `weights_path` | path for best-val `weights.pt` (written on every improvement, reloaded at end) |
 | `amp` / `amp_dtype` | mixed-precision autocast (`bfloat16` by default) with grad scaling |
 | `compile_model` / `compile_dynamic` | `torch.compile` the model before training |
+| `compile_modules` | regional compile: `nn.Module.compile` every submodule whose path (without peft's `base_model.model.` prefix) matches one of these globs, in place, so state-dict keys and LoRA merging are unchanged; dynamic shapes unless `compile_dynamic` says otherwise. For the DFT's conv blocks: `[dft.encoder.conv_encoder.conv_encoder.blocks.*, dft.decoder.conv_decoder.conv_decoder.blocks.*]` (untested on GPU) |
 | `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
 | `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32) |
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |

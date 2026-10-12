@@ -22,6 +22,8 @@ trainer:
   amp: true
   amp_dtype: bfloat16
   compile_model: false
+  # Glob paths of submodules to torch.compile in place (dynamic shapes); null: off.
+  compile_modules: null
   channels_last: false
   cudnn_benchmark: true
   tf32: true
