@@ -41,7 +41,11 @@ from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
 from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
-from .utils.warm_start_utils import write_warmstart_driver
+from .utils.warm_start_utils import (
+    build_init_profile_dataset,
+    write_init_driver,
+    write_warmstart_driver,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -222,6 +226,9 @@ class ForwardModel(BaseForwardModel):
         self._stage_input_dir()
 
         self.params = _merge_params(DEFAULT_PARAMS, None)
+        # Cell-centre (u, v) inflow profile from the last _apply_inflow_settings;
+        # the inflow_outflow cold start writes it as an LOD=1 driver.
+        self._init_uv_profile: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._apply_runtime_and_domain()
         self._apply_boundary_condition()
 
@@ -562,6 +569,7 @@ class ForwardModel(BaseForwardModel):
         p3d.set_value("initialization_parameters", "vg_surface", float(v0))
         self._apply_sgs_setting(p3d, self.params)
 
+        self._init_uv_profile = None
         if self.bounds is not None and self.nz:
             zmin, zmax = self.bounds[2]
             dz = (zmax - zmin) / self.nz
@@ -579,6 +587,7 @@ class ForwardModel(BaseForwardModel):
             p3d.set_array("initialization_parameters", "u_profile", u_profile.tolist())
             p3d.set_array("initialization_parameters", "v_profile", v_profile.tolist())
             p3d.set_array("initialization_parameters", "uv_heights", heights.tolist())
+            self._init_uv_profile = (u_profile[1:], v_profile[1:])
 
         p3d.write()
 
@@ -1114,7 +1123,10 @@ class ForwardModel(BaseForwardModel):
         """Run PALM, optionally warm-started from ``state``.
 
         ``state is None`` → cold start (with spinup): PALM initializes from
-        analytic profiles (``initializing_actions='set_constant_profiles'``).
+        the analytic inflow profile — under ``periodic`` via
+        ``initializing_actions='set_constant_profiles'``, under
+        ``inflow_outflow`` via an LOD=1 ``init_atmosphere_*`` driver and
+        ``'read_from_file'`` (see ``_reset_cold_init``).
 
         ``state`` provided → warm start (no spinup): the resolved u/v/w field is
         injected as PALM's full 3D initial condition via the dynamic-driver
@@ -1216,11 +1228,41 @@ class ForwardModel(BaseForwardModel):
         ``initializing_actions = 'read_from_file'`` (and disturbances disabled)
         in the namelist; reset both so a subsequent cold start initializes from
         analytic profiles and re-enables the turbulence-seeding perturbation.
+
+        Under ``inflow_outflow`` the analytic profile goes in as an LOD=1
+        ``init_atmosphere_*`` driver read with ``'read_from_file'``, not as
+        ``set_constant_profiles``: the latter zeroes u/v on the whole first fluid
+        level, and the dirichlet/radiation inflow face then keeps u=v=0 there for
+        the entire run (docs/pypalm.md §8). The driver is merged into a
+        time-varying ``inflow_plane_*`` driver when one was just written; a stale
+        driver from a prior run was already removed by ``_apply_inflow_settings``.
+        Must run AFTER ``_apply_inflow_settings``, which builds the profile.
         """
+        actions = "set_constant_profiles"
+        if (
+            self.boundary_condition == "inflow_outflow"
+            and self._init_uv_profile is not None
+            and self.bounds is not None
+            and self.nx
+            and self.ny
+            and self.nz
+        ):
+            u_profile, v_profile = self._init_uv_profile
+            write_init_driver(
+                self.dynamic_driver_path,
+                build_init_profile_dataset(
+                    u_profile,
+                    v_profile,
+                    bounds=self.bounds,
+                    nx=int(self.nx),
+                    ny=int(self.ny),
+                    nz=int(self.nz),
+                    pt_surface=DEFAULT_PT_SURFACE,
+                ),
+            )
+            actions = "read_from_file"
         self._p3d_set_string(
-            "initialization_parameters",
-            "initializing_actions",
-            "set_constant_profiles",
+            "initialization_parameters", "initializing_actions", actions
         )
         self._p3d_set_value("runtime_parameters", "create_disturbances", True)
 
