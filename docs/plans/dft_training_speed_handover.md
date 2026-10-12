@@ -1,48 +1,342 @@
-# DFT training speed and memory: handover (`feat/dft-grad-accum`)
+# DFT training speed and memory: handover for the H100 (`feat/dft-grad-accum`)
 
-Status as of 2026-10-12. Work moved from Snellius (H100, 93 GB) to a local
-RTX 3090 (24 GB) to save SBUs. This note is the handover: what is on the
-branch, what was measured on Snellius, what is still untested, and how to test
-it on the 3090. Move it to [implemented/](implemented/) once the PR is merged
-and the full DFT run is launched.
+Status as of 2026-10-12. For the agent on Snellius who tests on an H100 and
+makes the final calls before launching the full DFT run. Everything below was
+built and measured on a local RTX 3090 (24 GB) with the **size-S** AE
+`tadpole_ae_s_new` on the idealized corpus; nothing here has run on an H100 or
+with the size-B AE `tadpole_ae_b_realistic` yet. Move this note to
+[implemented/](implemented/) once the PR is merged and the run is launched.
 
-## Goal
+## Goal (unchanged)
 
 Train the DFT stepper (`configs/surrogate/train_dft.yaml`, `task: dft`, §31-33
 of [neural_surrogates.md](../neural_surrogates.md)) on the realistic uDALES
-corpus from the size-B autoencoder `tadpole_ae_b_realistic`:
+corpus from `tadpole_ae_b_realistic`: effective batch 8; pushforward up to 4
+steps with gradients through the last **2** (`grad_unroll_steps: 2`, keep);
+LoRA rank 32 (keep); as fast as possible without running near the memory limit.
+The mathematical model must not change.
 
-- effective batch 8;
-- pushforward rollout up to 4 steps, gradients through the last **2**
-  (`grad_unroll_steps: 2` — keep it, it clearly improves rollouts);
-- LoRA rank 32 (keep);
-- as fast as possible without running near the GPU memory limit.
+## TL;DR
+
+- On the 3090 (S AE, 32×144×192 = 0.885 Mcell, horizon 4, 2 grad steps, bf16)
+  the branch trains **~2× more samples/s** than the branch before this work (b704c0f) at the
+  same peak memory (table below), with matching gradients (parity tests) and
+  matching real-data training (see [Accuracy check](#accuracy-check)).
+- The wins, in order: `lora.fused_forward=true` (LoRA through the merged weight:
+  −36 % step time, −31 % memory), larger micro-batches (the step is close to
+  CPU launch-bound at micro-batch 1, more so on an H100), regional compile of
+  the two conv stems (−22 % memory, −10 % time at micro-batch 2), and several
+  always-on bit-identical fixes (−12 % step time, −18 % memory together).
+- **Fix a likely OOM before launching:** DataLoader workers each kept a
+  shared-memory copy of every geometry they served (+325 MB/worker on the
+  idealized split; est. ~11 GB/worker, ~170 GB for 15 workers on the realistic
+  corpus). Fixed on this branch (`share_once`, commit 20a9b39).
+- Keep `spatial_mode: global` (halo study below).
+- Your job: confirm the speed/memory effects with the B AE on the H100, pick the
+  micro-batch / `cell_budget`, run a smoke over all 69 shapes, then launch.
+
+Measured on the 3090 (`scripts/tools/benchmark_dft_step.py`, 30 timed steps on a
+fixed batch, back to back, idle GPU):
+
+| Branch / settings, 32×144×192 | Micro-batch | s/it | samples/s | Peak |
+|---|---|---|---|---|
+| before this work, b704c0f (two runs) | 1 | 0.366–0.385 | 2.6–2.7 | 7.7 GB |
+| this branch, defaults (always-on fixes only) | 1 | 0.328 | 3.05 | 6.3 GB |
+| + `lora.fused_forward=true` | 1 | 0.232 | 4.32 | 4.9 GB |
+| + `compile_modules` (conv stems) | 1 | 0.20–0.24 | 4.2–5.0 | 3.8 GB |
+| + `compile_modules` (conv stems) | **2** | 0.379 | **5.27** | 7.5 GB |
 
 ## What is on the branch
 
-All new knobs default to off: default runs are unchanged. Commits on top of
-`main` (67ee5a2):
+`feat/dft-grad-accum` = its previous head b704c0f + five work branches
+(pipeline, LoRA, memory, halo, compile). `tests/neural_surrogates` and the
+`tests/scripts` surrogate/config/docs/import tests pass (CPU). New knobs default
+to off; the always-on changes are bit-identical (tested) unless noted.
 
-| Commit | Knob(s) | What it does | GPU-tested? |
+### Always on
+
+| Commit | Change | Effect |
+|---|---|---|
+| 20a9b39 | `share_once`: dataset geometry masks + SDF features in one shared-memory buffer before the workers start (`TransitionDataset`, `SnapshotDataset`) | /dev/shm 775 → ~350 MB on the idealized split; prevents the per-worker copies above. Same values. |
+| 20a9b39, bff865b | `lr_warmup_per_step`: warmup length counted at each epoch's own curriculum horizon and in that epoch's own seeded shuffle (incl. `cell_budget` variable batches) | Was ending warmup early / cosine one epoch late (e.g. epoch 2 lr 4.47e-4 instead of 5e-4). Only with `lr_warmup_per_step`. |
+| 20a9b39 | `TrajectoryBatchSampler.set_epoch` called by `fit()` | A resumed run no longer replays epoch 0, 1, … shuffles. Fresh runs byte-identical. |
+| 20a9b39 | `grad_accum_samples` gradient division as one `_foreach_div_` | fewer kernels |
+| 0e3252b | Subnetwork positional embedding cached on the device (**vendored** `_tadpole/architecture/downstream/llm.py`) | Removed the last per-call host→device copy/sync: −11 % s/it at 32×144×192 |
+| eb65876 | PEFT LoRA layers no longer cast their input to fp32 (it was cast straight back to bf16) | peak −13 %, slightly faster; bit-identical |
+| cd3e535 | Frozen window-attention position bias (`cpb_mlp`) computed once and reused (no vendored edit; recomputed if it ever becomes trainable) | ~800 fewer kernels/step, −4 % s/it |
+| 9bae22e | Global mode: the spatial runner returns the single whole-grid region directly (no zero-filled grid + copy) | small memory win |
+| c5bbf85 | **Vendored** `PixelShuffle3d`: `arange(n)[:-6].tolist()` → `list(range(n-6))` (same axes) | removes a torch.compile graph break in the decoder stem |
+| 3db3d50 | `trainer.channels_last=true` no longer crashes on 4-D tensors | still not recommended (eager +25 % slower) |
+
+The two vendored edits are listed in `docs/neural_surrogates.md` with the other
+local patches.
+
+### New knobs (default off)
+
+| Knob | What | Recommendation |
+|---|---|---|
+| `lora.fused_forward` | Each PEFT LoRA Linear/Conv3d computes `base(x; W + s·B@A)` in one call; the merge is rebuilt every call in fp32 (outside autocast), gradients reach A and B through it, W stays frozen. Falls back to PEFT for dropout, variants, LoRA bias, groups, merged/disabled adapters. State-dict keys, adapter save and merged `weights.pt` unchanged (bit-identical export). | **on** |
+| `trainer.compile_modules` (existing, now GPU-tested) | Regional compile, dynamic shapes. Use the two conv stems `[dft.encoder.conv_encoder,dft.decoder.conv_decoder]` (the old `blocks.*` globs miss the full-resolution stem convs). | **on**, confirm on H100 |
+| `trainer.activation_checkpoint_modules` | Non-reentrant checkpoint of the matched submodules (globs). Cheap pattern: the conv blocks `[dft.encoder.conv_encoder.conv_encoder.blocks.*,dft.decoder.conv_decoder.conv_decoder.blocks.*]`. | only if a micro-batch does not fit otherwise |
+| `trainer.unroll_no_grad_modules` | Runs the matched modules under `no_grad` in every grad step but the last. **Changes the gradient** (encoder LoRA: cosine 0.994, 0.61× norm). | **off** |
+| `architecture.spatial_checkpoint` | Recompute each spatial region's encoder/decoder call in backward (whole enc/dec in global mode; per tile in halo). Subnetwork and loss stay global. | off (global); needed only for halo |
+| `architecture.spatial_batch_tiles` | Stack equal-shape halo/local tiles into one call | off (halo only) |
+
+Tool: `scripts/tools/benchmark_dft_step.py` (run from the repo root; see its
+docstring). It builds the model exactly like `train.py` (`task: dft`) and times
+`trainer._train_epoch()` on one fixed batch tiled to `--grid`, so cuDNN
+autotuning and compilation stay out of the timed part. Pass the corpus with
+`paths.data_dir=...` after `--`.
+
+## Findings (3090, S AE)
+
+### LoRA is the largest cost
+
+At size S, rank-32 LoRA costs **~1.5× the frozen convs**, not the ~33 % assumed
+before: rank 32 is as wide as most conv layers (32 channels). `decompress`
+(32→1 at full resolution) pays 32× its base conv for `lora_A` (a full-res
+32→32 3×3×3 conv). `fused_forward` replaces the low-rank branch by one full
+weight-gradient conv per layer; it wins on every layer measured, at S and at B
+widths (per-layer micro-benchmark, fwd+bwd):
+
+| Layer at 32×144×192 | PEFT | fused |
+|---|---|---|
+| S decompress / feature_embed / 32-ch block | 31.7 / 17.8 / 4.3 ms | 15.3 / 8.6 / 2.2 ms |
+| B feature_embed / down0 / decompress | 28.3 / 32.5 / 56.0 ms | 15.7 / 18.5 / 29.2 ms |
+| B 128-ch block (r/C = 0.25) | 24.7 ms | 22.1 ms |
+
+So the gain on B/H100 should be smaller than −36 % but positive; the
+full-resolution layers dominate and gain ~2× on any hardware. Parity: fp64
+loss rel. 7.5e-16, LoRA grads 2e-11 (same function); fp32 grads 3e-6; in bf16
+fused is slightly closer to the fp32 reference than PEFT (it rounds `W + δ` to
+bf16 instead of `base + lora`). 200 real training steps: loss curve within
+PEFT's own run-to-run bf16 noise.
+
+### Launch-bound step: use micro-batches > 1
+
+With fused LoRA one step at micro-batch 1 is ~8,000 kernels / ~11.5k aten ops;
+small idealized grids all take 0.14–0.22 s/it regardless of size (the CPU
+floor). The fused step's GPU time at 0.885 Mcell (~220 ms on the 3090) would be
+~60–70 ms on an H100, below that floor, so **expect the H100 to be CPU-bound at
+micro-batch 1** (Snellius already showed 86 % GPU busy with one core saturated
+before these changes). On the 3090, micro-batch 2 / 3 / 4 gave +15 / +21 / +25 %
+samples/s (fused, eager) and compile adds −10 % s/it at micro-batch 2.
+
+### Compile
+
+`compile_modules=[dft.encoder.conv_encoder,dft.decoder.conv_decoder]`: one
+compile of 45–115 s per process (both grad modes), then **no recompiles across
+all 11 idealized shapes** (a new shape costs only cuDNN autotuning, as in
+eager), so the 69 realistic shapes should not add compile time — verify.
+Memory −22 % at any micro-batch (fewer saved fp32 GroupNorm/GELU tensors);
+time neutral at micro-batch 1, −10 % at 2. Parity vs eager: loss rel. 2e-4,
+grads global rel. 4e-3 (bf16); 4e-5 / 2e-4 (fp32/TF32). Rejected: compiling
+the transformer stages or the whole encoder/decoder (> 14 min compile, killed),
+`compile_model`, `channels_last`. If `dft.subnetwork` is ever compiled, the
+cached positional embedding in `llm.py` (an `id()`-keyed dict) graph-breaks; a
+`functools.lru_cache` version traced as one graph (not on the branch).
+
+### Memory model
+
+Saved activations for one sample, both grad steps, S fused: decoder ~51 %,
+encoder ~47 %, subnetwork < 1 %; 43 % of it fp32 (GroupNorm/GELU inputs,
+attention softmax). The no-grad rollout prefix and the masked-loss temporaries
+are negligible.
+
+Per Mcell at micro-batch 1 (2 grad steps), measured on the 3090; the size-B
+model was built randomly initialised (`skip_pretrained_load`) for memory/speed
+only. The old B figure (19.7 GB/Mcell) matches the ~19 GB/Mcell measured on the
+H100, so these should carry over (cuDNN workspaces differ):
+
+| Setting | S GB/Mcell | B GB/Mcell | B s/it at 0.885 Mcell (3090) |
 |---|---|---|---|
-| 52750a0 | `trainer.grad_accum_steps` (1) | k micro-batches per optimizer step, each loss divided by the group's size. | yes (H100 smoke, see below) |
-| 52750a0 | — | Frozen geometry-branch cache now hits: the trainer passes the same broadcast geometry/SDF tensors while geometry and batch size hold (was recomputed on every model call; CPU check: 6 → 1 branch forwards for 2 batches × 3 rollout steps). | yes (part of the H100 smoke) |
-| 52750a0 | — | Masked MSE/L1/Huber loss without boolean indexing (`torch.where` + an on-device fluid-cell rescale): no GPU→host sync per step. Geometry uploads `non_blocking`. Exact same value/gradient (tested, incl. NaN junk in solid cells). | yes (part of the H100 smoke) |
-| e6f9c05 | `trainer.lr_warmup_per_step` (false) | Warmup advances per optimizer step instead of per epoch. With `lr_warmup_epochs=1`: LR rises linearly over epoch 0 from `lr_warmup_start`, peak from epoch 1, then cosine to `lr_min` per epoch. Fixes "epoch 0 runs entirely at 1e-6". | **no** |
-| 6dca519 | `trainer.grad_accum_samples` (null) | Accumulate until ≥ N samples, step on the per-sample mean. For variable micro-batches from `batch_sampler.cell_budget`. Exclusive with `grad_accum_steps > 1`. `_optimizer_steps_per_epoch()` (used by the per-step warmup) replays the sampler's planned batch sizes. | **no** |
-| 251fb3a | `trainer.profile_steps` (null) | `[start, count]`: torch.profiler over those epoch-0 micro-batches; prints it/s and GPU-busy %, writes `profile.txt` (top 40 ops) next to `weights.pt`. | **no** |
-| f7c9b75 | `trainer.compile_modules` (null) | Regional `nn.Module.compile` (in place, dynamic shapes) of submodules matching globs; state-dict keys / LoRA merge unchanged. CPU parity vs eager with LoRA tested. | yes (3090, see [Kernels, launch overhead and compile](#kernels-launch-overhead-and-compile-rtx-3090)) |
+| old (PEFT cast) | 8.7 | 19.7 | 1.00 |
+| fused | 5.9 | 14.3 | 0.79 |
+| fused + compile (S measured −22 %; B assumed) | 4.3 | ~11 | – |
+| fused + conv-block checkpointing | 4.3 | 8.0 | 0.86 |
+| fused + checkpoint all four stages | 2.4 | 4.8 | 1.02 |
 
-Also on the branch: `job_scripts/snellius/*` and `docs/job_scripts.md` use the
-new Snellius account `tdsei19851` (the old `tdsr72361` is rejected by Slurm).
+Projected H100 peaks for B (≈ 0.5 GB + per-Mcell × cells × micro-batch):
+fused, 2.8 Mcell: ~41 GB at b=1, ~81 GB at b=2 (too tight); fused + conv-block
+checkpointing: 23 / 45 / 67 GB at b = 1 / 2 / 3; ~1 Mcell grids fused b=4
+≈ 58 GB. Compile should take ~20 % off the fused figures — **measure it**.
 
-Activation checkpointing and the step-1 encoder skip are now opt-in trainer
-knobs (`activation_checkpoint_modules`, `unroll_no_grad_modules`), see
-[Activation memory](#activation-memory-rtx-3090) below.
+Do not use the vendored skip wrappers' `use_checkpoint` (reentrant checkpoint:
+silently drops the encoder LoRA gradients). The subnetwork's `use_checkpoint`
+is not worth it (< 1 % of activations).
 
-## Data and artifacts
+### Data pipeline and cuDNN
 
-On Snellius (project space `/projects/prjs2075/urbanair`, 2 TiB quota):
+- The loader does not starve the GPU: 48–66 batches/s locally with 4–8 workers.
+  On Snellius a whole-frame read is ~0.55 s, so one sample ≈ 1.1 s of I/O wait;
+  workers needed ≈ 1.1 s × samples/s × 1.5 → ~13 at 8 samples/s. Keep
+  `num_workers: 15`; if the GPU starves at the new speed, check this first.
+- cuDNN `benchmark: true`: the first step on a new shape costs ~12 s (≈ 43
+  forward + 32 backward conv configurations, CPU-side plan building);
+  `benchmark: false` costs 4–7 % at steady state. Keep it on for 48 h jobs;
+  off for short smokes. `benchmark_limit` does not help. ~100 cached plans per
+  grid × 69 grids ≈ 7,000 < the default 10,000 LRU limit; mixing micro-batch
+  sizes multiplies the keys, so set
+  `TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT=0` (unlimited) with `cell_budget` batching.
+- GPU-tested on real data: `grad_accum_steps` / `grad_accum_samples` equal the
+  large-batch gradient (fp32 rel. 2.4e-7), `profile_steps` writes `profile.txt`,
+  per-step warmup + resume. Checkpoints are written only at epoch end (no
+  mid-epoch resume).
+
+### Halo vs global
+
+Recommendation: **`global`** for training (idealized and realistic) and for
+ESMDA deployment. Deploy in exactly the mode/crop/halo the model was trained
+with: each mode is a different function.
+
+- The frozen AE behaves like a function of its 16×32×32 training tile (every
+  latent cell of a 32-wide tile touches the zero-padded tile border). AE
+  reconstruction (z-score NRMSE, 60 val/test frames, = DFT output at init):
+  local [16,32,32] 0.139, halo 16 0.230, global 0.288, halo 32 / larger cores
+  0.30–0.31. Halo 16 has the worst seams (1.56× error at tile borders); global
+  and halo 32 none. After a 400-step fine-tune all modes reached 0.51–0.53
+  one-step NRMSE (persistence 0.83): LoRA re-adapts quickly; no clear winner.
+- Halo costs 1.8–7.8× the cells (overlap; plus padding to the core multiple)
+  and, without `spatial_checkpoint`, *more* training memory than global
+  (12.4 vs 3.75 GB at 0.4 Mcell): autograd keeps every tile's activations.
+  With `spatial_checkpoint` + `spatial_batch_tiles` halo trains, but at every
+  size measured global + `spatial_checkpoint` was faster and as small or
+  smaller (2.8 Mcell, S: global 1.23 s / 21.8 GB, global + checkpoint 1.37 s /
+  10.1 GB, best halo 4.06 s / 11.6 GB).
+- The loss and the latent subnetwork are always global in every mode; only the
+  encoder/decoder calls are tiled.
+- Deployment (no grad, S, 2.8 Mcell): global 0.16 s, 5.0 GB (2.7 GB with
+  `max_internal_batchsize: 1`).
+- Halo would only pay for domains far beyond 2.8 Mcell. Then: core z = full z
+  (e.g. crop [32,64,64]), `halo_size` ≥ 16 (32 removes seams), both knobs on,
+  `max_internal_batchsize` set. Further halo work (not done): recompute skips
+  inside the decoder checkpoint; gather geometry features without expanding
+  them per tile.
+
+## Accuracy check
+
+Real idealized data, S AE, on the 3090: 400 training steps on the same 400 real
+train transitions in the same order (batch 1, horizon 4 with 2 grad steps, lr
+5e-4 without warmup, same seed), then the mean horizon-4 loss on 20 fixed val
+samples:
+
+| Run | Train loss, mean of last 100 steps | Held-out val loss | Peak |
+|---|---|---|---|
+| b704c0f (before this work) | 0.595 | 0.723 | 4.13 GB |
+| b704c0f, repeat | 0.605 | 0.752 | 4.13 GB |
+| this branch, defaults | 0.652 | 0.789 | 3.64 GB |
+| + `lora.fused_forward` + `compile_modules` (recommended) | 0.595 | 0.723 | 2.51 GB |
+| + conv-block `activation_checkpoint_modules` | 0.613 | 0.727 | 2.28 GB |
+
+Read this against the run-to-run noise: two runs of the *same* code have the
+same first-step loss but differ from step 2 on (cuDNN's nondeterministic
+backward) and the difference compounds over the 400 steps. To check that the
+always-on changes are really identical, the defaults row was repeated with
+deterministic kernels (`torch.backends.cudnn.deterministic`,
+`use_deterministic_algorithms`, `cudnn_benchmark=false`): over 40 training
+steps, including the optimizer updates, **this branch's defaults reproduce the
+old branch bit for bit** (max loss difference 0.0; two runs of the old branch
+are bit-identical too). The defaults row's gap above is therefore noise. The
+recommended settings and conv-block checkpointing stay within that noise, as
+expected for changes that only alter rounding (fused LoRA, compile) or nothing
+(conv-block checkpointing is bit-identical). Wall time was ~200–215 s for all
+runs except checkpointing (251 s): these small idealized grids are CPU-bound at
+micro-batch 1, so they do not show the speedups (see the benchmark above).
+
+Scripts and raw losses (local, not in git):
+`/export/scratch1/ntm/dft_speed/acc2/` (`train_cmp.py`, `run.sh`,
+`run_det.sh`, `results.jsonl`, `loss_*.txt`). On the H100, a cheap check is to
+compare the first epochs' train/val loss of the full run with the earlier
+`dft_b_smoke` runs.
+
+## H100 test plan (for the Snellius agent)
+
+All numbers above are from the 3090 with the S AE: confirm before relying on
+them. Suggested order (each step ≲ 1 h on `gpu_h100`):
+
+1. **Setup.** Check out `feat/dft-grad-accum` (pixi ≥ 0.72.1; see
+   [Known environment issues](#known-environment-issues)). Run
+   `pytest tests/neural_surrogates`.
+2. **Fixed-shape benchmark with the B AE** (`scripts/tools/benchmark_dft_step.py
+   --pretrained $R/model_weights/tadpole_ae_b_realistic -- paths.data_dir=...
+   architecture.size=B`), horizon 4, at 32×144×192 (0.885 Mcell) and
+   32×272×320 (2.8 Mcell). Matrix, back to back:
+   - b704c0f (`git worktree add`) vs this branch's defaults vs `lora.fused_forward=true`
+     vs fused + `compile_modules` — micro-batch 1;
+   - fused + compile at micro-batch 2, 4 (0.885 Mcell) and 2 (2.8 Mcell);
+   - fused + compile + conv-block `activation_checkpoint_modules` at the
+     largest micro-batch that OOMs without it.
+   Record s/it, samples/s and peak; also `nvidia-smi dmon` (SM busy %) and,
+   for one setting, `trainer.profile_steps` in a real run.
+   **Decide:** fused on (expected), compile on (expected; check compile time
+   and memory), and GB per Mcell for the chosen setting.
+3. **Pick the batching.** From the measured GB/Mcell, set
+   `batch_sampler.cell_budget ≈ (target peak − ~3 GB) / (GB/Mcell) × 1e6`
+   with a target peak of ~70 GB on the 93 GB card, `batch_sampler.batch_size`
+   = the micro-batch cap (e.g. 4), `trainer.grad_accum_steps=1`,
+   `trainer.grad_accum_samples=8` (effective batch stays 8). Grids larger than
+   the budget still run at micro-batch 1 — check the 2.8 Mcell peak at b=1
+   fits. Add the conv-block checkpointing only if it lets the budget roughly
+   double for the common ~1 Mcell grids at ≤ 10 % time.
+4. **Smoke run** (60–90 min, real corpus, the full launch command below with
+   `trainer.num_epochs=1 trainer.pushforward_start_steps=4`): all 69 shapes
+   and micro-batch sizes are seen during the first ~30 min (cuDNN autotune;
+   judge speed only after). Check: no OOM, `nvidia-smi` peak, no recompiles
+   (`TORCH_LOGS=recompiles`), `/dev/shm` stays ~one copy of the geometries
+   (`df -h /dev/shm` over time), host RAM, GPU busy %, steady samples/s.
+5. **Launch.** Estimate epoch time from the smoke (58,000 samples at horizon 4).
+
+Open calls for you: `optimizer.lr` for effective batch 8 (7e-4 was a guess;
+5e-4 was tuned at batch 1); whether `cudnn_benchmark` stays on; the final
+`cell_budget`.
+
+## Launch command (proposal; fill in the measured `cell_budget`)
+
+```bash
+R=/projects/prjs2075/urbanair
+sbatch -p gpu_h100 -c 16 \
+  --export=ALL,PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT=0 \
+  job_scripts/snellius/surrogate_train_dft.slurm \
+  paths.weights_dir=$R/model_weights paths.data_dir=$R/training_data/pyudales_realistic \
+  pretrained_dir=$R/model_weights/tadpole_ae_b_realistic \
+  prechunk.output_root=$R/training_data/pyudales_realistic_frames \
+  name=dft_b architecture.size=B \
+  lora.fused_forward=true \
+  "trainer.compile_modules=[dft.encoder.conv_encoder,dft.decoder.conv_decoder]" \
+  batch_sampler.batch_size=4 batch_sampler.cell_budget=<from step 3> \
+  trainer.grad_accum_steps=1 trainer.grad_accum_samples=8 \
+  dataset.pushforward_steps=4 trainer.grad_unroll_steps=2 \
+  trainer.num_epochs=15 trainer.pushforward_epochs_per_step=2 trainer.patience=3 \
+  optimizer.lr=7e-4 +optimizer.fused=true trainer.lr_min=5e-6 \
+  trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true \
+  dataloader.num_workers=15
+```
+
+- `cell_budget: 393216` in `train_dft.yaml` is below every realistic grid, so
+  without overriding it every batch is 1.
+- Curriculum: horizon 1,1,2,2,3,3,4,… → 9 of 15 epochs at 4 steps; patience
+  resets at each horizon change. Validation runs at the target horizon (1,150
+  samples, ~6 min/epoch before these changes).
+- Resubmit the identical line to resume (`checkpoint_every=1`; changed
+  overrides resume silently with the new values). Copy `checkpoint.pt` aside
+  between jobs (a kill during its write corrupts it).
+- `surrogate_train_dft.slurm` defaults to `gpu_a100` / 18 CPUs: pass
+  `-p gpu_h100 -c 16` (an A100 cannot fit the largest grids even at b=1
+  without checkpointing).
+
+## Earlier Snellius measurements (before this branch's changes)
+
+H100, B AE, bf16, smoke runs of 40 min: micro-batch 2 at horizon 1 peaked at
+81 GB; micro-batch 1 × accum 8 at horizon 4 (2 grad steps): peak ~47–57 GB on
+the 2.8 Mcell grids, steady **~2.05 samples/s** (~7.9 h/epoch), GPU 86 % busy
+with one CPU core saturated (run 27934039). A100 40 GB: OOM even at
+micro-batch 4, horizon 1. ~19 GB/Mcell per sample with 2 grad steps (3, 4 or 5
+rollout steps cost the same as 2). cuDNN autotuning of 69 shapes: ~25 min of
+slow steps at the start of every job.
+
+## Data and artifacts (Snellius)
+
+Project space `/projects/prjs2075/urbanair` (2 TiB quota):
 
 | What | Path | Size |
 |---|---|---|
@@ -51,273 +345,25 @@ On Snellius (project space `/projects/prjs2075/urbanair`, 2 TiB quota):
 | Whole-frame prechunked copy (DFT) | `training_data/pyudales_realistic_frames` | 323 GB |
 | AE-tile prechunked copy | `training_data/pyudales_realistic_rechunked` | 354 GB |
 
-The prechunked copy only holds `state/`; params are read from the corpus
-(`paths.data_dir`). A copy validates against the corpus files' size+mtime, so
-copying the corpus to another machine invalidates the copy: re-make it there
-with `prechunk.output_root=<new dir>` (`prechunk.prepare_only=true` for a
-CPU-only pass), or skip `prechunk` (reads are ~2.5× slower per frame).
-
-Grids: (z, y, x) = 32 × 96…272 × 128…320, **0.29M–2.8M cells, 69 distinct
-shapes**; per trajectory file ≈ 0.75 GB for a mid-size grid. Cumulative counts
-of the 500 train trajectories: ≤ 0.6M cells: 98; ≤ 0.8M: 146; ≤ 1.0M: 262;
-≤ 1.2M: 323; ≤ 1.5M: 394. Largest: 16 trajectories at 2.80M, 26 at ~2.5M.
-Model step = one stored frame = 5 s.
-
-## Measured on Snellius (H100 93 GB / A100 40 GB, bf16 autocast)
-
-Smoke runs, 40 min each, `name=dft_b_smoke`:
-
-| GPU | Micro-batch | Rollout (grad steps) | Result |
-|---|---|---|---|
-| A100 | 8 | 1 (1) | OOM step 1 |
-| A100 | 4 | 1 (1) | step 1 ≈ 38 GB, OOM step 2 |
-| H100 | 8 | 1 (1) | OOM step 1 |
-| H100 | 4 | 1 (1) | 3 steps, OOM at step 4 (> 93 GB) |
-| H100 | 2 | 1 (1) | ran; peak 81 GB; steady 3–5 it/s (~7 samples/s) |
-| H100 | 1 × accum 8 | 5 (2) | ran; **peak 57 GB**; steady **~1.85 samples/s** → ~8.6 h/epoch |
-| H100 | 1 × accum 8 | 4 (2) | ran; steady **~2.05 samples/s** → ~7.9 h/epoch; GPU 86 % busy (run 27934039, below) |
-
-Memory model (bf16 autocast, per sample, activations saved for backward):
-~9.5 GB per million cells with 1 grad step, **~19 GB/Mcell with 2 grad steps**
-(the no-grad prefix of the rollout frees its activations, so 3, 4 or 5 rollout
-steps cost the same as 2). Peak for the 2.8M-cell grids at micro-batch 1 ≈
-47–57 GB. `grad_accum_*` does not change peak memory; only the micro-batch
-does. CPU breakdown of one grad step: decoder ~53 %, encoder ~44 % (exists only
-because of encoder LoRA), subnetwork ~3 %.
-
-Compute: > 90 % of FLOPs are 3×3×3 Conv3d at full and /2 resolution
-(4.6 TFLOP per Mcell per sample forward). Even micro-batch 1 is compute-bound
-by arithmetic; micro-batch 2 was estimated to give < 5 % per sample (not
-measured cleanly). LoRA rank 32 adds ~33 % forward FLOPs over the frozen model
-(rank 16: ~20 %, rank 8: ~8 %); rank stays 32 by decision.
-
-cuDNN: with `cudnn_benchmark: true` every new (shape, batch) pair is
-autotuned on one CPU core while the GPU idles (py-spy: main thread in conv3d,
-GPU 0 %). 69 shapes ⇒ ~25 min of slow steps at the start of **every job**
-(22 s/it falling to ~0.3–0.5 s/it). Small share of a 48 h job; dominates a
-40 min smoke, so judge speed only after ~25 min (or on a fixed-shape subset).
-
-Measurement run 27934039 (commit 52750a0; rollout 4 from the start,
-micro-batch 1 × accum 8, fused AdamW, `expandable_segments`; 40 min, no OOM):
-
-- Steady speed (after ~25 min): **~2.0–2.1 samples/s** (steps 1,399→1,899 in
-  241 s) → ~7.9 h per epoch (58,000 samples at horizon 4), ~10 % faster than
-  horizon 5 (one forward fewer).
-- `nvidia-smi dmon` (2 s samples): SM busy **12 %** during the warm-up,
-  **86 %** in the last 8 min (92 % of samples ≥ 50 %), memory bandwidth ~60 %.
-- py-spy in steady state: the main Python process at ~106 % CPU (one core
-  saturated), stacks split between the autograd engine (backward) and Python
-  forward code (`_spatial_recon`, the subnetwork `llm.py`). So the remaining
-  ~14 % GPU idle is likely CPU-side launch overhead: the case for
-  `compile_modules` (fewer, fused kernels) — confirm with `profile_steps`.
-- Raw logs (Snellius scratch, not kept): `nvidia-smi dmon` and py-spy dumps;
-  the job log is `job_scripts/snellius/out_files/smoke_dft_h100-27934039.out`
-  (gitignored).
-
-## Recommended full-run config
-
-Command-line overrides (`train_dft.yaml` untouched; Snellius values shown):
-
-```bash
-R=/projects/prjs2075/urbanair
-sbatch -p gpu_h100 -c 16 --export=ALL,PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-  job_scripts/snellius/surrogate_train_dft.slurm \
-  paths.weights_dir=$R/model_weights paths.data_dir=$R/training_data/pyudales_realistic \
-  pretrained_dir=$R/model_weights/tadpole_ae_b_realistic \
-  prechunk.output_root=$R/training_data/pyudales_realistic_frames \
-  name=dft_b architecture.size=B \
-  batch_sampler.batch_size=1 batch_sampler.cell_budget=null trainer.grad_accum_steps=8 \
-  dataset.pushforward_steps=4 trainer.grad_unroll_steps=2 \
-  trainer.num_epochs=15 trainer.pushforward_epochs_per_step=2 trainer.patience=3 \
-  optimizer.lr=7e-4 +optimizer.fused=true trainer.lr_min=5e-6 \
-  trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true \
-  dataloader.num_workers=15
-```
-
-- `cell_budget: 393216` in `train_dft.yaml` is below every grid, so without
-  `cell_budget=null` every batch is 1 regardless of `batch_size`.
-- `lr 7e-4` is a cautious bump for the effective batch 8 (5e-4 was effectively
-  tuned at batch 1); untested — fall back to 5e-4 if epoch 1 is unstable.
-- Curriculum: horizon 1,1,2,2,3,3,4,… → 9 of 15 epochs at 4 steps. Patience
-  resets at every horizon change, so it can only stop during the final stage.
-- Validation always runs at the target horizon (1,150 samples, ~6 min/epoch).
-- Estimated total ≈ 100 GPU-hours (≈ 2–3 × 48 h jobs); resubmit the identical
-  line to resume (`checkpoint_every=1`; changed overrides resume silently with
-  the new values). Copy `checkpoint.pt` aside between jobs: a time-limit kill
-  during its write would corrupt it.
-- `surrogate_train_dft.slurm` still asks for `gpu_a100` / 18 CPUs: an A100
-  cannot run this (11 % of trajectories exceed 40 GB even at micro-batch 1), so
-  pass `-p gpu_h100 -c 16` or change the script's defaults.
-
-Candidate additions: `trainer.compile_modules='[dft.encoder.conv_encoder,dft.decoder.conv_decoder]'`
-(tested on the 3090, see [below](#kernels-launch-overhead-and-compile-rtx-3090))
-and/or `batch_sampler.batch_size=4 batch_sampler.cell_budget=3500000
-trainer.grad_accum_steps=1 trainer.grad_accum_samples=8` (micro-batches 1–4 by
-grid size, peak ≲ 70 GB on the H100).
-
-## Skip the step-1 encoder graph (`unroll_no_grad_modules`, default off)
-
-In the 2-grad-step rollout `x2 →[call 3]→ x3 →[call 4]→ x4`, run call 3's
-**encoder** under `no_grad` (latent and skips become constants). Gradients
-through call 4 and through call 3's subnetwork/decoder are unchanged (bit-
-identical on CPU); encoder LoRA loses only its call-3 term (CPU, random init:
-cosine 0.9991 vs full). CPU: −21 % saved activations, −25 % backward time; est.
-10–15 % per step at horizon ≥ 2. Needs an explicit "a later grad step follows"
-flag (at horizon 1 it must not apply, or encoder LoRA gets no gradient).
-Changes training only, not the model or deployment. Where: the grad loop of
-`BaseTraining._forward` and `_spatial_recon` in `tadpole_stepper.py`.
-
-## Activation memory (RTX 3090)
-
-Measured on the 3090 with `bench_dft_step.py` (S AE, bf16, horizon 4, 2 grad
-steps, 32x144x192 = 0.885 Mcell unless noted; the user's LBM jobs shared the
-GPU, so times vary by ~±8 %).
-
-Where the memory goes (saved for backward, one sample, both grad steps,
-before fused LoRA): 6.6 GB = decoder 51 % / encoder 47 % / subnetwork 0.6 % /
-skip mixing 0.6 %; 30 % of it fp32 (GroupNorm's fp32 input copy and GELU's fp32
-input in every conv block, softmax in the window attention). Full-resolution
-32-channel tensors dominate the stems (`feature_embed`, `downsampling_layers.0`,
-`decompress`) and PEFT kept a second bf16 copy of every LoRA input (its fp32
-input cast, now off: bit-identical, peak 7.70 -> 6.69 GB, −13 %). With
-`lora.fused_forward` the saved set is 4.5 GB, 43 % of it fp32.
-`encode_spatial` also keeps a `torch.cat` copy of the full-res skips (one
-chunk), ~0.36 GB here; the halo branch's rewrite already drops it.
-
-`trainer.activation_checkpoint_modules` (fused LoRA on, 32x144x192, b = 1):
-
-| Pattern | Peak | s/it | vs none |
-|---|---|---|---|
-| none | 5.28 GB | 0.261–0.273 | – |
-| conv blocks (`dft.{encoder.conv_encoder.conv_encoder,decoder.conv_decoder.conv_decoder}.blocks.*`) | 3.85 GB | 0.289 | −27 %, +6…11 % |
-| transformer stages (`dft.encoder.transformer_encoder`, `dft.decoder.transformer_decoder`) | 3.56 GB | 0.378 | −33 %, +40 % |
-| all four stages (`dft.encoder.conv_encoder`, `…transformer_encoder`, `dft.decoder.transformer_decoder`, `…conv_decoder`) | 2.16 GB | 0.411 | −59 %, +50 % |
-
-Same loss; gradients bit-identical for the conv blocks and within rounding for
-the stages (max rel. 5e-3 in bf16, 2e-4 in fp32/TF32, cosine 1.0000; cuDNN
-picks other kernels during the recompute). Largest corpus grid 32x272x320
-(2.79 Mcell): 16.3 GB none, 11.8 GB conv blocks (+6 %), 6.7 GB stages (+29 %).
-The subnetwork's `use_checkpoint` is not worth it (its activations are <1 %).
-Do not use the vendored skip wrappers' `use_checkpoint`: it calls reentrant
-checkpointing, which drops the encoder LoRA gradients.
-
-Micro-batch (fused, 32x144x192): b = 1 3.7–3.8 samples/s, b = 2 4.35 (10.4 GB),
-b = 3 4.59 (15.5 GB), b = 4 4.72 (20.6 GB); conv blocks b = 4 4.50 (14.9 GB).
-So on the 3090 a micro-batch of 2–4 gains 15–25 % per sample; checkpointing
-pays only where it lets a larger micro-batch (or the grid) fit at all.
-
-Size B (random init, `skip_pretrained_load`), 32x144x192, b = 1: PEFT cast on
-17.5 GB, off 15.4 GB (0.96 s/it), stages 5.2 GB (1.28 s/it, +34 %);
-fused 13.2 GB (0.79 s/it), fused + conv blocks 7.5 GB (0.86 s/it, +9 %),
-fused + stages 4.8 GB (1.02 s/it, +30 %). The PEFT-cast number, 19.7 GB/Mcell,
-matches the ~19 GB/Mcell measured on the H100, so the per-Mcell figures should
-carry over (cuDNN workspaces differ). Per Mcell at micro-batch 1 (2 grad steps):
-S fused ≈ 5.9 GB; B fused ≈ 14.3, + conv blocks ≈ 8.0, + stages ≈ 4.8 GB/Mcell.
-Projected H100 peaks, B, fused (≈ 0.5 GB + per-Mcell x cells x micro-batch):
-2.8 Mcell grids 41 GB at b = 1 (was 47–57), 81 GB at b = 2 (too tight);
-with conv blocks 23 GB at b = 1, 45 GB at b = 2, 67 GB at b = 3; ~1 Mcell grids
-fused b = 4 ≈ 58 GB, with conv blocks b = 8 ≈ 64 GB.
-
-Step-1 encoder skip (`unroll_no_grad_modules: [dft.encoder]`, real AE,
-LoRA at init): every gradient but the encoder LoRA's is unchanged; the encoder
-LoRA gradient keeps cosine 0.994 but only 0.61x its norm (the dropped call-3
-term is ~40 % of it); whole-vector cosine 0.970. Memory −20 % (5.28 -> 4.25
-GB fused), time −3…7 % fused (−14 % unfused). Not recommended: it acts like a
-~40 % lower encoder-LoRA learning rate for a few % speed; checkpointing the
-conv blocks saves more memory without changing the gradient.
-
-## Kernels, launch overhead and compile (RTX 3090)
-
-S AE, horizon 4 (2 grad steps), bf16, micro-batch 1 unless stated, idle GPU.
-Speed numbers on this box drift ±5–10 % with the CPU load of other jobs, so
-the compile and cache effects below are in-process A/B (eager and compiled /
-cached alternated, 4 rounds of 10 steps, median).
-
-- **Profile, unfused LoRA (32x144x192)**: 0.39 s/it, ~9,500 kernels per step,
-  GPU 72 % busy (kernel time 349 ms/it): convs 40 %, elementwise + copies
-  42 % (PEFT's fp32 input casts, GroupNorm/GELU in fp32 under autocast, the
-  residual/skip adds), cuDNN `nchwToNhwc`/`nhwcToNchw` layout transposes
-  ~11 %, attention/LN GEMMs ~9 %. With `lora.fused_forward`: 0.23 s/it,
-  ~8,000 kernels, kernel time 222 ms/it (92 % busy on an idle box).
-- **The step is close to launch-bound.** Small idealized grids run at the same
-  0.14–0.22 s/it whatever their size; that is the CPU floor of one micro-batch
-  step (~11.5k aten ops incl. backward; the window-attention `F.normalize`, the
-  position-bias MLP and the fused-LoRA merges of the transformer Linear layers
-  are the largest forward contributors). On an H100 (3–4x the 3090's conv
-  throughput) the fused step's GPU time (~60–70 ms) is well under that floor,
-  so expect the H100 to be CPU-bound at micro-batch 1: use micro-batches > 1
-  (`grad_accum_samples` + `cell_budget`) to amortise the launches.
-- **Window-attention position bias**: the stepper now reuses it while frozen
-  (bit-identical): −4.3 % at 32x144x192, −3.5 % at 16x64x112.
-- **`compile_modules` (dynamic shapes)**: use the two conv stems,
-  `[dft.encoder.conv_encoder,dft.decoder.conv_decoder]` (the `blocks.*` globs
-  cover only the half-resolution blocks and miss the full-resolution stem
-  convs). One graph per stem and grad mode; one compile of ~45–115 s, then **no
-  recompiles across all 11 idealized shapes** (a new shape costs only cuDNN
-  autotuning, ~4 s, as in eager), so 69 realistic shapes cost nothing extra.
-  Fused LoRA, 32x144x192: b = 1 +2 % s/it (neutral), peak 4.90 → 3.84 GB
-  (−22 %); **b = 2 −10 % s/it (0.419 → 0.378), peak 9.64 → 7.51 GB (−22 %)**;
-  with conv-block activation checkpointing b = 1 ±0 %, 3.48 → 3.33 GB.
-  Compile alone saves more memory than conv-block checkpointing for no time
-  cost. Parity vs eager on a fixed batch (perturbed LoRA/gates so every grad is
-  non-zero): loss rel. 2e-4, grads global rel. 4e-3 (bf16); 4e-5 / 2e-4 in
-  fp32 (TF32); both sides deterministic.
-- Rejected / not worth it: compiling the transformer stages or the whole
-  encoder/decoder with dynamic shapes (> 14 min of compile, killed); `blocks.*`
-  only (b = 1 +1 %, peak −19 %); `channels_last=true` (crashed on the DFT's
-  4-D buffers, now fixed; eager +25 % slower: GroupNorm converts back and
-  forth; with compile ±0); PEFT's fp32 input cast (gone with fused LoRA).
-- Local quirk: on this box `/usr/local/sbin` on `PATH` is unsearchable, so
-  inductor's `nvcc --version` probe raises `PermissionError` (it only catches
-  `FileNotFoundError`); drop that entry from `PATH` to run compile here.
-
-## Testing on the RTX 3090 (24 GB)
-
-What transfers: correctness of every knob; relative speed effects of compile,
-the geometry cache, the sync-free loss, `channels_last`, `cudnn_benchmark`;
-profiler breakdowns (conv vs GroupNorm/GELU vs LoRA vs gaps); the cuDNN
-warm-up behaviour. What does not: absolute it/s (3090 ≈ 3–4× slower than an
-H100 in bf16 conv), the memory headroom, and anything needing the large grids.
-
-Memory: at micro-batch 1 with 2 grad steps a sample needs ~19 GB/Mcell plus
-~2–3 GB for weights/optimizer/workspace, so **only grids ≤ ~0.8–0.9M cells fit**
-(146 of 500 trajectories at ≤ 0.8M). With 1 grad step (rollout 1) ~9.5 GB/Mcell
-⇒ grids ≤ ~2M. Ampere supports bf16 and TF32, so the same `amp_dtype` works.
-
-Suggested setup:
-
-1. Copy the AE dir (806 MB) and a subset corpus: val + test (20 files) and the
-   train trajectories with ≤ 0.8M cells (or ~40 of them for quick tests),
-   keeping the corpus layout (`state/<split>/sample_*.nc`,
-   `param/<split>/sample_*.nc`, `normalization_stats/`, `geometries/`,
-   `params.nc`, `config.yaml`). The DFT keeps the AE's state normalization
-   (`recompute_normalization: false`), so the subset's own stats are not used
-   for states; param stats are recomputed from the subset.
-2. Make a whole-frame prechunked copy locally (`--config-name surrogate/train_dft
-   ... prechunk.output_root=<dir> prechunk.prepare_only=true`).
-3. Fixed-shape speed tests: a subset with a single grid shape removes the
-   cuDNN warm-up from the comparison (or compare only after all shapes are seen).
-4. Compare one knob at a time against the baseline (same subset, same horizon,
-   `trainer.pushforward_start_steps=4` to measure the dominant stage),
-   with `trainer.profile_steps='[START,50]'` after warm-up:
-   - baseline (current branch defaults + recommended overrides);
-   - `compile_modules` (watch compile time per shape and recompiles);
-   - `channels_last=true` (expected no effect: `_tadpole_spatial.py` folds
-     channels into the batch and calls `.contiguous()`);
-   - `cudnn_benchmark=false` (shorter warm-up vs slower steady state);
-   - `grad_accum_samples` + `cell_budget` (only meaningful where micro-batches > 1 fit);
-   - the step-1 encoder skip, if implemented.
-5. Check the per-step warmup on a short run: `metrics.csv` logs the LR at the
-   start of each epoch (epoch 0 ≈ `lr_warmup_start`, epoch 1 = peak).
+The prechunked copy holds only `state/`; params are read from the corpus. It
+validates against the corpus files' size+mtime (re-make it after copying the
+corpus). Grids: (z, y, x) = 32 × 96…272 × 128…320, **0.29M–2.8M cells, 69
+shapes**. Train trajectories ≤ 0.6M cells: 98; ≤ 1.0M: 262; ≤ 1.5M: 394;
+largest: 16 at 2.80M, 26 at ~2.5M. Model step = one stored frame = 5 s.
 
 ## Known environment issues
 
-- `.temp` in the Snellius checkout is a dangling symlink, so 9
-  `tests/scripts` tests (assimilation/forward/workflow) fail with
-  `FileNotFoundError: '.temp/ensemble_experiments'`; unrelated to this branch.
-  `tests/neural_surrogates` passes.
 - pixi ≥ 0.72.1 is required. The `bin/test` clash between `coreutils` and
-  `tempest-remap` hits every env that has both (dev, snellius, cuda), not only
-  dev: `rm -rf .pixi/envs/<env>/bin/test && pixi install -e <env>`.
+  `tempest-remap` hits every env that has both (dev, snellius, cuda):
+  `rm -rf .pixi/envs/<env>/bin/test && pixi install -e <env>`.
+- `.temp` in the Snellius checkout is a dangling symlink, so 9 `tests/scripts`
+  tests (assimilation/forward/workflow) fail with `FileNotFoundError:
+  '.temp/ensemble_experiments'`; unrelated to this branch.
 - Snellius only: import `neural_surrogates` before `torch` in ad-hoc scripts
   (system `libstdc++` vs netCDF4/ICU).
+- `trainer.tf32=false` does not switch off PyTorch's default
+  `torch.backends.cudnn.allow_tf32=True`; set it by hand for true-fp32 parity
+  checks.
+- Local 3090 box only: an unsearchable `/usr/local/sbin` on `PATH` makes
+  inductor's `nvcc` probe raise `PermissionError`; drop it from `PATH` to
+  compile there.
