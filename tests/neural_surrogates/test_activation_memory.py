@@ -116,7 +116,9 @@ def test_activation_checkpointing_keeps_loss_and_grads(
     plain = _peft_stepper(fused)
     ckpt = copy.deepcopy(plain)
     _trainer(ckpt, activation_checkpoint_modules=patterns)
-    wrapped = [n for n, m in ckpt.named_modules() if "forward" in vars(m)]
+    wrapped = [
+        n for n, m in ckpt.named_modules() if "_checkpoint_inner_forward" in vars(m)
+    ]
     assert wrapped and all(n.startswith("base_model.model.dft.") for n in wrapped)
     assert list(ckpt.state_dict()) == list(plain.state_dict())
 
@@ -161,7 +163,9 @@ def test_activation_checkpointing_wraps_the_fused_lora_forward() -> None:
 def test_activation_checkpointing_off_wraps_nothing() -> None:
     model = _peft_stepper()
     _trainer(model)
-    assert not [n for n, m in model.named_modules() if "forward" in vars(m)]
+    assert not [
+        n for n, m in model.named_modules() if "_checkpoint_inner_forward" in vars(m)
+    ]
 
 
 def test_activation_checkpointing_skips_nested_and_must_match() -> None:
