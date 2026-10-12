@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, cast
 
 import geopandas as gpd
 import pytest
@@ -35,7 +35,7 @@ class FakeTools(Tools):
         self.release = threading.Event()
         self.release.set()
 
-    def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:
+    def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
         if self.fail_case:
             raise ValueError("No buildings in this area")
         self.release.wait(5)
@@ -45,21 +45,23 @@ class FakeTools(Tools):
         corner = gpd.GeoSeries.from_xy([DELFT["west"]], [DELFT["south"]], crs=4326)
         x, y = corner.to_crs(32631).iloc[0].coords[0]
         buildings = gpd.GeoDataFrame(
-            {"height": [12.0], "height_source": ["osm_height"]},
+            {"height": [12.0], "height_source": ["height"]},
             geometry=[box(x + 60, y + 60, x + 80, y + 80)],
             crs=32631,
         )
         buildings.to_file(case_dir / "buildings.geojson", driver="GeoJSON")
         case = {
             "case_dir": str(case_dir),
-            # Sensor (50, 50) is the bbox's UTM envelope corner: margin 50 m.
+            # Sensor (50, 50) is the bbox's UTM corner: the origin is 50 m off.
+            "crs": "EPSG:32631",
+            "origin": [x - 50.0, y - 50.0],
             "overrides": [
                 "domain.nx=100",
                 "obs.x_points=[50.0, 70.0]",
                 "obs.y_points=[50.0, 50.0]",
             ],
             "n_buildings": 1,
-            "height_sources": {"osm_height": 1},
+            "height_sources": {"height": 1},
             "max_height": 12.0,
             "domain": {"nx": 100, "ny": 100, "nz": 16, "lengths_m": [400.0] * 3},
         }
@@ -68,7 +70,7 @@ class FakeTools(Tools):
         )
         return case
 
-    def prepare_forward_run(self, overrides: Any = None, **_: Any) -> dict[str, Any]:
+    def prepare_forward_run(self, overrides: Any = None, **_: Any) -> dict[str, Any]:  # type: ignore[override]
         self.prepared.append(list(overrides))
         issues = []
         if "model.forward_model.ncpu=3" in overrides:
@@ -94,7 +96,7 @@ class FakeTools(Tools):
             "details": {"phase": "running"},
         }
 
-    def launch_forward_run(self, plan_id: str, idempotency_key: str, **_: Any) -> Any:
+    def launch_forward_run(self, plan_id: str, idempotency_key: str, **_: Any) -> Any:  # type: ignore[override]
         self.jobs_state["run1"] = "queued"
         return self._job("run1")
 
@@ -111,7 +113,7 @@ class FakeTools(Tools):
         self.jobs_state[run_id] = "cancelling"
         return self._job(run_id)
 
-    def inspect_run_results(
+    def inspect_run_results(  # type: ignore[override]
         self, run_id: str, artifact_id: Any = None, **_: Any
     ) -> Any:
         if artifact_id is None:
@@ -122,7 +124,7 @@ class FakeTools(Tools):
             "coordinates": {"time": {"size": 3, "first": "0.0", "last": "2.0"}},
         }
 
-    def render_simulation(self, run_id: str, idempotency_key: str, **_: Any) -> Any:
+    def render_simulation(self, run_id: str, idempotency_key: str, **_: Any) -> Any:  # type: ignore[override]
         self.jobs_state["vis1"] = "succeeded"
         return {"visualization_id": "vis1"}
 
@@ -225,27 +227,28 @@ def test_case_lifecycle(app: App) -> None:
     status, body, _ = request(app, "api/cases", {"bbox": DELFT, "resolution": -1})
     assert status == 400 and "resolution" in body["error"]
 
-    app.tools.release.clear()  # hold the build until "building" is seen
+    cast(
+        FakeTools, app.tools
+    ).release.clear()  # hold the build until "building" is seen
     status, body, _ = request(app, "api/cases", {"bbox": DELFT})
     assert status == 202
     case_id = body["case_id"]
     assert request(app, f"api/cases/{case_id}")[1]["status"] == "building"
-    app.tools.release.set()
+    cast(FakeTools, app.tools).release.set()
     case = wait_for(app, f"api/cases/{case_id}", "status", "building")
     assert case["status"] == "ready", case
     assert case["summary"]["n_buildings"] == 1
     assert case["summary"]["domain"]["nx"] == 100
     (feature,) = case["buildings"]["features"]
-    assert feature["properties"] == {"height": 12.0, "height_source": "osm_height"}
+    assert feature["properties"] == {"height": 12.0, "height_source": "height"}
     lon, lat = feature["geometry"]["coordinates"][0][0]
     assert DELFT["west"] < lon < DELFT["east"] and DELFT["south"] < lat < DELFT["north"]
     (sw, east), corner = case["sensors"], [DELFT["west"], DELFT["south"]]
-    # The UTM envelope of the bbox starts a few metres west of its corner.
-    assert sw == pytest.approx(corner, abs=2e-4)
+    assert sw == pytest.approx(corner, abs=1e-6)
     assert east[0] > sw[0] and east[1] == pytest.approx(sw[1], abs=1e-5)
     assert request(app, "api/cases/unknown")[0] == 404
 
-    app.tools.fail_case = True
+    cast(FakeTools, app.tools).fail_case = True
     case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
     case = wait_for(app, f"api/cases/{case_id}", "status", "building")
     assert case == {"case_id": case_id, "status": "failed", "error": case["error"]}
@@ -253,7 +256,7 @@ def test_case_lifecycle(app: App) -> None:
 
 
 def test_run_lifecycle(app: App) -> None:
-    tools: FakeTools = app.tools
+    tools = cast(FakeTools, app.tools)
     case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
     wait_for(app, f"api/cases/{case_id}", "status", "building")
     run = {"case_id": case_id, "model": "pylbm"}

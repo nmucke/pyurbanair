@@ -64,9 +64,9 @@ with `{"error": "<message>"}`.
   The inflow angle is the flow direction, counter-clockwise from +x (east).
 - **Case geometry**: `buildings` is `case_dir/buildings.geojson` reprojected to
   EPSG:4326 (properties `height`, `height_source`). `sensors` are the
-  assimilated `obs.x/y_points` as `[lon, lat]`. They are converted from the
-  domain frame with the origin `make_case` uses: the bbox's UTM envelope corner
-  less its default `margin`. The held-out validation sensors are not returned.
+  assimilated `obs.x/y_points` as `[lon, lat]`, converted from the domain
+  frame with case.json's `crs` and `origin`. The held-out validation sensors
+  are not returned.
 - **Log tail**: the last 40 lines of the last 16 KiB of `worker.log`.
 
 ## Tests

@@ -250,30 +250,24 @@ def _positive(payload: dict[str, Any], key: str, default: float, top: float) -> 
 def case_geometry(case_dir: pathlib.Path) -> dict[str, Any]:
     """Buildings as EPSG:4326 GeoJSON and the sensors as [lon, lat].
 
-    The sensors are in the domain frame of `make_case`: its UTM CRS shifted so
-    the bbox's projected envelope, less `margin`, starts at (0, 0). The origin
-    is recomputed the same way from case.json's bbox and make_case's default
-    margin (Tools.prepare_city_case does not pass one).
+    The sensors are in the domain frame of `make_case`; case.json records its
+    CRS and `origin`, the projected coordinates of the domain's (0, 0) corner.
     """
     import geopandas as gpd
-    from pycity4cfd.case import make_case
-    from shapely.geometry import box
 
     buildings = gpd.read_file(case_dir / "buildings.geojson")
     shown = buildings[["height", "height_source", "geometry"]].to_crs("EPSG:4326")
     case = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
-    margin = inspect.signature(make_case).parameters["margin"].default
-    area = gpd.GeoSeries([box(*case["bbox"])], crs="EPSG:4326").to_crs(buildings.crs)
-    xmin, ymin = area.total_bounds[:2]
+    x0, y0 = case["origin"]
     points: dict[str, list[float]] = {}
     for override in case["overrides"]:
         match = re.fullmatch(r"obs\.([xy])_points=\[(.*)\]", override)
         if match:
             points[match[1]] = [float(v) for v in match[2].split(",") if v.strip()]
     sensors = gpd.points_from_xy(
-        [x + xmin - margin for x in points.get("x", [])],
-        [y + ymin - margin for y in points.get("y", [])],
-        crs=buildings.crs,
+        [x + x0 for x in points.get("x", [])],
+        [y + y0 for y in points.get("y", [])],
+        crs=case["crs"],
     ).to_crs("EPSG:4326")
     return {
         "buildings": json.loads(shown.to_json(drop_id=True)),
