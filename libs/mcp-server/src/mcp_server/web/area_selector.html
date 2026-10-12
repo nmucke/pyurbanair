@@ -64,12 +64,19 @@ function setDrawing(on) {
 function update(bounds) {
   bbox = { west: bounds.getWest(), south: bounds.getSouth(),
            east: bounds.getEast(), north: bounds.getNorth() };
-  const area = areaKm2(bbox), fits = area <= maxArea;
+  const area = areaKm2(bbox), fits = area > 0 && area <= maxArea;
   info.textContent = `${area.toFixed(3)} km² · W ${bbox.west.toFixed(5)} S ${bbox.south.toFixed(5)}`
     + ` E ${bbox.east.toFixed(5)} N ${bbox.north.toFixed(5)}`;
   useButton.disabled = !fits;
-  say(fits ? "" : `Too large: the maximum is ${maxArea} km².`, fits ? "" : "error");
+  say(area <= maxArea ? "" : `Too large: the maximum is ${maxArea} km².`, area <= maxArea ? "" : "error");
+  rectangle.setBounds(bounds);
   rectangle.setStyle({ color: fits ? "#2a6fdb" : "#b00020" });
+}
+
+function finish() {
+  if (!start) return;
+  start = null;
+  setDrawing(false);
 }
 
 drawButton.addEventListener("click", () => setDrawing(!drawing));
@@ -78,6 +85,7 @@ map.on("mousedown", (e) => {
   start = e.latlng;
   if (rectangle) rectangle.remove();
   rectangle = L.rectangle(L.latLngBounds(start, start), { weight: 2 }).addTo(map);
+  update(rectangle.getBounds());
 });
 map.on("mousemove", (e) => {
   if (drawing && start) update(L.latLngBounds(start, e.latlng));
@@ -85,9 +93,10 @@ map.on("mousemove", (e) => {
 map.on("mouseup", (e) => {
   if (!drawing || !start) return;
   update(L.latLngBounds(start, e.latlng));
-  start = null;
-  setDrawing(false);
+  finish();
 });
+// A release outside the map keeps the last drawn rectangle.
+document.addEventListener("mouseup", finish);
 
 useButton.addEventListener("click", async () => {
   useButton.disabled = true;
