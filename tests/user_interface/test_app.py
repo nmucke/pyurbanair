@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,11 +32,13 @@ class FakeTools(Tools):
         self.prepared: list[list[str]] = []
         self.jobs_state: dict[str, str] = {}
         self.fail_case = False
+        self.release = threading.Event()
+        self.release.set()
 
     def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:
         if self.fail_case:
             raise ValueError("No buildings in this area")
-        time.sleep(0.2)
+        self.release.wait(5)
         case_dir = self.store / "case"
         case_dir.mkdir(exist_ok=True)
         # One building in UTM 31N near the bbox's south-west corner.
@@ -222,10 +225,12 @@ def test_case_lifecycle(app: App) -> None:
     status, body, _ = request(app, "api/cases", {"bbox": DELFT, "resolution": -1})
     assert status == 400 and "resolution" in body["error"]
 
+    app.tools.release.clear()  # hold the build until "building" is seen
     status, body, _ = request(app, "api/cases", {"bbox": DELFT})
     assert status == 202
     case_id = body["case_id"]
     assert request(app, f"api/cases/{case_id}")[1]["status"] == "building"
+    app.tools.release.set()
     case = wait_for(app, f"api/cases/{case_id}", "status", "building")
     assert case["status"] == "ready", case
     assert case["summary"]["n_buildings"] == 1

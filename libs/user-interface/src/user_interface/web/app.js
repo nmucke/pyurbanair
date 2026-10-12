@@ -16,8 +16,8 @@
   const NOMINATIM = "https://nominatim.openstreetmap.org/search";
   // Sequential ramp (YlGnBu) for building height, low = light, high = dark.
   const RAMP = ["#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4", "#1d91c0", "#225ea8", "#0c2c84"];
-  const SOURCE_LABELS = { tagged: "OSM height tag", levels: "OSM building levels", default: "Default height" };
-  const SOURCE_COLORS = { tagged: "#1d91c0", levels: "#7fcdbb", default: "#b8c2cc" };
+  const SOURCE_LABELS = { height: "OSM height tag", levels: "OSM building levels", default: "Default height" };
+  const SOURCE_COLORS = { height: "#1d91c0", levels: "#7fcdbb", default: "#b8c2cc" };
 
   // All app state lives here.
   const state = {
@@ -991,12 +991,10 @@
     if (Array.isArray(r.variables) && r.variables.length) {
       row("Variables", el("span", { class: "chips" }, r.variables.map((v) => el("span", { class: "chip", text: v }))));
     }
-    if (Array.isArray(r.times) && r.times.length) {
-      const first = r.times[0], last = r.times[r.times.length - 1];
-      const span = typeof first === "number" ? ` (${fmt(first)} – ${fmt(last)} s)` : "";
-      row("Snapshots", `${r.times.length}${span}`);
-    } else if (typeof r.times === "number") {
-      row("Snapshots", String(r.times));
+    const t = r.times;  // {size, first, last} of the time coordinate
+    if (t && t.size) {
+      const span = typeof t.first === "number" ? ` (${fmt(t.first)} – ${fmt(t.last)} s)` : "";
+      row("Snapshots", `${t.size}${span}`);
     }
   }
 
