@@ -11,7 +11,7 @@ as sbatch flags (see the Tadpole example below).
 
 ```text
 job_scripts/
-├── snellius/                         # SURF Snellius: partition rome, account tdsr72361
+├── snellius/                         # SURF Snellius: partition rome, account tdsei19851
 │   ├── env.sh                        # sourced by every job (see below)
 │   ├── forward_workflow.slurm        # workflows/forward_workflow.sh
 │   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid>

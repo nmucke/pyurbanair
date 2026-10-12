@@ -2,7 +2,7 @@
 #   sbatch job_scripts/snellius/assimilation_workflow.slurm smoother model@assim_model=pylbm ensemble.ensemble_size=64
 #SBATCH --job-name=assimilation_workflow
 #SBATCH --partition=rome
-#SBATCH --account=tdsr72361
+#SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem-per-cpu=1750M
