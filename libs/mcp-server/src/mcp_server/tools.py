@@ -276,8 +276,10 @@ class Tools:
         the one `get_selected_area` returned. Building heights come from OSM
         `height`, else `building:levels` x 3 m, else `default_height` (m).
         Takes minutes (the OpenStreetMap download dominates). Returns
-        `overrides`: pass `["model=pylbm", *overrides]` to
-        `prepare_forward_run`. `resolution` is the grid spacing (m); check
+        `overrides`: pass `["model=<m>", *overrides]` to `prepare_forward_run`
+        with m = pylbm, pypalm or pyudales (pyudales first runs its IBM
+        preprocessing on the STL: seconds to minutes, growing with the grid
+        and building count). `resolution` is the grid spacing (m); check
         `domain` before launching, the run cost grows with nx * ny * nz.
         `max_area_km2` is the area limit; pass the one the selector was
         opened with. A finished case for the same inputs is reused.
