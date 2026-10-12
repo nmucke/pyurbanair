@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -10,7 +11,7 @@ import sys
 from typing import Any
 from urllib.parse import quote
 
-from mcp_server.area_selector import MAX_AREA_KM2, AreaSelector
+from mcp_server.area_selector import MAX_AREA_KM2, AreaSelector, validate_bbox
 from mcp_server.jobs.preparation import PreparationService
 from mcp_server.jobs.rendering_environment import select_render_environment
 from mcp_server.jobs.results import contained_file, inspect_results
@@ -249,6 +250,36 @@ class Tools:
         if result["status"] == "pending" and self.area_selector.closed:
             result["status"] = "expired"
         return result
+
+    def prepare_city_case(
+        self,
+        bbox: dict[str, float] | list[float],
+        resolution: float = 4.0,
+        default_height: float = 10.0,
+    ) -> dict[str, Any]:
+        """Turn a city area into a simulation case: OSM buildings -> City4CFD STL.
+
+        `bbox` is {west, south, east, north} (or a 4-list) in EPSG:4326, e.g.
+        the one `get_selected_area` returned. Building heights come from OSM
+        `height`, else `building:levels` x 3 m, else `default_height` (m).
+        Takes minutes (the OpenStreetMap download dominates). Returns
+        `overrides`: pass `["model=pylbm", *overrides]` to
+        `prepare_forward_run`. `resolution` is the grid spacing (m); check
+        `domain` before launching, the run cost grows with nx * ny * nz.
+        """
+        from pycity4cfd.case import make_case
+
+        area = validate_bbox(bbox)
+        west, south, east, north = (area[k] for k in ("west", "south", "east", "north"))
+        key = f"{west:.5f},{south:.5f},{east:.5f},{north:.5f},{resolution},{default_height}"
+        name = "area_" + hashlib.sha1(key.encode()).hexdigest()[:10]
+        case_dir = self.repo_root / ".temp" / "city_cases" / name
+        return make_case(
+            (west, south, east, north),
+            case_dir,
+            resolution=resolution,
+            default_height=default_height,
+        )
 
     def render_simulation(
         self, run_id: str, idempotency_key: str, options: dict[str, Any] | None = None

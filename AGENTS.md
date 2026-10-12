@@ -33,7 +33,7 @@ workflows/  shell pipelines: a run followed by its post-processing
 geometries/ case inputs: one folder per case (STL, namoptions, _p3d), urbantales/
 src/        pyurbanair: base classes every backend inherits
 libs/       pylbm, pyudales, pypalm, neural-surrogates, neural-surrogate-baselines,
-            data-assimilation, evaluation, visualization, mcp-server (each an
+            data-assimilation, evaluation, visualization, mcp-server, pycity4cfd (each an
             editable package)
 tests/      one folder per package; tests/scripts/ for scripts, configs, workflows
 docs/       reference docs; plans/, research/, archive/ are working notes
@@ -45,7 +45,8 @@ EnKF, hybrid) is in JAX and never depends on a specific solver: backends plug
 in through `BaseForwardModel` / `BaseEnsembleForwardModel`.
 
 Vendored code (`libs/pyudales/u-dales/`, `libs/pypalm/palm_model_system/`,
-`libs/pylbm/LBM/`, `neural_surrogates/architectures/_tadpole/` and `_upt/`) is
+`libs/pylbm/LBM/`, `libs/pycity4cfd/City4CFD/`,
+`neural_surrogates/architectures/_tadpole/` and `_upt/`) is
 upstream: don't edit it.
 
 ## Read the right doc first
@@ -64,6 +65,7 @@ Before editing, read the doc for the area you touch, and only that one.
 | Published baselines (`libs/neural-surrogate-baselines`, `configs/surrogate/baselines/`) | [docs/neural_surrogate_baselines.md](docs/neural_surrogate_baselines.md) |
 | Metrics and figures (`libs/evaluation`) | [docs/evaluation.md](docs/evaluation.md) |
 | MCP server (`libs/mcp-server`) | [docs/mcp.md](docs/mcp.md) |
+| Map area -> case (`libs/pycity4cfd`, City4CFD) | [docs/pycity4cfd.md](docs/pycity4cfd.md) |
 | HTML forward-run viewer (`libs/visualization`) | [docs/visualization.md](docs/visualization.md) |
 | HPC jobs (`job_scripts/`) | [docs/job_scripts.md](docs/job_scripts.md) |
 | Tests | [tests/README.md](tests/README.md) |

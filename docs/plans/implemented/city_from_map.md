@@ -3,7 +3,8 @@
 Prototype. In Claude Code the user asks to simulate a city area; an MCP tool
 opens a map, the user draws a rectangle, the buildings come from OpenStreetMap
 (heights from OSM tags), City4CFD turns them into an STL, and pylbm runs on it.
-Point clouds, terrain and trees are out of scope for now.
+Point clouds, terrain and trees are out of scope for now. Implemented; the
+maintained reference is [docs/pycity4cfd.md](../../pycity4cfd.md).
 
 ## Pipeline and owners
 
