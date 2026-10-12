@@ -355,6 +355,15 @@ mcp-server = { path = "libs/mcp-server", editable = true }
 start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve local forward tools over stdio" }
 register-claude = { cmd = "bash scripts/register_claude.sh", description = "Register the pyurbanair MCP server with Claude Code (asks first)" }
 
+# City area from a map: OSM building footprints (osmnx/geopandas) and
+# City4CFD, which turns them into an STL.
+[tool.pixi.feature.city4cfd.dependencies]
+osmnx = ">=2.1.1,<3"
+geopandas = ">=1.2.0,<2"
+
+[tool.pixi.feature.city4cfd.pypi-dependencies]
+pycity4cfd = { path = "libs/pycity4cfd", editable = true }
+
 [tool.pixi.feature.visualization-3d.dependencies]
 pyvista = ">=0.44,<0.47"
 vtk = ">=9.3,<9.6"
@@ -362,11 +371,11 @@ ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]
 default = { features = ["py312", "cpu"] }
-dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "cpu"] }
+dev = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "benchmark_geometry", "city4cfd", "cpu"] }
 delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 # Snellius is CPU-only for now, so it pulls in the shared `cpu` feature
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "visualization", "evaluation", "dev", "py312", "cpu"] }
+mcp = { features = ["mcp", "city4cfd", "visualization", "evaluation", "dev", "py312", "cpu"] }
 rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }
