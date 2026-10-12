@@ -87,6 +87,25 @@ DEFAULT_NUDGING_CONFIG: dict = {
 # (LSF0001/0003/0005 constraint chain); toggled together.
 _NUDGING_SWITCHES = ("nudging", "large_scale_forcing", "lsf_exception", "humidity")
 
+# ``random_seed`` -> &initialization_parameters ensemble_member_nr, PALM's only
+# seed (modules.f90:638, parin.f90:213). It offsets every column ID of the
+# 'random-parallel' generator by 1E6*(ensemble_member_nr - 1000) in a 32-bit
+# integer (random_generator_parallel_mod.f90:129,176-177); this range keeps that
+# offset within +-1E9, leaving room for the grid's own column IDs.
+RANDOM_SEED_RANGE = (0, 2000)
+
+
+def validate_random_seed(random_seed: Optional[int]) -> Optional[int]:
+    """Return ``random_seed`` as an int, or None; raise if PALM can't take it."""
+    if random_seed is None:
+        return None
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise TypeError(f"random_seed must be an int or null, got {random_seed!r}")
+    low, high = RANDOM_SEED_RANGE
+    if not low <= random_seed <= high:
+        raise ValueError(f"random_seed must be in [{low}, {high}], got {random_seed}")
+    return random_seed
+
 
 def _augment_runtime_library_paths(env: dict[str, str]) -> None:
     """Prepend active pixi/conda lib dirs to LD_LIBRARY_PATH."""
@@ -158,6 +177,7 @@ class ForwardModel(BaseForwardModel):
         sgs_constant: Optional[float] = None,
         nudging_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        random_seed: Optional[int] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -202,6 +222,9 @@ class ForwardModel(BaseForwardModel):
         # turbulence generator).
         self._inlet_turbulence = inlet_turbulence
         validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Seed of PALM's random disturbances. None writes nothing (PALM's
+        # default ensemble_member_nr = 0); see `_apply_random_seed`.
+        self.random_seed = validate_random_seed(random_seed)
 
         self.dirs = get_palm_directory_paths(
             case_dir=pathlib.Path(case_dir),
@@ -216,6 +239,7 @@ class ForwardModel(BaseForwardModel):
         self.params = _merge_params(DEFAULT_PARAMS, None)
         self._apply_runtime_and_domain()
         self._apply_boundary_condition()
+        self._apply_random_seed()
 
         if nx is not None and ny is not None and bounds is not None:
             dz = (bounds[2][1] - bounds[2][0]) / nz if nz else 1.0
@@ -282,6 +306,28 @@ class ForwardModel(BaseForwardModel):
     def _p3d_set_array(self, section: str, key: str, values: Iterable[float]) -> None:
         p3d = P3DFile(self.p3d_path)
         p3d.set_array(section, key, values)
+        p3d.write()
+
+    def _apply_random_seed(self) -> None:
+        """Write ``random_seed`` as ``ensemble_member_nr``; no-op when unset.
+
+        It seeds only the 'random-parallel' generator (PALM's default,
+        modules.f90:582), which draws both the initial kick and the in-run
+        inflow disturbances (disturb_field.f90:126-139). The other generators
+        ignore it, so a template that selects one is rejected.
+        """
+        if self.random_seed is None:
+            return
+        p3d = P3DFile(self.p3d_path)
+        generator = p3d.get_value("initialization_parameters", "random_generator")
+        if generator is not None and generator.strip("'\"") != "random-parallel":
+            raise ValueError(
+                f"random_seed needs random_generator='random-parallel', but the "
+                f"_p3d template sets {generator}: PALM ignores the seed there."
+            )
+        p3d.set_value(
+            "initialization_parameters", "ensemble_member_nr", self.random_seed
+        )
         p3d.write()
 
     def _apply_runtime_and_domain(self) -> None:

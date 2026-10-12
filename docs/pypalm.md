@@ -76,6 +76,7 @@ Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
 | `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (4.0 m), `profile_config` (default `power_law` with `alpha=0.25`). See §8. |
 | `inlet_turbulence` | Switchable inlet turbulence (`enabled`, default `false`) → PALM's random inflow disturbances. Absent (`None`) is a strict no-op. `inflow_outflow` only. See §8. |
+| `random_seed` | Seed of PALM's random disturbances → `&initialization_parameters ensemble_member_nr`, an int in `[0, 2000]`. `None` (default) writes nothing. See §7. |
 | `verbose` | When `False`, stdout/stderr captured; failures surface the last 80 lines |
 
 On construction, `__init__` copies case files to `INPUT/`, writes grid+time
@@ -378,6 +379,7 @@ Key field notes:
   auto-derivation). Requires `boundary_condition: inflow_outflow`; staging
   raises otherwise. **`enabled: false` does not disable PALM's
   `turbulent_inflow` module** — see §8.
+- `random_seed: null` — the seed of PALM's random disturbances; see below.
 - `compile: false` — PALM is compiled once at install time via
   `__init__.py`, not per-run.
 - `failure: ${ensemble.failure}` — pulls the shared `resample_from_successes`
@@ -424,6 +426,44 @@ injected field is not shocked.
 `initial_seed` defaults to **true**: it is what breaks symmetry so turbulence can
 develop from PALM's smooth analytic initial profile. With it false, transition
 has to be tripped by the topography alone and develops later.
+
+### `random_seed`: PALM's one seed
+
+PALM has no seed key of its own. Its random disturbances are seeded by
+`ensemble_member_nr` (integer, default 0, `modules.f90:638`), a key of
+`&initialization_parameters` (`parin.f90:213`). Each init calls
+`init_parallel_random_generator` (`init_3d_model.f90:822-826`), which gives
+every grid column the start ID
+`j*(nx+1) + i + 1 + 1E6*(ensemble_member_nr - 1000)`
+(`random_generator_parallel_mod.f90:176-177`; the 1D variant at `:129`). The
+same per-column streams then draw both the initial kick
+(`init_3d_model.f90:1488-1490`) and the in-run inflow disturbances
+(`time_integration.f90:966-989`), both through `disturb_field`
+(`disturb_field.f90:126-139`).
+
+This holds only for `random_generator = 'random-parallel'`, PALM's default
+(`modules.f90:582`; also an `&initialization_parameters` key, `parin.f90:271`).
+`'numerical-recipes'` always starts from the fixed `iran = -1234567`
+(`modules.f90:657`, `disturb_field.f90:115-125`), and `'system-specific'`
+uses Fortran's `RANDOM_NUMBER` (`:140-150`); neither reads the seed. Apart from
+seeding, `ensemble_member_nr` only adds an `en-no:` tag to the run header
+(`check_parameters.f90:248-249`, `header.f90:296-298`).
+
+`random_seed` (in `forward_model`) writes that key:
+
+- `null` (the default) writes nothing, so the `_p3d` is byte-identical to a
+  run without the knob, and PALM uses 0.
+- An int is written once to `&initialization_parameters` at construction.
+  It must lie in `[0, 2000]`: the column ID is a 32-bit integer, and this keeps
+  the offset within ±1E9. Out-of-range values, non-integers and a template
+  that selects another `random_generator` raise before PALM starts.
+- `0` reproduces the default run. Any other value gives a different
+  realisation of both the kick and the inflow disturbances.
+- It is one value per run. Ensemble members are copies of the staged model,
+  so they all get the same seed (as today, when they all get 0). pyudales
+  derives per-member seeds from the experiment name instead; pypalm does not.
+- Every warm-started window re-initialises the generator from the same seed,
+  as PALM does without the knob.
 
 ## 8. Known gotchas
 
@@ -706,6 +746,7 @@ bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |
 | Inlet turbulence on/off | `inlet_turbulence` in `pypalm.yaml`; [`utils/inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) |
+| Seed of the random disturbances | `random_seed` in `pypalm.yaml` (→ `ensemble_member_nr`, §7) |
 | Warm-start (state injection) | [`utils/warm_start_utils.write_warmstart_driver`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) |
 | Vertical stagger unification | `_load_and_postprocess_state` in [`forward_model.py`](../libs/pypalm/src/pypalm/forward_model.py) |
 | Topography from STL | [`stl_to_palm.stl_to_palm_topography`](../libs/pypalm/src/pypalm/stl_to_palm.py) |
