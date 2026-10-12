@@ -1114,7 +1114,7 @@ declared in the pixi `neural-surrogates` feature and as the package
 
 | Symbol | Role |
 |---|---|
-| `inject_lora(model, *, rank, alpha, dropout, target_modules, variant, modules_to_save)` | `get_peft_model(model, LoraConfig(...))`. `variant="balora"` raises `NotImplementedError` (plan 04). Returns a `PeftModel` whose forward preserves our `(state, params, geometry, geom_features)` contract and forwards attribute access (e.g. `n_geom_feature_channels`) to the base model. |
+| `inject_lora(model, *, rank, alpha, dropout, target_modules, variant, modules_to_save, fused_forward)` | `get_peft_model(model, LoraConfig(...))`. `variant="balora"` raises `NotImplementedError` (plan 04). Returns a `PeftModel` whose forward preserves our `(state, params, geometry, geom_features)` contract and forwards attribute access (e.g. `n_geom_feature_channels`) to the base model. `fused_forward=True` (`lora.fused_forward`, default false) runs each adapted Linear/Conv3d as one call with the merged weight `W + scaling·B@A` instead of PEFT's `base(x) + B(A(x))·scaling`: the same function up to rounding, same keys/adapter/merge; dropout, variants, LoRA bias and grouped convs fall back to PEFT. |
 | `merge_to_state_dict(peft_model)` | `merge_and_unload()` on a **deepcopy** → a plain, full base-architecture state dict (no `lora_*` keys), byte-loadable into a fresh architecture. The ESMDA-critical export. |
 | `save_adapter` / `load_adapter` | PEFT adapter checkpoint I/O (`adapter_model.safetensors` + `adapter_config.json`). |
 | `resolve_target_modules(model, *, preset, target_modules)` | Explicit `target_modules` (regex/list) wins; else the per-architecture `preset`. |
@@ -1723,7 +1723,13 @@ geometry settings). The task:
 3. freezes everything, injects LoRA on `dft.encoder` / `dft.decoder` with the
    `lora:` block (`target_preset: tadpole_encdec`), and unfreezes the
    `trainable_modules` (the NEW modules trained *fully*: `subnetwork`,
-   `latent_residual_scale`, `skip_mixing`, the γ skip `scales`);
+   `latent_residual_scale`, `skip_mixing`, the γ skip `scales`).
+   `lora.fused_forward: true` is the fast path for this task: rank 32 is as
+   wide as most S-size conv layers (32 channels; LoRA alone costs ~1.5× the
+   frozen forward FLOPs, 32× on the 32→1 `decompress`), so one conv with the
+   merged weight beats the low-rank branch. RTX 3090, bf16, horizon 4 / 2 grad
+   steps: 0.538 → 0.344 s/it and 7.7 → 5.3 GB at 32×144×192, 0.309 → 0.242 s/it
+   and 3.75 → 2.65 GB at 16×112×224;
 4. stamps `skip_pretrained_load: true` / `pretrained_ae_dir: null` on the
    saved architecture and trains with `weights_transform=merge_to_state_dict`
    and the plan-01 export (§23 step 4).
