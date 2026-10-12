@@ -173,7 +173,11 @@
     } catch {
       /* non-JSON body */
     }
-    if (!response.ok) throw new Error(data?.error || `${response.status} ${response.statusText}`);
+    if (!response.ok) {
+      const error = new Error(data?.error || `${response.status} ${response.statusText}`);
+      error.status = response.status;
+      throw error;
+    }
     return data || {};
   }
 
@@ -189,7 +193,8 @@
 
   // ---------------------------------------------------------------- map
 
-  const map = L.map("map", { zoomControl: true }).setView([52.0116, 4.3571], 15);
+  // worldCopyJump keeps the view on the [-180, 180] world the API accepts.
+  const map = L.map("map", { zoomControl: true, worldCopyJump: true }).setView([52.0116, 4.3571], 15);
   const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
   // Keyless CARTO basemaps are gone, so the neutral basemap is OSM's own
   // tiles toned down with a CSS filter (.basemap-neutral in app.css).
@@ -313,7 +318,8 @@
       showArea(areaRect?.getBounds(), areaRect);
       return;
     }
-    const bounds = L.latLngBounds(d.start, map.mouseEventToLatLng(e));
+    // Drawn on a wrapped world copy, longitudes can pass ±180: wrap them back.
+    const bounds = map.wrapLatLngBounds(L.latLngBounds(d.start, map.mouseEventToLatLng(e)));
     if (areaRect) areaRect.remove();
     areaRect = d.rect;
     areaRect.setBounds(bounds);
@@ -945,6 +951,12 @@
       data = await api(`api/visualizations/${encodeURIComponent(vizId)}`);
     } catch (err) {
       if (state.viz?.id !== vizId) return;
+      if (err.status >= 400 && err.status < 500) {
+        // The render cannot be shown (bad bundle, unknown ID): stop polling.
+        state.viz.error = err.message;
+        renderResults();
+        return;
+      }
       toast(err.message);
       schedule("viz", () => pollViz(vizId), POLL_MS * 2);
       return;
@@ -956,8 +968,9 @@
       const frame = $("#viewer-frame");
       if (frame.getAttribute("src") !== data.viewer_url) frame.src = data.viewer_url;
       if (state.step === 5) setStage("results");
-    } else if (FAILED.has(data.state)) {
-      state.viz.error = data.error || `Rendering ${data.state}.`;
+    } else if (data.state === "succeeded" || FAILED.has(data.state)) {
+      // Succeeded without a URL: rendered, but the viewer cannot be served.
+      state.viz.error = data.message || data.error || `Rendering ${data.state}.`;
     } else {
       schedule("viz", () => pollViz(vizId), POLL_MS);
     }
@@ -974,7 +987,10 @@
     const succeeded = state.run?.state === "succeeded";
     $("#viz-pending").hidden = !succeeded || !viz || !!viz.url || !!viz.error;
     $("#viz-failed").hidden = !viz?.error;
-    if (viz?.error) $("#viz-error").textContent = viz.error;
+    if (viz?.error) {
+      $("#viz-failed-title").textContent = viz.state === "succeeded" ? "Viewer unavailable." : "Rendering failed.";
+      $("#viz-error").textContent = viz.error;
+    }
     $("#viz-ready").hidden = !viz?.url;
     if (viz?.url) $("#viz-open").href = viz.url;
     if (viz && !viz.url) $("#viz-elapsed").textContent = fmtDuration(Date.now() - viz.started);
@@ -993,7 +1009,9 @@
     }
     const t = r.times;  // {size, first, last} of the time coordinate
     if (t && t.size) {
-      const span = typeof t.first === "number" ? ` (${fmt(t.first)} – ${fmt(t.last)} s)` : "";
+      // inspect_run_results reports first/last as strings.
+      const [first, last] = [Number(t.first), Number(t.last)];
+      const span = Number.isFinite(first) && Number.isFinite(last) ? ` (${fmt(first)} – ${fmt(last)} s)` : "";
       row("Snapshots", `${t.size}${span}`);
     }
   }

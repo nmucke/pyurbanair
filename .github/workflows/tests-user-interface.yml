@@ -1,5 +1,6 @@
 # The browser app (libs/user-interface), in the mcp pixi environment. Its
-# tests fake every Tools action except config composition: no network, no solver.
+# tests fake every Tools action except config composition: no network, no solver,
+# so the checkout skips the solver submodules.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: user-interface"
@@ -38,8 +39,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - uses: ./.github/actions/setup
         with:
           environment: mcp

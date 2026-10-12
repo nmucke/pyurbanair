@@ -285,6 +285,15 @@ def test_asset_server_ranges_and_containment(tmp_path: Path) -> None:
         with urlopen(url) as response:
             assert response.headers["Content-Type"] == "text/html"
             assert response.read().startswith(b"<!doctype html>")
+            policy = response.headers["Content-Security-Policy"]
+            assert policy.endswith("frame-ancestors 'none'")
+        # Only the named loopback origin may embed a bundle registered with it.
+        framed = server.register(bundle, frame_ancestor="http://127.0.0.1:8123")
+        with urlopen(framed) as response:
+            policy = response.headers["Content-Security-Policy"]
+            assert policy.endswith("frame-ancestors http://127.0.0.1:8123")
+        with pytest.raises(ValueError, match="frame_ancestor"):
+            server.register(bundle, frame_ancestor="* 'unsafe-inline'")
         poster = url + manifest["views"][0]["poster"]
         with urlopen(Request(poster, headers={"Range": "bytes=0-7"})) as response:
             assert response.status == 206

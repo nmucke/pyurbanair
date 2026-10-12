@@ -227,14 +227,15 @@ def field_override(key: str, value: Any) -> str:
         return f"{key}={value}"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RequestError(400, f"{field['label']} must be a number")
-    if kind == "int" and not float(value).is_integer():
-        raise RequestError(400, f"{field['label']} must be a whole number")
-    if not math.isfinite(value):
-        raise RequestError(400, f"{field['label']} must be finite")
+    # The range first: a huge JSON integer overflows the float conversions.
     if "min" in field and value < field["min"]:
         raise RequestError(400, f"{field['label']} must be at least {field['min']}")
     if "max" in field and value > field["max"]:
         raise RequestError(400, f"{field['label']} must be at most {field['max']}")
+    if not math.isfinite(value):
+        raise RequestError(400, f"{field['label']} must be finite")
+    if kind == "int" and not float(value).is_integer():
+        raise RequestError(400, f"{field['label']} must be a whole number")
     return f"{key}={int(value) if kind == 'int' else float(value)!r}"
 
 
@@ -242,7 +243,7 @@ def _positive(payload: dict[str, Any], key: str, default: float, top: float) -> 
     value = payload.get(key, default)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RequestError(400, f"{key} must be a number")
-    if not (math.isfinite(value) and 0 < value <= top):
+    if not (0 < value <= top and math.isfinite(value)):
         raise RequestError(400, f"{key} must lie in (0, {top:g}]")
     return float(value)
 
@@ -510,7 +511,10 @@ class App:
         return {"visualization_id": job["visualization_id"]}
 
     def visualization(self, visualization_id: str) -> dict[str, Any]:
-        metadata, _ = self.tools.visualization(visualization_id)
+        # The page embeds the viewer: allow this app's origin to frame it.
+        metadata, _ = self.tools.visualization(
+            visualization_id, frame_ancestor=f"http://{self.authority}"
+        )
         result = {"state": metadata["state"]}
         if metadata.get("viewer_url"):
             result["viewer_url"] = metadata["viewer_url"]

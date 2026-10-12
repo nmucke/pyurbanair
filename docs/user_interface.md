@@ -68,6 +68,10 @@ with `{"error": "<message>"}`.
   frame with case.json's `crs` and `origin`. The held-out validation sensors
   are not returned.
 - **Log tail**: the last 40 lines of the last 16 KiB of `worker.log`.
+- **Viewer**: `visualization` passes the app's own origin as `frame_ancestor`,
+  so the viewer served on the supervisor's asset server may be embedded in the
+  page (any other page still may not). A render that succeeded without a
+  `viewer_url` (browser serving unavailable) says why in `message`.
 
 ## Tests
 

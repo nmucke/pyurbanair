@@ -34,6 +34,7 @@ class FakeTools(Tools):
         self.fail_case = False
         self.release = threading.Event()
         self.release.set()
+        self.frame_ancestor: str | None = None
 
     def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
         if self.fail_case:
@@ -128,7 +129,10 @@ class FakeTools(Tools):
         self.jobs_state["vis1"] = "succeeded"
         return {"visualization_id": "vis1"}
 
-    def visualization(self, visualization_id: str, preview: Any = None) -> Any:
+    def visualization(
+        self, visualization_id: str, preview: Any = None, frame_ancestor: Any = None
+    ) -> Any:
+        self.frame_ancestor = frame_ancestor
         return {"state": "succeeded", "viewer_url": "http://127.0.0.1:1/v/"}, None
 
 
@@ -269,6 +273,9 @@ def test_run_lifecycle(app: App) -> None:
         ({**run, "settings": {"time.simulation_time": -5}}, "at least"),
         ({**run, "settings": {"forward.ensemble": 1}}, "true or false"),
         ({**run, "settings": {"ensemble.ensemble_size": 2.5}}, "whole number"),
+        # Too large for a float: a 400, not an OverflowError.
+        ({**run, "settings": {"ensemble.ensemble_size": 10**400}}, "at most"),
+        ({**run, "settings": {"time.simulation_time": -(10**400)}}, "at least"),
         ({**run, "settings": {"model.forward_model.ncpu": 3}}, "cannot start"),
         ({**run, "extra_overrides": "a=b"}, "list of strings"),
         (
@@ -327,6 +334,7 @@ def test_run_lifecycle(app: App) -> None:
         "state": "succeeded",
         "viewer_url": "http://127.0.0.1:1/v/",
     }
+    assert tools.frame_ancestor == f"http://{app.authority}"  # the page embeds it
 
     tools.jobs_state["run1"] = "running"
     assert request(app, "api/runs/run1/cancel", {})[1] == {
