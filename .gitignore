@@ -110,7 +110,3 @@ params.nc
 
 # Results
 results/*
-
-##### pycity4cfd #####
-# City4CFD build tree (pixi run build-city4cfd)
-libs/pycity4cfd/build/

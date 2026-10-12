@@ -21,8 +21,10 @@ version = "0.1.0"
 [tool.pixi.workspace]
 # pixi.lock is lock format v7 with a rich `linux-64-cuda` platform. Older pixi
 # can't read it or rewrites it on install (0.72.0 still does), dirtying a fresh
-# clone; every release from 0.72.1 to 0.81 leaves it as is.
-requires-pixi = ">=0.72.1"
+# clone; every release from 0.72.1 to 0.81 leaves it as is. The `city4cfd`
+# source package's backend (pixi-build-cmake 0.4.7, libs/pycity4cfd/recipe)
+# speaks pixi-build API v7, which needs pixi >= 0.77.0.
+requires-pixi = ">=0.77.0"
 preview = ["pixi-build"]
 channels = ["conda-forge","robostack"]
 platforms = [
@@ -362,9 +364,10 @@ geopandas = ">=1.2.0,<2"
 [tool.pixi.feature.city4cfd.pypi-dependencies]
 pycity4cfd = { path = "libs/pycity4cfd", editable = true }
 
-# Optional local agent interface; workers do not require the MCP SDK.
+# Optional local agent interface: mcp-server with the MCP SDK (`server` extra).
+# Workers and the browser app do not need the SDK.
 [tool.pixi.feature.mcp.pypi-dependencies]
-mcp-server = { path = "libs/mcp-server", editable = true }
+mcp-server = { path = "libs/mcp-server", editable = true, extras = ["server"] }
 
 [tool.pixi.feature.mcp.tasks]
 start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve local forward tools over stdio" }
@@ -375,8 +378,10 @@ register-claude = { cmd = "bash scripts/register_claude.sh", description = "Regi
 [tool.pixi.feature.user-interface.dependencies]
 geopandas = ">=1.2.0,<2"
 
+# mcp-server without the `server` extra: the app calls its Tools directly.
 [tool.pixi.feature.user-interface.pypi-dependencies]
 user-interface = { path = "libs/user-interface", editable = true }
+mcp-server = { path = "libs/mcp-server", editable = true }
 
 [tool.pixi.feature.user-interface.tasks]
 start-ui = { cmd = "python -m user_interface --repo-root .", description = "Start the local browser app for city simulations" }
@@ -394,9 +399,10 @@ delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilat
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "user-interface", "visualization", "evaluation", "dev", "py312", "cpu"], solve-group = "mcp" }
-# The browser app; it builds city cases as jobs in the `city4cfd` env.
-ui = { features = ["user-interface", "mcp", "visualization", "evaluation", "dev", "py312", "cpu"], solve-group = "mcp" }
+mcp = { features = ["mcp", "user-interface", "visualization", "evaluation", "dev", "py312", "cpu"] }
+# The browser app, without the MCP SDK; it builds city cases as jobs in the
+# `city4cfd` env.
+ui = { features = ["user-interface", "visualization", "evaluation", "dev", "py312", "cpu"] }
 # Map area -> case: pycity4cfd and the City4CFD binary; the case-build worker
 # runs here (mcp_server.jobs on PYTHONPATH, like `rendering`).
 city4cfd = { features = ["city4cfd", "dev", "py312", "cpu"] }

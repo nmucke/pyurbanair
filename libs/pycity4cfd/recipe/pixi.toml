@@ -6,8 +6,11 @@
 name = "city4cfd"
 version = "0.8.1"
 
+# The backend is pinned to the version that built 0.8.1 (pixi-build API v7, so
+# pixi >= 0.77). Changing anything in this file needs a `pixi clean --build`
+# before the next install, see docs/pycity4cfd.md.
 [package.build]
-backend = { name = "pixi-build-cmake", version = "*" }
+backend = { name = "pixi-build-cmake", version = "==0.4.7", channel = "conda-forge" }
 source = { git = "https://github.com/tudelft3d/City4CFD.git", tag = "0.8.1" }
 
 # The backend defaults to BUILD_SHARED_LIBS=ON, which makes City4CFD's bundled

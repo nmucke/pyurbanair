@@ -31,6 +31,12 @@ pycity4cfd and City4CFD live only in the `city4cfd` pixi environment; `dev`,
 `mcp` and `ui` don't have them (the MCP tools and the browser app build cases
 as jobs in `city4cfd`).
 
+**After editing `libs/pycity4cfd/recipe/pixi.toml`, run `pixi clean --build`
+and reinstall** (`pixi install -e city4cfd`): pixi's build cache does not key
+on the package's build config, so without the clean it reinstalls the old
+binary. The recipe pins its build backend (`pixi-build-cmake` 0.4.7), which
+needs pixi >= 0.77.0 (`requires-pixi`).
+
 ## Modules
 
 - **`osm`**: `fetch_buildings(bbox)` downloads footprints with osmnx (Overpass),

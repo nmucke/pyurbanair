@@ -39,7 +39,9 @@ CPU workers use `dev`; GPU workers use the installed `cuda` environment. The MCP
 server runs in the separate `mcp` environment; city cases are built in
 `city4cfd` (`pixi install --locked -e city4cfd`, compiles City4CFD once). Install optional 3D support with
 `pixi install --locked -e rendering`. It includes PyVista/VTK and ffmpeg.
-The root lockfile pins the tested MCP SDK v2 and renderer packages.
+The MCP SDK is mcp-server's `server` extra, installed only in `mcp`; the `ui`
+environment has mcp-server's tools and jobs without it. The root lockfile pins
+the tested MCP SDK v2 and renderer packages.
 
 Other clients, or Claude Code by hand, register an **absolute** launcher path:
 
