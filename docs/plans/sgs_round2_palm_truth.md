@@ -1,6 +1,8 @@
 # SGS correction, Round 2: does it improve uDALES predictions of a PALM flow?
 
-Status: proposed, not run. Written 2026-10-12 against `3b279f3` (main). It
+Status: proposed, revised the same day after the pilot (see "Pilot findings
+and revisions" below); DA runs not started. Written 2026-10-12 against
+`3b279f3` (main). It
 follows Round 1 and Round 1b
 ([sgs_discrepancy_twin_tests.md](sgs_discrepancy_twin_tests.md),
 [sgs_twin_round1b_error_model.md](sgs_twin_round1b_error_model.md); results in
@@ -40,7 +42,90 @@ is "no added value", however its coefficients look.
    mismatch. A fair test therefore compares the SGS correction with equally
    cheap alternatives, not only with inflow-only estimation.
 
-## Truth regimes
+## Pilot findings and revisions (2026-10-12)
+
+The pilot (§1) ran before any DA run. It changed the design as follows.
+Everything below this section has been updated to match; where an older
+passage disagrees, this section wins.
+
+**1. PALM's inflow/outflow mode needed a fix (PR #188).**
+- PALM diverged within about 10 s on this case.
+- Behind the last cube the wake reverses the flow at the radiation outflow,
+  and the case's non-dissipative `pw-scheme` cannot damp it.
+- PALM's outflow damping layer (factor 1.0, 4 m) fixes it: stable for
+  600 s, with the flow still unsteady.
+- The seed key (PR #187) was also added. Pilot runs used a local branch
+  with both PRs; the final DA runs must use the merged `main`.
+
+**2. Aligned before any comparison:**
+- PALM `boundary_condition=inflow_outflow` (pypalm's default is periodic);
+- power-law `z_ref = 64 m` for PALM (pypalm defaulted to the domain top,
+  32 m, which made PALM's inflow 19 % faster);
+- uDALES `interior_nudging=false` (pypalm runs no nudging under
+  inflow/outflow).
+
+The result: above about 5 m, speed (ratio 0.97–1.04) and angle (within
+0.2°) agree.
+
+**3. Near-wall inflow differs.** At z = 2 m uDALES's inflow is about 1.5×
+PALM's (profile exponent 0.43 in PALM against 0.26–0.31). This is being
+diagnosed:
+- **if definitional**, it is fixed before the freeze;
+- **if it is a wall-model difference**, it stays as part of the model
+  discrepancy, and the report says so.
+
+**4. There is only one truth regime.**
+- PALM without inflow disturbances is not smooth. Turbulence develops from
+  the buildings, with TKE about 0.17 m²/s² near the ground, and its 180 s
+  means vary by 0.06–0.11 m/s between windows.
+- PALM with disturbances differs from it by only 1.5× the replica noise.
+- The two-truth design is therefore dropped. **One PALM truth (with
+  disturbances) plus its replica (seed 17)** is used.
+- The "regime" factor moves to the model side (see Truth and model setups).
+
+**5. uDALES's turbulence level is the other big mismatch.**
+- Without inlet turbulence uDALES stays almost steady (TKE about 0).
+- With its synthetic inlet it has 2–3× PALM's TKE aloft.
+
+**6. The structural mismatch at the true inflow is large and spatial:**
+- 0.45–0.5 m/s at the sensors (180 s means, 10–23 %), about 6× PALM's
+  noise floor;
+- the pedestrian wind map is off by 1.0 m/s, against a floor of 0.05;
+- the exceedance bias is +0.45;
+- it is mixed in sign, so the inflow parameters cannot absorb it.
+
+**7. b* barely moves uDALES.** The Round 1 b* = (0.3, −0.3, 0.2) changes the
+predictions by at most 0.008 m/s, about 1 % of the mismatch, in mixed
+directions. **Expected outcome, stated before the runs:** T3 ≈ T2, unless
+the posterior moves `b` far from b* (the prior allows ±0.6, which saturates
+the multiplier at 0.67–1.5).
+
+**8. Error model.** PALM's realisation noise in 180 s means is **0.06 m/s**
+(truth vs replica, √2-corrected; about 0.05–0.07 by height). It is frozen as
+the persistent representation error for every arm. The earlier 0.03 m/s
+floor for a smooth regime is dropped.
+
+**9. Calibration rules, revised from the Round 1b lessons** before any run:
+- **Collapse** now means *degenerate* collapse: posterior std < 0.1 × prior
+  std **and** a seed-to-seed spread of the posterior means > 3× the mean
+  posterior std. A narrow posterior that agrees across seeds is a
+  well-determined parameter, not a collapse.
+- **Differences between arms** are judged against the seed spread and the
+  replica's *paired* difference, rather than the replica's score level. The
+  paired difference is the replica-vs-truth score of the arm minus that of
+  the comparison arm, which is ≈ 0 by construction. It is reported, not
+  used as a threshold.
+
+## Truth and model setups (revised)
+
+| Setup | PALM truth | uDALES model | Mismatch it carries |
+|---|---|---|---|
+| **M-on** | with disturbances (`random_seed` default), plus replica `random_seed=17` | synthetic inlet **on** (Round 1 settings) | too much TKE aloft |
+| **M-off** | the same truth and replica | inlet turbulence **off**, no interior nudging | almost no turbulence |
+
+The original two-truth table is kept below for the record.
+
+## Truth regimes (original, superseded)
 
 | Regime | PALM truth | uDALES model inflow | Like |
 |---|---|---|---|
@@ -168,7 +253,8 @@ transfer.
      mean flows differ by more than the inflow prior can absorb, stop and
      report.
 3. **Smoke test the pipeline.** Run one window of T3 with
-   `assimilation.truth_dir=<P-smooth run>` and `assimilation.truth_start_time=30`,
+   `assimilation.truth_dir=<PALM truth run>` and `assimilation.truth_start_time=0`
+   (PALM output frames sit on (0, 540] s, aligned with uDALES; pilot-verified),
    then `compute_metrics.py` and `qoi.py`. Check that the sensor sampling uses
    PALM's operator for the truth (`truth_model=pypalm`), and that
    `field_statistics` really compares PALM interpolated onto the uDALES cell
@@ -201,21 +287,19 @@ The fixed settings follow Round 1:
   `assimilation.truth_start_time` set so that it aligns with the uDALES
   windows (from the pilot), and `assimilation.replica_dir` for P-turb.
 
-**Aggregation:** 180 s window means with the frozen persistent error, in both
-regimes. For P-smooth also run 20 s bins, because Round 1 stage A showed the
-value at 20 s, and in a deterministic flow more bins are not
-over-correlated.
+**Aggregation:** 180 s window means with the frozen persistent error
+σ_r = 0.06 m/s (pilot finding 8), for every arm and setup.
 
 | Priority | Runs | Count | Cumulative time (2 side by side, ~1.5 h each) |
 |---|---|---|---|
-| 1 | P-smooth, 180 s: T2, T3, TC, Tα × 3 seeds | 12 | 9 h |
-| 2 | P-turb, 180 s: T2, T3, TC, Tα × 3 seeds | 12 | 18 h |
-| 3 | P-smooth, 20 s: T2, T3 × 3 seeds | 6 | 22.5 h |
-| 4 | P-turb, second PALM truth realisation (new `random_seed`): T2, T3 × 3 seeds | 6 | 27 h |
-| 5 | T3C, or a dense-sensor reference (below), if warranted | 6 | 31.5 h |
+| 1 | M-on: T2, T3, TC, Tα × 3 seeds | 12 | 9 h |
+| 2 | M-off: T2, T3, TC, Tα × 3 seeds | 12 | 18 h |
+| 3 | Second PALM truth realisation (`random_seed=29`, with its replica): T2, T3 × 3 seeds, in the better setup | 6 | 22.5 h |
+| 4 | Dense-sensor reference (below), or T3C, if warranted | 6 | 27 h |
 
-Plus the pilot (about half a day). In total that is about 1.5–2 days of
-machine time.
+The pilot is done (2026-10-12), and this is about 1–1.5 days of machine
+time. The two original "P-smooth" runs at 20 s are dropped with the smooth
+regime.
 
 - **Disk.** Keep the window states for seed 1 of each arm; QoIs need them.
   For seeds 2–3, compute the metrics and QoIs, then delete the states (about
@@ -235,15 +319,22 @@ machine time.
 
 ## 4. Acceptance criteria (frozen before running)
 
-**Noise rules** (as in Round 1). A score difference between two arms counts
-only if it meets all of these:
+**Noise rules** (revised, pilot finding 9). A score difference between two
+arms counts only if it meets all of these:
 
-- it is larger than the seed spread;
-- it is larger than the replica floor (P-turb);
+- it is larger than the seed spread of that difference;
 - it has the same sign in all 3 seeds;
-- for P-turb, it has the same sign for both PALM truth realisations
-  (priority 4). Seeds vary only the DA, so they understate the truth's
+- where priority 3 has run, it has the same sign for both PALM truth
+  realisations. Seeds vary only the DA, so they understate the truth's
   variability.
+
+The replica's score level (PALM truth vs replica) is reported as the floor
+of what any model can reach. It is no longer a threshold for differences
+between arms.
+
+**Collapse** follows pilot finding 9: posterior std < 0.1 prior std together
+with a seed-to-seed spread of the posterior means > 3× the mean posterior
+std.
 
 **Calibration first.** An arm that collapses, or has a Desroziers ratio
 outside 0.7–1.4 or a validation spread/skill ratio outside 0.6–1.5, is
@@ -251,7 +342,7 @@ reported as miscalibrated. Its value verdict is then not trusted. These
 limits are wider than Round 1b's, because the structural mismatch inflates
 both ratios for every arm alike.
 
-**Value verdict per regime, for T3 against each of T2, TC and Tα:**
+**Value verdict per model setup (M-on, M-off), for T3 against each of T2, TC and Tα:**
 
 - **Adds value:** T3 is better by ≥ 10 % on the validation `sensor_statistics`
   CRPS (window means *and* variances), for the posterior *and* the forecast,
@@ -269,11 +360,10 @@ both ratios for every arm alike.
 | No added value | n/a | Inflow estimation alone is enough to match PALM at these sensors |
 | Hurts | n/a | Check compensation between `b` and the inflow in the posterior correlations; report it |
 
-Expected, given Rounds 1 and 1b: a positive result is plausible in
-P-smooth, and unlikely in P-turb at 180 s. Both outcomes are worth
-reporting. Do not tune the error model, the sensors or the priors after
-seeing the held-out scores; any change is made on the pilot and the
-calibration diagnostics only, and is recorded.
+Expected, given Rounds 1 and 1b and the pilot (findings 6–7): T3 ≈ T2 is
+likely, because b* changes the predictions by about 1 % of the structural
+mismatch. A clear T3 gain would need the posterior to move `b` far from b*.
+Both outcomes are worth reporting
 
 ## Deliverables
 
