@@ -27,6 +27,7 @@ from typing import Callable
 import torch
 import tqdm
 from torch.autograd import DeviceType
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 
@@ -64,6 +65,52 @@ def compile_submodules(
     return compiled
 
 
+def _checkpointed_forward(
+    self: torch.nn.Module, *args: object, **kwargs: object
+) -> object:
+    """The class ``forward`` under non-reentrant activation checkpointing
+    (plain when gradients are off: nothing would be saved anyway)."""
+    forward = type(self).forward.__get__(self)
+    if not torch.is_grad_enabled():
+        return forward(*args, **kwargs)
+    return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+
+
+def checkpoint_submodules(model: torch.nn.Module, patterns: list[str]) -> list[str]:
+    """Activation-checkpoint every submodule whose path matches a glob in
+    ``patterns``, and return the wrapped paths.
+
+    The module keeps only its inputs for backward and recomputes its forward
+    there (``torch.utils.checkpoint``, non-reentrant: gradients reach frozen
+    modules' LoRA adapters even when no input requires grad, and the autocast
+    state and RNG are replayed). Matching follows :func:`compile_submodules`:
+    peft's ``base_model.model.`` prefix is dropped, a match inside an already
+    wrapped module is skipped and an unmatched pattern raises. Only the
+    instance's ``forward`` is replaced (bound to the module, so a deepcopy
+    stays self-contained); the module tree and state-dict keys are unchanged.
+    """
+    import types
+    from fnmatch import fnmatchcase
+
+    wrapped: list[str] = []
+    unmatched = set(patterns)
+    for name, module in model.named_modules():
+        path = name.removeprefix("base_model.model.")
+        hits = {p for p in patterns if fnmatchcase(path, p)}
+        if not hits:
+            continue
+        unmatched -= hits
+        if any(name.startswith(parent + ".") for parent in wrapped):
+            continue
+        module.forward = types.MethodType(_checkpointed_forward, module)
+        wrapped.append(name)
+    if unmatched:
+        raise ValueError(
+            f"checkpoint_modules patterns match no module: {sorted(unmatched)}"
+        )
+    return wrapped
+
+
 class BaseTraining:
     def __init__(
         self,
@@ -82,6 +129,7 @@ class BaseTraining:
         compile_model: bool = False,
         compile_dynamic: bool | None = None,
         compile_modules: list[str] | None = None,
+        activation_checkpoint_modules: list[str] | None = None,
         channels_last: bool = False,
         cudnn_benchmark: bool = False,
         tf32: bool = False,
@@ -134,6 +182,10 @@ class BaseTraining:
         # architectures predating the knob keep the one-step behaviour exactly.
         self.num_history_steps = int(getattr(self._eager_model, "num_history_steps", 1))
         self.n_state_channels = getattr(self._eager_model, "n_state_channels", None)
+        if activation_checkpoint_modules:
+            # Trade compute for memory: the matched submodules recompute their
+            # forward in backward instead of keeping their activations.
+            checkpoint_submodules(self.model, list(activation_checkpoint_modules))
         if compile_model or compile_modules:
             # Inductor's CUDA backend generates triton kernels; without a
             # working triton, compilation raises mid-epoch. Fall back to
