@@ -87,6 +87,9 @@ DEFAULT_NUDGING_CONFIG: dict = {
 # (LSF0001/0003/0005 constraint chain); toggled together.
 _NUDGING_SWITCHES = ("nudging", "large_scale_forcing", "lsf_exception", "humidity")
 
+# &initialization_parameters keys of PALM's outflow damping layer (parin.f90:253).
+_OUTFLOW_DAMPING_KEYS = ("outflow_damping_factor", "outflow_damping_width")
+
 
 def _augment_runtime_library_paths(env: dict[str, str]) -> None:
     """Prepend active pixi/conda lib dirs to LD_LIBRARY_PATH."""
@@ -158,6 +161,7 @@ class ForwardModel(BaseForwardModel):
         sgs_constant: Optional[float] = None,
         nudging_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        outflow_damping: Optional[dict] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -202,6 +206,10 @@ class ForwardModel(BaseForwardModel):
         # turbulence generator).
         self._inlet_turbulence = inlet_turbulence
         validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Outflow damping layer for inflow_outflow runs; None writes nothing.
+        # See `_apply_outflow_damping` and docs/pypalm.md §8.
+        self._outflow_damping = outflow_damping
+        self._validate_outflow_damping()
 
         self.dirs = get_palm_directory_paths(
             case_dir=pathlib.Path(case_dir),
@@ -354,6 +362,12 @@ class ForwardModel(BaseForwardModel):
                     )
             p3d.set_string("initialization_parameters", "bc_lr", "cyclic")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
+            # A positive outflow_damping_factor under cyclic bc_lr/bc_ns is a
+            # PALM error (PAC0352). Zero any key a template carries; a clean
+            # template is left byte-identical.
+            for key in _OUTFLOW_DAMPING_KEYS:
+                if key in p3d.sections.get("initialization_parameters", {}):
+                    p3d.set_value("initialization_parameters", key, 0.0)
             p3d.write()
         else:
             # Standard PALM urban inflow: non-cyclic east-west, cyclic north-south.
@@ -363,12 +377,64 @@ class ForwardModel(BaseForwardModel):
             p3d.set_string("initialization_parameters", "bc_lr", "dirichlet/radiation")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
             p3d.set_string("initialization_parameters", "psolver", "multigrid_noopt")
+            self._apply_outflow_damping(p3d)
             p3d.write()
             # multigrid needs uniform subdomains, and PALM's auto-decomposition
             # puts the larger factor on npey — which usually fails to divide the
             # grid. Pin a slab decomposition (npex=ncpu, npey=1) derived from
             # NCPU so any ncpu that divides nx+1 works (see ncpu_utils).
             self._apply_processor_topology()
+
+    def _validate_outflow_damping(self) -> None:
+        """Reject an ``outflow_damping`` block PALM would reject or ignore.
+
+        ``outflow_damping_factor`` is a relaxation rate in 1/s and
+        ``outflow_damping_width`` a distance in metres from the outflow edge
+        (init_3d_model.f90:1717-1720); PALM aborts on a width outside
+        [0, domain length] (PAC0351, check_parameters.f90:2603). A width under
+        two cells is legal but leaves a one-cell sink, so it only warns.
+        """
+        cfg = self._outflow_damping
+        if cfg is None:
+            return
+        factor = float(cfg["factor"])
+        width = float(cfg["width"])
+        if factor < 0.0:
+            raise ValueError(f"outflow_damping.factor must be >= 0 1/s, got {factor}")
+        if width <= 0.0:
+            raise ValueError(f"outflow_damping.width must be > 0 m, got {width}")
+        if self.nx and self.bounds is not None:
+            xmin, xmax = self.bounds[0]
+            dx = (xmax - xmin) / self.nx
+            if width > xmax - xmin:
+                raise ValueError(
+                    f"outflow_damping.width={width} m exceeds the domain length "
+                    f"{xmax - xmin} m (PALM PAC0351)."
+                )
+            if width < 2 * dx:
+                logger.warning(
+                    "outflow_damping.width=%.3g m is under two cells (dx=%.3g m); "
+                    "the damping layer degenerates to a single-cell sink.",
+                    width,
+                    dx,
+                )
+
+    def _apply_outflow_damping(self, p3d: P3DFile) -> None:
+        """Write PALM's outflow damping layer for an inflow_outflow run.
+
+        Behind the last obstacle the flow reverses at the radiation outflow
+        boundary, and the non-dissipative ``pw-scheme`` advection cannot damp
+        it: xie_and_castro diverges within ~10 s without this. PALM relaxes
+        u, v, w (and pt) toward the initial profile over the last ``width``
+        metres at up to ``factor`` 1/s (prognostic_equations.f90:391).
+        ``None`` writes nothing, leaving whatever the template sets.
+        """
+        cfg = self._outflow_damping
+        if cfg is None:
+            return
+        section = "initialization_parameters"
+        p3d.set_value(section, "outflow_damping_factor", float(cfg["factor"]))
+        p3d.set_value(section, "outflow_damping_width", float(cfg["width"]))
 
     def _apply_processor_topology(self) -> None:
         """Pin npex/npey in runtime_parameters from NCPU (slab decomposition).

@@ -367,6 +367,13 @@ Key field notes:
 - `boundary_condition: inflow_outflow` — triggers the multigrid solver +
   npex/npey slab decomposition. `periodic` instead selects the nudging driver
   (§8).
+- `outflow_damping:` — `factor` (default `1.0`, 1/s) and `width` (default
+  `4.0`, metres from the outflow edge), written as `&initialization_parameters
+  outflow_damping_factor` / `outflow_damping_width` on `inflow_outflow` runs
+  only. Periodic runs never get them (any a template carries are zeroed);
+  `outflow_damping: null` writes nothing. Staging raises on `factor < 0`,
+  `width <= 0` or a width longer than the domain, and warns on a width under
+  two cells. See §8 "inflow_outflow diverges at the outflow without damping".
 - `nudging_config:` — `enabled` (default `true`; `false` restores un-driven
   periodic staging), `tnudge` (relaxation timescale, s), `nnudge_meters` (no
   nudging below this height), `profile_config` (vertical shear shape). Only
@@ -629,6 +636,42 @@ surface. PALM's top-down rasterizer interprets the elevated ground as "one big
 building": every cell in that region gets a large non-zero height, blocking
 airflow over the entire base rather than only the actual buildings. Pylbm and
 pyudales handle the same geometry correctly with their 3D approaches.
+
+### inflow_outflow diverges at the outflow without damping (pw-scheme)
+
+On xie_and_castro, `boundary_condition: inflow_outflow` without damping
+diverges within ~10 s. Behind the last cube the flow reverses at the radiation
+outflow boundary, and the case's `momentum_advec = 'pw-scheme'` (2nd-order
+Piacsek-Williams, chosen in 55574ce to match uDALES CD2) adds no numerical
+dissipation to absorb it. PALM's outflow damping layer fixes it, so
+`configs/model/pypalm.yaml` turns it on by default (`outflow_damping`, §7).
+
+PALM semantics (vendored source, `packages/palm/model/src/`):
+- `outflow_damping_factor` and `outflow_damping_width` are
+  `&initialization_parameters` keys (`parin.f90:253-254`), both defaulting to
+  `0.0` (`modules.f90:975-976`), i.e. off.
+- `width` is in **metres**: the layer covers `i*dx > nx*dx - width` with a
+  `factor * sin^2` ramp up to `factor` at the outflow edge
+  (`init_3d_model.f90:1712-1744`). `factor` is a relaxation rate (1/s): the
+  prognostic equations add `- MAX(rdf, odf_x, odf_y) * (u - u_init)` to u, v
+  and w (`prognostic_equations.f90:391`, `:474`, `:554`) and to pt (`:638`).
+- PAC0351 (`check_parameters.f90:2603-2615`): width must be in
+  `[0, (nx+1)*dx]`.
+- PAC0352 (`check_parameters.f90:2621-2657`): a positive factor needs a
+  `dirichlet/radiation` (or reverse) `bc_lr`/`bc_ns`; under cyclic BCs it
+  aborts. Hence the periodic branch zeroes any keys.
+- PAC0353 (`check_parameters.f90:2665-2668`): topography height must be zero
+  at the inflow column. Cases with a building on the inflow edge cannot use
+  damping (pypalm does not pre-check this; PALM aborts at start).
+
+Evidence (2026-10 diagnosis): factor 1.0, width 4 m is stable for 600 s on
+30x40x16, 50x40x16, 64x40x16 (domain x to 80 m) and 64x80x32, with inlet
+disturbances on and off. The flow stays unsteady: temporal std of u ~0.22 m/s,
+the same as the undamped run before it blows up. Factor 0.1 still diverges.
+
+The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
+across runs) is very likely the same outflow instability; not yet confirmed by
+a rerun with damping.
 
 ### Member divergence in ensembles (~15%)
 
