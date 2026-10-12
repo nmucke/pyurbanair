@@ -29,6 +29,9 @@ from pycity4cfd.city4cfd import run_city4cfd, write_config
 from pycity4cfd.osm import fetch_buildings, write_buildings
 from shapely.geometry import Point, box
 
+# Bump when a change makes older case folders unusable (files, case.json keys,
+# overrides); it is part of the MCP cache key, so old folders are not reused.
+CASE_FORMAT = 2
 N_SENSORS = 6
 N_VALIDATION = 3  # held-out sensors, after the assimilated ones
 SENSOR_HEIGHT = 3.0  # m above ground
@@ -255,6 +258,7 @@ def make_case(
         "origin": [float(xmin - margin), float(ymin - margin)],
     }
     (case_dir / "case.json").write_text(
-        json.dumps({"bbox": list(bbox), **result}, indent=2) + "\n"
+        json.dumps({"case_format": CASE_FORMAT, "bbox": list(bbox), **result}, indent=2)
+        + "\n"
     )
     return result

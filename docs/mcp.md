@@ -150,8 +150,10 @@ origin}`. Pass
 the `max_area_km2` the selector was opened with, and
 `["model=<m>", *overrides]` to `prepare_forward_run`, with `m` any of
 `pylbm`, `pypalm`, `pyudales` (uDALES adds its IBM preprocessing; costs in
-[pycity4cfd.md](pycity4cfd.md)). A folder that already
-has a `case.json` is reused; a per-case lock makes a retry wait for a running
+[pycity4cfd.md](pycity4cfd.md)). The `<hash>` covers the bbox,
+`resolution`, `default_height` and `pycity4cfd.case.CASE_FORMAT`, so a folder
+that already has a `case.json` is reused only if the same `make_case` format
+built it (older folders are left in place and never matched); a per-case lock makes a retry wait for a running
 build instead of racing it. It runs in the MCP process and takes minutes: the
 OpenStreetMap (Overpass) download dominates. Known limit: the build blocks the
 tool call rather than running in the supervisor. It needs City4CFD built

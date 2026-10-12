@@ -284,13 +284,18 @@ class Tools:
         `max_area_km2` is the area limit; pass the one the selector was
         opened with. A finished case for the same inputs is reused.
         """
-        from pycity4cfd.case import make_case
+        from pycity4cfd.case import CASE_FORMAT, make_case
 
         area = validate_bbox(bbox, max_area_km2)
         west, south, east, north = (area[k] for k in ("west", "south", "east", "north"))
+        # The case format is in the key, so folders built by an older make_case
+        # are never reused.
         key = ",".join(
-            f"{value:.5f}"
-            for value in (west, south, east, north, resolution, default_height)
+            [f"v{CASE_FORMAT}"]
+            + [
+                f"{value:.5f}"
+                for value in (west, south, east, north, resolution, default_height)
+            ]
         )
         name = "area_" + hashlib.sha1(key.encode()).hexdigest()[:10]
         case_dir = self.repo_root / ".temp" / "city_cases" / name
@@ -302,6 +307,7 @@ class Tools:
             if case_json.is_file():
                 case: dict[str, Any] = json.loads(case_json.read_text(encoding="utf-8"))
                 case.pop("bbox", None)
+                case.pop("case_format", None)
             else:
                 case = make_case(
                     (west, south, east, north),

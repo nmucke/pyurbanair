@@ -176,3 +176,31 @@ def test_city_case_is_reused(tmp_path: pathlib.Path, fake_make_case: Any) -> Non
     assert "bbox" not in again
     tools.prepare_city_case(DELFT, resolution=2.0)
     assert len(fake_make_case) == 2 and fake_make_case[0] != fake_make_case[1]
+
+
+def test_older_city_case_is_not_reused(
+    tmp_path: pathlib.Path, fake_make_case: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    import pycity4cfd.case
+
+    tools = Tools(REPO, tmp_path)
+    tools.repo_root = tmp_path
+    # A folder built before the case format was versioned, at its old key.
+    values = (*DELFT.values(), 4.0, 10.0)
+    old_key = ",".join(f"{value:.5f}" for value in values)
+    old_dir = (
+        tmp_path
+        / ".temp"
+        / "city_cases"
+        / ("area_" + hashlib.sha1(old_key.encode()).hexdigest()[:10])
+    )
+    old_dir.mkdir(parents=True)
+    (old_dir / "case.json").write_text(json.dumps({"overrides": ["old"]}))
+    case = tools.prepare_city_case(DELFT, resolution=4.0)
+    assert case["overrides"] == ["domain.nx=8"] and fake_make_case[0] != old_dir
+    # A new case format builds a new folder instead of reusing this one.
+    monkeypatch.setattr(pycity4cfd.case, "CASE_FORMAT", pycity4cfd.case.CASE_FORMAT + 1)
+    tools.prepare_city_case(DELFT, resolution=4.0)
+    assert len(fake_make_case) == 2 and fake_make_case[0] != fake_make_case[1]
