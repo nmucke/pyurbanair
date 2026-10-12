@@ -77,6 +77,7 @@ def _check_case(result: dict, buildings: gpd.GeoDataFrame) -> None:
     assert overrides["geometry.stl_path"] == str(case_dir / "buildings.stl")
     case_json = json.loads((case_dir / "case.json").read_text())
     assert case_json["bbox"] == list(BBOX)
+    assert case_json["case_format"] == case.CASE_FORMAT
     assert case_json["crs"] == result["crs"] == buildings.crs.to_string()
     assert case_json["origin"] == result["origin"]
 
@@ -163,7 +164,9 @@ def test_overrides_compose(
     assert cfg.domain.nx == result["domain"]["nx"]
     assert cfg.geometry.case_dir == result["case_dir"]
     # barcelona's precomputed uDALES geometry must not leak into the new case.
-    assert cfg.model.forward_model.get("precomputed_geom_dir") is None
+    assert cfg.geometry.udales_precomputed_geom_dir is None
+    if model == "pyudales":
+        assert cfg.model.forward_model.precomputed_geom_dir is None
     for axis in "xyz":
         assert list(cfg.obs[f"{axis}_points"]) == json.loads(
             overrides[f"obs.{axis}_points"]

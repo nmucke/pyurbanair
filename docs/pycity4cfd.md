@@ -72,6 +72,11 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>  # or pypa
   the UrbanTALES STLs). The overrides also null
   `geometry.udales_precomputed_geom_dir`, which barcelona sets to its own
   case folder.
+- `CASE_FORMAT` (also written to `case.json` as `case_format`) versions the
+  folder layout, `case.json` keys and overrides. Bump it when a change makes
+  older folders unusable: it is part of the MCP server's case-cache key
+  ([mcp.md](mcp.md)), so folders from an older format are rebuilt, not
+  reused.
 
 ## Limits
 
