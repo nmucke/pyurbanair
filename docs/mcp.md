@@ -127,37 +127,47 @@ confirmation when the run has already been requested.
 
 `open_area_selector(max_area_km2=4.0)` returns `{selection_id, url, status:
 "pending", max_area_km2, instructions}`. The user opens `url`, a Leaflet/OSM
-map (`mcp_server/web/area_selector.html`), draws a rectangle (the page shows
+map (`user_interface/web/area_selector.html`), draws a rectangle (the page shows
 its km² and bbox) and presses "Use this area". `get_selected_area(selection_id,
 wait_s=30)` blocks up to `wait_s` (at most 60 s) and returns status `pending`
 (call again), `expired` (the page server shut down or the id is unknown to
 the current one; open a new selector) or `selected` with `bbox`
 `{west, south, east, north, area_km2}` in EPSG:4326 degrees. A user may
 instead paste a bbox; the agent then uses it directly, no page needed.
-`mcp_server.area_selector.validate_bbox` is the one check: finite lon/lat in
+`user_interface.area_selector.validate_bbox` is the one check: finite lon/lat in
 range, `west < east`, `south < north` and the area limit. The page needs
 internet access for Leaflet (unpkg) and the OSM tiles; search uses Nominatim.
 
-The page server lives in the MCP process (not the supervisor) and mirrors the
-asset server below: loopback, Host/Origin checks, an unguessable token per
+The selector belongs to the browser app's library (`libs/user-interface`,
+[user_interface.md](user_interface.md)); the two tools import it lazily, so
+`mcp_server.jobs` and the worker envs do not need it. The page server lives
+in the MCP process (not the supervisor) and mirrors the asset server below: loopback, Host/Origin checks, an unguessable token per
 selection in the URL, JSON-only POSTs, and shutdown after 30 idle minutes.
 
 `prepare_city_case(bbox, resolution=4.0, default_height=10.0,
 max_area_km2=4.0)` then builds the case with `pycity4cfd.case.make_case` (see
-[pycity4cfd.md](pycity4cfd.md)) in `.temp/city_cases/area_<hash>/` and returns
-`{case_dir, overrides, n_buildings, height_sources, max_height, domain, crs,
-origin}`. Pass
-the `max_area_km2` the selector was opened with, and
-`["model=<m>", *overrides]` to `prepare_forward_run`, with `m` any of
+[pycity4cfd.md](pycity4cfd.md)) in `.temp/city_cases/area_<hash>/`. A folder
+that already has a `case.json` is returned at once as `{status: "ready",
+case_dir, overrides, n_buildings, height_sources, max_height, domain, crs,
+origin}`; otherwise the build is queued as a `city_case` supervisor job and the
+tool returns `{status: "building", case_job_id}`. `get_city_case(case_job_id)`
+returns `{case_job_id, status: "building"}`, `{case_job_id, status: "failed",
+error}` or `{case_job_id, status: "ready", <the case>}`; `get_run_logs` and
+`cancel_run` take the same id. Pass the `max_area_km2` the selector was opened
+with, and `["model=<m>", *overrides]` to `prepare_forward_run`, with `m` any of
 `pylbm`, `pypalm`, `pyudales` (uDALES adds its IBM preprocessing; costs in
-[pycity4cfd.md](pycity4cfd.md)). The `<hash>` covers the bbox,
-`resolution`, `default_height` and `pycity4cfd.case.CASE_FORMAT`, so a folder
-that already has a `case.json` is reused only if the same `make_case` format
-built it (older folders are left in place and never matched); a per-case lock makes a retry wait for a running
-build instead of racing it. It runs in the MCP process and takes minutes: the
-OpenStreetMap (Overpass) download dominates. Known limit: the build blocks the
-tool call rather than running in the supervisor. It needs City4CFD built
-(`pixi run -e mcp build-city4cfd`).
+[pycity4cfd.md](pycity4cfd.md)).
+
+The `<hash>` covers the bbox, `resolution`, `default_height` (all to five
+decimals) and `CASE_FORMAT` in `mcp_server/jobs/city_case.py`, so a folder is
+reused only if the same case format built it (older folders are left in place
+and never matched). The job's idempotency key is the folder name plus an
+attempt number: concurrent requests for one folder share a job, and a failed,
+cancelled or deleted build moves on to a new attempt. The worker runs in the
+`city4cfd` Pixi environment (the only one with pycity4cfd and the City4CFD
+binary); the tool raises, naming `pixi install -e city4cfd`, when it is
+missing. Neither the MCP nor the browser-app process imports pycity4cfd. The
+build takes minutes: the OpenStreetMap (Overpass) download dominates.
 
 ## Configuration and artifacts
 
@@ -231,12 +241,13 @@ plan's `estimated_output_bytes` is checked against the machine's
 ## Lifecycle and isolation
 
 A detached supervisor owns a transactional SQLite queue and a private Unix
-socket. It admits one active simulation or render job at a time. States are
+socket. It admits one active simulation or render job at a time, and,
+separately, one city case build, so a case never waits for a run. States are
 `queued`, `preparing`, `running`, `finalizing`, `succeeded`, `failed`, `cancelling`,
 `cancelled`, and `interrupted`. Closing MCP does not stop the supervisor.
 
 Workers capture native stdout/stderr into their job log and select `dev`,
-`cuda`, or `rendering` independently. Cancellation signals verified process
+`cuda`, `rendering` or `city4cfd` independently. Cancellation signals verified process
 identities and inherited job tokens, including detached MPI/forkserver children,
 then escalates TERM to KILL after five seconds. The slot stays occupied until
 owned descendants exit. Forward workers hold a checkout-wide backend lock for

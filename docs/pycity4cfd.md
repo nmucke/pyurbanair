@@ -12,9 +12,13 @@ bbox -> osm.fetch_buildings -> buildings.geojson (UTM, "height")
 ```
 
 From Claude Code the MCP tools drive it: `open_area_selector` ->
-`get_selected_area` -> `prepare_city_case` -> `prepare_forward_run` /
-`launch_forward_run` with `model=pylbm`, `pypalm` or `pyudales` (see
-[mcp.md](mcp.md)). By hand:
+`get_selected_area` -> `prepare_city_case` (-> `get_city_case` while it
+builds) -> `prepare_forward_run` / `launch_forward_run` with `model=pylbm`,
+`pypalm` or `pyudales` (see [mcp.md](mcp.md)); the browser app
+([user_interface.md](user_interface.md)) calls the same tools. Neither process
+imports pycity4cfd: the build is a `city_case` supervisor job whose worker
+(`mcp_server/jobs/city_case.py`, `build_case`) calls `make_case` in the
+`city4cfd` Pixi environment. By hand:
 
 ```bash
 pixi run -e dev build-city4cfd    # once per env, ~2 min
@@ -39,8 +43,9 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>  # or pypa
   compiles it with the `city4cfd` pixi feature's conda-forge deps into
   `libs/pycity4cfd/build/<env>/` (not in `setup-dev`). Build it once per pixi
   env you run it from (`dev`, `mcp`): CMake records that env's absolute
-  library paths, so `city4cfd_executable()` only looks in the current env's
-  directory and its error names the env to build. Each building is an LoD1.2
+  library paths. `city4cfd_executable()` takes `city4cfd` on PATH first (the
+  binary the `city4cfd` env installs), else the current env's build
+  directory; its error says to `pixi install -e city4cfd`. Each building is an LoD1.2
   extrusion to its `height`. City4CFD cannot run without a ground point cloud,
   so `write_config` writes a flat `ground.xyz` grid; every footprint must lie
   inside the `half_width` square around `point_of_interest`, or City4CFD
@@ -72,11 +77,13 @@ pixi run -e dev python scripts/run_forward.py model=pylbm <overrides>  # or pypa
   the UrbanTALES STLs). The overrides also null
   `geometry.udales_precomputed_geom_dir`, which barcelona sets to its own
   case folder.
-- `CASE_FORMAT` (also written to `case.json` as `case_format`) versions the
-  folder layout, `case.json` keys and overrides. Bump it when a change makes
-  older folders unusable: it is part of the MCP server's case-cache key
+- `CASE_FORMAT` in `mcp_server/jobs/city_case.py` versions the folder
+  layout, `case.json` keys and overrides. Bump it when a change to `case`
+  makes older folders unusable: it is part of the case-cache key
   ([mcp.md](mcp.md)), so folders from an older format are rebuilt, not
-  reused.
+  reused. It lives with the cache, not here, because the MCP and browser-app
+  processes compute the key without installing pycity4cfd (and pycity4cfd
+  does not depend on mcp-server).
 
 ## Limits
 

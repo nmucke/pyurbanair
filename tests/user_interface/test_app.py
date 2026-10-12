@@ -2,7 +2,7 @@
 
 `FakeTools` keeps the real config composition (`inspect_config`) and replaces
 everything that downloads, builds or runs: no network, no solver, no
-supervisor.
+supervisor. Its case build is job "case1", held while `release` is clear.
 """
 
 from __future__ import annotations
@@ -32,14 +32,26 @@ class FakeTools(Tools):
         self.prepared: list[list[str]] = []
         self.jobs_state: dict[str, str] = {}
         self.fail_case = False
+        self.cached = False
         self.release = threading.Event()
         self.release.set()
         self.frame_ancestor: str | None = None
 
     def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
+        if self.cached:
+            return {"status": "ready", **self._case()}
+        return {"status": "building", "case_job_id": "case1"}
+
+    def get_city_case(self, case_job_id: str) -> dict[str, Any]:
+        assert case_job_id == "case1"
+        if not self.release.is_set():
+            return {"case_job_id": case_job_id, "status": "building"}
         if self.fail_case:
-            raise ValueError("No buildings in this area")
-        self.release.wait(5)
+            error = "ValueError: No buildings in this area"
+            return {"case_job_id": case_job_id, "status": "failed", "error": error}
+        return {"case_job_id": case_job_id, "status": "ready", **self._case()}
+
+    def _case(self) -> dict[str, Any]:
         case_dir = self.store / "case"
         case_dir.mkdir(exist_ok=True)
         # One building in UTM 31N near the bbox's south-west corner.
@@ -257,6 +269,12 @@ def test_case_lifecycle(app: App) -> None:
     case = wait_for(app, f"api/cases/{case_id}", "status", "building")
     assert case == {"case_id": case_id, "status": "failed", "error": case["error"]}
     assert "No buildings" in case["error"]
+
+    # A case built before is ready at once, without a job.
+    cast(FakeTools, app.tools).cached = True
+    case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
+    case = request(app, f"api/cases/{case_id}")[1]
+    assert case["status"] == "ready" and case["summary"]["n_buildings"] == 1
 
 
 def test_run_lifecycle(app: App) -> None:

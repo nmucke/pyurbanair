@@ -213,7 +213,7 @@
   const caseLayer = L.layerGroup().addTo(map);
   let buildingsLayer = null;
 
-  // Same spherical formula as mcp_server.area_selector.bbox_area_km2.
+  // Same spherical formula as user_interface.area_selector.bbox_area_km2.
   function areaKm2(b) {
     const r = 6371.0088, rad = Math.PI / 180;
     return r * r * (b.east - b.west) * rad * (Math.sin(b.north * rad) - Math.sin(b.south * rad));

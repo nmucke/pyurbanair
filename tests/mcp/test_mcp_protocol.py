@@ -57,6 +57,7 @@ def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
                 "open_area_selector",
                 "get_selected_area",
                 "prepare_city_case",
+                "get_city_case",
             } <= names
             result = await client.call_tool("list_config_options", {"group": "model"})
             assert not result.is_error

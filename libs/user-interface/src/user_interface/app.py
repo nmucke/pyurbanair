@@ -1,11 +1,11 @@
 """Loopback HTTP server: the web/ page plus a JSON API over `mcp_server.tools.Tools`.
 
-Mirrors `mcp_server/area_selector.py`: a stdlib ThreadingHTTPServer on
+Mirrors `user_interface/area_selector.py`: a stdlib ThreadingHTTPServer on
 127.0.0.1, Host/Origin checks, an unguessable token as the first URL path
-segment and JSON-only POSTs with a size cap. Every action is a `Tools` call;
-this module only validates the requests, runs the slow case build in a thread
-and keeps the cases, runs and renders of this session in memory. The routes
-are listed in docs/user_interface.md.
+segment and JSON-only POSTs with a size cap. Every action is a `Tools` call
+(case builds and runs are supervisor jobs); this module only validates the
+requests and keeps the cases, runs and renders of this session in memory. The
+routes are listed in docs/user_interface.md.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from mcp_server.area_selector import MAX_AREA_KM2, validate_bbox
 from mcp_server.tools import Tools
+from user_interface.area_selector import MAX_AREA_KM2, validate_bbox
 
 WEB_DIR = pathlib.Path(__file__).with_name("web")
 MAX_BODY_BYTES = 64 * 1024
@@ -339,46 +339,57 @@ class App:
         default_height = _positive(
             payload, "default_height", CASE_DEFAULTS["default_height"], 500.0
         )
+        # A finished case is ready at once; a new one builds as a job.
+        built = self.tools.prepare_city_case(
+            bbox, resolution=resolution, default_height=default_height
+        )
         case_id = uuid.uuid4().hex[:12]
         record: dict[str, Any] = {"case_id": case_id, "status": "building"}
+        if built["status"] == "ready":
+            record.update(self._ready(built))
+        else:
+            record["case_job_id"] = built["case_job_id"]
         with self._lock:
             self.cases[case_id] = record
-
-        def build() -> None:
-            try:
-                summary = self.tools.prepare_city_case(
-                    bbox, resolution=resolution, default_height=default_height
-                )
-                geometry = case_geometry(pathlib.Path(summary["case_dir"]))
-                update: dict[str, Any] = {
-                    "status": "ready",
-                    "summary": {
-                        key: summary[key]
-                        for key in (
-                            "n_buildings",
-                            "height_sources",
-                            "max_height",
-                            "domain",
-                        )
-                    },
-                    "overrides": list(summary["overrides"]),
-                    **geometry,
-                }
-            except Exception as exc:  # reported to the page, not raised
-                traceback.print_exc()
-                update = {"status": "failed", "error": str(exc)[:2000]}
-            with self._lock:
-                record.update(update)
-
-        threading.Thread(target=build, daemon=True).start()
         return 202, {"case_id": case_id}
+
+    @staticmethod
+    def _ready(case: dict[str, Any]) -> dict[str, Any]:
+        """A finished case as this app keeps it: summary, overrides, geometry."""
+        return {
+            "status": "ready",
+            "summary": {
+                key: case[key]
+                for key in ("n_buildings", "height_sources", "max_height", "domain")
+            },
+            "overrides": list(case["overrides"]),
+            **case_geometry(pathlib.Path(case["case_dir"])),
+        }
 
     def case(self, case_id: str) -> dict[str, Any]:
         with self._lock:
             record = self.cases.get(case_id)
             if record is None:
                 raise RequestError(404, f"Unknown case: {case_id}")
-            return {k: v for k, v in record.items() if k != "overrides"}
+            job_id = (
+                record.get("case_job_id") if record["status"] == "building" else None
+            )
+        if job_id is not None:
+            built = self.tools.get_city_case(job_id)
+            update: dict[str, Any] = {}
+            if built["status"] == "ready":
+                try:
+                    update = self._ready(built)
+                except Exception as exc:  # reported to the page, not raised
+                    traceback.print_exc()
+                    update = {"status": "failed", "error": str(exc)[:2000]}
+            elif built["status"] == "failed":
+                update = {"status": "failed", "error": built["error"][:2000]}
+            with self._lock:
+                record.update(update)
+        with self._lock:
+            hidden = ("overrides", "case_job_id")
+            return {k: v for k, v in record.items() if k not in hidden}
 
     def create_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

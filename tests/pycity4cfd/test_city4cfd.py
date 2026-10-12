@@ -122,13 +122,29 @@ def test_write_config_rejects_footprints_outside(tmp_path: pathlib.Path) -> None
         )
 
 
-def test_executable_missing_names_the_build_task(
+def test_executable_missing_names_the_env(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     monkeypatch.setattr(city4cfd, "BUILD_DIR", tmp_path)
     monkeypatch.setattr(city4cfd, "PIXI_ENV", "someenv")
-    with pytest.raises(FileNotFoundError, match="pixi run -e someenv build-city4cfd"):
+    with pytest.raises(FileNotFoundError, match="pixi install -e city4cfd"):
         city4cfd.city4cfd_executable()
+
+
+def test_executable_on_path_comes_first(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for directory in ("bin", "build"):
+        binary = tmp_path / directory / "city4cfd"
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+    monkeypatch.setattr(city4cfd, "BUILD_DIR", tmp_path / "build")
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    assert city4cfd.city4cfd_executable() == tmp_path / "bin" / "city4cfd"
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    assert city4cfd.city4cfd_executable() == tmp_path / "build" / "city4cfd"
 
 
 def test_build_dir_is_per_pixi_env() -> None:
@@ -136,9 +152,16 @@ def test_build_dir_is_per_pixi_env() -> None:
     assert city4cfd.BUILD_DIR.parent.name == "build"
 
 
+def _has_city4cfd() -> bool:
+    try:
+        city4cfd.city4cfd_executable()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 requires_city4cfd = pytest.mark.skipif(
-    not (city4cfd.BUILD_DIR / "city4cfd").is_file(),
-    reason="City4CFD is not built (pixi run build-city4cfd)",
+    not _has_city4cfd(), reason="City4CFD is not installed (pixi install -e city4cfd)"
 )
 
 
