@@ -17,9 +17,12 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 
-# These tests run in the mcp env, the only one that installs mcp-server.
+# These tests run in the mcp env. ui installs mcp-server without the MCP SDK,
+# so there only the SDK-free tests are collected; elsewhere none are.
 if importlib.util.find_spec("mcp_server") is None:
     collect_ignore_glob = ["test_*.py"]
+elif importlib.util.find_spec("mcp") is None:
+    collect_ignore = ["test_mcp_protocol.py", "test_mcp_forward_integration.py"]
 
 
 @pytest.fixture  # type: ignore[misc]

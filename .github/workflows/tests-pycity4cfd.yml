@@ -1,7 +1,8 @@
 # tests/pycity4cfd: map area -> OSM buildings -> City4CFD -> case overrides, in
 # the city4cfd pixi environment. osmnx is mocked. Installing the env compiles
-# City4CFD (a pixi source package, a few minutes; the env is cached after), so
-# the `integration` tests that run it are included.
+# City4CFD (a pixi source package, a few minutes per OS); the installed env is
+# cached, so it recompiles only when the cache key (pixi.lock, the manifests)
+# changes. The `integration` tests that run it are included.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: pycity4cfd"
