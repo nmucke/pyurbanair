@@ -31,7 +31,7 @@ All new knobs default to off: default runs are unchanged. Commits on top of
 | e6f9c05 | `trainer.lr_warmup_per_step` (false) | Warmup advances per optimizer step instead of per epoch. With `lr_warmup_epochs=1`: LR rises linearly over epoch 0 from `lr_warmup_start`, peak from epoch 1, then cosine to `lr_min` per epoch. Fixes "epoch 0 runs entirely at 1e-6". | **no** |
 | 6dca519 | `trainer.grad_accum_samples` (null) | Accumulate until ≥ N samples, step on the per-sample mean. For variable micro-batches from `batch_sampler.cell_budget`. Exclusive with `grad_accum_steps > 1`. `_optimizer_steps_per_epoch()` (used by the per-step warmup) replays the sampler's planned batch sizes. | **no** |
 | 251fb3a | `trainer.profile_steps` (null) | `[start, count]`: torch.profiler over those epoch-0 micro-batches; prints it/s and GPU-busy %, writes `profile.txt` (top 40 ops) next to `weights.pt`. | **no** |
-| f7c9b75 | `trainer.compile_modules` (null) | Regional `nn.Module.compile` (in place, dynamic shapes) of submodules matching globs; state-dict keys / LoRA merge unchanged. CPU parity vs eager with LoRA tested. | **no** |
+| f7c9b75 | `trainer.compile_modules` (null) | Regional `nn.Module.compile` (in place, dynamic shapes) of submodules matching globs; state-dict keys / LoRA merge unchanged. CPU parity vs eager with LoRA tested. | yes (3090, see [Kernels, launch overhead and compile](#kernels-launch-overhead-and-compile-rtx-3090)) |
 
 Also on the branch: `job_scripts/snellius/*` and `docs/job_scripts.md` use the
 new Snellius account `tdsei19851` (the old `tdsr72361` is rejected by Slurm).
@@ -149,7 +149,8 @@ sbatch -p gpu_h100 -c 16 --export=ALL,PYTORCH_CUDA_ALLOC_CONF=expandable_segment
   cannot run this (11 % of trajectories exceed 40 GB even at micro-batch 1), so
   pass `-p gpu_h100 -c 16` or change the script's defaults.
 
-Once tested, candidate additions: `trainer.compile_modules='[dft.encoder.conv_encoder.conv_encoder.blocks.*,dft.decoder.conv_decoder.conv_decoder.blocks.*]'`
+Candidate additions: `trainer.compile_modules='[dft.encoder.conv_encoder,dft.decoder.conv_decoder]'`
+(tested on the 3090, see [below](#kernels-launch-overhead-and-compile-rtx-3090))
 and/or `batch_sampler.batch_size=4 batch_sampler.cell_budget=3500000
 trainer.grad_accum_steps=1 trainer.grad_accum_samples=8` (micro-batches 1–4 by
 grid size, peak ≲ 70 GB on the H100).
@@ -224,6 +225,51 @@ term is ~40 % of it); whole-vector cosine 0.970. Memory −20 % (5.28 -> 4.25
 GB fused), time −3…7 % fused (−14 % unfused). Not recommended: it acts like a
 ~40 % lower encoder-LoRA learning rate for a few % speed; checkpointing the
 conv blocks saves more memory without changing the gradient.
+
+## Kernels, launch overhead and compile (RTX 3090)
+
+S AE, horizon 4 (2 grad steps), bf16, micro-batch 1 unless stated, idle GPU.
+Speed numbers on this box drift ±5–10 % with the CPU load of other jobs, so
+the compile and cache effects below are in-process A/B (eager and compiled /
+cached alternated, 4 rounds of 10 steps, median).
+
+- **Profile, unfused LoRA (32x144x192)**: 0.39 s/it, ~9,500 kernels per step,
+  GPU 72 % busy (kernel time 349 ms/it): convs 40 %, elementwise + copies
+  42 % (PEFT's fp32 input casts, GroupNorm/GELU in fp32 under autocast, the
+  residual/skip adds), cuDNN `nchwToNhwc`/`nhwcToNchw` layout transposes
+  ~11 %, attention/LN GEMMs ~9 %. With `lora.fused_forward`: 0.23 s/it,
+  ~8,000 kernels, kernel time 222 ms/it (92 % busy on an idle box).
+- **The step is close to launch-bound.** Small idealized grids run at the same
+  0.14–0.22 s/it whatever their size; that is the CPU floor of one micro-batch
+  step (~11.5k aten ops incl. backward; the window-attention `F.normalize`, the
+  position-bias MLP and the fused-LoRA merges of the transformer Linear layers
+  are the largest forward contributors). On an H100 (3–4x the 3090's conv
+  throughput) the fused step's GPU time (~60–70 ms) is well under that floor,
+  so expect the H100 to be CPU-bound at micro-batch 1: use micro-batches > 1
+  (`grad_accum_samples` + `cell_budget`) to amortise the launches.
+- **Window-attention position bias**: the stepper now reuses it while frozen
+  (bit-identical): −4.3 % at 32x144x192, −3.5 % at 16x64x112.
+- **`compile_modules` (dynamic shapes)**: use the two conv stems,
+  `[dft.encoder.conv_encoder,dft.decoder.conv_decoder]` (the `blocks.*` globs
+  cover only the half-resolution blocks and miss the full-resolution stem
+  convs). One graph per stem and grad mode; one compile of ~45–115 s, then **no
+  recompiles across all 11 idealized shapes** (a new shape costs only cuDNN
+  autotuning, ~4 s, as in eager), so 69 realistic shapes cost nothing extra.
+  Fused LoRA, 32x144x192: b = 1 +2 % s/it (neutral), peak 4.90 → 3.84 GB
+  (−22 %); **b = 2 −10 % s/it (0.419 → 0.378), peak 9.64 → 7.51 GB (−22 %)**;
+  with conv-block activation checkpointing b = 1 ±0 %, 3.48 → 3.33 GB.
+  Compile alone saves more memory than conv-block checkpointing for no time
+  cost. Parity vs eager on a fixed batch (perturbed LoRA/gates so every grad is
+  non-zero): loss rel. 2e-4, grads global rel. 4e-3 (bf16); 4e-5 / 2e-4 in
+  fp32 (TF32); both sides deterministic.
+- Rejected / not worth it: compiling the transformer stages or the whole
+  encoder/decoder with dynamic shapes (> 14 min of compile, killed); `blocks.*`
+  only (b = 1 +1 %, peak −19 %); `channels_last=true` (crashed on the DFT's
+  4-D buffers, now fixed; eager +25 % slower: GroupNorm converts back and
+  forth; with compile ±0); PEFT's fp32 input cast (gone with fused LoRA).
+- Local quirk: on this box `/usr/local/sbin` on `PATH` is unsearchable, so
+  inductor's `nvcc --version` probe raises `PermissionError` (it only catches
+  `FileNotFoundError`); drop that entry from `PATH` to run compile here.
 
 ## Testing on the RTX 3090 (24 GB)
 
