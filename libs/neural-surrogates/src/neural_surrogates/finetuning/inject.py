@@ -23,10 +23,12 @@ untouched by PEFT and included in the merged export.
 from __future__ import annotations
 
 import copy
+import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids importing peft eagerly
@@ -43,6 +45,7 @@ def inject_lora(
     variant: str = "standard",
     modules_to_save: list[str] | None = None,
     balora_cfg: dict | None = None,
+    fused_forward: bool = False,
 ) -> "PeftModel":
     """Wrap ``model`` with LoRA adapters on ``target_modules`` and return it.
 
@@ -53,6 +56,10 @@ def inject_lora(
     ``variant="balora"`` routes through the custom-dispatch layer from plan 04;
     it raises ``NotImplementedError`` here (this phase ships standard LoRA only).
     ``balora_cfg`` is accepted for forward-compatibility and ignored for now.
+
+    ``fused_forward=True`` runs every adapted Linear / Conv3d as one call with the
+    merged weight ``W + scaling * B @ A`` (see :func:`_fused_lora_forward`): the
+    same function, faster when the rank is not small against the layer widths.
     """
     if variant == "balora":
         raise NotImplementedError(
@@ -72,7 +79,57 @@ def inject_lora(
         modules_to_save=list(modules_to_save) if modules_to_save else None,
         bias="none",
     )
-    return get_peft_model(model, config)
+    peft_model = get_peft_model(model, config)
+    if fused_forward:
+        from peft.tuners.lora import layer as lora_layer
+
+        for module in peft_model.modules():
+            if isinstance(module, (lora_layer.Linear, lora_layer.Conv3d)):
+                module.forward = types.MethodType(_fused_lora_forward, module)
+    return peft_model
+
+
+def _fused_lora_forward(self: Any, x: torch.Tensor, *args: Any, **kwargs: Any) -> Any:
+    """A PEFT LoRA Linear / Conv3d forward as one call with the merged weight.
+
+    PEFT computes ``base(x) + B(A(x)) * scaling``: three convolutions, one of them
+    with the base kernel at rank output channels, plus elementwise passes over the
+    output. This computes ``base_with_weight(x, W + scaling * B @ A)`` instead, the
+    same function up to rounding. The merge runs in fp32 outside autocast; the
+    gradients reach ``A`` and ``B`` through the merged weight. The cost moves from
+    the low-rank branch to one full weight-gradient convolution, which wins when
+    the rank is not small against the channel widths (and always without grad).
+
+    Anything other than plain, unmerged LoRA (dropout, a variant, a LoRA bias,
+    grouped convs, mixed adapter batches, ``fan_in_fan_out``) falls back to PEFT.
+    """
+    base = self.get_base_layer()
+    adapters = [a for a in self.active_adapters if a in self.lora_A]
+    if (
+        args
+        or kwargs
+        or self.disable_adapters
+        or self.merged
+        or getattr(self, "fan_in_fan_out", False)
+        or getattr(base, "groups", 1) != 1
+        or any(
+            a in self.lora_variant
+            or self.lora_bias[a]
+            or not isinstance(self.lora_dropout[a], nn.Identity)
+            for a in adapters
+        )
+    ):
+        return type(self).forward(self, x, *args, **kwargs)
+    weight = base.weight
+    with torch.autocast(x.device.type, enabled=False):
+        for a in adapters:
+            lora_a = self.lora_A[a].weight.flatten(1)  # (r, in * kernel)
+            lora_b = self.lora_B[a].weight.flatten(1)  # (out, r)
+            delta = (lora_b @ lora_a).view(weight.shape) * self.scaling[a]
+            weight = weight + delta.to(weight.dtype)
+    if isinstance(base, nn.Linear):
+        return F.linear(x, weight, base.bias)
+    return base._conv_forward(x, weight, base.bias)
 
 
 def merge_to_state_dict(peft_model: "PeftModel") -> dict[str, torch.Tensor]:

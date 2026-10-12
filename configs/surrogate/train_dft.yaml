@@ -47,6 +47,7 @@ lora:
   target_preset: tadpole_encdec
   target_modules: null
   modules_to_save: []
+  fused_forward: false  # true: one call with the merged weight W + s*B@A (same function, faster)
 recompute_normalization: false
 trainer:
   _target_: neural_surrogates.Trainer

@@ -13,6 +13,7 @@ Gated with ``importorskip`` on the vendored Tadpole runtime deps
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as np
@@ -291,6 +292,78 @@ def test_identity_at_init_parity_after_lora_injection() -> None:
         # the base model's reference recon is reached through the PEFT wrapper
         ref = peft_model.base_model.model._ae_reference_recon(state, geom)
     assert torch.equal(out, ref)  # exact, bitwise: injection adds no delta at init
+
+
+def test_lora_fused_forward_matches_peft() -> None:
+    """``fused_forward`` (one call with the merged weight) is the same function as
+    PEFT's ``base(x) + B(A(x)) * s``: equal outputs and LoRA gradients at nonzero B,
+    the same state-dict keys and the same merged export."""
+    finetuning = pytest.importorskip("neural_surrogates.finetuning")
+    m = _stepper(latent_type="mode").eval()
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    m.requires_grad_(False)
+    targets = finetuning.resolve_target_modules(m, preset="tadpole_encdec")
+    state, params, geom = _inputs()
+    runs = []
+    for fused in (False, True):
+        torch.manual_seed(0)  # the same random lora_A and lora_B in both runs
+        peft_model = finetuning.inject_lora(
+            copy.deepcopy(m),
+            rank=4,
+            alpha=8,
+            target_modules=targets,
+            fused_forward=fused,
+        ).eval()  # eval: no stochastic layers, gradients still flow
+        with torch.no_grad():  # off the zero fixed point
+            for n, p in peft_model.named_parameters():
+                if "lora_B" in n:
+                    p.normal_(std=0.05)
+        out = peft_model(state, params, geom)
+        out.square().mean().backward()
+        grads = {
+            n: p.grad for n, p in peft_model.named_parameters() if p.grad is not None
+        }
+        runs.append((peft_model, out, grads))
+    (peft_ref, out_ref, g_ref), (peft_fused, out_fused, g_fused) = runs
+    with torch.no_grad():
+        assert not torch.allclose(out_ref, m(state, params, geom), atol=1e-4)
+    # fp32 rounding through the deep network: compare against the largest entry
+    assert (out_fused - out_ref).abs().max() <= 1e-4 * out_ref.abs().max()
+    assert g_ref.keys() == g_fused.keys() and any("lora_A" in n for n in g_ref)
+    for n, g in g_ref.items():
+        assert (g_fused[n] - g).abs().max() <= 1e-3 * g.abs().max(), n
+    assert peft_fused.state_dict().keys() == peft_ref.state_dict().keys()
+    merged_ref = finetuning.merge_to_state_dict(peft_ref)
+    merged_fused = finetuning.merge_to_state_dict(peft_fused)
+    for k, v in merged_ref.items():
+        assert torch.equal(merged_fused[k], v), k
+
+
+def test_lora_fused_forward_falls_back_with_dropout() -> None:
+    """Configurations the merged call cannot express (here LoRA dropout) keep
+    PEFT's own forward: the same random output under the same seed."""
+    finetuning = pytest.importorskip("neural_surrogates.finetuning")
+    m = _stepper(latent_type="mode")
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    targets = finetuning.resolve_target_modules(m, preset="tadpole_encdec")
+    state, params, geom = _inputs()
+    outs = []
+    for fused in (False, True):
+        torch.manual_seed(0)  # the same random lora_A and lora_B in both runs
+        peft_model = finetuning.inject_lora(
+            copy.deepcopy(m),
+            rank=4,
+            alpha=8,
+            dropout=0.5,
+            target_modules=targets,
+            fused_forward=fused,
+        ).train()
+        with torch.no_grad():
+            for n, p in peft_model.named_parameters():
+                if "lora_B" in n:
+                    p.normal_(std=0.05)
+            outs.append(peft_model(state, params, geom))
+    assert torch.equal(outs[0], outs[1])
 
 
 def test_max_internal_batchsize_chunked_path_parity() -> None:
