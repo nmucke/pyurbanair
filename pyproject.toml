@@ -388,6 +388,13 @@ mcp-server = { path = "libs/mcp-server", editable = true }
 start-mcp = { cmd = "python -m mcp_server --repo-root .", description = "Serve local forward tools over stdio" }
 register-claude = { cmd = "bash scripts/register_claude.sh", description = "Register the pyurbanair MCP server with Claude Code (asks first)" }
 
+# Local browser app (libs/user-interface): draw an area, run a model, see results.
+[tool.pixi.feature.user-interface.pypi-dependencies]
+user-interface = { path = "libs/user-interface", editable = true }
+
+[tool.pixi.feature.user-interface.tasks]
+start-ui = { cmd = "python -m user_interface --repo-root .", description = "Start the local browser app for city simulations" }
+
 [tool.pixi.feature.visualization-3d.dependencies]
 pyvista = ">=0.44,<0.47"
 vtk = ">=9.3,<9.6"
@@ -401,5 +408,5 @@ delftblue = { features = ["delftblue", "dev", "py312", "udales", "data-assimilat
 # (JAX_PLATFORMS=cpu, PYTHONNOUSERSITE=1) rather than the `cuda` feature.
 snellius = { features = ["snellius", "cpu", "dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm"] }
 cuda = { features = ["dev", "py312", "udales", "data-assimilation", "evaluation", "visualization", "neural-surrogates", "baselines", "lbm", "palm", "cuda"] }
-mcp = { features = ["mcp", "city4cfd", "visualization", "evaluation", "dev", "py312", "cpu"] }
+mcp = { features = ["mcp", "user-interface", "city4cfd", "visualization", "evaluation", "dev", "py312", "cpu"] }
 rendering = { features = ["visualization", "visualization-3d", "evaluation", "dev", "py312", "cpu"] }

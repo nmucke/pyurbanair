@@ -2471,6 +2471,7 @@ environments:
       - pypi: ./libs/evaluation
       - pypi: ./libs/mcp-server
       - pypi: ./libs/pycity4cfd
+      - pypi: ./libs/user-interface
       - pypi: ./libs/visualization
       - pypi: https://download-r2.pytorch.org/whl/cpu/torch-2.12.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
       - pypi: https://download-r2.pytorch.org/whl/cpu/torchvision-0.27.1%2Bcpu-cp312-cp312-manylinux_2_28_x86_64.whl
@@ -2753,6 +2754,7 @@ environments:
       - pypi: ./libs/evaluation
       - pypi: ./libs/mcp-server
       - pypi: ./libs/pycity4cfd
+      - pypi: ./libs/user-interface
       - pypi: ./libs/visualization
       - pypi: https://files.pythonhosted.org/packages/04/4b/29cac41a4d98d144bf5f6d33995617b185d14b22401f75ca86f384e87ff1/h11-0.16.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/09/ba/a4568248771ce81957bfb7cc600264a40fbcda092391ee1c415c50be4bea/httpcore2-2.13.1-py3-none-any.whl
@@ -16584,6 +16586,12 @@ packages:
   - netcdf4>=1.7.3,<2
   - tqdm>=4.67.1,<5
   - trimesh>=4.0.0,<5
+  requires_python: '>=3.12,<3.13'
+- pypi: ./libs/user-interface
+  name: user-interface
+  requires_dist:
+  - mcp-server
+  - pycity4cfd
   requires_python: '>=3.12,<3.13'
 - pypi: ./libs/visualization
   name: visualization
