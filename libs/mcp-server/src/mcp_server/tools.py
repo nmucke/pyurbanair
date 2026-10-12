@@ -276,19 +276,26 @@ class Tools:
         the one `get_selected_area` returned. Building heights come from OSM
         `height`, else `building:levels` x 3 m, else `default_height` (m).
         Takes minutes (the OpenStreetMap download dominates). Returns
-        `overrides`: pass `["model=pylbm", *overrides]` to
-        `prepare_forward_run`. `resolution` is the grid spacing (m); check
+        `overrides`: pass `["model=<m>", *overrides]` to `prepare_forward_run`
+        with m = pylbm, pypalm or pyudales (pyudales first runs its IBM
+        preprocessing on the STL: seconds to minutes, growing with the grid
+        and building count). `resolution` is the grid spacing (m); check
         `domain` before launching, the run cost grows with nx * ny * nz.
         `max_area_km2` is the area limit; pass the one the selector was
         opened with. A finished case for the same inputs is reused.
         """
-        from pycity4cfd.case import make_case
+        from pycity4cfd.case import CASE_FORMAT, make_case
 
         area = validate_bbox(bbox, max_area_km2)
         west, south, east, north = (area[k] for k in ("west", "south", "east", "north"))
+        # The case format is in the key, so folders built by an older make_case
+        # are never reused.
         key = ",".join(
-            f"{value:.5f}"
-            for value in (west, south, east, north, resolution, default_height)
+            [f"v{CASE_FORMAT}"]
+            + [
+                f"{value:.5f}"
+                for value in (west, south, east, north, resolution, default_height)
+            ]
         )
         name = "area_" + hashlib.sha1(key.encode()).hexdigest()[:10]
         case_dir = self.repo_root / ".temp" / "city_cases" / name
@@ -300,6 +307,7 @@ class Tools:
             if case_json.is_file():
                 case: dict[str, Any] = json.loads(case_json.read_text(encoding="utf-8"))
                 case.pop("bbox", None)
+                case.pop("case_format", None)
             else:
                 case = make_case(
                     (west, south, east, north),

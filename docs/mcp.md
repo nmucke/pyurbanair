@@ -145,10 +145,15 @@ selection in the URL, JSON-only POSTs, and shutdown after 30 idle minutes.
 `prepare_city_case(bbox, resolution=4.0, default_height=10.0,
 max_area_km2=4.0)` then builds the case with `pycity4cfd.case.make_case` (see
 [pycity4cfd.md](pycity4cfd.md)) in `.temp/city_cases/area_<hash>/` and returns
-`{case_dir, overrides, n_buildings, height_sources, max_height, domain}`. Pass
+`{case_dir, overrides, n_buildings, height_sources, max_height, domain, crs,
+origin}`. Pass
 the `max_area_km2` the selector was opened with, and
-`["model=pylbm", *overrides]` to `prepare_forward_run`. A folder that already
-has a `case.json` is reused; a per-case lock makes a retry wait for a running
+`["model=<m>", *overrides]` to `prepare_forward_run`, with `m` any of
+`pylbm`, `pypalm`, `pyudales` (uDALES adds its IBM preprocessing; costs in
+[pycity4cfd.md](pycity4cfd.md)). The `<hash>` covers the bbox,
+`resolution`, `default_height` and `pycity4cfd.case.CASE_FORMAT`, so a folder
+that already has a `case.json` is reused only if the same `make_case` format
+built it (older folders are left in place and never matched); a per-case lock makes a retry wait for a running
 build instead of racing it. It runs in the MCP process and takes minutes: the
 OpenStreetMap (Overpass) download dominates. Known limit: the build blocks the
 tool call rather than running in the supervisor. It needs City4CFD built

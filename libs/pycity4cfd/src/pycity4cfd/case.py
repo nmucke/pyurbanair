@@ -1,9 +1,11 @@
 """Map area -> simulation case: OSM buildings, City4CFD STL, domain overrides.
 
 ``make_case`` writes one case folder (``buildings.geojson``, City4CFD's run in
-``city4cfd/``, the domain-frame ``buildings.stl`` and ``case.json``) and
-returns the Hydra overrides that point a forward run at it, e.g.
-``python scripts/run_forward.py model=pylbm <overrides>``.
+``city4cfd/``, the domain-frame ``buildings.stl``, the uDALES ``namoptions.300``
+and PALM ``_p3d`` templates, and ``case.json``) and returns the Hydra overrides
+that point a forward run at it, e.g.
+``python scripts/run_forward.py model=pylbm <overrides>`` (or ``model=pypalm``,
+``model=pyudales``).
 
 The domain is the bbox's projected envelope plus an open ``margin`` on every
 side, so the inflow and outflow boundaries are clear of buildings. The STL
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,14 +29,38 @@ from pycity4cfd.city4cfd import run_city4cfd, write_config
 from pycity4cfd.osm import fetch_buildings, write_buildings
 from shapely.geometry import Point, box
 
+# Bump when a change makes older case folders unusable (files, case.json keys,
+# overrides); it is part of the MCP cache key, so old folders are not reused.
+CASE_FORMAT = 2
 N_SENSORS = 6
 N_VALIDATION = 3  # held-out sensors, after the assimilated ones
 SENSOR_HEIGHT = 3.0  # m above ground
+# The xie_and_castro uDALES/PALM templates: what the wrappers do not overwrite
+# (courant 0.7, neutral, no Coriolis, CD2 advection) is generic and matched
+# between the two solvers.
+TEMPLATE_DIR = Path(__file__).resolve().parents[4] / "geometries" / "xie_and_castro"
 
 
 def _even(n: float) -> int:
-    """Round up to an even integer (PALM's poisfft needs even nx/ny)."""
+    """Round up to an even integer."""
     return 2 * math.ceil(n / 2)
+
+
+def _fft_size(n: float) -> int:
+    """Round up to an even integer with no prime factor above 5.
+
+    PALM's poisfft needs even nx/ny and its Temperton FFT only factors 2, 3, 5
+    (PAC0317).
+    """
+    m = _even(n)
+    while True:
+        r = m
+        for p in (2, 3, 5):
+            while r % p == 0:
+                r //= p
+        if r == 1:
+            return m
+        m += 2
 
 
 def _sensors(
@@ -64,6 +91,66 @@ def _sensors(
     return points[:n_assimilated], points[n_assimilated:]
 
 
+def _set(text: str, values: dict[str, Any]) -> str:
+    """Replace ``key = value`` lines of a Fortran namelist."""
+    for key, value in values.items():
+        text, n = re.subn(
+            rf"(?m)^(\s*{key}\s*=\s*).*$", rf"\g<1>{value}", text, count=1
+        )
+        if n != 1:
+            raise KeyError(f"{key} not in the namelist template")
+    return text
+
+
+def _write_solver_templates(
+    case_dir: Path, n_facets: int, n: tuple[int, int, int], lengths: tuple[float, ...]
+) -> None:
+    """Write ``namoptions.300`` (uDALES) and ``_p3d`` (PALM) into ``case_dir``.
+
+    Both wrappers overwrite the grid, runtime, boundary conditions, inflow and
+    closure at staging; the grid is written here only so the files are
+    consistent as-is. uDALES reads ``stl_file`` from here; its IBM
+    preprocessing recounts ``nfcts`` (one facet per STL triangle) and
+    regenerates the other ``&WALLS`` counts, so those are zeroed.
+    """
+    (nx, ny, nz), (lx, ly, lz) = n, lengths
+    namoptions = (TEMPLATE_DIR / "namoptions.300").read_text()
+    walls = {
+        f"{count}_{grid}": 0
+        for count in ("nsolpts", "nbndpts", "nfctsecs")
+        for grid in "uvwc"
+    }
+    namoptions = _set(
+        namoptions,
+        {
+            "itot": nx,
+            "jtot": ny,
+            "ktot": nz,
+            "xlen": lx,
+            "ylen": ly,
+            "zsize": lz,
+            "stl_file": "buildings.stl",
+            "nfcts": n_facets,
+            **walls,
+        },
+    )
+    (case_dir / "namoptions.300").write_text(namoptions)
+    # PALM counts nx/ny from 0; nz is the number of levels.
+    p3d = (TEMPLATE_DIR / "_p3d").read_text()
+    p3d = _set(
+        p3d,
+        {
+            "nx": f"{nx - 1},",
+            "ny": f"{ny - 1},",
+            "nz": f"{nz},",
+            "dx": f"{lx / nx},",
+            "dy": f"{ly / ny},",
+            "dz": f"{lz / nz},",
+        },
+    )
+    (case_dir / "_p3d").write_text(p3d)
+
+
 def make_case(
     bbox: tuple[float, float, float, float],
     case_dir: str | Path,
@@ -85,7 +172,9 @@ def make_case(
 
     Returns:
         ``{"case_dir", "overrides", "n_buildings", "height_sources",
-        "max_height", "domain"}``; also written to ``case_dir/case.json``.
+        "max_height", "domain", "crs", "origin"}``; also written to
+        ``case_dir/case.json``. ``origin`` is the domain's ``(0, 0)`` corner in
+        ``crs`` (the local UTM zone).
     """
     case_dir = Path(case_dir).resolve()
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -109,8 +198,8 @@ def make_case(
     # Domain top: three times the tallest building, at least 15 cells.
     nz = _even(max(3 * max_height, 15 * resolution) / resolution)
     lz = nz * resolution
-    nx = _even((xmax - xmin + 2 * margin) / resolution)
-    ny = _even((ymax - ymin + 2 * margin) / resolution)
+    nx = _fft_size((xmax - xmin + 2 * margin) / resolution)
+    ny = _fft_size((ymax - ymin + 2 * margin) / resolution)
     lx, ly = nx * resolution, ny * resolution
 
     config = write_config(
@@ -127,6 +216,9 @@ def make_case(
     mesh.apply_translation((*shift, 0.0))
     stl_path = case_dir / "buildings.stl"
     mesh.export(stl_path)
+    # nfcts as uDALES counts it: the faces trimesh keeps on loading the STL.
+    n_facets = len(trimesh.load_mesh(stl_path).faces)
+    _write_solver_templates(case_dir, n_facets, (nx, ny, nz), (lx, ly, lz))
 
     footprints = buildings.geometry.translate(-(xmin - margin), -(ymin - margin))
     sensors, validation = _sensors(footprints, lx, ly, resolution)
@@ -136,6 +228,9 @@ def make_case(
         f"case_name=city_{case_dir.name}",
         f"geometry.case_dir={case_dir}",
         f"geometry.stl_path={stl_path}",
+        # uDALES generates its IBM geometry from buildings.stl (a case's
+        # precomputed one, e.g. barcelona's, is for another STL and grid).
+        "++geometry.udales_precomputed_geom_dir=null",
         f"domain.nx={nx}",
         f"domain.ny={ny}",
         f"domain.nz={nz}",
@@ -157,8 +252,13 @@ def make_case(
         "height_sources": buildings["height_source"].value_counts().to_dict(),
         "max_height": max_height,
         "domain": {"nx": nx, "ny": ny, "nz": nz, "lengths_m": [lx, ly, lz]},
+        # The domain's (0, 0) corner in the buildings' projected (UTM) CRS, to
+        # map domain coordinates (e.g. sensors) back onto the map.
+        "crs": buildings.crs.to_string(),
+        "origin": [float(xmin - margin), float(ymin - margin)],
     }
     (case_dir / "case.json").write_text(
-        json.dumps({"bbox": list(bbox), **result}, indent=2) + "\n"
+        json.dumps({"case_format": CASE_FORMAT, "bbox": list(bbox), **result}, indent=2)
+        + "\n"
     )
     return result
