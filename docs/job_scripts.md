@@ -22,6 +22,9 @@ job_scripts/
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
+│   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
+│   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
+│   ├── surrogate_evaluate_latent_generator_gpu.slurm # on latent_generator_b_realistic (GPU)
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
 └── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
 ```
