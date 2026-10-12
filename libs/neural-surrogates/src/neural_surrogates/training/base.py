@@ -26,6 +26,7 @@ from typing import Callable
 
 import torch
 import tqdm
+from torch.autograd import DeviceType
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 
 
@@ -58,6 +59,7 @@ class BaseTraining:
         grad_clip_norm: float | None = None,
         grad_unroll_steps: int = 2,
         grad_accum_steps: int = 1,
+        profile_steps: list[int] | tuple[int, int] | None = None,
         checkpoint_every: int = 1,
         resume: bool = False,
         checkpoint_metadata: dict | None = None,
@@ -243,6 +245,15 @@ class BaseTraining:
         # effective batch of ``batch_size * grad_accum_steps`` when the full
         # batch does not fit in memory. 1 steps after every batch.
         self.grad_accum_steps = max(1, int(grad_accum_steps))
+        # Optional ``(start, count)`` window of micro-batches of the first
+        # training epoch to run under ``torch.profiler`` (see ``_profile_tick``).
+        # One-shot: consumed by the first ``_train_epoch`` call and cleared on
+        # resume, so only epoch 0 of a fresh run is profiled. ``None`` = off.
+        self._profile_window: tuple[int, int] | None = (
+            None
+            if profile_steps is None
+            else (int(profile_steps[0]), int(profile_steps[1]))
+        )
         # Persist the full (model + optimizer + scheduler + scaler + curriculum)
         # checkpoint only every ``checkpoint_every`` epochs (plus the final one).
         # The optimizer state alone is ~2x the model size, so writing it every
@@ -563,6 +574,8 @@ class BaseTraining:
         k = self.grad_accum_steps
         n_batches = len(self.train_loader) if k > 1 else 0
         group = 1
+        window, self._profile_window = self._profile_window, None
+        prof = self._profile_tick(None, 0, window) if window is not None else None
         for i, batch in enumerate(tqdm.tqdm(self.train_loader)):
             if i % k == 0:
                 group = min(k, n_batches - i) if k > 1 else 1
@@ -584,8 +597,82 @@ class BaseTraining:
             total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)
+            if window is not None:
+                prof = self._profile_tick(prof, n, window)
+        if prof is not None:  # the epoch ended inside the window
+            self._profile_end(prof, n - window[0])  # type: ignore[index]
         self._train_terms = self._mean_terms(term_sums, n)
         return float((total / max(n, 1)).item())
+
+    def _profile_tick(
+        self,
+        prof: tuple[torch.profiler.profile, float] | None,
+        done: int,
+        window: tuple[int, int],
+    ) -> tuple[torch.profiler.profile, float] | None:
+        """Start or stop the profiler once ``done`` micro-batches have run.
+
+        Called between iterations, so the window covers the loader fetch and
+        the full forward/backward/optimizer work of micro-batches
+        ``start .. start + count - 1`` (0-based). The only syncs are the two at
+        the window edges, which time it."""
+        start, count = window
+        if done == start:
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if self.device.type == "cuda":
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+            profiler = torch.profiler.profile(
+                activities=activities, record_shapes=False, with_stack=False
+            )
+            profiler.start()
+            return profiler, time.monotonic()
+        if prof is not None and done == start + count:
+            self._profile_end(prof, count)
+            return None
+        return prof
+
+    def _profile_end(
+        self, prof: tuple[torch.profiler.profile, float], steps: int
+    ) -> None:
+        """Stop the profiler; print a one-line summary and write the top ops
+        (by self device time on CUDA, self CPU time otherwise) to
+        ``profile.txt`` next to ``weights.pt``."""
+        profiler, t0 = prof
+        cuda = self.device.type == "cuda"
+        if cuda:
+            torch.cuda.synchronize(self.device)
+        wall = time.monotonic() - t0
+        profiler.stop()
+        events = profiler.key_averages()
+        # Kernel time over wall time: well below 100% means the GPU waits on
+        # the CPU (launch overhead, data loading, syncs).
+        kernels = [e for e in events if e.device_type == DeviceType.CUDA]
+        busy = sum(e.self_device_time_total for e in kernels) / 1e6
+        summary = (
+            f"profiled {steps} micro-batches in {wall:.2f} s "
+            f"({steps / max(wall, 1e-9):.2f} it/s"
+            + (
+                f", device busy {busy:.2f} s = {busy / max(wall, 1e-9):.0%}"
+                if cuda
+                else ""
+            )
+            + ")"
+        )
+        print(summary)
+        if self.weights_path is None:
+            return
+        sort_by = "self_device_time_total" if cuda else "self_cpu_time_total"
+        path = self.weights_path.parent / "profile.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            summary
+            + "\n\n"
+            + events.table(sort_by=sort_by, row_limit=40, max_name_column_width=80)
+            + "\n"
+        )
+        print(f"  wrote {path}")
 
     def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
         """Hook for a second optimizer that must step after the main one (the AE's
@@ -852,6 +939,7 @@ class BaseTraining:
             if self._train_pushforward_dataset is not None and current_steps > 0:
                 self._train_pushforward_dataset.set_pushforward_steps(current_steps)
             start_epoch = ckpt["epoch"] + 1
+            self._profile_window = None  # only epoch 0 of a fresh run is profiled
             print(
                 f"resumed from {ckpt_path}: continuing at epoch {start_epoch + 1} "
                 f"(best val={best_val:.6f}, horizon={current_steps})"

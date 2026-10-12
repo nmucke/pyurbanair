@@ -33,6 +33,8 @@ trainer:
   # Batches whose gradients are summed into one optimizer step (an effective
   # batch of batch_size x grad_accum_steps when a larger batch does not fit).
   grad_accum_steps: 1
+  # [start, count]: torch.profiler table of these epoch-0 micro-batches -> profile.txt.
+  profile_steps: null
   # Ignore solid (building) cells in the loss.
   mask_loss: true
 
