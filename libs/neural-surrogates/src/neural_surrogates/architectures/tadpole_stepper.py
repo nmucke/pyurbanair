@@ -254,6 +254,21 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     halo_size:
         Context width in cells, a nonnegative multiple of 16 (halo mode only);
         ``encoder_crop_size`` sets the central core size.
+    spatial_checkpoint:
+        Training-memory knob (default off). Recompute each encoder/decoder
+        tile call in backward instead of keeping its activations, so training
+        memory grows with the tile, not the domain: only each tile's latent
+        core and skips are kept. Same values and gradients; costs one extra
+        encoder + decoder forward. Applies wherever tiles are processed one
+        by one (global/halo, or local with skip mixing); the local path
+        without skip mixing ignores it.
+    spatial_batch_tiles:
+        Speed knob (default off). Stack tiles of equal shape into one
+        encoder/decoder call instead of one call per tile (at most
+        ``max_internal_batchsize // (B*C)`` tiles per call when that is set).
+        Same function up to batched-kernel rounding; with
+        ``spatial_checkpoint`` a call's activations are what is recomputed, so
+        ``max_internal_batchsize`` then bounds the training memory too.
     skip_mixing:
         Optional mapping with ``width`` (default 32) and ``levels`` (spatial
         strides, default [4, 8]). Adds zero-init pointwise state mixing alongside
@@ -335,6 +350,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         spatial_mode: str = "local",
         halo_size: int = 16,
         skip_mixing: dict | None = None,
+        spatial_checkpoint: bool = False,
+        spatial_batch_tiles: bool = False,
     ) -> None:
         super().__init__()
 
@@ -397,6 +414,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         validate_spatial_mode(spatial_mode, halo_size)
         self.spatial_mode = spatial_mode
         self.halo_size = halo_size
+        self.spatial_checkpoint = bool(spatial_checkpoint)
+        self.spatial_batch_tiles = bool(spatial_batch_tiles)
         self.max_internal_batchsize = max_internal_batchsize
         self.normalize = bool(normalize)
         self.predict_residual = bool(predict_residual)
@@ -743,6 +762,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
                 branch.get("geom_feats"),
                 dft=True,
                 latent_type=latent_type,
+                batch_tiles=self.spatial_batch_tiles,
             )
             return latent, residuals
         _, _, u, v, w = self._fold_dims(x)
@@ -808,6 +828,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             self.halo_size,
             branch.get("geom_feats"),
             dft=True,
+            recompute=self.spatial_checkpoint,
+            batch_tiles=self.spatial_batch_tiles,
         )
         if not reference and self.dft.subnetwork is not None:
             b, c = x.shape[:2]
@@ -831,6 +853,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             residuals=residuals,
             zero_skips=reference,
             skip_mixing=self.skip_mixing,
+            recompute=self.spatial_checkpoint,
+            batch_tiles=self.spatial_batch_tiles,
         ).reshape_as(x)
 
     # -- forward ----------------------------------------------------------- #

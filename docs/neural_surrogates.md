@@ -1347,6 +1347,8 @@ Both wrappers expose the same architecture settings, saved with the model:
 | `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
 | `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the per-axis core shape. |
 | `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
+| `spatial_checkpoint` | DFT only, default `false`. Recompute every encoder/decoder tile call in backward (non-reentrant checkpoint) instead of keeping its activations. Same outputs and gradients; costs one more encoder and decoder forward. Training then keeps only each tile's latent core and skips, so with halo the activation memory scales with the tile size, not the domain. Without it, halo training keeps the activations of every tile (overlap included) and needs more memory than global. |
+| `spatial_batch_tiles` | DFT only, default `false`. Stack tiles of equal shape into one encoder/decoder call (at most `max_internal_batchsize // (B*C)` tiles per call when that is set) instead of one call per tile. Same function up to batched-kernel rounding; removes the per-tile launch overhead that makes local/halo training many times slower than global. With `spatial_checkpoint`, `max_internal_batchsize` then also bounds the recompute memory. |
 
 In **every DFT mode**, the latent time-stepping network runs **once over the
 assembled full-domain latent grid**, joining all state variables. Halo mode
@@ -1362,6 +1364,38 @@ larger halos should be evaluated on seam errors and rollout quality rather than
 assumed equivalent to global processing. `max_internal_batchsize` limits the
 encoder/decoder batch, not the full-grid latent transform or all saved training
 activations; in local mode `encode(...)` honours it too.
+
+Measured on the idealized data with `tadpole_ae_s_new` (trained `local`,
+`[16, 32, 32]`), 2026-10 (details in the halo study report):
+
+- The frozen AE is a function of its training tile, not of the field. AE
+  reconstruction error (z-scored NRMSE, 60 val/test frames): local
+  `[16,32,32]` 0.139 (its training mode), halo 16 / `[16,32,32]` 0.230,
+  local `[16,64,64]` 0.248, global 0.288, larger halos 0.30–0.31. Per-tile
+  GroupNorm statistics or per-tile latent attention do not recover it
+  (diagnostic: < 0.001 change); every latent cell of a 32-wide tile touches
+  the tile border, so the zero padding of the convolutions is part of what it
+  learned. Seams: error jump across 32-cell tile borders vs interior is 1.29×
+  for local, 1.56× for halo 16 (core 32), 1.0× for halo 32 and global.
+- After 400 fine-tuning steps the modes are close (one-step NRMSE local 0.528,
+  halo 16 0.507, halo 32 0.508, global 0.512): LoRA re-adapts the AE to its
+  context quickly, so the starting error is not decisive.
+- Halo computes every overlapped cell several times (tiles with 16-cell halos
+  around 32-cell cores: 3.7× the cells of the domain in 2-D, 7.3× when z is
+  tiled too) and pads the domain to a multiple of the core. Without
+  `spatial_checkpoint` training keeps all of it (16×112×224: 12.2 GB vs 3.75 GB
+  global); without `spatial_batch_tiles` the per-tile loop is ~20× slower than
+  global. With both knobs halo trains, but `global` + `spatial_checkpoint` is
+  cheaper on both counts (RTX 3090, S AE, horizon 4, 2 grad steps):
+  32×144×192 global 0.38 s/it 7.3 GB, global+checkpoint 0.50 s/it 3.3 GB,
+  halo 16 `[32,64,64]` batched+checkpoint 1.26 s/it 5.0 GB; 32×272×320
+  (2.8 M cells) global 1.23 s/it 21.8 GB, global+checkpoint 1.37 s/it 10.1 GB,
+  halo 16 `[32,64,64]` batched+checkpoint (`max_internal_batchsize: 6`)
+  4.06 s/it 11.6 GB. Halo keeps every tile's skips (and gathered geometry
+  features) with the overlap, so it does not bound training memory by itself.
+  Do not tile z with a halo (use the full z as the core's z size).
+- A model must be deployed in the spatial mode (and tile/halo sizes) it was
+  trained in: the encoder/decoder compute different functions in each.
 
 For example, set these in `train_autoencoder.yaml` or `train_dft.yaml`:
 

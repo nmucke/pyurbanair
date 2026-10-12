@@ -223,3 +223,101 @@ def test_ae_and_dft_gradients_and_inner_sampling_override(mode: str) -> None:
 def test_invalid_spatial_policy_fails(mode: str, halo: Any) -> None:
     with pytest.raises(ValueError, match="spatial_mode|halo_size"):
         _ae(mode, halo_size=halo)
+
+
+@pytest.mark.parametrize("mode", ["global", "halo"])
+@pytest.mark.parametrize("batch_tiles", [False, True])
+def test_spatial_checkpoint_keeps_outputs_and_gradients(
+    mode: str, batch_tiles: bool
+) -> None:
+    options: dict[str, Any] = {
+        "encode_geometry": False,
+        "geometry_branch": {"width": 4},
+        "skip_mixing": {"width": 4},
+        "spatial_batch_tiles": batch_tiles,
+    }
+    plain = _stepper(mode, **options)
+    with torch.no_grad():  # make every path carry signal (zero-init hides bugs)
+        for name, p in plain.named_parameters():
+            if "scales" in name or "proj" in name or "skip_mixing" in name:
+                p.fill_(0.05)
+    plain.requires_grad_(True)  # encoder/decoder too, standing in for LoRA
+    ckpt = _stepper(mode, spatial_checkpoint=True, **options)
+    ckpt.load_state_dict(plain.state_dict(), strict=True)
+    ckpt.requires_grad_(True)
+    state = torch.randn(2, 2, 32, 16, 48)
+    geom = torch.ones(2, 32, 16, 48)
+    geom[:, 4:9, 3:7, 20:30] = 0
+    calls = [0, 0]
+    for i, m in enumerate((plain, ckpt)):
+        for part in (m.dft.encoder, m.dft.decoder):
+            part.register_forward_pre_hook(
+                lambda *_, i=i: calls.__setitem__(i, calls[i] + 1)
+            )
+    out = [m(state, None, geom) for m in (plain, ckpt)]
+    torch.testing.assert_close(out[1], out[0], rtol=0, atol=0)
+    for o in out:
+        o.square().mean().backward()
+    assert calls[1] == 2 * calls[0] > 0  # every tile call was recomputed once
+    grads = [dict(m.named_parameters()) for m in (plain, ckpt)]
+    checked = 0
+    for name, p in grads[0].items():
+        q = grads[1][name]
+        if p.grad is None:
+            assert q.grad is None, name
+            continue
+        torch.testing.assert_close(q.grad, p.grad, rtol=1e-5, atol=1e-7, msg=name)
+        checked += p.grad.abs().sum() > 0
+    assert checked > 50
+    with torch.no_grad():  # deployment: identical, no recompute bookkeeping
+        torch.testing.assert_close(
+            ckpt(state, None, geom), plain(state, None, geom), rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize("mode", ["local", "halo"])
+@pytest.mark.parametrize("limit", [None, 1, 4])
+def test_batched_tiles_match_one_call_per_tile(mode: str, limit: Any) -> None:
+    options: dict[str, Any] = {
+        "encode_geometry": False,
+        "geometry_branch": {"width": 4},
+        "skip_mixing": {"width": 4},
+    }
+    # float64, and norm parameters skipped: the attention LayerNorm biases see
+    # zero-padded window tokens, so their gradients are ~0 by cancellation and
+    # differ by O(1) relative between any two batch layouts (also between
+    # max_internal_batchsize chunkings of the unbatched path). DFT training never
+    # trains them (LoRA targets linear/conv layers).
+    plain = _stepper(mode, **options).double()
+    with torch.no_grad():
+        for name, p in plain.named_parameters():
+            if "scales" in name or "proj" in name or "skip_mixing" in name:
+                p.fill_(0.05)
+    plain.requires_grad_(True)
+    batched = _stepper(mode, spatial_batch_tiles=True, **options).double()
+    batched.load_state_dict(plain.state_dict(), strict=True)
+    batched.requires_grad_(True)
+    for m in (plain, batched):
+        m.dft.max_internal_batchsize = limit
+    calls = [0, 0]
+    for i, m in enumerate((plain, batched)):
+        m.dft.encoder.register_forward_pre_hook(
+            lambda *_, i=i: calls.__setitem__(i, calls[i] + 1)
+        )
+    state = torch.randn(1, 2, 32, 16, 64, dtype=torch.float64)
+    geom = torch.ones(1, 32, 16, 64, dtype=torch.float64)
+    geom[:, 4:9, 3:7, 20:30] = 0
+    out = [m(state, None, geom) for m in (plain, batched)]
+    torch.testing.assert_close(out[1], out[0], rtol=1e-10, atol=1e-12)
+    assert calls[1] < calls[0]
+    for o in out:
+        o.square().mean().backward()
+    named = dict(batched.named_parameters())
+    grads = {n: p.grad for n, p in plain.named_parameters() if p.grad is not None}
+    # Biases right before a norm have ~0 gradients too: compare on a global scale.
+    scale = max(g.abs().max().item() for n, g in grads.items() if "norm" not in n)
+    for name, g in grads.items():
+        if "norm" not in name:
+            torch.testing.assert_close(
+                named[name].grad, g, rtol=1e-7, atol=1e-9 * scale, msg=name
+            )
