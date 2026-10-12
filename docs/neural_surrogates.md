@@ -1265,10 +1265,13 @@ import (upstream's integer-rank LoRA library, used only by a branch we never
 take; we drive LoRA through PEFT) is made optional, (2) the optional
 **geometry-branch projections** in `architecture/p3d/{conv,core,kl,skip_wrapper}.py`
 and `model/{autoencoder,dft}.py` (each of those files' module docstrings states
-its own injection points), and (3) `PixelShuffle3d` builds its permutation
-without a tensor round trip (`p3d/modules.py`; same axes; upstream's
-`arange(...).tolist()` is a `torch.compile` graph break). The projections are created **only** when the caller
-passes `geom_in_dims`, so on the default path nothing is added. Preserving the
+its own injection points; they are created **only** when the caller passes
+`geom_in_dims`, so on the default path nothing is added), and (3) two
+value-preserving speed fixes: `PixelShuffle3d` builds its permutation without a
+tensor round trip (`p3d/modules.py`; upstream's `arange(...).tolist()` is a
+`torch.compile` graph break) and `SequentialModel` keeps its positional table on
+the device (`downstream/llm.py`; upstream re-copied it host->device, a CPU-GPU
+sync, on every call). Preserving the
 exact subtree keeps every internal relative import valid **and** the
 encoder/decoder `state_dict` keys identical, so the HF `thuerey-group/Tadpole`
 weights still load strictly. Runtime deps
