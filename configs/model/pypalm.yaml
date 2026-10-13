@@ -20,6 +20,15 @@ forward_model:
   save_only_last_timestep: false
   verbose: false
   boundary_condition: periodic # inflow_outflow #
+  # inflow_outflow only: PALM's outflow damping layer relaxes u/v/w toward the
+  # initial profile over the last `width` m before the radiation outflow, at up
+  # to `factor` 1/s. Without it the reversed flow behind the last obstacle meets
+  # the outflow and the non-dissipative pw-scheme diverges within ~10 s
+  # (xie_and_castro); factor 0.1 is not enough. Cyclic runs never get these keys
+  # (PALM rejects them, PAC0352). null -> write nothing. See docs/pypalm.md §8.
+  outflow_damping:
+    factor: 1.0            # 1/s; outflow_damping_factor
+    width: 4.0             # m from the outflow edge; outflow_damping_width
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
   # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #
