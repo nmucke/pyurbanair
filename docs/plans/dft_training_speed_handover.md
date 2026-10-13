@@ -1,11 +1,79 @@
 # DFT training speed and memory: handover for the H100 (`feat/dft-grad-accum`)
 
-Status as of 2026-10-12. For the agent on Snellius who tests on an H100 and
-makes the final calls before launching the full DFT run. Everything below was
-built and measured on a local RTX 3090 (24 GB) with the **size-S** AE
-`tadpole_ae_s_new` on the idealized corpus; nothing here has run on an H100 or
-with the size-B AE `tadpole_ae_b_realistic` yet. Move this note to
-[implemented/](implemented/) once the PR is merged and the run is launched.
+Status as of 2026-10-13. The 3090 work below (size-S AE, idealized corpus) was
+confirmed on a Snellius H100 with the size-B AE `tadpole_ae_b_realistic` and the
+realistic corpus: see [H100 results](#h100-results-2026-10-13) for the
+measurements, the calls made and the launched command. Move this note to
+[implemented/](implemented/) once the PR is merged and the run has finished.
+
+## H100 results (2026-10-13)
+
+Commit 1ebf77d, `gpu_h100` (H100 93 GB), bf16, size-B AE, horizon 4 with 2 grad
+steps. `tests/neural_surrogates`: 625 passed.
+
+**Fixed-shape A/B** (`scripts/tools/benchmark_dft_step.py`, 8 warm-up + 30
+timed steps, one process per row, back to back on one GPU; b704c0f run from a
+worktree of that commit with its own `neural_surrogates` on `PYTHONPATH`).
+Repeats of two rows agreed to < 0.3 %.
+
+| 32×144×192 (0.885 Mcell) | Micro-batch | s/it | samples/s | Peak alloc |
+|---|---|---|---|---|
+| b704c0f (before this work) | 1 | 0.345 | 2.90 | 17.5 GB |
+| this branch, defaults | 1 | 0.295 | 3.39 | 14.7 GB |
+| + `lora.fused_forward` | 1 | 0.219 | 4.58 | 12.4 GB |
+| + `compile_modules` (conv stems) | 1 | 0.195 | **5.14** | 8.3 GB |
+| + `compile_modules` | 2 | 0.366 | 5.46 | 16.2 GB |
+| + `compile_modules` | 4 | 0.706 | 5.67 | 31.9 GB |
+
+| 32×272×320 (2.8 Mcell) | Micro-batch | s/it | samples/s | Peak alloc |
+|---|---|---|---|---|
+| b704c0f | 1 | 0.973 | 1.03 | 54.1 GB |
+| fused | 1 | 0.644 | 1.55 | 38.1 GB |
+| fused + compile | 1 | 0.570 | **1.75** | 25.3 GB |
+| fused + compile | 2 | 1.115 | 1.79 | 50.1 GB |
+| + conv-block `activation_checkpoint_modules` | 2 | 1.238 | 1.62 | 40.9 GB |
+| + conv-block `activation_checkpoint_modules` | 3 | 1.844 | 1.63 | 61.1 GB |
+
+- Fused + compile: **1.7–1.8× the old samples/s at under half the memory**,
+  more than projected for B (compile alone cut memory 33 %, not ~20 %).
+- Memory, fused + compile: **peak ≈ 0.5 GB + 8.9 GB × Mcell × micro-batch**
+  (same slope at both sizes; the projection was ~11).
+- Micro-batches > 1 help much less than on the 3090: +6 % (b=2) and +10 % (b=4)
+  at 0.885 Mcell, +2 % at 2.8 Mcell — B on the H100 is mostly GPU-bound.
+- Conv-block checkpointing: −18 % memory for −10 % samples/s. Not needed.
+
+**Smoke run** (job 27989597, the command below with `trainer.num_epochs=1
+trainer.pushforward_start_steps=4`, 90 min, `TORCH_LOGS=recompiles`):
+
+- No OOM, no NaN. Peak GPU 71.3 GB (`nvidia-smi`, incl. reserved/workspace).
+- 3 recompiles in total, all at the start: the conv stems' grad-mode variants
+  (no-grad rollout step, first grad step, input requiring grad in the second).
+  None for the 69 shapes or the 1–4 micro-batch sizes.
+- Host memory flat: `/dev/shm` constant at 3.85 GB (one shared copy of the
+  geometries), PSS of the main process + 16 loader processes 34.6 GB, +54 MB
+  over 10 min (main process anon constant at 3.98 GB).
+- cuDNN warm-up ~30 min (15 s → 1 s per micro-batch). Then **~1.18
+  micro-batches/s × 3.76 samples per micro-batch ≈ 4.4 samples/s** (minutes
+  70–85), vs **2.05 samples/s** before (run 27934039): **2.16×**.
+- Epoch at horizon 4 ≈ 58,000 / 4.4 ≈ **3.6 h** (was 7.9 h). Whole run (2 × h1,
+  2 × h2, 2 × h3, 9 × h4 epochs, scaled by forward-pass count; plus validation
+  and the per-job warm-up) ≈ 49–52 GPU-hours: 2 × 48 h jobs, a 3rd if the
+  partial epochs lost at each time-limit kill add up.
+
+**Calls made:** fused LoRA on; compile on; conv-block checkpointing off;
+`batch_sampler.batch_size=4 batch_sampler.cell_budget=7500000` (largest
+micro-batch ≈ 0.5 + 8.9 × 7.5 ≈ 67 GB: b=4 up to 1.87 Mcell, b=3 at ~2.5 Mcell,
+b=2 at 2.8 Mcell) with `grad_accum_samples=8`; `optimizer.lr=7e-4` with the
+per-step warmup over epoch 0 (resubmit with 5e-4 if epoch 1 is unstable —
+check `metrics.csv`); `cudnn_benchmark` on;
+`TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT=0`; `unroll_no_grad_modules` off.
+
+Snellius notes: the benchmark tool imports `torch` before `neural_surrogates`,
+so outside `pixi run` put `$CONDA_PREFIX/lib` first on `LD_LIBRARY_PATH`
+(system `libstdc++` lacks `GLIBCXX_3.4.30`); the `cuda` env's activation needs
+`set +u` around `pixi shell-hook` in a `set -u` script; the tool writes to
+`.temp/`, which is a dangling symlink in the Snellius checkout, so run it from
+a worktree.
 
 ## Goal (unchanged)
 
@@ -290,7 +358,7 @@ Open calls for you: `optimizer.lr` for effective batch 8 (7e-4 was a guess;
 5e-4 was tuned at batch 1); whether `cudnn_benchmark` stays on; the final
 `cell_budget`.
 
-## Launch command (proposal; fill in the measured `cell_budget`)
+## Launch command (as launched on 2026-10-13)
 
 ```bash
 R=/projects/prjs2075/urbanair
@@ -303,7 +371,7 @@ sbatch -p gpu_h100 -c 16 \
   name=dft_b architecture.size=B \
   lora.fused_forward=true \
   "trainer.compile_modules=[dft.encoder.conv_encoder,dft.decoder.conv_decoder]" \
-  batch_sampler.batch_size=4 batch_sampler.cell_budget=<from step 3> \
+  batch_sampler.batch_size=4 batch_sampler.cell_budget=7500000 \
   trainer.grad_accum_steps=1 trainer.grad_accum_samples=8 \
   dataset.pushforward_steps=4 trainer.grad_unroll_steps=2 \
   trainer.num_epochs=15 trainer.pushforward_epochs_per_step=2 trainer.patience=3 \
