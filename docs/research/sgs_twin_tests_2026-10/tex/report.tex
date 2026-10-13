@@ -29,7 +29,7 @@
 \newcommand{\bad}[1]{\textcolor{red!65!black}{#1}}
 
 \title{Joint inflow and SGS-bias estimation in uDALES:\\
-       twin tests, Rounds~1 and~1b}
+       twin tests (Rounds~1, 1b) and a PALM truth (Round~2)}
 \author{pyurbanair SGS discrepancy study}
 \date{October 2026}
 
@@ -67,6 +67,12 @@ array. Twenty-eight assimilation runs were made, plus a pilot.
   calibration statistics. Only \SI{180}{s} window means avoid collapse, and
   they give the best held-out scores. With turbulent inflow, the SGS
   correction still adds no value.
+\item \textbf{Round 2} assimilates a PALM truth into uDALES. PALM first needed
+  three fixes. Every arm stays miscalibrated: Desroziers $\approx3.5$,
+  because the structural mismatch is about $4\times$ the realisation noise.
+  At face value the SGS correction adds no value, and its coefficients
+  flip sign or saturate. Only the simpler SGS constant gives a small gain
+  ($\approx4\,\%$). Both closure knobs push uDALES toward more dissipation.
 \end{itemize}
 \end{abstract}
 
@@ -669,6 +675,169 @@ The error has to match each regime's actual noise.
 \end{enumerate}
 
 
+\FloatBarrier
+\section{Round 2: uDALES against a PALM truth}
+\label{sec:r2}
+
+There is no true $b$ when the truth comes from another model. The
+coefficients are calibration knobs, judged only by the held-out predictions
+of states and quantities of interest (QoIs) they give. Four arms estimate,
+besides the inflow, nothing (T2), $b$ (T3), the SGS constant (TC) or the
+shear exponent (T$\alpha$). Each runs for 3 seeds and two uDALES setups:
+\begin{itemize}
+\item \textbf{M-on:} synthetic inlet turbulence on;
+\item \textbf{M-off:} inlet turbulence off, no interior nudging.
+\end{itemize}
+The truth is one PALM run (with disturbances) plus a replica (seed 17).
+
+\paragraph{Making PALM a usable truth.}
+PALM's inflow/outflow mode failed on this case in three ways. Each fix is a
+PR with tests:
+\begin{enumerate}
+\item \textbf{Divergence after about \SI{10}{s}} (\#188). The wake of the
+  last cube reverses the flow at the radiation outflow, and the case's
+  non-dissipative advection scheme cannot damp it. The outflow damping layer
+  fixes it.
+\item \textbf{Zero inflow at \SI{1}{m}} (\#189). The standard cold start
+  zeroes the lowest level, and the inflow face never restores it.
+  Initialising from a driver fixes it.
+\item \textbf{No seed} (\#187), needed for a PALM replica.
+\end{enumerate}
+In addition, the inflow reference height and the boundary condition were
+aligned on the command line. Afterwards the inflow agrees within
+$4\,\%$ at every height (Figure~\ref{fig:r2-pilot}).
+
+A separate bug, inflow/outflow warm starts zeroing the inflow face, is
+documented but not fixed. It does not affect a single continuous truth run.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r2_pilot_inflow.pdf}
+\caption{PALM truth, PALM replica and the two uDALES setups at the true
+inflow (\ang{10}, \SI{6}{m/s}). (a)~Inflow profiles: aligned after the fixes.
+(b)~Canopy-averaged profiles of $u$ and TKE. uDALES M-off is almost
+turbulence-free, and M-on has too much TKE aloft.}
+\label{fig:r2-pilot}
+\end{figure}
+
+\paragraph{The structural mismatch.}
+At the true inflow, uDALES differs from PALM by about \SI{0.48}{m/s} in
+\SI{180}{s} sensor means and by \SI{0.69}{m/s} on the pedestrian wind map.
+The replica differs by \SI{0.12}{m/s} and \SI{0.15}{m/s}, so the mismatch is
+$4$--$6\times$ PALM's own noise. It is spatial and mixed in sign, so the
+inflow parameters cannot absorb it. The Round~1 $b^\ast$ moves uDALES by
+only about $1\,\%$ of it.
+
+PALM's realisation noise was frozen as the height-banded persistent error:
+0.17, 0.10 and \SI{0.055}{m/s} at 2, 8 and \SI{14}{m}.
+
+\paragraph{Calibration fails everywhere.}
+All eight setup--arm combinations have a Desroziers ratio of 3.5--3.6. The
+validation spread/skill ratio is 0.37--0.39 in M-on and 0.02--0.03 in M-off
+(Figure~\ref{fig:r2-cal}). The error model represents realisation noise by
+design, not the structural mismatch, so every arm is overconfident against
+PALM. Under the plan's calibration-first rule, \textbf{no value verdict is
+trusted}; the results below are reported at face value.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r2_calibration.pdf}
+\caption{Calibration by arm and setup (points are seeds). The target bands
+are shaded. Every arm is far outside them.}
+\label{fig:r2-cal}
+\end{figure}
+
+\paragraph{Value at face value.}
+Figures~\ref{fig:r2-scores} and~\ref{fig:r2-value} show the scores.
+\begin{itemize}
+\item \textbf{T3 adds no value over T2 in either setup.} It never reaches
+  the $10\,\%$ threshold, and in M-on it is 2--$4\,\%$ worse on the
+  validation CRPS of means. On the pedestrian map, comfort exceedance and lane
+  flows it is level with T2.
+\item \textbf{Roof exchange} swings by up to $\pm90\,\%$ between arms, in
+  both directions. These are changes of a small number: the errors are
+  0.0006--\SI{0.0036}{m^2/s^2}, against a flux of $-0.016$.
+\item \textbf{TC is the only arm with a real gain, and it is small:} in
+  M-off, validation CRPS 0.498 against 0.518 for T2 ($-3.9\,\%$, the same
+  sign in all seeds), and field $u$ $-2.9\,\%$.
+\item \textbf{T$\alpha$ hurts in M-off:} pedestrian map error 0.81 against
+  0.69.
+\end{itemize}
+Every arm sits at about $2.5$--$3\times$ the replica's CRPS (0.18). All
+effects are small next to the structural mismatch.
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r2_scores.pdf}
+\caption{Held-out scores by arm and setup (points are seeds): validation
+CRPS of window-mean $|U|$, field RMSE of $u$, pedestrian-level $|U|$ RMSE
+and comfort-exceedance RMSE, with the replica level dashed. The arms differ
+little compared with their distance from the replica.}
+\label{fig:r2-scores}
+\end{figure}
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r2_value.pdf}
+\caption{Paired relative change against inflow-only estimation (T2) for TC,
+T3 and T$\alpha$, per setup. Filled markers are clear under the paired-seed
+rule. The lines mark 0 and $\pm10\,\%$. Large roof-flux percentages are
+changes of a small error, and rows beyond $\pm30\,\%$ are clipped and
+labelled.}
+\label{fig:r2-value}
+\end{figure}
+
+\paragraph{What the knobs do.}
+Both closure knobs push uDALES toward \emph{more} SGS dissipation
+(Figure~\ref{fig:r2-coef}):
+\begin{itemize}
+\item \textbf{TC} raises $c_v$ from 0.24 to 0.30--0.33 (M-on) and
+  0.38--0.42 (M-off), drifting up across the windows.
+\item \textbf{T3, M-off:} $b$ settles at about $(+0.2,+0.5,-0.4)$, with the
+  canopy-band term positive.
+\item \textbf{T3, M-on:} $b$ is unstable. $b_1$ reaches $+1.1$ to $+1.2$,
+  and $b_2$ flips sign across seeds.
+\item The multiplier saturates at its $1.5\times$ cap in 20--$90\,\%$ of
+  band cells.
+\end{itemize}
+The cap limits T3 to an effective $c_v\approx0.36$, below what TC finds.
+This plausibly explains why the simpler knob does better: the data ask for
+more dissipation than the bounded 3-coefficient form, as configured, can
+deliver. T3's coefficients flip sign or sit at the cap, so they would not
+transfer. M-on matches PALM better than M-off on the mean-flow scores and
+the QoIs (by 7--$25\,\%$).
+
+\begin{figure}[!htbp]
+\centering
+\includegraphics[width=\linewidth]{r2_coefficients.pdf}
+\caption{Posterior coefficients per window ($b_0,b_1,b_2$ for T3, $c_v$ for
+TC, $\alpha$ for T$\alpha$) by setup and seed, with the prior bands.}
+\label{fig:r2-coef}
+\end{figure}
+
+\paragraph{Round 2 verdict.}
+\begin{enumerate}
+\item No arm is calibrated: the PALM--uDALES mismatch is about $4\times$
+  the noise the error model represents. Under the frozen rules, no value
+  claim is trusted.
+\item At face value, the 3-coefficient SGS correction adds \bad{no value}
+  over inflow-only estimation against PALM, and its coefficients are not
+  transferable.
+\item The one consistent signal is that uDALES needs more SGS dissipation to
+  resemble PALM. A single SGS constant captures this better, with a gain of
+  about $4\,\%$.
+\end{enumerate}
+
+\paragraph{Next steps.}
+\begin{itemize}
+\item Re-test T3 with a wider multiplier cap, or together with $c_v$.
+\item Represent the structural mismatch in the error model, for every arm
+  alike, before claiming value.
+\item Merge \#187--\#189 and re-check a few runs on \code{main}.
+\item Fix the PALM warm-start inflow bug before any multi-window PALM work.
+\end{itemize}
+
+
 \appendix
 \section{Runs}
 
@@ -699,6 +868,9 @@ B & T3, T2: none, 20, \SI{180}{s} & L2 & 1, 2, 3 & honest persistent error \\
 A & T1, T3 rerun (saturation) & L2 & 1 & done \\
 A & T3, T2 (none, \SI{180}{s}); T3 (B error) & L2 & 1 & done \\
 B & T3, raw frames, 1 window (feasibility) & L2 & 1 & done, \SI{33}{min} \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{Round 2} (PALM truth; 80--\SI{97}{min} each; see \code{appendix\_round2.md})} \\
+M-on, M-off & T2, T3, TC, T$\alpha$ & L2 & 1, 2, 3 & done (3 recovered after a full disk) \\
 \bottomrule
 \end{tabular}}
 \end{table}

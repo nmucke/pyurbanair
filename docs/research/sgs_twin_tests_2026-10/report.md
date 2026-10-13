@@ -1,8 +1,8 @@
-# SGS discrepancy twin tests, Rounds 1 and 1b (uDALES truth, uDALES model)
+# SGS discrepancy tests: Rounds 1 and 1b (uDALES truth) and Round 2 (PALM truth)
 
 Status: **done**. The pilot ran on 2026-10-08, the DA runs from
-2026-10-08 22:00 to 2026-10-10 01:07, and the analysis on 2026-10-10. Round 1b (error model and averaging, at the end of
-this report) ran 2026-10-10 to 2026-10-11 and was analysed on 2026-10-12.
+2026-10-08 22:00 to 2026-10-10 01:07, and the analysis on 2026-10-10. Round 1b (error model and averaging) ran 2026-10-10 to 2026-10-11 and was analysed on 2026-10-12.
+Round 2 (PALM truth, at the end of this report) ran 2026-10-12 to 2026-10-13.
 Plan: [sgs_discrepancy_twin_tests.md](../../plans/sgs_discrepancy_twin_tests.md).
 
 ## Setup
@@ -568,3 +568,224 @@ Seed 1, Round 1's error model.
    Differences between arms should be judged against the noise of a
    *difference* (for example paired replica differences), not against the
    replica's score level.
+
+
+# Round 2: does the SGS correction improve uDALES predictions of a PALM flow?
+
+Plan: [sgs_round2_palm_truth.md](../../plans/sgs_round2_palm_truth.md) (PR
+#186, including the revisions made after the pilot). It ran 2026-10-12 to
+2026-10-13: 24 DA runs, none failed in the end. Three runs were recovered after
+the disk filled up (the cause is described below). Full tables:
+[appendix_round2.md](appendix_round2.md) and
+[appendix_round2_pilot.md](appendix_round2_pilot.md).
+
+**The question.** No true `b` exists here: PALM and uDALES are different
+models. The coefficients are therefore calibration knobs, judged only by the
+held-out state and quantity-of-interest predictions they give.
+
+## Getting a usable PALM truth
+
+PALM's inflow/outflow mode did not work on this case. It took three fixes,
+each with tests and its own PR, plus an alignment step:
+
+1. **Outflow instability (PR #188).**
+   - PALM diverged within about 10 s on every grid. Behind the last cube the
+     wake reverses the flow at the radiation outflow boundary, and the case's
+     non-dissipative `pw-scheme` cannot damp it.
+   - PALM's outflow damping layer (factor 1.0, 4 m) fixes it: stable for
+     600 s, with the flow still unsteady.
+   - The 2026-06 note that 13–23 % of PALM ESMDA members diverge on this case
+     is very likely the same instability.
+2. **Near-wall inflow zeroed (PR #189).**
+   - On the `set_constant_profiles` cold start, PALM zeroes u and v at
+     z = 1 m. The inflow face never restores them, so the inlet had no wind
+     at 1 m for the whole run.
+   - Initialising from an LOD=1 driver fixes it.
+3. **Seed (PR #187).** A PALM replica needs a seed; `random_seed` writes
+   `ensemble_member_nr`.
+4. **Definitional alignment, on the command line:**
+   - PALM `inflow_outflow` (pypalm's default is periodic);
+   - power-law `z_ref = 64 m` for PALM (pypalm defaulted to the domain top,
+     which made its inflow 19 % faster);
+   - uDALES interior nudging off.
+
+After all of this, the inflow agrees within 4 % at every height, and the
+profile exponent is 0.26 in both codes.
+
+**Also found, not fixed:** inflow/outflow *warm starts* (LOD=2) zero the whole
+inflow face. This matters for multi-window PALM runs, but not here: the PALM
+truth is a single continuous 540 s run.
+
+**The runs used a local branch** combining #187, #188 and #189. They should
+be re-checked on `main` once those PRs merge.
+
+## Pilot: the structural mismatch
+
+Comparing PALM with uDALES at the true inflow (10°, 6.0 m/s):
+
+| Quantity | uDALES vs PALM | PALM vs replica (floor) |
+|---|---|---|
+| 180 s sensor means, RMS | 0.48 m/s | 0.12 m/s |
+| Pedestrian wind-map RMSE | 0.69 m/s | 0.15 m/s |
+| Field RMSE of time-mean u | 0.38 m/s | 0.08 m/s |
+| Exceedance bias | ≈ 0 | ≈ 0 |
+
+- **The mismatch is about 4–6× PALM's own noise** and spatial in pattern, so
+  the inflow parameters cannot absorb it.
+- **The Round 1 b* moves uDALES by at most 0.005 m/s**, about 1 % of the
+  mismatch.
+- **The turbulence level is a large part of the mismatch:**
+  - uDALES without inlet turbulence is almost steady;
+  - with it, uDALES has 2–3× PALM's TKE aloft;
+  - PALM without its inflow disturbances is just as turbulent (TKE comes
+    from the buildings).
+- So the plan's two truth regimes became **one PALM truth** with two uDALES
+  setups:
+  - **M-on:** synthetic inlet on;
+  - **M-off:** inlet off.
+- **PALM's realisation noise** in 180 s means, by height, is 0.17 / 0.10 /
+  0.055 m/s at z = 2 / 8 / 14 m. These were frozen as the height-banded
+  persistent representation error, the same for every arm.
+
+## Results (24 runs: 4 arms × 3 seeds × 2 setups)
+
+Arms:
+- **T2:** inflow only;
+- **T3:** inflow + `b0, b1, b2`;
+- **TC:** inflow + `sgs_constant`;
+- **Tα:** inflow + shear exponent.
+
+### Calibration fails everywhere
+
+| Setup | Desroziers ratio | Validation spread/skill | χ² |
+|---|---|---|---|
+| M-on | 3.5–3.6 | 0.37–0.39 | 6–7 |
+| M-off | 3.5–3.6 | 0.02–0.03 | 12–13 |
+
+The targets are 0.7–1.4 for Desroziers and 0.6–1.5 for spread/skill.
+
+- **Every arm fails, in both setups.** The error model covers PALM's
+  realisation noise by design, never the structural mismatch, which is about
+  4× larger. So the ensemble is overconfident against PALM whatever the knob.
+- **M-off is almost spread-free** against validation, because its flow has
+  almost no turbulence.
+- **Under the calibration-first rule, none of the value verdicts below is
+  trusted.** They are reported at face value as evidence.
+
+### Value (face value; paired-seed rule)
+
+| Setup | T3 vs T2 | T3 vs TC | T3 vs Tα |
+|---|---|---|---|
+| M-on | no added value | hurts | no added value |
+| M-off | no added value | hurts | no added value |
+
+Validation CRPS of window-mean |U|, posterior, as the mean over 3 seeds:
+
+| Setup | T2 | T3 | TC | Tα | Replica |
+|---|---|---|---|---|---|
+| M-on | 0.451 | 0.466 | 0.450 | 0.451 | 0.184 |
+| M-off | 0.518 | 0.523 | **0.498** | 0.564 | 0.184 |
+
+- **T3 never reaches the 10 % threshold** on any |U| CRPS row. In M-on it is
+  2–4 % *worse* than T2 on the means. On the QoIs it is level with T2
+  for the pedestrian map, exceedance and lanes.
+- **Roof exchange.** T3 is +72 % in the posterior (within noise) and −82 %
+  in the forecast (clear) against T2. These are swings of a small number:
+  the roof-flux errors are 0.0006–0.0036 m²/s², against a flux of −0.016.
+- **TC is the only arm with a real gain**, and it is small:
+  - in M-off, −3.9 % on validation CRPS, with the same sign in all seeds;
+  - also −2.9 % on field u and −1.3 % on the pedestrian map;
+  - about level with T2 in M-on.
+- **Tα hurts in M-off:** the pedestrian map gets worse, 0.81 against 0.69.
+- **Every effect is small** next to the 0.4–0.7 m/s structural mismatch. Every
+  arm sits at about 2.5–3× the replica's CRPS (0.18), the level a
+  perfect model with another seed reaches.
+
+### What the knobs do
+
+- **Both closure knobs push uDALES toward more SGS dissipation.**
+  - **T3:**
+    - In M-off, b settles at about (+0.2, +0.4 to +0.7, −0.4), consistently
+      across seeds, with the canopy-band term b1 positive.
+    - In M-on, b is unstable: b1 reaches +1.09 and +1.23 in two seeds, and
+      b2 flips sign across seeds (+0.24, −0.24, −1.31).
+    - The multiplier saturates at its 1.5× cap in 20–90 % of band cells.
+  - **TC:** c_vreman rises from the prior's 0.24 to **0.30–0.33 (M-on)** and
+    **0.38–0.42 (M-off)**, drifting up across the windows (about 5σ from the
+    prior).
+- **This plausibly explains why TC beats T3.** The bounded multiplier
+  (`log_multiplier_cap = log 1.5`) caps T3 at an effective c_vreman of
+  about 0.36. TC has no such cap. The extra dissipation the data ask for
+  exceeds what the 3-coefficient form, as configured, can deliver.
+- **T3's coefficients are not transferable.** They flip sign between seeds
+  and windows (M-on) or sit at the multiplier cap (M-off), which are exactly
+  the warning signs the plan said to flag.
+- **Inflow.** The angle ends at about 5–6.5° and the speed at about
+  6.0–6.4 m/s (truth 10° / 6.0 m/s). Both compensate for the structural
+  mismatch.
+
+### Which uDALES setup matches PALM better
+
+M-on beats M-off on the mean-flow scores and the QoIs:
+- validation CRPS of means: better by 11–25 %;
+- exceedance: better by 9–11 %;
+- lanes: better by 7–14 %.
+
+M-off "wins" on the variance and TKE scores only because its near-zero
+spread happens to score well there. Overall **M-on matches PALM better**.
+
+## Round 2 verdict
+
+1. **Execution.** PALM needed three fixes before it could serve as an
+   inflow/outflow truth on this case; all are PRs with tests. All 24 DA runs
+   completed.
+2. **Calibration.** No arm is calibrated: Desroziers is about 3.5
+   everywhere. The PALM–uDALES structural mismatch is about 4× the
+   realisation noise the error model covers. Under the frozen rules this
+   means **no value verdict is trusted**.
+3. **Value, at face value.** Estimating the SGS correction gives **no added
+   value** over inflow-only estimation against PALM, in either uDALES
+   setup. Its coefficients are unstable or saturated, so they would not
+   transfer. The only knob with a measurable gain is the simpler
+   `sgs_constant` (TC): about 4 % with inlet turbulence off, consistent
+   across seeds. It works by adding much more dissipation (c_vreman about
+   0.4) than the bounded 3-coefficient correction can.
+4. **What this means.**
+   - On this case, with these sensors, the 3-coefficient SGS correction as
+     configured is not worth its cost against a different-model truth.
+   - The data do point to *one* systematic closure difference: uDALES needs
+     more SGS dissipation to resemble PALM.
+   - A single constant captures that better than the bounded,
+     height-and-strain-dependent correction.
+
+With 3 seeds and one PALM truth, this is evidence, not a statistical claim.
+The second truth realisation (plan priority 3) was not run.
+
+## Suggested next steps
+
+- **If the SGS idea is pursued further:**
+  - re-test T3 with a wider `log_multiplier_cap` (e.g. log 2), so it can
+    reach the dissipation TC finds;
+  - or estimate `sgs_constant` and `b` together (T3C), which the plan kept
+    as an option.
+- **Before any calibrated value verdict is possible**, the error model has
+  to represent the structural mismatch. Options:
+  - an inflated, Desroziers-guided representation error, applied to every
+    arm alike;
+  - assimilating statistics such as window variances, which the codes
+    disagree on less.
+- **Merge PRs #187–#189**, then re-check a few runs on `main`.
+- **Fix the PALM warm-start inflow bug** before any multi-window PALM work.
+
+## Operational note: the disk filled up
+
+During the night of 2026-10-12, scratch2 filled up and three runs failed at
+launch.
+
+- **Cause:** the job step meant to delete the seed 2–3 window states after
+  their metrics ran under `set -f`, so its glob deleted nothing.
+- **Fix:** the step now re-enables globbing; it is checked in the generated
+  jobs.
+- **Recovery:** the states of the completed seed 2–3 runs were deleted, as
+  the plan intended. One run had finished its assimilation, so only its
+  metrics were redone; the other two were rerun in full.
