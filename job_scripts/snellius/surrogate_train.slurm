@@ -2,7 +2,7 @@
 #   sbatch job_scripts/snellius/surrogate_train.slurm --config-name surrogate/train_autoencoder
 #SBATCH --job-name=surrogate_train
 #SBATCH --partition=rome
-#SBATCH --account=tdsr72361
+#SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem-per-cpu=1750M

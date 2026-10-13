@@ -47,7 +47,10 @@ class PixelShuffle3d(nn.Module):
             in_width,
         )
 
-        axes = arange(input_view.ndim)[:-6].tolist() + [-3, -6, -2, -5, -1, -4]
+        # pyurbanair edit: ``list(range(...))`` instead of upstream's
+        # ``arange(input_view.ndim)[:-6].tolist()`` (same axes); the tensor
+        # round trip is a data-dependent graph break under torch.compile.
+        axes = list(range(input_view.ndim - 6)) + [-3, -6, -2, -5, -1, -4]
         output = input_view.permute(axes).contiguous()
 
         return output.view(*x.shape[:-4], nOut, out_depth, out_height, out_width)

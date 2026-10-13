@@ -321,7 +321,12 @@ see the SDF plan in [archive/sdf_features_plan.md](archive/sdf_features_plan.md)
 
 `__init__` only walks each state file to read `ds.sizes["time"]` (metadata
 only) so it can build the flat `(traj, t)` index. Parameters and the
-static geometry mask are loaded eagerly (both are small). State
+static geometry mask are loaded eagerly (both are small). The unique masks
+and their SDF features are then copied into one shared-memory buffer each
+(`share_once`, also used by `SnapshotDataset`): a loader worker otherwise
+moves every tensor it ships into shared memory first, so each worker would end
+up holding its own copy of every geometry it served (on the realistic corpus
+~12 GB per worker, ~180 GB for 15 workers). State
 snapshots are read lazily on each `__getitem__` via a single
 `xr.open_dataset(..., cache=cache).isel(...)` covering that sample's own
 slices (`[t, t+K]`, or the `H` history frames plus `t+K`) — only those
@@ -582,11 +587,17 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `weights_path` | path for best-val `weights.pt` (written on every improvement, reloaded at end) |
 | `amp` / `amp_dtype` | mixed-precision autocast (`bfloat16` by default) with grad scaling |
 | `compile_model` / `compile_dynamic` | `torch.compile` the model before training |
+| `compile_modules` | regional compile: `nn.Module.compile` every submodule whose path (without peft's `base_model.model.` prefix) matches one of these globs, in place, so state-dict keys and LoRA merging are unchanged; dynamic shapes unless `compile_dynamic` says otherwise. For the DFT's conv blocks: `[dft.encoder.conv_encoder.conv_encoder.blocks.*, dft.decoder.conv_decoder.conv_decoder.blocks.*]` (untested on GPU) |
+| `activation_checkpoint_modules` | activation checkpointing: every submodule whose path (matched like `compile_modules`) matches one of these globs keeps only its inputs for backward and recomputes its forward there (`torch.utils.checkpoint`, non-reentrant, so frozen layers' LoRA adapters still get gradients; the autocast state is replayed). Same loss and gradients (bit-identical on CPU; on the GPU within rounding, as cuDNN may pick other kernels for the recompute); only the instance `forward` is replaced, so state-dict keys and LoRA merging are unchanged. Calls under `no_grad` (the pushforward prefix, validation) run plain. For the DFT, `[dft.encoder.conv_encoder, dft.encoder.transformer_encoder, dft.decoder.transformer_decoder, dft.decoder.conv_decoder]` cuts the peak memory of a 2-grad-step sample by ~60 % at ~+30–50 % step time, the conv blocks alone (`dft.encoder.conv_encoder.conv_encoder.blocks.*`, `dft.decoder.conv_decoder.conv_decoder.blocks.*`) by ~27–43 % at ~+6–11 % (see [dft_training_speed_handover.md](plans/dft_training_speed_handover.md) for the measured cost). Default `null` (off) |
+| `unroll_no_grad_modules` | **approximate gradient**, default `null` (off): the matched submodules (globs as above) run under `no_grad` in every gradient-carrying rollout step except the last (`grad_unroll_steps` ≥ 2), so their parameters keep only the last step's gradient term while every other gradient is unchanged; a no-op at horizon 1. For the DFT, `[dft.encoder]` drops the encoder-LoRA term of the first of the two gradient steps (measured cost and gradient change in [dft_training_speed_handover.md](plans/dft_training_speed_handover.md)) |
 | `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
-| `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32) |
+| `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32). The autotune runs once per new (grid, micro-batch) shape, ~100 conv configurations per grid for the DFT, and is CPU-bound cuDNN plan building while the GPU idles: ~12 s per new grid on an RTX 3090 with the S autoencoder (vs ~0.8 s with it off; `torch.backends.cudnn.benchmark_limit` does not shorten it), ~25 min per job for the 69 realistic grids on the H100. Off, steady-state steps were 4-7% slower, so keep it on for long runs and turn it off for runs shorter than ~8 h (smoke tests) |
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
-| `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` | linear warmup → cosine annealing LR schedule |
+| `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
+| `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`_optimizer_steps_per_epoch()`: `ceil(batches / grad_accum_steps)`, or the batch sizes the sampler draws in that epoch's shuffle, grouped as with `grad_accum_samples`). Not with the AE's discriminator |
+| `profile_steps` | `[start, count]`: run micro-batches `start .. start+count-1` (0-based) of epoch 0 under `torch.profiler` (CPU + CUDA, no shapes/stacks) and write `profile.txt` next to `weights.pt`: wall time, it/s and kernel-busy fraction of the window, then the top 40 ops by self device time (self CPU time on CPU). Place it after the cuDNN-benchmark warm-up. Default `null` (off, no syncs); a resumed run does not profile; a window past the epoch end closes there |
+| `grad_accum_samples` | instead of `grad_accum_steps` (setting both raises): sum micro-batches until at least N samples, then step on the per-sample mean (each batch's loss weighted by its size, the grads divided by the group's sample total). A fixed effective batch when `cell_budget` varies the micro-batch size; a group overshoots N by less than one micro-batch, and the epoch's last group is flushed short. `null` (default) is off. Not with the AE's discriminator |
 | `checkpoint_every` / `resume` | full checkpoint (model + optimizer + scheduler + scaler + curriculum) for resume |
 
 `fit()` runs the loop; each epoch calls `_train_epoch` then `_validate`
@@ -629,7 +640,21 @@ geometry `expand` are unaffected, and both `_final_loss` hooks compare a
 **LR schedule.** When `lr_warmup_epochs` is set the optimizer's LR ramps
 linearly from `lr_warmup_start` to its configured peak over the warmup
 window, then cosine-anneals down to `lr_min` over the remaining epochs.
-`lr_warmup_epochs=None` (default) keeps the LR fixed.
+`lr_warmup_epochs=None` (default) keeps the LR fixed. The LR changes once per
+epoch, so epoch 0 runs entirely at `lr_warmup_start`. With
+`lr_warmup_per_step=true` the warmup instead advances after every optimizer
+step: the first step uses `lr_warmup_start` and the peak is reached at the
+start of epoch `lr_warmup_epochs`, after which the cosine steps per epoch as
+before (`trainer.lr_warmup_epochs=1 trainer.lr_warmup_per_step=true` warms up
+over the first epoch only). The scheduler decides from its own step count
+whether it is still warming up, so a resumed run continues where it stopped.
+The warmup's step count is taken per epoch, in that epoch's shuffle and at its
+curriculum horizon (a shorter rollout leaves more samples per trajectory), so the ramp ends with
+the last step of epoch `lr_warmup_epochs - 1`.
+The logged `lr` is the LR at the start of each epoch. `fit()` also calls the
+batch sampler's `set_epoch(epoch)` (`TrajectoryBatchSampler` seeds its
+shuffle with `seed + epoch`), so a resumed run draws the batches the
+uninterrupted run would have, not the shuffles of its first epochs again.
 
 **Best-checkpoint saving.** When `weights_path` is set, the trainer
 writes `model.state_dict()` to that path every time the val loss
@@ -1102,7 +1127,7 @@ declared in the pixi `neural-surrogates` feature and as the package
 
 | Symbol | Role |
 |---|---|
-| `inject_lora(model, *, rank, alpha, dropout, target_modules, variant, modules_to_save)` | `get_peft_model(model, LoraConfig(...))`. `variant="balora"` raises `NotImplementedError` (plan 04). Returns a `PeftModel` whose forward preserves our `(state, params, geometry, geom_features)` contract and forwards attribute access (e.g. `n_geom_feature_channels`) to the base model. |
+| `inject_lora(model, *, rank, alpha, dropout, target_modules, variant, modules_to_save, fused_forward)` | `get_peft_model(model, LoraConfig(...))`. Turns off PEFT's cast of each LoRA input to the adapter dtype: under bf16 autocast that cast only made an fp32 copy and a second saved bf16 copy of every adapted layer's input (bit-identical results without it, ~13 % less DFT peak memory). `variant="balora"` raises `NotImplementedError` (plan 04). Returns a `PeftModel` whose forward preserves our `(state, params, geometry, geom_features)` contract and forwards attribute access (e.g. `n_geom_feature_channels`) to the base model. `fused_forward=True` (`lora.fused_forward`, default false) runs each adapted Linear/Conv3d as one call with the merged weight `W + scaling·B@A` instead of PEFT's `base(x) + B(A(x))·scaling`: the same function up to rounding, same keys/adapter/merge; dropout, variants, LoRA bias and grouped convs fall back to PEFT. |
 | `merge_to_state_dict(peft_model)` | `merge_and_unload()` on a **deepcopy** → a plain, full base-architecture state dict (no `lora_*` keys), byte-loadable into a fresh architecture. The ESMDA-critical export. |
 | `save_adapter` / `load_adapter` | PEFT adapter checkpoint I/O (`adapter_model.safetensors` + `adapter_config.json`). |
 | `resolve_target_modules(model, *, preset, target_modules)` | Explicit `target_modules` (regex/list) wins; else the per-architecture `preset`. |
@@ -1235,13 +1260,18 @@ Only the autoencoder subtree is vendored (like `_upt/`), **not** an external
 `tadpole` dependency: upstream's `requirements.txt` pulls in `torchfsm` (its
 online data-generation dep, unused here) → `vape4d`, an unnecessary,
 resolution-risky chain the AE path never imports. The vendored files are
-byte-for-byte upstream except **two** documented pyurbanair edits: (1) the `GIFt`
+byte-for-byte upstream except these documented pyurbanair edits: (1) the `GIFt`
 import (upstream's integer-rank LoRA library, used only by a branch we never
-take; we drive LoRA through PEFT) is made optional, and (2) the optional
+take; we drive LoRA through PEFT) is made optional, (2) the optional
 **geometry-branch projections** in `architecture/p3d/{conv,core,kl,skip_wrapper}.py`
 and `model/{autoencoder,dft}.py` (each of those files' module docstrings states
-its own injection points). The projections are created **only** when the caller
-passes `geom_in_dims`, so on the default path nothing is added. Preserving the
+its own injection points; they are created **only** when the caller passes
+`geom_in_dims`, so on the default path nothing is added), and (3) two
+value-preserving speed fixes: `PixelShuffle3d` builds its permutation without a
+tensor round trip (`p3d/modules.py`; upstream's `arange(...).tolist()` is a
+`torch.compile` graph break) and `SequentialModel` keeps its positional table on
+the device (`downstream/llm.py`; upstream re-copied it host->device, a CPU-GPU
+sync, on every call). Preserving the
 exact subtree keeps every internal relative import valid **and** the
 encoder/decoder `state_dict` keys identical, so the HF `thuerey-group/Tadpole`
 weights still load strictly. Runtime deps
@@ -1322,6 +1352,8 @@ Both wrappers expose the same architecture settings, saved with the model:
 | `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
 | `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the per-axis core shape. |
 | `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
+| `spatial_checkpoint` | DFT only, default `false`. Recompute every encoder/decoder tile call in backward (non-reentrant checkpoint) instead of keeping its activations. Same outputs and gradients; costs one more encoder and decoder forward. Training then keeps only each tile's latent core and skips, so with halo the activation memory scales with the tile size, not the domain. Without it, halo training keeps the activations of every tile (overlap included) and needs more memory than global. |
+| `spatial_batch_tiles` | DFT only, default `false`. Stack tiles of equal shape into one encoder/decoder call (at most `max_internal_batchsize // (B*C)` tiles per call when that is set) instead of one call per tile. Same function up to batched-kernel rounding; removes the per-tile launch overhead that makes local/halo training many times slower than global. With `spatial_checkpoint`, `max_internal_batchsize` then also bounds the recompute memory. |
 
 In **every DFT mode**, the latent time-stepping network runs **once over the
 assembled full-domain latent grid**, joining all state variables. Halo mode
@@ -1337,6 +1369,38 @@ larger halos should be evaluated on seam errors and rollout quality rather than
 assumed equivalent to global processing. `max_internal_batchsize` limits the
 encoder/decoder batch, not the full-grid latent transform or all saved training
 activations; in local mode `encode(...)` honours it too.
+
+Measured on the idealized data with `tadpole_ae_s_new` (trained `local`,
+`[16, 32, 32]`), 2026-10 (details in the halo study report):
+
+- The frozen AE is a function of its training tile, not of the field. AE
+  reconstruction error (z-scored NRMSE, 60 val/test frames): local
+  `[16,32,32]` 0.139 (its training mode), halo 16 / `[16,32,32]` 0.230,
+  local `[16,64,64]` 0.248, global 0.288, larger halos 0.30–0.31. Per-tile
+  GroupNorm statistics or per-tile latent attention do not recover it
+  (diagnostic: < 0.001 change); every latent cell of a 32-wide tile touches
+  the tile border, so the zero padding of the convolutions is part of what it
+  learned. Seams: error jump across 32-cell tile borders vs interior is 1.29×
+  for local, 1.56× for halo 16 (core 32), 1.0× for halo 32 and global.
+- After 400 fine-tuning steps the modes are close (one-step NRMSE local 0.528,
+  halo 16 0.507, halo 32 0.508, global 0.512): LoRA re-adapts the AE to its
+  context quickly, so the starting error is not decisive.
+- Halo computes every overlapped cell several times (tiles with 16-cell halos
+  around 32-cell cores: 3.7× the cells of the domain in 2-D, 7.3× when z is
+  tiled too) and pads the domain to a multiple of the core. Without
+  `spatial_checkpoint` training keeps all of it (16×112×224: 12.2 GB vs 3.75 GB
+  global); without `spatial_batch_tiles` the per-tile loop is ~20× slower than
+  global. With both knobs halo trains, but `global` + `spatial_checkpoint` is
+  cheaper on both counts (RTX 3090, S AE, horizon 4, 2 grad steps):
+  32×144×192 global 0.38 s/it 7.3 GB, global+checkpoint 0.50 s/it 3.3 GB,
+  halo 16 `[32,64,64]` batched+checkpoint 1.26 s/it 5.0 GB; 32×272×320
+  (2.8 M cells) global 1.23 s/it 21.8 GB, global+checkpoint 1.37 s/it 10.1 GB,
+  halo 16 `[32,64,64]` batched+checkpoint (`max_internal_batchsize: 6`)
+  4.06 s/it 11.6 GB. Halo keeps every tile's skips (and gathered geometry
+  features) with the overlap, so it does not bound training memory by itself.
+  Do not tile z with a halo (use the full z as the core's z size).
+- A model must be deployed in the spatial mode (and tile/halo sizes) it was
+  trained in: the encoder/decoder compute different functions in each.
 
 For example, set these in `train_autoencoder.yaml` or `train_dft.yaml`:
 
@@ -1711,7 +1775,13 @@ geometry settings). The task:
 3. freezes everything, injects LoRA on `dft.encoder` / `dft.decoder` with the
    `lora:` block (`target_preset: tadpole_encdec`), and unfreezes the
    `trainable_modules` (the NEW modules trained *fully*: `subnetwork`,
-   `latent_residual_scale`, `skip_mixing`, the γ skip `scales`);
+   `latent_residual_scale`, `skip_mixing`, the γ skip `scales`).
+   `lora.fused_forward: true` is the fast path for this task: rank 32 is as
+   wide as most S-size conv layers (32 channels; LoRA alone costs ~1.5× the
+   frozen forward FLOPs, 32× on the 32→1 `decompress`), so one conv with the
+   merged weight beats the low-rank branch. RTX 3090, bf16, horizon 4 / 2 grad
+   steps: 0.538 → 0.344 s/it and 7.7 → 5.3 GB at 32×144×192, 0.309 → 0.242 s/it
+   and 3.75 → 2.65 GB at 16×112×224;
 4. stamps `skip_pretrained_load: true` / `pretrained_ae_dir: null` on the
    saved architecture and trains with `weights_transform=merge_to_state_dict`
    and the plan-01 export (§23 step 4).

@@ -13,6 +13,7 @@ Gated with ``importorskip`` on the vendored Tadpole runtime deps
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import numpy as np
@@ -105,6 +106,26 @@ def test_sequential_checkpoint_matches_eager_forward_and_backward() -> None:
     assert torch.allclose(x_eager.grad, x_checkpointed.grad)
     for p_eager, p_checkpointed in zip(eager.parameters(), checkpointed.parameters()):
         assert torch.allclose(p_eager.grad, p_checkpointed.grad)
+
+
+def test_sequential_positional_embedding_is_cached_on_the_device() -> None:
+    """The positional embedding is copied to the input's device/dtype once per
+    grid (a host->device copy per call synchronised the GPU), with the values
+    of the previous ``torch.tensor(table).to(x)``; a new grid replaces it."""
+    from neural_surrogates.architectures._tadpole.architecture.downstream import llm
+
+    model = _nonzero_sequential(use_checkpoint=False)
+    x = torch.randn(2, 4, 1, 2, 3)
+    expected = model(x)
+    table = llm.get_3d_sincos_pos_embed(model.hidden_size, (1, 2, 3))
+    for dtype in (torch.float32, torch.bfloat16):
+        x_like = x.to(dtype)
+        cached = llm._pos_embed_on(table, x_like)
+        assert cached is llm._pos_embed_on(table, x_like)
+        assert torch.equal(cached, torch.tensor(table).to(x_like))
+    assert torch.equal(model(x), expected)
+    other = llm.get_3d_sincos_pos_embed(model.hidden_size, (1, 2, 4))
+    assert llm._pos_embed_on(other, x).shape[0] == 8
 
 
 def test_sequential_context_windows_preserve_grid_and_gradients() -> None:
@@ -273,6 +294,78 @@ def test_identity_at_init_parity_after_lora_injection() -> None:
     assert torch.equal(out, ref)  # exact, bitwise: injection adds no delta at init
 
 
+def test_lora_fused_forward_matches_peft() -> None:
+    """``fused_forward`` (one call with the merged weight) is the same function as
+    PEFT's ``base(x) + B(A(x)) * s``: equal outputs and LoRA gradients at nonzero B,
+    the same state-dict keys and the same merged export."""
+    finetuning = pytest.importorskip("neural_surrogates.finetuning")
+    m = _stepper(latent_type="mode").eval()
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    m.requires_grad_(False)
+    targets = finetuning.resolve_target_modules(m, preset="tadpole_encdec")
+    state, params, geom = _inputs()
+    runs = []
+    for fused in (False, True):
+        torch.manual_seed(0)  # the same random lora_A and lora_B in both runs
+        peft_model = finetuning.inject_lora(
+            copy.deepcopy(m),
+            rank=4,
+            alpha=8,
+            target_modules=targets,
+            fused_forward=fused,
+        ).eval()  # eval: no stochastic layers, gradients still flow
+        with torch.no_grad():  # off the zero fixed point
+            for n, p in peft_model.named_parameters():
+                if "lora_B" in n:
+                    p.normal_(std=0.05)
+        out = peft_model(state, params, geom)
+        out.square().mean().backward()
+        grads = {
+            n: p.grad for n, p in peft_model.named_parameters() if p.grad is not None
+        }
+        runs.append((peft_model, out, grads))
+    (peft_ref, out_ref, g_ref), (peft_fused, out_fused, g_fused) = runs
+    with torch.no_grad():
+        assert not torch.allclose(out_ref, m(state, params, geom), atol=1e-4)
+    # fp32 rounding through the deep network: compare against the largest entry
+    assert (out_fused - out_ref).abs().max() <= 1e-4 * out_ref.abs().max()
+    assert g_ref.keys() == g_fused.keys() and any("lora_A" in n for n in g_ref)
+    for n, g in g_ref.items():
+        assert (g_fused[n] - g).abs().max() <= 1e-3 * g.abs().max(), n
+    assert peft_fused.state_dict().keys() == peft_ref.state_dict().keys()
+    merged_ref = finetuning.merge_to_state_dict(peft_ref)
+    merged_fused = finetuning.merge_to_state_dict(peft_fused)
+    for k, v in merged_ref.items():
+        assert torch.equal(merged_fused[k], v), k
+
+
+def test_lora_fused_forward_falls_back_with_dropout() -> None:
+    """Configurations the merged call cannot express (here LoRA dropout) keep
+    PEFT's own forward: the same random output under the same seed."""
+    finetuning = pytest.importorskip("neural_surrogates.finetuning")
+    m = _stepper(latent_type="mode")
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    targets = finetuning.resolve_target_modules(m, preset="tadpole_encdec")
+    state, params, geom = _inputs()
+    outs = []
+    for fused in (False, True):
+        torch.manual_seed(0)  # the same random lora_A and lora_B in both runs
+        peft_model = finetuning.inject_lora(
+            copy.deepcopy(m),
+            rank=4,
+            alpha=8,
+            dropout=0.5,
+            target_modules=targets,
+            fused_forward=fused,
+        ).train()
+        with torch.no_grad():
+            for n, p in peft_model.named_parameters():
+                if "lora_B" in n:
+                    p.normal_(std=0.05)
+            outs.append(peft_model(state, params, geom))
+    assert torch.equal(outs[0], outs[1])
+
+
 def test_max_internal_batchsize_chunked_path_parity() -> None:
     """The vendored DFT chunks the folded crops when max_internal_batchsize is
     set; toggling it on the SAME weights must not change the output (covers the
@@ -286,6 +379,62 @@ def test_max_internal_batchsize_chunked_path_parity() -> None:
         chunked = m(state, params, geom)
     assert torch.allclose(unchunked, chunked, atol=1e-5)
     assert torch.isfinite(chunked).all()
+
+
+def test_frozen_window_bias_cache_matches_upstream() -> None:
+    """The stepper reuses the P3D window-attention position bias while its MLP
+    is frozen: outputs and gradients equal upstream's recompute-every-call
+    forward exactly; a weight update (load_state_dict) or a trainable MLP
+    recomputes it."""
+    from neural_surrogates.architectures._tadpole.architecture.p3d.transformer import (
+        PosEmbMLPSwinv3D,
+    )
+
+    torch.manual_seed(0)
+    cached = _stepper(spatial_mode="global", encode_geometry=False)
+    cached.requires_grad_(False)
+    for p in cached.dft.subnetwork.parameters():
+        p.requires_grad_(True)
+    with torch.no_grad():  # live skips and decoder output, not zero-init paths
+        for name, p in cached.named_parameters():
+            if "scales" in name or "out_proj" in name:
+                p.normal_(std=0.05)
+    upstream = copy.deepcopy(cached)
+    biases = [m for m in upstream.modules() if isinstance(m, PosEmbMLPSwinv3D)]
+    assert biases
+    for m in biases:
+        del m.forward  # back to the class (upstream) forward
+    calls = {"n": 0}
+    first = next(m for m in cached.modules() if isinstance(m, PosEmbMLPSwinv3D))
+    hook = first.cpb_mlp.register_forward_hook(
+        lambda *_: calls.__setitem__("n", calls["n"] + 1)
+    )
+    x = _inputs(grid=(32, 16, 16))
+    for _ in range(3):
+        out_c, out_u = cached(*x), upstream(*x)
+        torch.testing.assert_close(out_c, out_u, rtol=0, atol=0)
+    assert calls["n"] == 1  # computed once, then reused
+    out_c.square().mean().backward()
+    out_u.square().mean().backward()
+    grads = dict(upstream.named_parameters())
+    for name, p in cached.named_parameters():
+        if p.grad is not None:
+            torch.testing.assert_close(p.grad, grads[name].grad, rtol=0, atol=0)
+    # New weights (bumped version counters) invalidate the cache.
+    state = {
+        k: v + 0.01 if "cpb_mlp" in k else v for k, v in cached.state_dict().items()
+    }
+    cached.load_state_dict(state)
+    upstream.load_state_dict(state)
+    with torch.no_grad():
+        torch.testing.assert_close(cached(*x), upstream(*x), rtol=0, atol=0)
+    assert calls["n"] == 2
+    # A trainable MLP always recomputes (upstream path).
+    first.cpb_mlp.requires_grad_(True)
+    with torch.no_grad():
+        cached(*x)
+    assert calls["n"] == 3
+    hook.remove()
 
 
 def test_encoder_crop_size_must_be_multiple_of_16() -> None:

@@ -78,6 +78,53 @@ _SIZES = ("S", "B", "L")
 # the stride of the geometry branch's level-3 feature.
 _LATENT_STRIDE = 16
 
+
+def _cache_frozen_window_bias(module: nn.Module) -> None:
+    """Reuse the P3D window-attention position bias while its MLP is frozen.
+
+    Upstream ``PosEmbMLPSwinv3D.forward`` re-runs its ``cpb_mlp`` (+ gather and
+    sigmoid) on every call although the result depends only on frozen weights
+    and a constant buffer: ~800 small kernels per DFT training step. Each
+    instance gets a forward that adds the cached table instead, keyed on the
+    device, the autocast state and the version counters of the MLP weights and
+    the coordinate buffer, so the values are exactly upstream's. While any MLP
+    weight requires grad (AE pre-training) it runs upstream's forward.
+    """
+    import types
+
+    from ._tadpole.architecture.p3d.transformer import PosEmbMLPSwinv3D
+
+    for m in module.modules():
+        if isinstance(m, PosEmbMLPSwinv3D):
+            m.forward = types.MethodType(  # type: ignore[method-assign]
+                _cached_window_bias_forward, m
+            )
+
+
+def _cached_window_bias_forward(
+    self: Any, input_tensor: torch.Tensor, local_window_size: Any
+) -> torch.Tensor:
+    upstream = type(self).forward
+    params = list(self.cpb_mlp.parameters())
+    if self.deploy or any(p.requires_grad for p in params):
+        return upstream(self, input_tensor, local_window_size)
+    device = input_tensor.device.type
+    key = (
+        input_tensor.device,
+        torch.is_autocast_enabled(device),
+        torch.get_autocast_dtype(device),
+        self.relative_coords_table._version,
+        *(p._version for p in params),
+    )
+    cached = self.__dict__.get("_bias_cache")
+    if cached is None or cached[0] != key:
+        out = upstream(self, input_tensor, local_window_size)
+        self.__dict__["_bias_cache"] = (key, self.pos_emb.detach())
+        return out
+    input_tensor += cached[1]
+    return input_tensor
+
+
 # Subnetwork geometry per model size. ``latent_mult`` is the encoder's latent
 # channel count Cl (= hidden_size * 2**(len(depth)//2): 256 / 512 / 1024 for
 # S / B / L), so ``in_dim = input_channels * latent_mult`` matches the channel
@@ -254,6 +301,21 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     halo_size:
         Context width in cells, a nonnegative multiple of 16 (halo mode only);
         ``encoder_crop_size`` sets the central core size.
+    spatial_checkpoint:
+        Training-memory knob (default off). Recompute each encoder/decoder
+        tile call in backward instead of keeping its activations, so training
+        memory grows with the tile, not the domain: only each tile's latent
+        core and skips are kept. Same values and gradients; costs one extra
+        encoder + decoder forward. Applies wherever tiles are processed one
+        by one (global/halo, or local with skip mixing); the local path
+        without skip mixing ignores it.
+    spatial_batch_tiles:
+        Speed knob (default off). Stack tiles of equal shape into one
+        encoder/decoder call instead of one call per tile (at most
+        ``max_internal_batchsize // (B*C)`` tiles per call when that is set).
+        Same function up to batched-kernel rounding; with
+        ``spatial_checkpoint`` a call's activations are what is recomputed, so
+        ``max_internal_batchsize`` then bounds the training memory too.
     skip_mixing:
         Optional mapping with ``width`` (default 32) and ``levels`` (spatial
         strides, default [4, 8]). Adds zero-init pointwise state mixing alongside
@@ -335,6 +397,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         spatial_mode: str = "local",
         halo_size: int = 16,
         skip_mixing: dict | None = None,
+        spatial_checkpoint: bool = False,
+        spatial_batch_tiles: bool = False,
     ) -> None:
         super().__init__()
 
@@ -397,6 +461,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         validate_spatial_mode(spatial_mode, halo_size)
         self.spatial_mode = spatial_mode
         self.halo_size = halo_size
+        self.spatial_checkpoint = bool(spatial_checkpoint)
+        self.spatial_batch_tiles = bool(spatial_batch_tiles)
         self.max_internal_batchsize = max_internal_batchsize
         self.normalize = bool(normalize)
         self.predict_residual = bool(predict_residual)
@@ -492,6 +558,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             max_internal_batchsize=max_internal_batchsize,
             geom_in_dims=geom_in_dims,
         )
+
+        _cache_frozen_window_bias(self.dft)
 
         from .tadpole_skip_mixing import TadpoleSkipMixing
 
@@ -743,6 +811,7 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
                 branch.get("geom_feats"),
                 dft=True,
                 latent_type=latent_type,
+                batch_tiles=self.spatial_batch_tiles,
             )
             return latent, residuals
         _, _, u, v, w = self._fold_dims(x)
@@ -808,6 +877,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             self.halo_size,
             branch.get("geom_feats"),
             dft=True,
+            recompute=self.spatial_checkpoint,
+            batch_tiles=self.spatial_batch_tiles,
         )
         if not reference and self.dft.subnetwork is not None:
             b, c = x.shape[:2]
@@ -831,6 +902,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
             residuals=residuals,
             zero_skips=reference,
             skip_mixing=self.skip_mixing,
+            recompute=self.spatial_checkpoint,
+            batch_tiles=self.spatial_batch_tiles,
         ).reshape_as(x)
 
     # -- forward ----------------------------------------------------------- #

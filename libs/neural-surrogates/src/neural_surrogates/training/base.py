@@ -21,12 +21,133 @@ import csv
 import json
 import math
 import time
+import types
 from pathlib import Path
 from typing import Callable
 
 import torch
 import tqdm
+from torch.autograd import DeviceType
+from torch.utils.checkpoint import checkpoint
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
+
+
+def compile_submodules(
+    model: torch.nn.Module, patterns: list[str], **compile_kwargs: object
+) -> list[str]:
+    """``nn.Module.compile`` every submodule whose path matches a glob in
+    ``patterns``, and return the compiled paths.
+
+    Paths are relative to the bare architecture: a PEFT wrapper's
+    ``base_model.model.`` prefix is dropped before matching, so the same
+    pattern works with and without LoRA. A match inside an already compiled
+    module is skipped (its parent's graph covers it). Compiling in place keeps
+    the module tree and state-dict keys unchanged. A pattern that matches
+    nothing raises, so a typo does not silently run eager.
+    """
+    from fnmatch import fnmatchcase
+
+    compiled: list[str] = []
+    unmatched = set(patterns)
+    for name, module in model.named_modules():
+        path = name.removeprefix("base_model.model.")
+        hits = {p for p in patterns if fnmatchcase(path, p)}
+        if not hits:
+            continue
+        unmatched -= hits
+        if any(name.startswith(parent + ".") for parent in compiled):
+            continue
+        module.compile(**compile_kwargs)
+        compiled.append(name)
+    if unmatched:
+        raise ValueError(
+            f"compile_modules patterns match no module: {sorted(unmatched)}"
+        )
+    return compiled
+
+
+def _match_modules(
+    model: torch.nn.Module, patterns: list[str], knob: str
+) -> list[torch.nn.Module]:
+    """The outermost submodules whose path (without peft's prefix) matches."""
+    from fnmatch import fnmatchcase
+
+    names: list[str] = []
+    modules: list[torch.nn.Module] = []
+    unmatched = set(patterns)
+    for name, module in model.named_modules():
+        hits = {
+            p
+            for p in patterns
+            if fnmatchcase(name.removeprefix("base_model.model."), p)
+        }
+        if not hits:
+            continue
+        unmatched -= hits
+        if not any(name.startswith(parent + ".") for parent in names):
+            names.append(name)
+            modules.append(module)
+    if unmatched:
+        raise ValueError(f"{knob} patterns match no module: {sorted(unmatched)}")
+    return modules
+
+
+def _checkpointed_forward(
+    self: torch.nn.Module, *args: object, **kwargs: object
+) -> object:
+    """The previous ``forward`` under non-reentrant activation checkpointing
+    (plain when gradients are off: nothing would be saved anyway)."""
+    forward = self._checkpoint_inner_forward
+    if not torch.is_grad_enabled():
+        return forward(*args, **kwargs)
+    return checkpoint(forward, *args, use_reentrant=False, **kwargs)
+
+
+def checkpoint_submodules(
+    model: torch.nn.Module, patterns: list[str]
+) -> list[torch.nn.Module]:
+    """Activation-checkpoint every submodule whose path matches a glob in
+    ``patterns``, and return the wrapped modules.
+
+    The module keeps only its inputs for backward and recomputes its forward
+    there (``torch.utils.checkpoint``, non-reentrant: gradients reach frozen
+    modules' LoRA adapters even when no input requires grad, and the autocast
+    state and RNG are replayed). Matching follows :func:`compile_submodules`:
+    peft's ``base_model.model.`` prefix is dropped, a match inside an already
+    wrapped module is skipped and an unmatched pattern raises. Only the
+    instance's ``forward`` is replaced, wrapping the one it had (both bound to
+    the module, so a deepcopy stays self-contained); the module tree and
+    state-dict keys are unchanged.
+    """
+    modules = _match_modules(model, patterns, "activation_checkpoint_modules")
+    for module in modules:
+        # Wrap whatever forward the module has (e.g. LoRA's fused forward).
+        module._checkpoint_inner_forward = module.forward
+        module.forward = types.MethodType(_checkpointed_forward, module)
+    return modules
+
+
+def _flagged_no_grad_forward(
+    self: torch.nn.Module, *args: object, **kwargs: object
+) -> object:
+    """The previous ``forward``, under ``no_grad`` while the trainer flags it."""
+    if self._unroll_no_grad:
+        with torch.no_grad():
+            return self._unroll_inner_forward(*args, **kwargs)
+    return self._unroll_inner_forward(*args, **kwargs)
+
+
+def to_channels_last_3d(model: torch.nn.Module) -> torch.nn.Module:
+    """Put every 5-D parameter and buffer of ``model`` in ``channels_last_3d``,
+    in place, and return it. ``Module.to(memory_format=channels_last_3d)``
+    raises on any 4-D tensor (``required rank 5``), which many 3-D models have;
+    this skips every tensor that is not 5-D. Values are unchanged."""
+    fmt = torch.channels_last_3d
+    with torch.no_grad():
+        for t in [*model.parameters(), *model.buffers()]:
+            if t.dim() == 5 and not t.is_contiguous(memory_format=fmt):
+                t.data = t.data.contiguous(memory_format=fmt)
+    return model
 
 
 class BaseTraining:
@@ -46,6 +167,9 @@ class BaseTraining:
         amp_dtype: str = "bfloat16",
         compile_model: bool = False,
         compile_dynamic: bool | None = None,
+        compile_modules: list[str] | None = None,
+        activation_checkpoint_modules: list[str] | None = None,
+        unroll_no_grad_modules: list[str] | None = None,
         channels_last: bool = False,
         cudnn_benchmark: bool = False,
         tf32: bool = False,
@@ -54,9 +178,13 @@ class BaseTraining:
         lr_warmup_epochs: int | None = None,
         lr_warmup_start: float = 0.0,
         lr_min: float = 0.0,
+        lr_warmup_per_step: bool = False,
         mask_loss: bool = True,
         grad_clip_norm: float | None = None,
         grad_unroll_steps: int = 2,
+        grad_accum_steps: int = 1,
+        profile_steps: list[int] | tuple[int, int] | None = None,
+        grad_accum_samples: int | None = None,
         checkpoint_every: int = 1,
         resume: bool = False,
         checkpoint_metadata: dict | None = None,
@@ -80,7 +208,7 @@ class BaseTraining:
         # under autocast; a no-op for correctness either way.
         self.channels_last = channels_last
         if channels_last:
-            self.model = self.model.to(memory_format=torch.channels_last_3d)
+            self.model = to_channels_last_3d(self.model)
         # Keep a handle on the eager module: torch.compile wraps the model and
         # prefixes its state-dict keys with `_orig_mod.`, so saving/loading
         # must go through the unwrapped module (parameters are shared).
@@ -94,7 +222,25 @@ class BaseTraining:
         # architectures predating the knob keep the one-step behaviour exactly.
         self.num_history_steps = int(getattr(self._eager_model, "num_history_steps", 1))
         self.n_state_channels = getattr(self._eager_model, "n_state_channels", None)
-        if compile_model:
+        if activation_checkpoint_modules:
+            # Trade compute for memory: the matched submodules recompute their
+            # forward in backward instead of keeping their activations.
+            checkpoint_submodules(self.model, list(activation_checkpoint_modules))
+        # APPROXIMATE gradient, off by default: the matched submodules run under
+        # no_grad in every gradient-carrying rollout step except the last one,
+        # so their parameters only get the last step's gradient term.
+        self._unroll_no_grad_modules = (
+            _match_modules(
+                self.model, list(unroll_no_grad_modules), "unroll_no_grad_modules"
+            )
+            if unroll_no_grad_modules
+            else []
+        )
+        for module in self._unroll_no_grad_modules:
+            module._unroll_no_grad = False
+            module._unroll_inner_forward = module.forward
+            module.forward = types.MethodType(_flagged_no_grad_forward, module)
+        if compile_model or compile_modules:
             # Inductor's CUDA backend generates triton kernels; without a
             # working triton, compilation raises mid-epoch. Fall back to
             # eager instead of crashing the run.
@@ -102,22 +248,12 @@ class BaseTraining:
 
             if self.device.type == "cuda" and not has_triton():
                 print(
-                    "compile_model=true but no working triton installation for "
-                    "CUDA inductor; running eager. Install triton in this env "
+                    "torch.compile requested but no working triton installation "
+                    "for CUDA inductor; running eager. Install triton in this env "
                     "to enable torch.compile."
                 )
+                compile_model, compile_modules = False, None
             else:
-                # `dynamic` controls whether inductor specialises on concrete
-                # spatial sizes. An explicit `compile_dynamic` wins; otherwise
-                # the model may request a setting via a `compile_dynamic`
-                # attribute (P3D sets False: its shape-dependent internal padding
-                # makes dynamo introduce symbolic spatial dims even on the first
-                # trace, and inductor then mis-infers the backward strides of its
-                # reshape/PixelShuffle ops -- an `assert_size_stride` crash in the
-                # compiled backward. Forcing static specialisation avoids it).
-                dynamic = compile_dynamic
-                if dynamic is None:
-                    dynamic = getattr(self._eager_model, "compile_dynamic", None)
                 # The pushforward loop calls the model under both no_grad and
                 # grad (plus separate autocast contexts), so a single forward
                 # legitimately needs several compiled graph variants. The
@@ -132,7 +268,29 @@ class BaseTraining:
                             _attr,
                             max(getattr(_dynamo.config, _attr), 64),
                         )
-                self.model = torch.compile(self.model, dynamic=dynamic)
+        if compile_modules:
+            # Regional compile: only the matched submodules, in place
+            # (``nn.Module.compile``), so state-dict keys, LoRA merging and
+            # checkpoints are untouched. Dynamic shapes by default, so one
+            # graph serves every grid of a multi-geometry dataset.
+            compile_submodules(
+                self.model,
+                compile_modules,
+                dynamic=True if compile_dynamic is None else compile_dynamic,
+            )
+        if compile_model:
+            # `dynamic` controls whether inductor specialises on concrete
+            # spatial sizes. An explicit `compile_dynamic` wins; otherwise
+            # the model may request a setting via a `compile_dynamic`
+            # attribute (P3D sets False: its shape-dependent internal padding
+            # makes dynamo introduce symbolic spatial dims even on the first
+            # trace, and inductor then mis-infers the backward strides of its
+            # reshape/PixelShuffle ops -- an `assert_size_stride` crash in the
+            # compiled backward. Forcing static specialisation avoids it).
+            dynamic = compile_dynamic
+            if dynamic is None:
+                dynamic = getattr(self._eager_model, "compile_dynamic", None)
+            self.model = torch.compile(self.model, dynamic=dynamic)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.optimizer = optimizer
@@ -175,9 +333,29 @@ class BaseTraining:
         # to the optimizer's configured (peak) LR over ``lr_warmup_epochs``,
         # then cosine-anneal down to ``lr_min`` over the remaining epochs.
         # ``lr_warmup_epochs is None`` keeps the LR fixed (original behavior).
+        # ``lr_warmup_per_step`` ramps once per optimizer step instead of once
+        # per epoch, so the peak LR is reached at the start of epoch
+        # ``lr_warmup_epochs``.
         self.lr_warmup_epochs = lr_warmup_epochs
         self.lr_warmup_start = lr_warmup_start
         self.lr_min = lr_min
+        self.lr_warmup_per_step = lr_warmup_per_step
+        # Micro-batches whose gradients are summed into one optimizer step: an
+        # effective batch of ``batch_size * grad_accum_steps`` when the full
+        # batch does not fit in memory. 1 steps after every batch.
+        self.grad_accum_steps = max(1, int(grad_accum_steps))
+        # Or accumulate micro-batches until at least this many samples, then
+        # step on the per-sample mean: a fixed effective batch when the sampler
+        # varies the micro-batch size (``cell_budget``). None: off.
+        if grad_accum_samples is not None:
+            if self.grad_accum_steps > 1:
+                raise ValueError("set grad_accum_steps or grad_accum_samples, not both")
+            if int(grad_accum_samples) < 1:
+                raise ValueError(
+                    f"grad_accum_samples must be >= 1, got {grad_accum_samples}"
+                )
+            grad_accum_samples = int(grad_accum_samples)
+        self.grad_accum_samples = grad_accum_samples
         self.scheduler = self._build_lr_scheduler()
         # Mixed precision: autocast runs the forward pass in bf16 (default) or
         # fp16. bf16 has fp32's exponent range, so no gradient under/overflow
@@ -212,6 +390,7 @@ class BaseTraining:
         self._geometry_host: torch.Tensor | None = None
         self._geometry: torch.Tensor | None = None
         self._fluid_mask: torch.Tensor | None = None
+        self._fluid_scale: torch.Tensor | None = None
         # Optional SDF + ∇SDF geometry features, shared across the batch exactly
         # like the mask: cached on the device alongside it (as ``(4, *grid)``)
         # and broadcast to the batch at each model call. Stays ``None`` when the
@@ -219,6 +398,13 @@ class BaseTraining:
         # advertises ``n_geom_feature_channels > 0`` fails loud (see
         # ``_prepare_batch``) rather than silently training on zeros.
         self._geom_features: torch.Tensor | None = None
+        # The mask and features broadcast to the batch, ``(B, geometry,
+        # geom_features)``, rebuilt only when the geometry or B changes: the
+        # model caches its frozen geometry branch on these tensors' identity,
+        # so a fresh ``expand`` view per call would miss that cache every time.
+        self._batch_geometry: tuple[int, torch.Tensor, torch.Tensor | None] | None = (
+            None
+        )
         # mask_loss restricts the loss to fluid cells: uDALES targets carry
         # junk values inside obstacles, which would otherwise be penalised
         # against the model's (masked) zero output there.
@@ -230,6 +416,15 @@ class BaseTraining:
         # improves long-rollout error at the cost of holding N steps'
         # activations.
         self.grad_unroll_steps = max(1, int(grad_unroll_steps))
+        # Optional ``(start, count)`` window of micro-batches of the first
+        # training epoch to run under ``torch.profiler`` (see ``_profile_tick``).
+        # One-shot: consumed by the first ``_train_epoch`` call and cleared on
+        # resume, so only epoch 0 of a fresh run is profiled. ``None`` = off.
+        self._profile_window: tuple[int, int] | None = (
+            None
+            if profile_steps is None
+            else (int(profile_steps[0]), int(profile_steps[1]))
+        )
         # Persist the full (model + optimizer + scheduler + scaler + curriculum)
         # checkpoint only every ``checkpoint_every`` epochs (plus the final one).
         # The optimizer state alone is ~2x the model size, so writing it every
@@ -269,7 +464,10 @@ class BaseTraining:
         if warmup == 0:
             return cosine
         # LinearLR scales the peak LR by start_factor on epoch 0 and reaches 1.0
-        # (the peak) at epoch ``warmup``; start_factor must be > 0.
+        # (the peak) at epoch ``warmup``; start_factor must be > 0. Per step,
+        # the same ramp spans the optimizer steps of those epochs instead.
+        if self.lr_warmup_per_step:
+            warmup = self._warmup_optimizer_steps(warmup)
         start_factor = self.lr_warmup_start / peak_lr if peak_lr > 0 else 1.0
         start_factor = min(max(start_factor, 1e-8), 1.0)
         warmup_sched = torch.optim.lr_scheduler.LinearLR(
@@ -282,6 +480,17 @@ class BaseTraining:
             self.optimizer,
             schedulers=[warmup_sched, cosine],
             milestones=[warmup],
+        )
+
+    def _warming_up_per_step(self) -> bool:
+        """Whether the per-step warmup is still ramping: the scheduler then
+        steps after every optimizer step, and only once per epoch afterwards.
+        Read off the scheduler's own count, so a resumed run picks it up."""
+        sched = self.scheduler
+        return (
+            self.lr_warmup_per_step
+            and isinstance(sched, torch.optim.lr_scheduler.SequentialLR)
+            and sched.last_epoch < sched._milestones[0]
         )
 
     def _autocast(self) -> torch.autocast:
@@ -321,10 +530,17 @@ class BaseTraining:
 
         if stale:
             self._geometry_host = geom_host
-            self._geometry = geom_host.to(self.device)
+            # The loader pins the batch, so these copies need not block.
+            self._geometry = geom_host.to(self.device, non_blocking=True)
             self._fluid_mask = self._geometry.bool()
+            # Cells per fluid cell, kept on the device (no host sync): rescales
+            # a mean over the whole grid to the mean over fluid cells only.
+            self._fluid_scale = self._fluid_mask.numel() / self._fluid_mask.sum()
             feat = batch.get("geom_features")
-            self._geom_features = feat[0].to(self.device) if feat is not None else None
+            self._geom_features = (
+                feat[0].to(self.device, non_blocking=True) if feat is not None else None
+            )
+            self._batch_geometry = None
             # Fail loud on a model/dataset mismatch: a model built with SDF
             # features wired into its stem cannot train on a dataset that ships
             # none (it would either error at cat time or, worse, be fed zeros).
@@ -336,8 +552,26 @@ class BaseTraining:
                     "matching dataset.sdf_features mode (and sdf_clamp_cells)."
                 )
         assert self._geometry is not None  # set on the first (always-stale) batch
-        geometry = self._geometry.expand(state.shape[0], *self._geometry.shape)
+        geometry, _ = self._broadcast_geometry(state.shape[0])
         return state, state_next, params, geometry
+
+    def _broadcast_geometry(
+        self, batch_size: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """The cached mask and SDF features broadcast to ``batch_size`` (views,
+        not copies), the same tensor objects for as long as the geometry and
+        the batch size hold (see ``_batch_geometry``)."""
+        assert self._geometry is not None
+        cached = self._batch_geometry
+        if cached is None or cached[0] != batch_size:
+            feat = self._geom_features
+            cached = (
+                batch_size,
+                self._geometry.expand(batch_size, *self._geometry.shape),
+                None if feat is None else feat.expand(batch_size, *feat.shape),
+            )
+            self._batch_geometry = cached
+        return cached[1], cached[2]
 
     def _prepare_snapshot_batch(
         self, batch: dict[str, torch.Tensor]
@@ -416,7 +650,7 @@ class BaseTraining:
         if self._geom_features is None:
             pred: torch.Tensor = self.model(state, params_i, geometry)
             return pred
-        feat = self._geom_features.expand(state.shape[0], *self._geom_features.shape)
+        _, feat = self._broadcast_geometry(state.shape[0])
         pred = self.model(state, params_i, geometry, geom_features=feat)
         return pred
 
@@ -473,9 +707,15 @@ class BaseTraining:
                     )
         with self._autocast():
             for i in range(K - g, K - 1):
-                state = self._advance_history(
-                    state, self._model_forward(state, params[:, i, :], geometry)
-                )
+                for module in self._unroll_no_grad_modules:
+                    module._unroll_no_grad = True
+                try:
+                    state = self._advance_history(
+                        state, self._model_forward(state, params[:, i, :], geometry)
+                    )
+                finally:
+                    for module in self._unroll_no_grad_modules:
+                        module._unroll_no_grad = False
             return self._final_loss(state, state_next, params, geometry)
 
     def _final_loss(
@@ -519,25 +759,189 @@ class BaseTraining:
         total = torch.zeros((), device=self.device)
         n = 0
         term_sums: dict[str, torch.Tensor] = {}
-        for batch in tqdm.tqdm(self.train_loader):
+        # Gradients of `grad_accum_steps` micro-batches are summed before each
+        # optimizer step, each loss divided by its group's size so the step
+        # sees their mean; with `grad_accum_samples`, micro-batches are summed
+        # until that many samples and the step sees the per-sample mean. The
+        # epoch's last group may be shorter.
+        k = self.grad_accum_steps
+        target = self.grad_accum_samples
+        n_batches = len(self.train_loader) if k > 1 or target is not None else 0
+        group = 1
+        window, self._profile_window = self._profile_window, None
+        prof = self._profile_tick(None, 0, window) if window is not None else None
+        seen = 0
+        for i, batch in enumerate(tqdm.tqdm(self.train_loader)):
             loss = self._forward(batch)
-            self.optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(loss).backward()
-            if self.grad_clip_norm is not None:
-                # No-op unscale when the scaler is disabled; scaler.step
-                # detects the explicit unscale and does not repeat it.
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.grad_clip_norm
-                )
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self._after_optimizer_step(batch)
+            if target is None:
+                if i % k == 0:
+                    group = min(k, n_batches - i) if k > 1 else 1
+                    self.optimizer.zero_grad(set_to_none=True)
+                self.scaler.scale(loss / group if group > 1 else loss).backward()
+                step = (i + 1) % k == 0 or i + 1 == n_batches
+            else:
+                if seen == 0:
+                    self.optimizer.zero_grad(set_to_none=True)
+                # Weigh each micro-batch's mean loss by its sample count, then
+                # divide the summed gradients by the group's total before the
+                # unscale / clip / step (linear, so fine on still-scaled grads).
+                n_samples = self._batch_samples(batch)
+                seen += n_samples
+                self.scaler.scale(loss * n_samples).backward()
+                step = seen >= target or i + 1 == n_batches
+                if step:
+                    # One fused launch instead of one per parameter tensor.
+                    grads = [
+                        p.grad for p in self.model.parameters() if p.grad is not None
+                    ]
+                    if grads:
+                        torch._foreach_div_(grads, seen)
+                    seen = 0
+            if step:
+                if self.grad_clip_norm is not None:
+                    # No-op unscale when the scaler is disabled; scaler.step
+                    # detects the explicit unscale and does not repeat it.
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip_norm
+                    )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self._after_optimizer_step(batch)
+                if self.scheduler is not None and self._warming_up_per_step():
+                    self.scheduler.step()
             total = total + loss.detach()
             n += 1
             self._accumulate_terms(term_sums)
+            if window is not None:
+                prof = self._profile_tick(prof, n, window)
+        if prof is not None:  # the epoch ended inside the window
+            self._profile_end(prof, n - window[0])  # type: ignore[index]
         self._train_terms = self._mean_terms(term_sums, n)
         return float((total / max(n, 1)).item())
+
+    def _profile_tick(
+        self,
+        prof: tuple[torch.profiler.profile, float] | None,
+        done: int,
+        window: tuple[int, int],
+    ) -> tuple[torch.profiler.profile, float] | None:
+        """Start or stop the profiler once ``done`` micro-batches have run.
+
+        Called between iterations, so the window covers the loader fetch and
+        the full forward/backward/optimizer work of micro-batches
+        ``start .. start + count - 1`` (0-based). The only syncs are the two at
+        the window edges, which time it."""
+        start, count = window
+        if done == start:
+            if self.device.type == "cuda":
+                torch.cuda.synchronize(self.device)
+            activities = [torch.profiler.ProfilerActivity.CPU]
+            if self.device.type == "cuda":
+                activities.append(torch.profiler.ProfilerActivity.CUDA)
+            profiler = torch.profiler.profile(
+                activities=activities, record_shapes=False, with_stack=False
+            )
+            profiler.start()
+            return profiler, time.monotonic()
+        if prof is not None and done == start + count:
+            self._profile_end(prof, count)
+            return None
+        return prof
+
+    def _profile_end(
+        self, prof: tuple[torch.profiler.profile, float], steps: int
+    ) -> None:
+        """Stop the profiler; print a one-line summary and write the top ops
+        (by self device time on CUDA, self CPU time otherwise) to
+        ``profile.txt`` next to ``weights.pt``."""
+        profiler, t0 = prof
+        cuda = self.device.type == "cuda"
+        if cuda:
+            torch.cuda.synchronize(self.device)
+        wall = time.monotonic() - t0
+        profiler.stop()
+        events = profiler.key_averages()
+        # Kernel time over wall time: well below 100% means the GPU waits on
+        # the CPU (launch overhead, data loading, syncs).
+        kernels = [e for e in events if e.device_type == DeviceType.CUDA]
+        busy = sum(e.self_device_time_total for e in kernels) / 1e6
+        summary = (
+            f"profiled {steps} micro-batches in {wall:.2f} s "
+            f"({steps / max(wall, 1e-9):.2f} it/s"
+            + (
+                f", device busy {busy:.2f} s = {busy / max(wall, 1e-9):.0%}"
+                if cuda
+                else ""
+            )
+            + ")"
+        )
+        print(summary)
+        if self.weights_path is None:
+            return
+        sort_by = "self_device_time_total" if cuda else "self_cpu_time_total"
+        path = self.weights_path.parent / "profile.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            summary
+            + "\n\n"
+            + events.table(sort_by=sort_by, row_limit=40, max_name_column_width=80)
+            + "\n"
+        )
+        print(f"  wrote {path}")
+
+    @staticmethod
+    def _batch_samples(batch: dict[str, torch.Tensor]) -> int:
+        """Samples in a batch, from its per-sample state (the geometry may be
+        shipped once for the whole batch). A shape read: no device sync."""
+        for key in ("state_n", "state", "latent", "state_n_patch"):
+            if key in batch:
+                return int(batch[key].shape[0])
+        raise KeyError(f"no per-sample state in the batch keys {list(batch)}")
+
+    def _optimizer_steps_per_epoch(self, epoch: int | None = None) -> int:
+        """Optimizer steps in one training epoch.
+
+        With ``grad_accum_samples`` the batch sampler's planned sizes
+        (``TrajectoryBatchSampler``) are grouped exactly as ``_train_epoch``
+        groups them, in the order epoch ``epoch`` draws them (``fit`` seeds
+        the sampler's shuffle by epoch), so the count is exact; ``None``
+        groups them unshuffled, where the overshoot of each group differs and
+        the count can be off by ~10%. Without planned sizes,
+        ``ceil(samples / N)``.
+        """
+        if self.grad_accum_samples is None:
+            return math.ceil(len(self.train_loader) / self.grad_accum_steps)
+        target = self.grad_accum_samples
+        batch_sizes = getattr(self.train_loader.batch_sampler, "batch_sizes", None)
+        if batch_sizes is None:
+            return math.ceil(len(self.train_loader.dataset) / target)
+        steps, seen = 0, 0
+        for size in batch_sizes(epoch):
+            seen += size
+            if seen >= target:
+                steps, seen = steps + 1, 0
+        return steps + (seen > 0)
+
+    def _warmup_optimizer_steps(self, epochs: int) -> int:
+        """Optimizer steps in the first ``epochs`` epochs, each counted in its
+        own shuffle and at the rollout horizon the curriculum gives it (a
+        shorter horizon leaves more samples per trajectory), so the warmup
+        ends with the last step of its last epoch."""
+        dataset = self._train_pushforward_dataset
+        if dataset is None:
+            return sum(
+                max(self._optimizer_steps_per_epoch(e), 1) for e in range(epochs)
+            )
+        built = dataset.pushforward_steps
+        total = 0
+        try:
+            for epoch in range(epochs):
+                dataset.set_pushforward_steps(self._pushforward_steps_for_epoch(epoch))
+                total += max(self._optimizer_steps_per_epoch(epoch), 1)
+        finally:
+            dataset.set_pushforward_steps(built)
+        return total
 
     def _after_optimizer_step(self, batch: dict[str, torch.Tensor]) -> None:
         """Hook for a second optimizer that must step after the main one (the AE's
@@ -804,6 +1208,7 @@ class BaseTraining:
             if self._train_pushforward_dataset is not None and current_steps > 0:
                 self._train_pushforward_dataset.set_pushforward_steps(current_steps)
             start_epoch = ckpt["epoch"] + 1
+            self._profile_window = None  # only epoch 0 of a fresh run is profiled
             print(
                 f"resumed from {ckpt_path}: continuing at epoch {start_epoch + 1} "
                 f"(best val={best_val:.6f}, horizon={current_steps})"
@@ -829,11 +1234,21 @@ class BaseTraining:
                 epochs_since_improvement = 0
                 print(f"  train pushforward horizon -> {steps} step(s)")
             lr = self.optimizer.param_groups[0]["lr"]
+            # An epoch that began in the per-step warmup has already stepped the
+            # scheduler after each optimizer step.
+            warming_up = self._warming_up_per_step()
+            # A seeded batch sampler shuffles by epoch: a resumed run must not
+            # replay the shuffles of the epochs it already trained.
+            set_epoch = getattr(
+                getattr(self.train_loader, "batch_sampler", None), "set_epoch", None
+            )
+            if set_epoch is not None:
+                set_epoch(epoch)
             epoch_start = time.monotonic()
             train_loss = self._train_epoch()
             val_loss = self._validate()
             epoch_seconds = time.monotonic() - epoch_start
-            if self.scheduler is not None:
+            if self.scheduler is not None and not warming_up:
                 self.scheduler.step()
             history["train"].append(train_loss)
             history["val"].append(val_loss)

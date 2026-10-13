@@ -113,6 +113,22 @@ def get_3d_sincos_pos_embed(
     return pos_embed
 
 
+# pyurbanair: the embedding on x's device/dtype, cached for the last (table,
+# device, dtype). `torch.tensor(table).to(x)` copied it from pageable host
+# memory on every call, a host<->GPU sync per model call; same values.
+_POS_EMBED_ON: dict = {}
+
+
+def _pos_embed_on(table, x):
+    key = (id(table), x.device, x.dtype)
+    hit = _POS_EMBED_ON.get(key)
+    if hit is None or hit[0] is not table:
+        _POS_EMBED_ON.clear()
+        hit = (table, torch.as_tensor(table).to(x))
+        _POS_EMBED_ON[key] = hit
+    return hit[1]
+
+
 class AttentionBlock(nn.Module):
     def __init__(
         self,
@@ -443,7 +459,7 @@ class SequentialModel(nn.Module):
             # Project input to hidden_size dimension
             x = self.input_proj(x)
         # Add positional embedding
-        x = x + torch.tensor(pos_embed).to(x)
+        x = x + _pos_embed_on(pos_embed, x)
         # Concatenate cls_token to the end of the sequence for each sample
         x = torch.cat([x, self.cls_token.repeat(n, 1, 1)], dim=1)
         # If not using in-context patches, or patch size is too large

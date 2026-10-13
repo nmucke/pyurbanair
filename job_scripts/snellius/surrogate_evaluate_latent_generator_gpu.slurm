@@ -5,7 +5,7 @@
 # (configs/surrogate/eval.yaml, block `latent_generator`). Outputs in <model dir>/eval.
 #SBATCH --job-name=surrogate_evaluate_latent_generator_gpu
 #SBATCH --partition=gpu_a100
-#SBATCH --account=tdsr72361
+#SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=18

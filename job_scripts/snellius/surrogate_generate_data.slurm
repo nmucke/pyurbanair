@@ -2,7 +2,7 @@
 #   sbatch job_scripts/snellius/surrogate_generate_data.slurm data.sharding.num_shards=4 data.sharding.shard_index=0
 #SBATCH --job-name=surrogate_generate_data
 #SBATCH --partition=rome
-#SBATCH --account=tdsr72361
+#SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem-per-cpu=1750M

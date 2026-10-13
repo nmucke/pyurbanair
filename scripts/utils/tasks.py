@@ -379,6 +379,7 @@ def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:
         target_modules=targets,
         variant=lora.variant,
         modules_to_save=list(lora.modules_to_save) or None,
+        fused_forward=lora.get("fused_forward", False),
     )
 
 

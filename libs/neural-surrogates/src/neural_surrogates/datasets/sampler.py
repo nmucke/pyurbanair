@@ -115,13 +115,31 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
             batches = [batches[i] for i in order]
         return batches
 
+    def set_epoch(self, epoch: int) -> None:
+        """Shuffle the next ``__iter__`` as epoch ``epoch`` (0-based) of a
+        fresh run; the trainer calls it so a resumed run does not replay the
+        shuffles of its first epochs."""
+        self._epoch = int(epoch)
+
+    def _generator(self, epoch: int) -> torch.Generator | None:
+        if not self.shuffle:
+            return None
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + epoch)
+        return generator
+
     def __iter__(self) -> Iterator[list[int]]:
-        generator = None
+        generator = self._generator(self._epoch)
         if self.shuffle:
-            generator = torch.Generator()
-            generator.manual_seed(self.seed + self._epoch)
             self._epoch += 1
         yield from self._batches(generator)
 
     def __len__(self) -> int:
         return len(self._batches(None))
+
+    def batch_sizes(self, epoch: int | None = None) -> list[int]:
+        """Samples in each batch of an epoch, in the order epoch ``epoch``
+        (0-based, see ``set_epoch``) draws them; ``None``: unshuffled order
+        (shuffling reorders the batches but keeps their sizes)."""
+        generator = None if epoch is None else self._generator(epoch)
+        return [len(batch) for batch in self._batches(generator)]

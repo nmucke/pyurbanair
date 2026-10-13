@@ -286,7 +286,8 @@ wrap them ([job_scripts.md](job_scripts.md)).
 
 - `scripts/tools/` — geometry CLIs: `prepare_case_stl.py`,
   `preprocess_udales_geometry.py`, `benchmark_geometry.py`,
-  `download_urbantales_geometries.py`, `rasters_to_stl.py`.
+  `download_urbantales_geometries.py`, `rasters_to_stl.py`; and
+  `benchmark_dft_step.py`, which times DFT training steps on a fixed batch.
 - `scripts/setup_dev_env.sh` — behind `pixi run setup-dev`.
 - `scripts/start_mcp` — MCP server launcher; the server runs `run_forward.py`
   on `configs/forward.yaml` (see [mcp.md](mcp.md)).

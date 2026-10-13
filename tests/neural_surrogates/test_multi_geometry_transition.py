@@ -99,6 +99,28 @@ def test_per_trajectory_geometry_and_dedup(data_root: Path) -> None:
     assert ds.geom_features_for(2).shape == (4, *GRIDS[2])
 
 
+def test_geometry_lives_in_one_shared_buffer(data_root: Path) -> None:
+    """Masks and SDF features are shared before any loader worker starts, so
+    workers ship handles to them instead of each keeping its own shared copy
+    of every geometry it served; values are those of the files."""
+    ds = _make_ds(data_root, sdf_features=True)
+    for tensors in (ds._geometries, ds._geom_features):
+        assert all(t.is_shared() for t in tensors)
+        assert len({t.untyped_storage().data_ptr() for t in tensors}) == 1
+    for traj, path in enumerate(ds._state_files):
+        assert torch.equal(ds.geometry_for(traj), ds._load_geometry(path))
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=2, shuffle=False),
+        collate_fn=transition_collate,
+        num_workers=1,
+    )
+    for batch in loader:
+        traj = 0 if batch["geometry"].shape[-1] == 8 else 2
+        assert torch.equal(batch["geometry"][0], ds.geometry_for(traj))
+        assert torch.equal(batch["geom_features"][0], ds.geom_features_for(traj))
+
+
 def test_items_carry_their_trajectory_geometry(data_root: Path) -> None:
     ds = _make_ds(data_root)
     per_traj = T_LEN - 1
@@ -273,3 +295,386 @@ def test_normalization_stats_use_per_trajectory_masks(data_root: Path) -> None:
         assert s_std[c] == pytest.approx(allv.std(), rel=1e-6)
     assert p_mean.shape == (len(PARAM_VARS),)
     assert p_std.shape == (len(PARAM_VARS),)
+
+
+class _RecordingModel(_IdentityModel):
+    """Records the geometry tensors each call receives (identity matters: the
+    Tadpole stepper caches its frozen geometry branch on it)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[torch.Tensor, torch.Tensor | None]] = []
+
+    def forward(self, state, params, geometry, geom_features=None):
+        self.seen.append((geometry, geom_features))
+        return state
+
+
+def test_trainer_reuses_broadcast_geometry(data_root: Path) -> None:
+    """Every model call of a batch -- and of the next batch on the same
+    geometry and batch size -- gets the same broadcast tensors; a new geometry
+    gets new ones."""
+    ds = _make_ds(data_root, sdf_features=True, pushforward_steps=3)
+    model = _RecordingModel()
+    trainer = _make_trainer(model)
+    batch_a = transition_collate([ds[0]])
+    batch_a2 = transition_collate([ds[1]])  # trajectory 1: same grid + mask
+    batch_b = transition_collate([ds[2]])  # trajectory 2: its own geometry
+
+    trainer._forward(batch_a)
+    trainer._forward(batch_a2)
+    assert len(model.seen) == 6  # three rollout steps per batch
+    geometry, features = model.seen[0]
+    assert features is not None and features.shape == (1, 4, *GRIDS[0])
+    assert all(g is geometry and f is features for g, f in model.seen)
+
+    trainer._forward(batch_b)
+    assert model.seen[-1][0] is not geometry
+    assert model.seen[-1][0].shape == (1, *GRIDS[2])
+
+
+@pytest.mark.parametrize("loss_fn", [torch.nn.MSELoss(), torch.nn.L1Loss()])
+def test_masked_loss_matches_boolean_indexing(data_root: Path, loss_fn) -> None:
+    """The sync-free masked loss equals the loss over the fluid cells only,
+    in value and gradient, even with non-finite junk inside the obstacles."""
+    ds = _make_ds(data_root, sdf_features=True)
+    batch = transition_collate([ds[6], ds[7]])  # trajectory 2
+    fluid = ds.geometry_for(2).bool()
+    batch["state_next"] = batch["state_next"].masked_fill(~fluid, float("nan"))
+
+    class Scaled(_IdentityModel):
+        def forward(self, state, params, geometry, geom_features=None):
+            return state * (1.0 + self.p)
+
+    model = Scaled()
+    trainer = _make_trainer(model)
+    trainer.loss_fn = loss_fn
+    loss = trainer._forward(batch)
+    (grad,) = torch.autograd.grad(loss, model.p)
+
+    pred = batch["state_n"] * (1.0 + model.p)
+    expected = loss_fn(pred[..., fluid], batch["state_next"][..., fluid])
+    (expected_grad,) = torch.autograd.grad(expected, model.p)
+    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(grad, expected_grad)
+
+
+class _ScaledModel(_IdentityModel):
+    def forward(self, state, params, geometry, geom_features=None):
+        return state * (1.0 + self.p)
+
+
+def _run_accum_epoch(loader: DataLoader, lr: float, **trainer_kwargs):
+    """One SGD epoch of a ``_ScaledModel`` trainer; returns the trainer and
+    its number of optimizer steps."""
+    model = _ScaledModel()
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=lr),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=1,
+        device="cpu",
+        amp=False,
+        **trainer_kwargs,
+    )
+    steps = 0
+    step = trainer.optimizer.step
+
+    def counting_step(*args, **kwargs):
+        nonlocal steps
+        steps += 1
+        return step(*args, **kwargs)
+
+    trainer.optimizer.step = counting_step  # type: ignore[method-assign]
+    trainer._train_epoch()
+    return trainer, steps
+
+
+def _sample_losses(batch: dict, p: torch.Tensor) -> list[torch.Tensor]:
+    """The masked MSE of a ``_ScaledModel`` with parameter ``p``, per sample."""
+    fluid = batch["geometry"][0].bool()
+    pred = batch["state_n"] * (1.0 + p)
+    return [
+        torch.nn.functional.mse_loss(
+            pred[b][..., fluid], batch["state_next"][b][..., fluid]
+        )
+        for b in range(pred.shape[0])
+    ]
+
+
+def test_grad_accum_averages_micro_batches(data_root: Path) -> None:
+    """``grad_accum_steps=k`` takes one optimizer step per k batches on their
+    mean gradient; a short last group is averaged over its own size."""
+    ds = _make_ds(data_root, sdf_features=True)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+    batches = list(loader)  # 9 single-sample batches -> groups of 4, 4, 1
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, grad_accum_steps=4)
+
+    p = torch.zeros(1, requires_grad=True)
+    for group in (batches[0:4], batches[4:8], batches[8:9]):
+        grad = torch.zeros(1)
+        for batch in group:
+            (loss,) = _sample_losses(batch, p)
+            grad += torch.autograd.grad(loss, p)[0] / len(group)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == 3
+    assert trainer._optimizer_steps_per_epoch() == 3
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+@pytest.mark.parametrize("window", [None, (2, 3), (0, 2), (7, 5)])
+def test_profile_window(data_root: Path, tmp_path: Path, window) -> None:
+    """``profile_steps=(start, count)`` profiles that window of the first
+    epoch into ``profile.txt`` (a window running past the epoch end is closed
+    there) without changing training; off writes nothing."""
+    ds = _make_ds(data_root, sdf_features=True)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+
+    class Scaled(_IdentityModel):
+        def forward(self, state, params, geometry, geom_features=None):
+            return state * (1.0 + self.p)
+
+    params = []
+    for profile_steps in (None, window):
+        model = Scaled()
+        out = tmp_path / ("off" if profile_steps is None else "on")
+        trainer = Trainer(
+            model=model,
+            train_loader=loader,
+            val_loader=loader,
+            optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+            loss_fn=torch.nn.MSELoss(),
+            num_epochs=2,
+            device="cpu",
+            amp=False,
+            grad_accum_steps=2,
+            weights_path=out / "weights.pt",
+            profile_steps=profile_steps,
+        )
+        trainer._train_epoch()
+        trainer._train_epoch()  # one-shot: the second epoch is not profiled
+        params.append(model.p.detach().clone())
+        profile = out / "profile.txt"
+        if profile_steps is None:
+            assert not profile.exists()
+        else:
+            text = profile.read_text()
+            count = min(window[1], 9 - window[0])  # 9 batches per epoch
+            assert text.startswith(f"profiled {count} micro-batches")
+            assert "Self CPU time total" in text and "aten::" in text
+    torch.testing.assert_close(params[0], params[1])
+
+
+@pytest.mark.parametrize(
+    "target, group_batches",
+    [
+        (4, (3, 4)),  # 2+1+2 = 5 overshoots, then 1+1+1+1 = 4
+        (6, (4, 3)),  # 2+1+2+1 = 6, then a partial last group of 1+1+1
+    ],
+)
+def test_grad_accum_samples_averages_over_samples(
+    data_root: Path, target: int, group_batches: tuple[int, ...]
+) -> None:
+    """``grad_accum_samples=N`` steps once at least N samples are in, on the
+    per-sample mean gradient, so variable micro-batches weigh by their size;
+    the epoch's last partial group is flushed."""
+    ds = _make_ds(data_root, sdf_features=True)
+    # 256-cell trajectories 0/1 get batches of 2 (then 1), the 512-cell
+    # trajectory 2 batches of 1: sizes 2, 1, 2, 1, 1, 1, 1.
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, shuffle=False)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    batches = list(loader)
+    assert [len(b["state_n"]) for b in batches] == [2, 1, 2, 1, 1, 1, 1]
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, grad_accum_samples=target)
+
+    p = torch.zeros(1, requires_grad=True)
+    start = 0
+    for size in group_batches:
+        losses = [
+            loss for b in batches[start : start + size] for loss in _sample_losses(b, p)
+        ]
+        start += size
+        (grad,) = torch.autograd.grad(torch.stack(losses).mean(), p)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == len(group_batches) == trainer._optimizer_steps_per_epoch()
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"grad_accum_samples": 1}])
+def test_no_accumulation_steps_every_batch(data_root: Path, kwargs: dict) -> None:
+    """Without accumulation (the default) and with ``grad_accum_samples=1``
+    every batch takes its own step on its own mean loss."""
+    ds = _make_ds(data_root, sdf_features=True)
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, shuffle=False)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    lr = 0.1
+    trainer, steps = _run_accum_epoch(loader, lr, **kwargs)
+
+    p = torch.zeros(1, requires_grad=True)
+    for batch in loader:
+        (grad,) = torch.autograd.grad(torch.stack(_sample_losses(batch, p)).mean(), p)
+        p = (p - lr * grad).detach().requires_grad_(True)
+    assert steps == len(loader) == trainer._optimizer_steps_per_epoch()
+    torch.testing.assert_close(trainer.model.p.detach(), p.detach())
+
+
+def test_grad_accum_steps_and_samples_are_exclusive() -> None:
+    model = _IdentityModel()
+    dummy = DataLoader([0, 1], batch_size=1)
+    with pytest.raises(ValueError, match="not both"):
+        Trainer(
+            model=model,
+            train_loader=dummy,
+            val_loader=dummy,
+            optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+            loss_fn=torch.nn.MSELoss(),
+            num_epochs=1,
+            device="cpu",
+            grad_accum_steps=2,
+            grad_accum_samples=8,
+        )
+
+
+def test_per_step_warmup_counts_steps_at_the_curriculum_horizon(
+    data_root: Path,
+) -> None:
+    """The per-step warmup spans the optimizer steps the curriculum's first
+    epochs really take: at horizon 1 a trajectory has more samples than at
+    the dataset's built (target) horizon, so the LR must reach its peak only
+    after the last step of epoch 0, not before it."""
+    ds = _make_ds(data_root, sdf_features=True, pushforward_steps=3)
+    loader = DataLoader(
+        ds,
+        batch_sampler=TrajectoryBatchSampler(ds, batch_size=1, shuffle=False),
+        collate_fn=transition_collate,
+    )
+    model = _ScaledModel()
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=3,
+        device="cpu",
+        amp=False,
+        pushforward_epochs_per_step=1,
+        pushforward_start_steps=1,
+        lr_warmup_epochs=1,
+        lr_warmup_start=0.01,
+        lr_warmup_per_step=True,
+        grad_accum_steps=2,
+    )
+    # Horizon 1: 3 samples per trajectory -> 9 batches -> 5 steps (horizon 3
+    # would give 3 batches -> 2 steps). The dataset keeps its built horizon.
+    assert trainer.scheduler._milestones == [5]
+    assert ds.pushforward_steps == 3
+    lrs: list[float] = []
+    step = trainer.optimizer.step
+
+    def recording_step(*args, **kwargs):
+        lrs.append(trainer.optimizer.param_groups[0]["lr"])
+        return step(*args, **kwargs)
+
+    trainer.optimizer.step = recording_step  # type: ignore[method-assign]
+    trainer._validate = lambda: 0.0  # type: ignore[method-assign]
+    trainer.fit()
+    # Epoch 0 ramps over all 5 steps, epoch 1 (horizon 2: 6 batches) is at peak.
+    assert lrs[:5] == pytest.approx([0.01 + 0.09 * i / 5 for i in range(5)])
+    assert lrs[5:8] == pytest.approx([0.1] * 3)
+
+
+def test_resumed_run_continues_the_sampler_shuffles(
+    data_root: Path, tmp_path: Path
+) -> None:
+    """The trainer seeds each epoch's shuffle by its epoch number, so a run
+    resumed from a checkpoint draws the same batches as the uninterrupted
+    run instead of replaying the shuffles of its first epochs."""
+    ds = _make_ds(data_root, sdf_features=True)
+
+    def run(out: Path, num_epochs: int) -> list[list[int]]:
+        orders: list[list[int]] = []
+
+        class Recording(TrajectoryBatchSampler):
+            def __iter__(self):  # type: ignore[no-untyped-def]
+                batches = list(super().__iter__())
+                orders.append([i for batch in batches for i in batch])
+                return iter(batches)
+
+        sampler = Recording(ds, batch_size=1, shuffle=True, seed=3)
+        loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+        model = _ScaledModel()
+        trainer = Trainer(
+            model=model,
+            train_loader=loader,
+            val_loader=loader,
+            optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+            loss_fn=torch.nn.MSELoss(),
+            num_epochs=num_epochs,
+            device="cpu",
+            amp=False,
+            weights_path=out / "weights.pt",
+            resume=True,
+        )
+        trainer._validate = lambda: 0.0  # type: ignore[method-assign]
+        trainer.fit()
+        return orders
+
+    full = run(tmp_path / "full", num_epochs=3)
+    run(tmp_path / "resumed", num_epochs=1)
+    resumed = run(tmp_path / "resumed", num_epochs=3)
+    assert len(full) == 3 and len(resumed) == 2
+    assert full[0] != full[1]
+    assert resumed == full[1:]
+
+
+def test_per_step_warmup_counts_the_shuffled_groups(data_root: Path) -> None:
+    """With ``grad_accum_samples`` over shuffled variable batches the groups
+    overshoot the target differently than in unshuffled order; the warmup
+    counts the epoch's own shuffle, so it ends exactly with epoch 0."""
+    ds = _make_ds(data_root, sdf_features=True)
+    # Sizes 2, 1, 2, 1, 1, 1, 1 unshuffled (2 groups of >= 4 samples), drawn
+    # as 1, 2, 1, 2, 1, 1, 1 in epoch 0 of seed 0 (3 groups).
+    sampler = TrajectoryBatchSampler(ds, batch_size=3, cell_budget=512, seed=0)
+    loader = DataLoader(ds, batch_sampler=sampler, collate_fn=transition_collate)
+    model = _ScaledModel()
+    trainer = Trainer(
+        model=model,
+        train_loader=loader,
+        val_loader=loader,
+        optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
+        loss_fn=torch.nn.MSELoss(),
+        num_epochs=2,
+        device="cpu",
+        amp=False,
+        lr_warmup_epochs=1,
+        lr_warmup_start=0.01,
+        lr_warmup_per_step=True,
+        grad_accum_samples=4,
+    )
+    assert trainer._optimizer_steps_per_epoch() == 2
+    assert trainer.scheduler._milestones == [3]
+    lrs: list[float] = []
+    step = trainer.optimizer.step
+
+    def recording_step(*args, **kwargs):
+        lrs.append(trainer.optimizer.param_groups[0]["lr"])
+        return step(*args, **kwargs)
+
+    trainer.optimizer.step = recording_step  # type: ignore[method-assign]
+    trainer._validate = lambda: 0.0  # type: ignore[method-assign]
+    trainer.fit()
+    assert lrs[:3] == pytest.approx([0.01, 0.04, 0.07])
+    assert lrs[3:] == pytest.approx([0.1] * (len(lrs) - 3))

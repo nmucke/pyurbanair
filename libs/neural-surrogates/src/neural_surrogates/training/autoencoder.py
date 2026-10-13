@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from neural_surrogates.training.base import BaseTraining
+from neural_surrogates.training.base import BaseTraining, to_channels_last_3d
 
 
 class AutoencoderTrainer(BaseTraining):
@@ -100,6 +100,14 @@ class AutoencoderTrainer(BaseTraining):
 
         # -- optional adversarial extension (everything below is inert when
         #    ``discriminator is None``) -------------------------------------- #
+        if discriminator is not None and (
+            self.grad_accum_steps > 1 or self.grad_accum_samples is not None
+        ):
+            # The critic steps once per AE step, on that step's last batch only.
+            raise ValueError(
+                "grad_accum_steps > 1 / grad_accum_samples do not support a "
+                "discriminator"
+            )
         if (discriminator is None) != (disc_optimizer is None):
             raise ValueError(
                 "the adversarial extension needs both `discriminator` and "
@@ -154,10 +162,7 @@ class AutoencoderTrainer(BaseTraining):
         assert self.discriminator is not None
         self.discriminator = self.discriminator.to(self.device)
         if self.channels_last:
-            # torch is untyped in the pre-commit mypy env, so the ignore is unused there.
-            self.discriminator = self.discriminator.to(  # type: ignore[call-overload, unused-ignore]
-                memory_format=torch.channels_last_3d
-            )
+            self.discriminator = to_channels_last_3d(self.discriminator)
         # Mirror BaseTraining's scaler: only fp16-on-CUDA autocast needs loss
         # scaling; bf16 (the default) has fp32's exponent range, so the scaler is
         # constructed disabled and every scaler call below is a pass-through.

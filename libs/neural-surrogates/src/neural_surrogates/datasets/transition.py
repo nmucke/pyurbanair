@@ -21,6 +21,25 @@ from neural_surrogates.sdf import sdf_features as compute_sdf_features
 from torch.utils.data import Dataset, default_collate
 
 
+def share_once(tensors: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Copy ``tensors`` into one shared-memory buffer and return views of it.
+
+    A ``DataLoader`` worker moves every tensor it ships into shared memory
+    first, unless it already lives there: the per-geometry masks and SDF
+    features a dataset keeps for the whole run would otherwise leave one
+    shared copy per worker of every geometry it served (15 workers x the
+    realistic corpus's ~12 GB). Shared once here, before the workers start,
+    every process ships handles to this one buffer. One buffer, not one per
+    tensor, keeps it at one file descriptor per process. Values unchanged.
+    """
+    if not tensors:
+        return tensors
+    # Shared while still empty (untouched pages cost no memory), then filled.
+    sizes = [t.numel() for t in tensors]
+    flat = torch.empty(sum(sizes), dtype=tensors[0].dtype).share_memory_()
+    return [part.view(t.shape).copy_(t) for part, t in zip(flat.split(sizes), tensors)]
+
+
 def transition_collate(batch: list[dict]) -> dict:
     """Collate transition items, shipping the shared per-domain tensors once.
 
@@ -260,6 +279,9 @@ class TransitionDataset(Dataset):
             if self.sdf_feature_mode != "none"
             else None
         )
+        self._geometries = share_once(self._geometries)
+        if self._geom_features is not None:
+            self._geom_features = share_once(self._geom_features)
         self._state_cache: dict[int, xr.Dataset] | None = None
 
     @property

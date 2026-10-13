@@ -24,6 +24,7 @@ lora:
   target_preset: attention
   target_modules: null
   modules_to_save: []
+  fused_forward: false  # true: one call with the merged weight W + s*B@A (same function, faster)
 
 # Recompute the input/output normalization on the new data (false: keep the
 # pretrained model's).

@@ -7,7 +7,7 @@
 # Resubmit the same line to resume.
 #SBATCH --job-name=surrogate_prechunk_data
 #SBATCH --partition=rome
-#SBATCH --account=tdsr72361
+#SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-cpu=1750M

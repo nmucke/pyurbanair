@@ -22,14 +22,33 @@ trainer:
   amp: true
   amp_dtype: bfloat16
   compile_model: false
+  # Glob paths of submodules to torch.compile in place (dynamic shapes); null: off.
+  compile_modules: null
+  # Glob paths of submodules to activation-checkpoint (recompute in backward); null: off.
+  activation_checkpoint_modules: null
+  # Changes the gradient (off): glob paths of submodules run under no_grad in every
+  # gradient-carrying rollout step but the last; null: off.
+  unroll_no_grad_modules: null
   channels_last: false
   cudnn_benchmark: true
   tf32: true
-  # Learning-rate schedule and stability
+  # Learning-rate schedule and stability: a linear warmup from lr_warmup_start
+  # to the optimizer's lr over lr_warmup_epochs, then a cosine to lr_min. The
+  # warmup steps once per epoch, or after every optimizer step with
+  # lr_warmup_per_step (peak lr is then reached at epoch lr_warmup_epochs).
   lr_warmup_epochs: 5
   lr_warmup_start: 1.0e-6
   lr_min: 1.0e-6
+  lr_warmup_per_step: false
   grad_clip_norm: 1.0
+  # Batches whose gradients are summed into one optimizer step (an effective
+  # batch of batch_size x grad_accum_steps when a larger batch does not fit).
+  grad_accum_steps: 1
+  # Or step every >= N samples on their per-sample mean (fixed effective batch
+  # under cell_budget's variable batches); null: off. Not with grad_accum_steps > 1.
+  grad_accum_samples: null
+  # [start, count]: torch.profiler table of these epoch-0 micro-batches -> profile.txt.
+  profile_steps: null
   # Ignore solid (building) cells in the loss.
   mask_loss: true
 
