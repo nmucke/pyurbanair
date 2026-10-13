@@ -35,9 +35,10 @@ as jobs in `city4cfd`).
 and reinstall** (`pixi install -e city4cfd`): pixi's build cache does not key
 on the package's build config, so without the clean it reinstalls the old
 binary. The recipe pins its build backend (`pixi-build-cmake` 0.4.7), which
-needs pixi >= 0.77.0 (`requires-pixi`). On Linux the build uses GCC 15
+needs pixi >= 0.77.0 (`requires-pixi`). On Linux the build uses GCC 13, as upstream's CI
 (`[tool.pixi.workspace.target.linux-64.build-variants]` in `pyproject.toml`):
-GCC 16 rejects the valijson headers City4CFD 0.8.1 bundles.
+the libstdc++ of GCC 15 and 16 rejects the valijson adapter City4CFD 0.8.1
+bundles.
 
 ## Modules
 
