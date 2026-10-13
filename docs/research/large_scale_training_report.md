@@ -156,8 +156,9 @@ matched to the access pattern:
   writes. The copy can therefore be shared read-only by concurrent jobs.
 - Any change in the sources or options fails closed.
 - Parameters are still read from the source.
-- Normalisation statistics are streamed from the source, whose large chunks read a
-  split about 3× faster.
+- For the stepper and baselines, normalisation statistics are streamed from the
+  source, whose large chunks read a split about 3× faster. The autoencoder computes
+  them from its tile copy and caches them there.
 
 **Results.**
 
@@ -514,7 +515,149 @@ size-B step is mostly bound by GPU work.
 
 ---
 
-## 8. Fault tolerance on time-limited jobs
+## 8. Autoencoder pretraining at scale
+
+The size-B autoencoder is trained from scratch on the realistic corpus before
+any stepper or generator. Its training problem differs from the stepper's in two
+ways: it reconstructs single snapshots rather than rolling out in time, and it
+trains on crops rather than whole domains. The techniques below apply to
+that setting. Shared infrastructure already described (bf16, TF32, cuDNN
+autotuning, the shared geometry copy, checkpoint/resume) is not repeated.
+
+**Setting of the production run.**
+
+- **Model:** 38.4M parameters in the encoder and decoder, plus a 3.5M-parameter
+  geometry branch (41.9M in total).
+- **Hardware:** a full 80 GB A100 on DelftBlue, in 48 h jobs.
+- **Run length:** 200 epochs.
+- **Epoch size:** one sample per stored snapshot, so 500 × 120 = 60,000 crops.
+- **Batches:** 48 crops. Batches are drawn per trajectory and the last partial batch
+  is kept (120 frames give 48 + 48 + 24), so an epoch is 1,500 optimizer steps.
+- **Schedule:** learning rate 10⁻⁴ with a 5-epoch warmup and a cosine decay to 10⁻⁶.
+- **Result:** best validation loss 0.0052, at epoch 195.
+
+### 8.1 Crop-based training with tiled encoding
+
+- **Lazy random crops.** Each item is a 64³ crop at a random origin. Only the crop is
+  read from disk; the rest of the frame never leaves it. An axis shorter than the
+  crop is taken whole, so on the realistic corpus (32 vertical cells) every crop is
+  32×64×64 cells.
+- **Geometry on the full grid.** The geometry mask and signed-distance features are
+  computed once per unique geometry on the full grid, then cropped per item. The
+  distance field therefore still sees buildings outside the crop.
+- **Tiled encoding.** The autoencoder encodes in local mode. Each crop is cut into
+  16×32×32 tiles, and the three velocity components and all tiles are folded into the
+  batch dimension. A 32×64×64 crop becomes 2×2×2 tiles per component, i.e. 24
+  single-channel tiles per sample and 1,152 per batch of 48.
+- **What tiling buys.**
+  - Activation memory is set by the tile and crop size, not by the domain. The batch
+    size can therefore be chosen once for all 69 grid shapes.
+  - Every batch has the same shape, so cuDNN autotunes it only once.
+  - It follows the intermediate pre-cropping of the original Tadpole training.
+- **Anisotropic tiles.** Tile shapes may differ per axis (each a multiple of 16). The
+  16-cell vertical extent avoids padding a 16-cell idealized domain to 32. The
+  32-cell realistic domain divides it exactly, so no compute is spent on padding.
+- **Tile size shapes the learned function.** Reconstruction error (NRMSE, idealized
+  corpus, size S) on the tile it was trained on is 0.139. On 16×64×64 tiles it is
+  0.248, and on whole domains 0.288. This is why the downstream stepper re-adapts the
+  frozen autoencoder through LoRA rather than using it as is (Section 7).
+
+### 8.2 Batch size from a memory probe
+
+- **Why the cell budget is off.** The cell-budget sampler of Section 4 counts
+  full-grid cells, not crop cells, so it would cap every realistic trajectory at
+  batch 1. It is therefore disabled for the autoencoder, and the batch size is set
+  directly.
+- **The probe:**
+
+| Batch size | Reserved GPU memory (A100 80 GB) |
+|---|---|
+| 32 | ≈ 50 GiB |
+| 55 | ≈ 77 GiB (10 steps completed) |
+| 48 (chosen) | – |
+
+- **Derived memory rate:** about 10.7 GiB reserved per million crop cells.
+
+### 8.3 I/O for crops and host memory
+
+- **The source layout.** A crop from the source files decompresses whole 40-frame
+  chunks to use one frame.
+- **The tile-chunked copy.** The copy of Section 3.1 with 16×64×64 spatial chunks and
+  one frame per chunk. A random 32×64×64 crop then touches 2–3 × 1–2 × 1–2 chunks of
+  one frame. No per-crop read time was measured.
+- **Bounded file handles.** netCDF4 keeps a 64 MiB chunk cache per variable per open
+  file. The first full-corpus run, with 4 loader workers, hit the 32 GB host-memory
+  limit after 123 batches. Each worker now keeps at most one file open, which bounds
+  the cache memory at one file per worker.
+- **Normalisation statistics** are streamed once from the copy and cached with it.
+
+### 8.4 Wall time of the production run
+
+The run's own log (`metrics.csv`) records three clearly separated regimes of epoch
+time:
+
+| Epochs | Mean epoch time | Crops/s (derived, incl. validation) |
+|---|---|---|
+| 1–8 | 20,111 s (5.6 h) | ≈ 3.0 |
+| 9–56 | 4,820 s (1.3 h) | ≈ 12 |
+| 57–200 | 1,740 s (0.48 h) | ≈ 34 |
+
+- **Totals:** 178.6 GPU-hours, which needs at least four chained 48 h jobs.
+- **Likely causes of the two speed-ups.** The surviving launch record shows a resumed
+  job on 5 October that read from the tile-chunked copy with 12 loader workers. The
+  configuration written by the final submission has 48 workers. This is consistent
+  with:
+  - **Epochs 1–8:** reading the source files, before the copy existed.
+  - **Epochs 9–56:** reading the copy, ≈ 4.2× faster.
+  - **Epochs 57–200:** 48 instead of 12 workers, a further ≈ 2.8×.
+
+  The attribution is inferred from these records, not measured. The DelftBlue job
+  logs would confirm it.
+- **Cost of the per-epoch warmup.** The warmup advanced per epoch, so the first five
+  epochs (about 28 h in the slow I/O regime) trained below the peak learning rate,
+  and the first at 10⁻⁶. This motivated the per-step warmup used for the stepper
+  (Section 6).
+
+### 8.5 Consistent hand-off to downstream models
+
+- **What is exported.** The encoder, decoder and geometry-branch weights that
+  downstream models load are re-cut from the best full-model weights. This happens at
+  the start of every job, at every new best validation loss, and at the end of
+  training.
+- **Why.** Before this, the separately written exports could lag the best weights by
+  an epoch (an epoch-40 export next to epoch-39 best weights). Downstream models
+  could then silently load an inconsistent encoder–decoder pair.
+- **Hardware-independent parity.** The decoder's latent is made contiguous, so the
+  autoencoder and the stepper built from it give identical outputs across CPU
+  instruction sets. Before this, AVX-512 introduced ≈ 10⁻⁶ drift.
+
+### 8.6 Evaluation on whole domains
+
+- **What is evaluated.** The trained autoencoder is evaluated on uncropped domains, on
+  fluid cells only, with per-grid vertical profiles.
+- **Bounding memory.** On the largest grid a single snapshot folds into 540
+  single-channel tiles. A micro-batching limit on the encoder (`max_internal_batchsize`)
+  processes them in chunks.
+- **Hardware needed.** Evaluation then fits on a 10 GB MIG slice of an A100, at
+  batch 1 with chunks of 2 tiles. In training this limit does not reduce memory,
+  because autograd keeps every chunk's activations.
+
+### 8.7 Optional adversarial loss (not used in production)
+
+- **Mechanism.** A geometry-conditioned hinge-loss critic can be added to sharpen
+  reconstructions. Its weight is scaled by the adaptive factor of Esser et al.
+  (clamped to [0, 1]) and ramped in after 1,000 optimizer steps. The critic has its
+  own optimizer and reuses the detached reconstruction, so it adds no second
+  autoencoder forward pass.
+- **Cost.** It adds three critic forward passes and two gradient-norm probes per
+  step.
+- **Constraints.** It cannot be combined with gradient accumulation, because the
+  critic steps once per optimizer step.
+- **Status.** Production used no critic.
+
+---
+
+## 9. Fault tolerance on time-limited jobs
 
 - **Periodic full checkpoint.** Training runs as chained 48 h Slurm jobs. A full
   checkpoint (model, optimizer, scheduler, autocast scaler, curriculum horizon and
@@ -535,7 +678,7 @@ size-B step is mostly bound by GPU work.
 
 ---
 
-## 9. Verification
+## 10. Verification
 
 - **Gradient and value parity.** Every change that should not alter the mathematics
   has a CPU test against the reference path. Tested: fused LoRA, regional
@@ -558,7 +701,7 @@ size-B step is mostly bound by GPU work.
 
 ---
 
-## 10. Results on the H100
+## 11. Results on the H100
 
 **Fixed-shape benchmark.** One fixed batch, 8 warm-up and 30 timed steps, horizon 4
 with 2 gradient steps, size-B autoencoder, one process per configuration, run back to
@@ -601,7 +744,7 @@ original 50-epoch, horizon-5 plan (est.).
 
 ---
 
-## 11. Caveats and open points for the article
+## 12. Caveats and open points for the article
 
 - **Shape-dependent throughput.** Throughput depends on the grid mix. The 2.16× is
   the sustained average over the realistic corpus, while the fixed-shape gains are
@@ -619,6 +762,15 @@ original 50-epoch, horizon-5 plan (est.).
   trained models carry a one-interval (5 s) lag between parameters and states. This
   affects any claim about the parameter–time convention (see
   `docs/plans/surrogate_retraining.md`).
+- **Autoencoder settings.** The repository's autoencoder config defaults are the
+  size-S idealized ones. The size-B production run used command-line overrides
+  (size B, batch 48, no cell budget, last partial batch kept), recorded in the
+  run's own config.
+- **Noisy autoencoder validation loss.** Validation crops are drawn at random each
+  epoch, so the autoencoder's validation loss carries crop-sampling noise.
+- **Stale autoencoder evaluation.** The stored evaluation metrics of the autoencoder
+  (relative L2 0.032 on 48 snapshots) predate its final best weights and should be
+  recomputed before quoting.
 - **Limited validation of the speed work.** The accuracy equivalence of the speed
   changes was established on the idealized corpus with the size-S model. For the
   size-B production run it rests on the parity tests and on bit-identity.
@@ -632,6 +784,11 @@ original 50-epoch, horizon-5 plan (est.).
 | Sharded, resumable corpus generation, adaptive spin-up | `scripts/surrogate/generate_data.py`, `configs/surrogate/generate_data.yaml` | `data.sharding.*`, `spinup.fill_times: 6` |
 | Re-chunked copies | `neural_surrogates/datasets/rechunk.py` | `prechunk.output_root=…/pyudales_realistic_frames` |
 | Latent cache | `neural_surrogates/datasets/latent_cache.py` | `latent_cache.output_root` (generator) |
+| Autoencoder crops and tiles | `datasets/snapshot.py`, `architectures/tadpole_ae.py`, `_tadpole_crop.py` | `dataset.random_crop_size=64`, `architecture.encoder_crop_size=[16,32,32]`, `spatial_mode: local` |
+| Autoencoder batch and tile copy | `configs/surrogate/train_autoencoder.yaml` (overrides) | `batch_sampler.batch_size=48 batch_sampler.cell_budget=null batch_sampler.drop_last=false`, `prechunk.spatial_chunks=[16,64,64]`, 48 loader workers |
+| Autoencoder hand-off exports | `scripts/utils/tasks.py` (`_autoencoder`) | always on |
+| Whole-domain evaluation, encoder micro-batching | `scripts/surrogate/evaluate_autoencoder.py` | `autoencoder.max_internal_batchsize=2` |
+| Adversarial critic (optional) | `training/autoencoder.py` | `discriminator: null` (off) |
 | Lazy windows, shared geometry | `datasets/transition.py` (`share_once`) | always on |
 | Per-trajectory cell-budget batching | `datasets/sampler.py` | `batch_sampler.batch_size=4 batch_sampler.cell_budget=7500000` |
 | Streaming fluid-only statistics | `training/data_utils.py` | always on |
