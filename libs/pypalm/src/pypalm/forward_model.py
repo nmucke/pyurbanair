@@ -110,6 +110,7 @@ def validate_random_seed(random_seed: Optional[int]) -> Optional[int]:
         raise ValueError(f"random_seed must be in [{low}, {high}], got {random_seed}")
     return random_seed
 
+
 # &initialization_parameters keys of PALM's outflow damping layer (parin.f90:253).
 _OUTFLOW_DAMPING_KEYS = ("outflow_damping_factor", "outflow_damping_width")
 
