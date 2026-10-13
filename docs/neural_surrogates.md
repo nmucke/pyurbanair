@@ -2212,7 +2212,7 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: input_film` (or `adaln`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2356,9 +2356,8 @@ printed as `PASS` / `FAIL: …` and written to `summary.json`. The gate judges
 diagnostics.
 
 The real pairwise spread (so the diversity ratio) and the Reynolds stresses
-need several snapshots **per grid**: the default `max_snapshots: 8` over, e.g., 7
-test grids leaves one per grid and makes them NaN (a gate failure). Raise it
-(e.g. 64) for a meaningful verdict.
+need several snapshots **per grid**: with one per grid (e.g. `max_snapshots: 8`
+over 7 test grids) they are NaN, a gate failure; the default is 64.
 
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
