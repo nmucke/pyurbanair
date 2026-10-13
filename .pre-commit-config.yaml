@@ -36,7 +36,7 @@ repos:
     hooks:
       - id: mypy
         args: [--ignore-missing-imports]
-        additional_dependencies: [types-PyYAML]
+        additional_dependencies: [types-PyYAML, types-requests]
         # The library tests carried over from the old test suite never passed
         # mypy; check each folder again once its tests are rewritten.
         exclude: ^tests/(pylbm|pyudales|pypalm|data_assimilation|neural_surrogates|evaluation|pyurbanair)/

@@ -192,3 +192,30 @@ def test_no_buildings_raises(
     monkeypatch.setattr(osm.ox, "features_from_bbox", features_from_bbox)
     with pytest.raises(ValueError, match="No buildings with polygon footprints"):
         osm.fetch_buildings(BBOX)
+
+
+def test_falls_back_to_next_overpass_endpoint(
+    raw: gpd.GeoDataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tried = []
+
+    def features_from_bbox(bbox: tuple, tags: dict) -> gpd.GeoDataFrame:
+        tried.append(osm.ox.settings.overpass_url)
+        if len(tried) == 1:
+            raise osm.requests.ConnectionError("[Errno 61] Connection refused")
+        return raw
+
+    monkeypatch.setattr(osm.ox, "features_from_bbox", features_from_bbox)
+    monkeypatch.setattr(osm.ox.settings, "overpass_url", osm.ox.settings.overpass_url)
+    assert not osm.fetch_buildings(BBOX).empty
+    assert tried == list(osm.OVERPASS_URLS[:2])
+
+
+def test_unreachable_overpass_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refused(*args: object, **kwargs: object) -> gpd.GeoDataFrame:
+        raise osm.requests.ConnectionError("[Errno 61] Connection refused")
+
+    monkeypatch.setattr(osm.ox, "features_from_bbox", refused)
+    monkeypatch.setattr(osm.ox.settings, "overpass_url", osm.ox.settings.overpass_url)
+    with pytest.raises(osm.requests.ConnectionError, match="refused"):
+        osm.fetch_buildings(BBOX)

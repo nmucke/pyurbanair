@@ -48,7 +48,11 @@ bundles.
   `building:levels` x `floor_height` (3 m), else `default_height` (10 m);
   `height_source` records which. Few buildings carry `height`: in central Delft
   4 of 439, about half fall back to the default. Overpass can stall for
-  minutes (504 + retry). An area with no building footprint (none in OSM, or
+  minutes (504 + retry). osmnx pins `overpass-api.de` to one IP, so when that
+  server refuses connections every download fails; `fetch_buildings` then
+  tries the next endpoint in `OVERPASS_URLS` (its two servers, `lambert` and
+  `gall.openstreetmap.de`, by name; public mirrors timed out). An area with
+  no building footprint (none in OSM, or
   only nodes, slivers below `min_area` or parts clipped away) raises a
   `ValueError`.
 - **`city4cfd`**: City4CFD 0.8.1 (AGPL-3.0, tudelft3d/City4CFD) is not on
