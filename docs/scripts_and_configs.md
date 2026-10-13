@@ -219,9 +219,10 @@ to change:
   the experiment name, so a rerun under the same name repeats the truth's
   turbulence; set an integer). With `per_member_irandom: true`, the cold-start
   `&RUN irandom` is also derived from the experiment name.
-- PALM: `pypalm` exposes no seed. PALM's random generator is seeded from
-  `ensemble_member_nr` (`&initialization_parameters`), which pypalm does not
-  write; a PALM replica needs that key added first.
+- PALM: `model.forward_model.random_seed` (null leaves PALM's default
+  `ensemble_member_nr = 0`; set an integer in `[0, 2000]` other than the
+  truth's). It seeds both the initial kick and the inflow disturbances; see
+  [pypalm.md](pypalm.md) §7.
 - A time-varying truth: the same sampler seed and horizon must reproduce the
   truth's parameter trajectory.
 
