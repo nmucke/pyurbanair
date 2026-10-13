@@ -20,10 +20,19 @@ import geopandas as gpd
 import numpy as np
 import osmnx as ox
 import pandas as pd
+import requests
 from shapely.geometry import box
 
 # Don't leave osmnx's response cache (./cache) in whatever directory we run from.
 ox.settings.use_cache = False
+
+# Overpass endpoints, tried in order when one cannot be reached: the main
+# instance, then its two servers by name (overpass-api.de spreads over them).
+OVERPASS_URLS = (
+    "https://overpass-api.de/api",
+    "https://lambert.openstreetmap.de/api",
+    "https://gall.openstreetmap.de/api",
+)
 
 COLUMNS = ["id", "height", "height_source", "geometry"]
 
@@ -59,6 +68,19 @@ def _polygons(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf[gdf.geom_type == "Polygon"]
 
 
+def _features_from_bbox(bbox: tuple[float, float, float, float]) -> gpd.GeoDataFrame:
+    """osmnx's ``building=*`` download, trying the next Overpass endpoint when one
+    cannot be reached (osmnx pins a host to a single IP, so a refusing server
+    behind overpass-api.de fails every request until DNS changes)."""
+    for url in OVERPASS_URLS:
+        ox.settings.overpass_url = url
+        try:
+            return ox.features_from_bbox(bbox, tags={"building": True})
+        except requests.ConnectionError as error:
+            last = error
+    raise last
+
+
 def fetch_buildings(
     bbox: tuple[float, float, float, float],
     *,
@@ -79,7 +101,7 @@ def fetch_buildings(
     """
     empty = ValueError(f"No buildings with polygon footprints in the area {bbox}")
     try:
-        raw = ox.features_from_bbox(bbox, tags={"building": True})
+        raw = _features_from_bbox(bbox)
     except ox._errors.InsufficientResponseError as error:
         raise empty from error
     raw = raw.reset_index()
