@@ -56,7 +56,9 @@ def snapshot_collate(batch: list[dict]) -> dict:
     so ``B-1`` redundant host->GPU copies are avoided. When they differ (random
     cropping ships a per-sample geometry crop), everything is stacked with the
     default collate into ``(B, *grid)`` / ``(B, C, *grid)``; the trainer handles
-    both leading shapes.
+    both leading shapes. The same fallback serves a batch that mixes the
+    trajectories of one grid shape (``TrajectoryBatchSampler(group_by="grid")``):
+    their deduped masks are distinct objects unless their contents are equal.
     """
     geometry = batch[0]["geometry"]
     shared = all(item["geometry"] is geometry for item in batch)
@@ -239,7 +241,8 @@ class SnapshotDataset(Dataset):
             # across trajectories. netCDF4 retains a chunk cache for each open
             # variable (64 MiB for each of u/v/w in the realistic corpus), so
             # keeping every visited file open exhausts worker RAM mid-epoch.
-            # One open file per worker preserves reuse within the current batch.
+            # One open file per worker preserves reuse within the current batch
+            # (a group_by="grid" batch mixes trajectories and reopens files).
             for old_ds in self._state_cache.values():
                 old_ds.close()
             self._state_cache.clear()

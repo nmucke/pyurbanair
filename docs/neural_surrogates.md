@@ -294,6 +294,22 @@ recompile per distinct grid shape — fine for the idealized pool (14
 shapes at 2 m resolution), impractical for the realistic pool (~98
 shapes); leave `compile_model: false` there.
 
+`group_by` (default `trajectory`, the behaviour above, with the same batches
+for a seed as before the key existed) can be set to `grid`: batches then hold
+frames of *any* trajectories on one grid shape — shuffled within each shape,
+batch order shuffled across shapes, `shuffle: false` a fixed shape-major order
+— so a step sees several geometries instead of one trajectory's correlated
+frames. `batch_size`, `cell_budget` and `drop_last` apply per shape (`len()`
+and `batch_sizes` follow). The geometry then varies within a batch, so only
+the snapshot collates (`snapshot_collate` / `snapshot_history_collate`, which
+fall back to stacking per-sample masks and SDF features as `(B, *grid)` when
+the items' deduped masks are not one object) and the latent-cache items (whose
+`geom` the default collate stacks) support it; `transition_collate` rejects
+the mixed batch. `_prepare_snapshot_batch` uploads such per-sample geometry
+directly and never caches it, so its shared-geometry cache cannot go stale.
+Each sample of a mixed batch may reopen its trajectory's file in the worker
+(one file is kept open), which a latent cache's memory maps make cheap.
+
 #### SDF geometry features (`sdf_features`)
 
 Built with a non-`none` `sdf_features` mode (default `none`), the dataset also
@@ -1578,7 +1594,8 @@ same command resumes from `checkpoint.pt`; `num_epochs` is the total.
 **Batching.** `training.yaml` ships the `TrajectoryBatchSampler` (§6), which
 replaces `dataloader.batch_size` / `shuffle` / `drop_last` (set the batch size
 on `batch_sampler`), draws every batch from one trajectory (needed for
-multi-geometry corpora) and caps it at `max(1, cell_budget // cells)` cells:
+multi-geometry corpora; `group_by: grid` mixes trajectories of one grid shape
+instead, §6) and caps it at `max(1, cell_budget // cells)` cells:
 on large grids that silently drops the batch to 1, so size `cell_budget`
 from a known-good run (`batch_size * cells_per_sample`).
 `train_autoencoder.yaml` sets `batch_size: 8`, `cell_budget: 393216` and
@@ -1916,8 +1933,9 @@ keeps them, so `get_normalization_stats` (`training/data_utils.py`) yields
 parameter mean/std over all saved times unchanged, and the inherited
 `sample_index` / geometry dedup let `TrajectoryBatchSampler` (§6) bucket a
 multi-geometry split as before. `snapshot_history_collate` delegates to
-`snapshot_collate`: a shared geometry (+ SDF) ships once as `(1, *grid)`, and
-`params_hist` goes through the default collate to `(B, Hp, P)`. On the trainer
+`snapshot_collate`: a shared geometry (+ SDF) ships once as `(1, *grid)`, a
+batch mixing geometries (`group_by: grid`, §6) stacks them as `(B, *grid)`,
+and `params_hist` goes through the default collate to `(B, Hp, P)`. On the trainer
 side, `BaseTraining._prepare_snapshot_batch(batch) -> (state, geometry,
 features)` — device upload plus the cached shared-geometry broadcast — was
 hoisted out of `AutoencoderTrainer._prepare_ae_batch` (kept as a wrapper) so the
@@ -2131,8 +2149,9 @@ is generator-shaped (`ae`, `latent_stats_installed`, `velocity_net`), that no AE
 parameter is thawed, that the optimizer holds only `requires_grad` parameters and
 none of the AE's (weight decay on frozen tensors would still move them), and
 that both loaders yield at least one batch (a `TrajectoryBatchSampler` with
-`drop_last=True` and fewer samples per trajectory than its batch size is the
-usual way to get an empty loader). The latent mean/std are model buffers, so
+`drop_last=True` and fewer samples per trajectory — per grid shape with
+`group_by: grid` — than its batch size is the usual way to get an empty
+loader). The latent mean/std are model buffers, so
 `weights.pt` and `checkpoint.pt` both carry them and `BaseTraining.fit` restores
 them on resume; they must be installed *before* training and are never
 recomputed here. `fit()` refuses to resume from a checkpoint whose
@@ -2165,6 +2184,7 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | `physical_metadata` | `units` (one entry per state **and** parameter variable), `coordinate_order: [z, y, x]`, `geometry_mask_convention` (must equal `MASK_CONVENTION`, which deployment checks), `notes` |
 | `trainer` | `LatentFlowMatchingTrainer`, `val_seed: 0`; `amp` wraps the velocity net only |
 | `optimizer` | AdamW, `weight_decay: 1.0e-2`, handed only the velocity-net parameters |
+| `batch_sampler` | `batch_size: 16`, `cell_budget: 393216`, `group_by: grid`: a batch mixes the frames of every trajectory on one grid shape (§6) instead of one trajectory's correlated frames; tokens per batch are still `B * Zl*Yl*Xl` of one shape, so `max_latent_tokens` bounds it as before. Validation keeps `shuffle: false`, a fixed order |
 
 The task takes `state_vars` / `sdf_features` / `sdf_clamp_cells` from the AE
 export (the frozen encoder only understands its own inputs) and forces

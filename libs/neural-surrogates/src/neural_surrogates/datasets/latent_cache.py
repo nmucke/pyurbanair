@@ -344,7 +344,9 @@ class LatentCacheDataset(Dataset):
     Same length and ``sample_index`` as ``base``. Each item is
     ``{"latent": (D, Zl, Yl, Xl), "geom": raw geometry conditioning (one
     tensor per trajectory), "params_hist": (Hp, P)}``; the default collate
-    batches them. The latent file is memory-mapped lazily per process.
+    batches them, ``geom`` per sample, so a batch may mix trajectories of one
+    grid shape (``TrajectoryBatchSampler(group_by="grid")``). The latent file
+    is memory-mapped lazily per process.
     """
 
     def __init__(self, root: str | Path, base: SnapshotHistoryDataset) -> None:
@@ -363,7 +365,8 @@ class LatentCacheDataset(Dataset):
             torch.from_numpy(np.load(directory / f"{stem}.geom.npy")) for stem in stems
         ]
         # One open memory map, like SnapshotDataset's file handle: batches
-        # come from one trajectory at a time.
+        # come from one trajectory at a time (a group_by="grid" batch reopens
+        # it per sample, which a memory map makes cheap).
         self._open: tuple[int, np.ndarray] | None = None
 
     @property

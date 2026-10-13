@@ -8,7 +8,9 @@ geometry mask. Covers:
   byte-identically to the fixed-domain dataset);
 * :func:`transition_collate` — fails loud on a mixed-geometry batch;
 * :class:`TrajectoryBatchSampler` — same-trajectory batches, cell-budget batch
-  sizing, full coverage, and lazy pickup of ``set_pushforward_steps``;
+  sizing, full coverage, and lazy pickup of ``set_pushforward_steps``; its
+  ``group_by="grid"`` mode (same-grid batches across trajectories) and the
+  unchanged default order;
 * :class:`BaseTraining._prepare_batch` — refreshes the device geometry cache
   when the batch's geometry changes (the silent-stale-mask trap);
 * ``_refork_loader`` — rebuilds a loader around its custom batch sampler;
@@ -185,6 +187,117 @@ def test_sampler_requires_a_bound(data_root: Path) -> None:
     ds = _make_ds(data_root)
     with pytest.raises(ValueError, match="batch_size, cell_budget"):
         TrajectoryBatchSampler(ds)
+
+
+def _reference_trajectory_batches(
+    sampler: TrajectoryBatchSampler, generator: torch.Generator | None
+) -> list[list[int]]:
+    """The trajectory-mode algorithm as it was before ``group_by`` existed: the
+    default must keep drawing exactly these batches for a seed."""
+    by_traj: dict[int, list[int]] = {}
+    for flat, (traj, _t) in enumerate(sampler.dataset.sample_index):
+        by_traj.setdefault(traj, []).append(flat)
+    batches: list[list[int]] = []
+    for traj, flats in by_traj.items():
+        if generator is not None:
+            order = torch.randperm(len(flats), generator=generator).tolist()
+            flats = [flats[i] for i in order]
+        size = sampler.batch_size or 1
+        if sampler.cell_budget is not None:
+            size = max(1, sampler.cell_budget // math.prod(GRIDS[traj]))
+            if sampler.batch_size is not None:
+                size = min(sampler.batch_size, size)
+        for start in range(0, len(flats), size):
+            batch = flats[start : start + size]
+            if not (sampler.drop_last and len(batch) < size):
+                batches.append(batch)
+    if generator is not None:
+        order = torch.randperm(len(batches), generator=generator).tolist()
+        batches = [batches[i] for i in order]
+    return batches
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(batch_size=2),
+        dict(batch_size=2, drop_last=True),
+        dict(cell_budget=2 * math.prod(GRIDS[0])),
+    ],
+)
+def test_sampler_default_order_is_unchanged(data_root: Path, kwargs: dict) -> None:
+    ds = _make_ds(data_root)
+    sampler = TrajectoryBatchSampler(ds, shuffle=True, seed=5, **kwargs)
+    assert sampler.group_by == "trajectory"
+    for epoch in range(3):
+        expected = _reference_trajectory_batches(
+            sampler, torch.Generator().manual_seed(5 + epoch)
+        )
+        assert list(sampler) == expected
+    unshuffled = TrajectoryBatchSampler(ds, shuffle=False, **kwargs)
+    assert list(unshuffled) == _reference_trajectory_batches(unshuffled, None)
+
+
+def test_grid_sampler_mixes_trajectories_never_shapes(data_root: Path) -> None:
+    ds = _make_ds(data_root)
+    sampler = TrajectoryBatchSampler(
+        ds, batch_size=4, shuffle=True, seed=1, group_by="grid"
+    )
+    for _ in range(2):  # two epochs: different shuffles, same invariants
+        batches = list(sampler)
+        assert len(sampler) == len(batches)
+        assert sorted(i for b in batches for i in b) == list(range(len(ds)))
+        mixed = False
+        for batch in batches:
+            trajs = {ds.sample_index[i][0] for i in batch}
+            assert len({GRIDS[t] for t in trajs}) == 1
+            mixed |= len(trajs) > 1
+        # Trajectories 0 and 1 have 3 samples each on one grid: a batch of 4
+        # from that grid must hold both.
+        assert mixed
+    assert sampler._epoch == 2
+
+
+def test_grid_sampler_respects_cell_budget_and_drop_last(data_root: Path) -> None:
+    ds = _make_ds(data_root)
+    per_traj = T_LEN - 1
+    budget = 2 * math.prod(GRIDS[0])  # 2 small-grid samples; 1 large-grid sample
+    sampler = TrajectoryBatchSampler(ds, cell_budget=budget, group_by="grid")
+    sizes = {GRIDS[0]: 2, GRIDS[2]: 1}
+    batches = list(sampler)
+    for batch in batches:
+        assert len(batch) == sizes[GRIDS[ds.sample_index[batch[0]][0]]]
+    assert len(batches) == len(sampler) == 2 * per_traj // 2 + per_traj
+    # drop_last applies per grid: the small grid's 6 samples give one full
+    # batch of 4, the large grid's 3 samples none.
+    dropping = TrajectoryBatchSampler(ds, batch_size=4, drop_last=True, group_by="grid")
+    batches = list(dropping)
+    assert len(dropping) == len(batches) == 1
+    assert len(batches[0]) == 4
+    assert dropping.batch_sizes(0) == dropping.batch_sizes() == [4]
+
+
+def test_grid_sampler_is_deterministic(data_root: Path) -> None:
+    ds = _make_ds(data_root)
+    per_traj = T_LEN - 1
+    # shuffle=False: grid-major, flat order within a grid; never advances.
+    fixed = TrajectoryBatchSampler(ds, batch_size=4, shuffle=False, group_by="grid")
+    expected = [[0, 1, 2, 3], [4, 5], [6, 7, 8]]
+    assert 2 * per_traj == 6 and list(fixed) == expected
+    assert list(fixed) == expected and fixed._epoch == 0
+    # A seed fixes every epoch's shuffle; set_epoch replays it.
+    a = TrajectoryBatchSampler(ds, batch_size=4, seed=3, group_by="grid")
+    b = TrajectoryBatchSampler(ds, batch_size=4, seed=3, group_by="grid")
+    epochs = [list(a), list(a)]
+    assert epochs == [list(b), list(b)]
+    b.set_epoch(1)
+    assert list(b) == epochs[1]
+
+
+def test_sampler_rejects_unknown_group_by(data_root: Path) -> None:
+    ds = _make_ds(data_root)
+    with pytest.raises(ValueError, match="group_by"):
+        TrajectoryBatchSampler(ds, batch_size=2, group_by="geometry")
 
 
 def test_dataloader_end_to_end(data_root: Path) -> None:
