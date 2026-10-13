@@ -15,7 +15,8 @@ independently toggleable on pypalm's staging (all line numbers refer to
    legal method strings). It is the true analogue of uDALES ``iinletgen=1``,
    **but** ``turbulent_inflow_mod.f90:337-343`` (``TUI0006``) rejects it unless
    ``initializing_actions`` is ``'cyclic_fill'`` or ``'read_restart_data'``.
-   pypalm cold-starts from ``'set_constant_profiles'`` and warm-starts from
+   pypalm cold-starts from ``'set_constant_profiles'`` (periodic) or
+   ``'read_from_file'`` (inflow_outflow) and warm-starts from
    ``'read_from_file'``, so recycling would require a separate precursor run
    plus restart-data plumbing. Not reachable from a config toggle.
 

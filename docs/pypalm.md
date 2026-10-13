@@ -88,8 +88,14 @@ into `_p3d`, applies boundary conditions (and calls
 
 The single-run entry point called by `BaseForwardModel.__call__`.
 
-- **Cold start** (`state is None`): PALM initialises from analytic profiles
-  (`initializing_actions = 'set_constant_profiles'`).
+- **Cold start** (`state is None`): PALM initialises from the analytic inflow
+  profile. Under `periodic` that is `initializing_actions =
+  'set_constant_profiles'`; under `inflow_outflow`, `_reset_cold_init` writes
+  the same cell-centre profile as LOD=1 `init_atmosphere_u/v/w/pt/qv` into the
+  `_dynamic` NetCDF (merged into the time-varying driver when there is one)
+  and sets `initializing_actions = 'read_from_file'`, because
+  `set_constant_profiles` zeroes the first fluid level, inflow face included
+  (§8 "Near-wall inflow zeroed by set_constant_profiles").
 - **Warm start** (`state` provided): calls `_apply_warmstart(state)`, which
   writes `init_atmosphere_u/v/w/pt/qv` (LOD=2) into the `_dynamic` NetCDF via
   `write_warmstart_driver` and sets `initializing_actions = 'read_from_file'`.
@@ -144,7 +150,8 @@ then by whether the params carry a `time` dim:
 - All paths then write `ug_surface`/`vg_surface` (inert with `omega = 0`;
   initial condition only) and `u_profile`/`v_profile`/`uv_heights` (the
   vertical shear profile prepended with a z=0 no-slip anchor), so the run
-  starts consistent with the initial nudging target.
+  starts consistent with the initial nudging target. The cell-centre part of
+  that profile is kept for the inflow_outflow cold-start LOD=1 driver.
 - Model-error knobs are applied via `_resolve_profile_config` and
   `_apply_sgs_setting` (see §5).
 
@@ -217,8 +224,9 @@ once and broadcast across time; the spinup plateau is prepended by
 `_prepend_spinup_plateau` (t=0 values held constant for `[0, spinup_time]`).
 PALM's `turbulent_inflow` module reads this file and linearly interpolates in
 time between snapshots at the dirichlet boundary. The dynamic driver also
-carries the `init_atmosphere_*` fields when warm-starting (the two mechanisms
-coexist in one PIDS_DYNAMIC file sharing the same 0-based vertical axes).
+carries the `init_atmosphere_*` fields — LOD=2 when warm-starting, LOD=1 on
+an inflow_outflow cold start (the two mechanisms coexist in one PIDS_DYNAMIC
+file sharing the same 0-based vertical axes).
 
 ---
 
@@ -597,8 +605,8 @@ Kataoka & Mizuno recycling (the true analogue of uDALES `iinletgen=1`) requires
 `initializing_actions = 'cyclic_fill'` or `'read_restart_data'`
 (`turbulent_inflow_mod.f90:337-343`, `TUI0006`) — i.e. a *precursor run* whose
 3D fields are cyclically filled in. pypalm cold-starts from
-`'set_constant_profiles'` and warm-starts from `'read_from_file'`, so neither
-staging path satisfies it. It also needs `dx < recycling_width < nx·dx`
+`'set_constant_profiles'` (periodic) or `'read_from_file'` (inflow_outflow) and
+warm-starts from `'read_from_file'`, so no staging path satisfies it. It also needs `dx < recycling_width < nx·dx`
 (`:346-349`, `TUI0007`; the default is `HUGE(1.0)`, so it is effectively
 mandatory) and `bc_lr = 'dirichlet/radiation'` (`:316-320`, `TUI0004`).
 Enabling recycling would mean adding a precursor-run + restart-data feature, not
@@ -712,6 +720,52 @@ the same as the undamped run before it blows up. Factor 0.1 still diverges.
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
 across runs) is very likely the same outflow instability; not yet confirmed by
 a rerun with damping.
+
+### Near-wall inflow zeroed by set_constant_profiles
+
+Before 2026-10, inflow_outflow cold starts used `initializing_actions =
+'set_constant_profiles'`. The profile itself is right: `check_parameters.f90:672-697`
+builds `u_init` from `u_profile`/`uv_heights` (`u_init(1)` = 2.089 m/s at
+`zu(1)` = 1 m for 6 m/s at 10°). But `init_3d_model.f90:707-720`
+(`set_constant_profiles`, `ibc_uv_b /= 1`, no LSM/USM spinup) then zeroes u
+and v wherever `topo_flags` bits 20/21 are unset, and those need fluid at
+k-1..k+1 (`topography_mod.f90:1575-1590`). So the whole k=1 level is zeroed,
+boundary columns included. With `bc_lr = 'dirichlet/radiation'` the inflow
+face is never re-imposed from `u_init` (`dynamics_mod.f90:1287-1288` copies
+`u_p(:,:,nxl) = u_p(:,:,nxl-1)`), so u = v = 0 at z = 1 m on the inflow face
+for the whole run (zero in every raw output frame).
+
+The `read_from_file` path (`init_3d_model.f90:~566-610`) sets u = `u_init`
+for every column, ghosts included, and masks only topography. pypalm now
+writes the same cell-centre profile as LOD=1 `init_atmosphere_u/v/w/pt/qv`
+(`warm_start_utils.build_init_profile_dataset`; LOD=1 still needs the
+`x`/`xu`/`y`/`yv` dims, else DRV0003) and reads it with `read_from_file`.
+`u_profile`/`uv_heights` stay in `_p3d`. Periodic cold starts (nudging
+re-imposes the near-wall flow) and warm starts (LOD=2, already
+`read_from_file`) are unchanged. This changes inflow_outflow cold-start runs
+by design.
+
+Evidence (xie_and_castro, 10°/6.0 m/s, inlet disturbances on, against a uDALES
+run with the same inflow): before the fix, the y-mean time-mean inflow |U|
+ratio uDALES/PALM was 3.56 at z = 1 m and 1.45 at z = 2 m, and the fitted
+profile exponent 0.43 (target 0.25). With the LOD=1 driver the ratio is
+≈1.00 near the wall, the exponent 0.24-0.26, and the run is stable.
+Through `run_forward.py` (540 s after 30 s spinup, `ncpu=1`, frames ≥ 30 s),
+ratio uDALES/PALM of the y-mean time-mean |U|:
+
+| x \ z (m) | 1 | 3 | 5 | 9 | 15 | 21 |
+|---|---|---|---|---|---|---|
+| −19 m | 1.01 | 1.02 | 1.01 | 0.97 | 0.98 | 1.01 |
+| −5 m | 1.10 | 0.98 | 0.97 | 0.96 | 0.98 | 1.03 |
+
+**Open: inflow_outflow warm starts have the same failure, at every height.**
+The LOD=2 reader fills `u` from `nxlu` (= 1) and copies it to `nxlu-1`
+(`netcdf_data_input_mod.f90:2339-2351`), which is `nxl`, so the ghost column
+`nxl-1` keeps the `u = 0` it was reset to. `dynamics_mod.f90:1287-1288` then
+copies that zero onto the inflow face. In a 2-window xie_and_castro run
+(`forward.rollout_steps=1`) the inflow-face u is 0 at all heights for the whole
+warm window and the domain-mean u falls from 4.0 to 0.36 m/s. Before the LOD=1
+fix the same warm window diverged after ~21 s. Not fixed yet.
 
 ### Member divergence in ensembles (~15%)
 
