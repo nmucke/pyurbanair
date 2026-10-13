@@ -12,12 +12,17 @@ side, so the inflow and outflow boundaries are clear of buildings. The STL
 follows the repo's case contract (``scripts/tools/prepare_case_stl.py``):
 metres, ``(xmin, ymin) -> (0, 0)``, flat ground at ``z = 0`` (no ground
 mesh), z up.
+
+A change that makes older case folders unusable (files, ``case.json`` keys,
+overrides) needs a bump of ``CASE_FORMAT`` in ``mcp_server/jobs/city_case.py``,
+whose case cache would otherwise reuse them.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -29,9 +34,6 @@ from pycity4cfd.city4cfd import run_city4cfd, write_config
 from pycity4cfd.osm import fetch_buildings, write_buildings
 from shapely.geometry import Point, box
 
-# Bump when a change makes older case folders unusable (files, case.json keys,
-# overrides); it is part of the MCP cache key, so old folders are not reused.
-CASE_FORMAT = 2
 N_SENSORS = 6
 N_VALIDATION = 3  # held-out sensors, after the assimilated ones
 SENSOR_HEIGHT = 3.0  # m above ground
@@ -257,8 +259,9 @@ def make_case(
         "crs": buildings.crs.to_string(),
         "origin": [float(xmin - margin), float(ymin - margin)],
     }
-    (case_dir / "case.json").write_text(
-        json.dumps({"case_format": CASE_FORMAT, "bbox": list(bbox), **result}, indent=2)
-        + "\n"
-    )
+    # case.json marks the folder finished: write it atomically, so a reader
+    # never sees it half written and a killed build leaves none.
+    temporary = case_dir / f".case.json.{os.getpid()}.tmp"
+    temporary.write_text(json.dumps({"bbox": list(bbox), **result}, indent=2) + "\n")
+    os.replace(temporary, case_dir / "case.json")
     return result

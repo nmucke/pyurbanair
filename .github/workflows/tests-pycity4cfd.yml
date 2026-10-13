@@ -1,6 +1,8 @@
-# tests/pycity4cfd: map area -> OSM buildings -> City4CFD -> case overrides.
-# osmnx is mocked and the `integration` tests (City4CFD, built by
-# `pixi run build-city4cfd`) are skipped by default, so nothing is compiled.
+# tests/pycity4cfd: map area -> OSM buildings -> City4CFD -> case overrides, in
+# the city4cfd pixi environment. osmnx is mocked. Installing the env compiles
+# City4CFD (a pixi source package, a few minutes per OS); the installed env is
+# cached, so it recompiles only when the cache key (pixi.lock, the manifests)
+# changes. The `integration` tests that run it are included.
 # Pull requests run it when the package or something it depends on changes;
 # every push to main and a manual run (Actions tab) run it unconditionally.
 name: "Tests: pycity4cfd"
@@ -11,6 +13,7 @@ on:
   pull_request:
     paths:
       - "libs/pycity4cfd/**"
+      - "libs/mcp-server/src/mcp_server/jobs/**"
       - "tests/pycity4cfd/**"
       - "configs/**"
       - "src/**"
@@ -36,8 +39,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-        with:
-          submodules: recursive
       - uses: ./.github/actions/setup
+        with:
+          environment: city4cfd
       - name: Run tests
-        run: pixi run -e dev python -m pytest tests/pycity4cfd --durations=10
+        run: pixi run --locked -e city4cfd python -m pytest tests/pycity4cfd -m '' --durations=10

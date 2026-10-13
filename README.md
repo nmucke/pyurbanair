@@ -32,13 +32,14 @@ sensor data.
 Everything runs through [Pixi](https://pixi.sh):
 
 ```bash
-curl -fsSL https://pixi.sh/install.sh | sh   # once (or `pixi self-update`: needs >= 0.72.1)
+curl -fsSL https://pixi.sh/install.sh | sh   # once (or `pixi self-update`: needs >= 0.77.0)
 pixi run setup-dev                           # install the dev environment
 pixi shell -e dev                            # activate it
 ```
 
 Other environments: `cuda` (GPU), `snellius` and `delftblue` (HPC), `mcp`
-(the agent interface), `rendering` (3D views).
+(the agent interface), `ui` (the browser app), `city4cfd` (city cases from a
+map; its first install compiles City4CFD, ~2 min), `rendering` (3D views).
 
 Supported platforms are Linux (linux-64) and macOS on Apple silicon
 (osx-arm64). The pixi environment brings the compilers, MPI, NetCDF and FFTW;

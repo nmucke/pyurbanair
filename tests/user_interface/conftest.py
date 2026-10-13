@@ -1,4 +1,4 @@
-"""The browser app runs in the mcp env, the only one that installs user-interface."""
+"""The browser app runs in the ui env (mcp also installs it); skipped elsewhere."""
 
 from __future__ import annotations
 

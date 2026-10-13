@@ -40,7 +40,12 @@ print(json.dumps(capabilities))
         text=True,
         check=True,
     )
-    assert len(json.loads(process.stdout)["backends"]) == 4
+    capabilities = json.loads(process.stdout)
+    assert len(capabilities["backends"]) == 4
+    assert capabilities["max_active_jobs"] == {
+        "simulation_or_render": 1,
+        "city_case": 1,
+    }
 
 
 def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
@@ -57,6 +62,7 @@ def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
                 "open_area_selector",
                 "get_selected_area",
                 "prepare_city_case",
+                "get_city_case",
             } <= names
             result = await client.call_tool("list_config_options", {"group": "model"})
             assert not result.is_error

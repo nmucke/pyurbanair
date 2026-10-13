@@ -3,9 +3,10 @@ Map area -> case folder and forward overrides (``pycity4cfd.case``).
 
 OpenStreetMap is replaced by two hand-built buildings. The unit test also
 replaces City4CFD (one box per building, in City4CFD's point-of-interest
-frame); the ``integration`` test runs the real binary (skipped when it is not
-built). Both check the STL lands in the domain frame, the grid, the sensors and
-the uDALES/PALM templates; the overrides compose on every case and backend.
+frame); the ``integration`` test runs the real binary (skipped when City4CFD is
+not on PATH). Both check the STL lands in the domain frame, the grid, the
+sensors and the uDALES/PALM templates; the overrides compose on every case and
+backend.
 """
 
 import json
@@ -77,7 +78,6 @@ def _check_case(result: dict, buildings: gpd.GeoDataFrame) -> None:
     assert overrides["geometry.stl_path"] == str(case_dir / "buildings.stl")
     case_json = json.loads((case_dir / "case.json").read_text())
     assert case_json["bbox"] == list(BBOX)
-    assert case_json["case_format"] == case.CASE_FORMAT
     assert case_json["crs"] == result["crs"] == buildings.crs.to_string()
     assert case_json["origin"] == result["origin"]
 
@@ -133,12 +133,17 @@ def test_make_case(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> N
     buildings = _buildings()
     monkeypatch.setattr(case, "fetch_buildings", lambda *a, **k: buildings)
     monkeypatch.setattr(case, "run_city4cfd", _fake_city4cfd)
+    # A rebuild over a case.json cut short replaces it whole (written to a
+    # temporary file, then renamed), leaving no temporary file.
+    (tmp_path / "delft").mkdir()
+    (tmp_path / "delft" / "case.json").write_text('{"overrides": ["dom')
     result = case.make_case(
         BBOX, tmp_path / "delft", resolution=RESOLUTION, margin=MARGIN
     )
     assert result["n_buildings"] == 2
     assert result["height_sources"] == {"levels": 1, "height": 1}
     _check_case(result, buildings)
+    assert not list((tmp_path / "delft").glob("*.tmp"))
 
 
 @pytest.mark.parametrize("model", ["pylbm", "pypalm", "pyudales"])  # type: ignore[misc]

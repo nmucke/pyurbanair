@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import pathlib
 import shutil
 import sys
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-from mcp_server.area_selector import MAX_AREA_KM2, AreaSelector, validate_bbox
+from mcp_server.jobs import city_case
 from mcp_server.jobs.preparation import PreparationService
+from mcp_server.jobs.registry import TERMINAL
 from mcp_server.jobs.rendering_environment import select_render_environment
 from mcp_server.jobs.results import contained_file, inspect_results
 from mcp_server.jobs.supervisor import SupervisorClient
@@ -23,6 +23,9 @@ from mcp_server.schemas import (
     MAX_PNG_BYTES,
     summary,
 )
+
+if TYPE_CHECKING:
+    from user_interface.area_selector import AreaSelector
 
 
 class Tools:
@@ -42,10 +45,8 @@ class Tools:
         self.preparation = PreparationService(self.repo_root, self.store_root)
         self.jobs = SupervisorClient(self.repo_root, self.store_root)
         self.area_selector: AreaSelector | None = None
-        # MCP sync tools run on worker threads: guard the selector swap and
-        # give each city case one builder at a time.
+        # MCP sync tools run on worker threads: guard the selector swap.
         self._lock = threading.Lock()
-        self._case_locks: dict[str, threading.Lock] = {}
 
     def get_capabilities(self) -> dict[str, Any]:
         """Inspect available configurations and installed environments without building solvers."""
@@ -57,7 +58,8 @@ class Tools:
             "backends": ["pylbm", "pyudales", "pypalm", "neural_surrogate"],
             "modes": ["single", "ensemble", "static", "dynamic", "rollout"],
             "total_windows": "1 + forward.rollout_steps",
-            "max_active_jobs": 1,
+            # The supervisor runs one job per lane at a time.
+            "max_active_jobs": {"simulation_or_render": 1, "city_case": 1},
             "python": sys.executable,
             "repo_root": str(self.repo_root),
             "store_root": str(self.store_root),
@@ -65,7 +67,7 @@ class Tools:
                 name: (
                     self.repo_root / ".pixi" / "envs" / name / "bin" / "python"
                 ).exists()
-                for name in ("dev", "cuda", "rendering")
+                for name in ("dev", "cuda", "rendering", "city4cfd")
             },
             "pixi": shutil.which(os.environ.get("PYURBANAIR_PIXI", "pixi")),
             "rendering": {
@@ -215,15 +217,20 @@ class Tools:
             limit,
         )
 
-    def open_area_selector(self, max_area_km2: float = MAX_AREA_KM2) -> dict[str, Any]:
+    def open_area_selector(self, max_area_km2: float | None = None) -> dict[str, Any]:
         """Open a local map page where the user draws the rectangle of a city area to simulate.
 
         Give the user the returned `url` to open in their browser, then call
         `get_selected_area(selection_id)` until it returns the bbox. If the
         user would rather type the area, they may paste a bbox as west, south,
         east, north in degrees (EPSG:4326); use that directly instead, without
-        this page. Areas above `max_area_km2` are rejected on the page.
+        this page. Areas above `max_area_km2` (default 4 km²) are rejected on
+        the page.
         """
+        from user_interface.area_selector import MAX_AREA_KM2, AreaSelector
+
+        if max_area_km2 is None:
+            max_area_km2 = MAX_AREA_KM2
         with self._lock:
             if self.area_selector is None or self.area_selector.closed:
                 self.area_selector = AreaSelector()
@@ -268,54 +275,100 @@ class Tools:
         bbox: dict[str, float] | list[float],
         resolution: float = 4.0,
         default_height: float = 10.0,
-        max_area_km2: float = MAX_AREA_KM2,
+        max_area_km2: float | None = None,
     ) -> dict[str, Any]:
         """Turn a city area into a simulation case: OSM buildings -> City4CFD STL.
 
         `bbox` is {west, south, east, north} (or a 4-list) in EPSG:4326, e.g.
         the one `get_selected_area` returned. Building heights come from OSM
         `height`, else `building:levels` x 3 m, else `default_height` (m).
-        Takes minutes (the OpenStreetMap download dominates). Returns
-        `overrides`: pass `["model=<m>", *overrides]` to `prepare_forward_run`
-        with m = pylbm, pypalm or pyudales (pyudales first runs its IBM
-        preprocessing on the STL: seconds to minutes, growing with the grid
-        and building count). `resolution` is the grid spacing (m); check
-        `domain` before launching, the run cost grows with nx * ny * nz.
-        `max_area_km2` is the area limit; pass the one the selector was
-        opened with. A finished case for the same inputs is reused.
+        A finished case for the same inputs is returned at once with status
+        "ready"; otherwise the build is queued and this returns status
+        "building" with `case_job_id`: poll `get_city_case(case_job_id)`. The
+        build takes minutes (the OpenStreetMap download dominates). A ready
+        case has `overrides`: pass `["model=<m>", *overrides]` to
+        `prepare_forward_run` with m = pylbm, pypalm or pyudales (pyudales
+        first runs its IBM preprocessing on the STL: seconds to minutes,
+        growing with the grid and building count). `resolution` is the grid
+        spacing (m); check `domain` before launching, the run cost grows with
+        nx * ny * nz. `max_area_km2` is the area limit (default 4 km²); pass
+        the one the selector was opened with.
         """
-        from pycity4cfd.case import CASE_FORMAT, make_case
+        from user_interface.area_selector import MAX_AREA_KM2, validate_bbox
 
-        area = validate_bbox(bbox, max_area_km2)
-        west, south, east, north = (area[k] for k in ("west", "south", "east", "north"))
-        # The case format is in the key, so folders built by an older make_case
-        # are never reused.
-        key = ",".join(
-            [f"v{CASE_FORMAT}"]
-            + [
-                f"{value:.5f}"
-                for value in (west, south, east, north, resolution, default_height)
-            ]
+        area = validate_bbox(
+            bbox, MAX_AREA_KM2 if max_area_km2 is None else max_area_km2
         )
-        name = "area_" + hashlib.sha1(key.encode()).hexdigest()[:10]
-        case_dir = self.repo_root / ".temp" / "city_cases" / name
-        with self._lock:
-            case_lock = self._case_locks.setdefault(name, threading.Lock())
-        # A retry waits for a running build of the same case, then reuses it.
-        with case_lock:
-            case_json = case_dir / "case.json"
-            if case_json.is_file():
-                case: dict[str, Any] = json.loads(case_json.read_text(encoding="utf-8"))
-                case.pop("bbox", None)
-                case.pop("case_format", None)
-            else:
-                case = make_case(
-                    (west, south, east, north),
-                    case_dir,
-                    resolution=resolution,
-                    default_height=default_height,
-                )
-        return case
+        values = [area[k] for k in ("west", "south", "east", "north")]
+        values += [resolution, default_height]
+        # The inputs as the folder key rounds them, so equal keys have equal jobs.
+        west, south, east, north, resolution, default_height = (
+            float(f"{value:.5f}") for value in values
+        )
+        directory = city_case.case_dir(
+            self.repo_root, (west, south, east, north), resolution, default_height
+        )
+        case_json = directory / "case.json"
+
+        def ready() -> dict[str, Any] | None:
+            # A missing or unparsable case.json (e.g. one cut short by an
+            # older build) is not a finished case: build it again.
+            try:
+                case = json.loads(case_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            if not isinstance(case, dict):
+                return None
+            # Not returned: the inputs, and case_format from older folders.
+            case.pop("bbox", None)
+            case.pop("case_format", None)
+            return {"status": "ready", **case}
+
+        case = ready()
+        if case is not None:
+            return case
+        payload = {
+            "kind": "city_case",
+            "bbox": [west, south, east, north],
+            "resolution": resolution,
+            "default_height": default_height,
+            "case_dir": str(directory),
+            "environment": city_case.select_case_environment(self.repo_root),
+        }
+        # One job per folder (submit returns the job already under its key),
+        # so concurrent requests share a build; a failed, cancelled or deleted
+        # build moves on to the next attempt's key.
+        attempt = 0
+        while True:
+            key = f"city-case:{directory.name}:{attempt}"
+            job = self.jobs.request("submit", payload=payload, key=key)
+            if job["state"] not in TERMINAL:
+                return {"status": "building", "case_job_id": job["id"]}
+            if job["state"] == "succeeded":
+                case = ready()
+                if case is not None:
+                    return case
+            attempt += 1
+
+    def get_city_case(self, case_job_id: str) -> dict[str, Any]:
+        """Poll a `prepare_city_case` build.
+
+        Returns status "building", "failed" with `error`, or "ready" with the
+        case (`case_dir`, `overrides`, `n_buildings`, `height_sources`,
+        `max_height`, `domain`, `crs`, `origin`); see `prepare_city_case`.
+        `get_run_logs(case_job_id)` reads the build log.
+        """
+        job = self.jobs.request("status", job_id=case_job_id)
+        if job["kind"] != "city_case":
+            raise ValueError("ID does not identify a city case build")
+        result: dict[str, Any] = {"case_job_id": case_job_id}
+        completion = job["details"].get("completion") or {}
+        if job["state"] == "succeeded" and "result" in completion:
+            return {**result, "status": "ready", **completion["result"]}
+        if job["state"] in TERMINAL:
+            error = job["details"].get("error") or f"Case build {job['state']}"
+            return {**result, "status": "failed", "error": str(error)}
+        return {**result, "status": "building"}
 
     def render_simulation(
         self, run_id: str, idempotency_key: str, options: dict[str, Any] | None = None

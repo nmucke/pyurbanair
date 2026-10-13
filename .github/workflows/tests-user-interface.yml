@@ -1,4 +1,4 @@
-# The browser app (libs/user-interface), in the mcp pixi environment. Its
+# The browser app (libs/user-interface), in the ui pixi environment. Its
 # tests fake every Tools action except config composition: no network, no solver,
 # so the checkout skips the solver submodules.
 # Pull requests run it when the package or something it depends on changes;
@@ -12,7 +12,6 @@ on:
     paths:
       - "libs/user-interface/**"
       - "libs/mcp-server/**"
-      - "libs/pycity4cfd/**"
       - "libs/visualization/**"
       - "tests/user_interface/**"
       - "configs/**"
@@ -41,6 +40,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
         with:
-          environment: mcp
+          environment: ui
       - name: Run tests
-        run: pixi run --locked -e mcp python -m pytest tests/user_interface --durations=10
+        run: pixi run --locked -e ui python -m pytest tests/user_interface --durations=10

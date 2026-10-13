@@ -6,7 +6,3 @@
 [submodule "libs/pylbm/lbm"]
 	path = libs/pylbm/LBM
 	url = https://github.com/geirev/LBM.git
-
-[submodule "libs/pycity4cfd/City4CFD"]
-	path = libs/pycity4cfd/City4CFD
-	url = https://github.com/tudelft3d/City4CFD.git

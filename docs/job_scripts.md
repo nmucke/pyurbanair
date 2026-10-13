@@ -207,7 +207,7 @@ memory.
 
 ## Machine notes
 
-- **pixi** must be 0.72.1 or newer (`requires-pixi` in `pyproject.toml`). An
+- **pixi** must be 0.77.0 or newer (`requires-pixi` in `pyproject.toml`). An
   older one fails on every `pixi run`, often with a manifest parse error
   (`expected a string, found table`) rather than a version message. Run
   `pixi self-update` once per cluster account.

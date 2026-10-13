@@ -5,9 +5,10 @@ build-backend = "hatchling.build"
 [project]
 authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
 # Local browser app: draw an area, build the case, run a model, see results.
-# Every action goes through mcp_server.tools.Tools; the web/ assets ship as
+# Every action goes through mcp_server.tools.Tools (case building runs as a job
+# in the city4cfd env, so no pycity4cfd here); the web/ assets ship as
 # package data.
-dependencies = ["mcp-server", "pycity4cfd"]
+dependencies = ["mcp-server", "geopandas>=1.2.0,<2"]
 name = "user-interface"
 requires-python = ">= 3.12,<3.13"
 version = "0.1.0"

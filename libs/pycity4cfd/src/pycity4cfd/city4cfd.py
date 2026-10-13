@@ -1,8 +1,7 @@
 """Run City4CFD on building footprints with heights: GeoJSON -> buildings STL.
 
-City4CFD (``libs/pycity4cfd/City4CFD``, built by ``pixi run build-city4cfd``)
-runs here without a measured point cloud: every building is an LoD1.2
-extrusion of its footprint to its ``height`` attribute, closed at the bottom,
+City4CFD (on PATH in the ``city4cfd`` pixi env) runs here without a measured
+point cloud: every building is an LoD1.2 extrusion of its footprint to its ``height`` attribute, closed at the bottom,
 standing on flat ground at z = 0. Coordinates are in the buildings' projected
 (metric) CRS, and City4CFD translates every output coordinate by
 ``-point_of_interest``. A building without a positive ``height`` is skipped and
@@ -26,19 +25,13 @@ from __future__ import annotations
 
 import json
 import os
-import sys
+import shutil
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
 from pyurbanair.utils.solver_process import run_solver
-
-# The pixi env this runs in (its prefix is .pixi/envs/<name> when not activated).
-PIXI_ENV = os.environ.get("PIXI_ENVIRONMENT_NAME") or Path(sys.prefix).name
-# libs/pycity4cfd/build/<env>/, where build_city4cfd.sh puts the binary: one
-# build per env, since CMake records that env's absolute library paths.
-BUILD_DIR = Path(__file__).resolve().parents[2] / "build" / PIXI_ENV
 
 # Output file stem; City4CFD appends "_<surface>.stl" per surface.
 OUTPUT_NAME = "city4cfd"
@@ -50,14 +43,15 @@ GROUND_POINTS = 11  # per side, edges included
 
 
 def city4cfd_executable() -> Path:
-    """Return this pixi env's City4CFD binary (``pixi run build-city4cfd``)."""
-    path = BUILD_DIR / "city4cfd"
-    if not path.is_file():
+    """Return the City4CFD binary on PATH (the ``city4cfd`` pixi env installs it)."""
+    found = shutil.which("city4cfd")
+    if not found:
         raise FileNotFoundError(
-            f"City4CFD is not built for the {PIXI_ENV} env ({path} is missing); "
-            f"run `pixi run -e {PIXI_ENV} build-city4cfd`."
+            "City4CFD is not on PATH; install the city4cfd env "
+            "(`pixi install -e city4cfd`) and run from it, e.g. "
+            "`pixi run -e city4cfd python ...`."
         )
-    return path
+    return Path(found)
 
 
 def _points(coordinates: Any) -> list[list[float]]:

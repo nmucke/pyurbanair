@@ -62,7 +62,7 @@ class Registry:
         if not key or len(key) > 256:
             raise ValueError("idempotency_key must contain 1–256 characters")
         kind = payload.get("kind", "forward")
-        if kind not in {"forward", "visualization"}:
+        if kind not in {"forward", "visualization", "city_case"}:
             raise ValueError("Unknown job kind")
         encoded = json.dumps(payload, sort_keys=True, allow_nan=False)
         digest = hashlib.sha256(encoded.encode()).hexdigest()
