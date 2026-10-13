@@ -588,9 +588,12 @@ class BaseTraining:
         mirroring :meth:`_prepare_batch`) so a same-geometry stream does not
         re-upload the mask + SDF features each step -- and expanded to
         ``(B, *grid)`` (a view) so the model sees one geometry per member with
-        no broadcast ambiguity. Random-crop batches arrive per-sample as
-        ``(B, *grid)`` (leading dim != 1): they take the direct-upload branch and
-        are never cached, so a stale crop can never be served.
+        no broadcast ambiguity. Random-crop batches and batches mixing the
+        geometries of one grid shape (``TrajectoryBatchSampler(group_by="grid")``)
+        arrive per-sample as ``(B, *grid)`` (leading dim != 1): they take the
+        direct-upload branch and are never cached, so a stale crop or mask can
+        never be served. A one-sample batch ships ``(1, *grid)`` either way and
+        is content-revalidated against the cache.
         """
         to_kwargs: dict = {"non_blocking": True}
         if self.channels_last:
@@ -601,8 +604,8 @@ class BaseTraining:
         feat_batch = batch.get("geom_features")
 
         if geom_batch.shape[0] != 1:
-            # Per-sample geometry (random-crop batch): upload directly, no cache
-            # -- the crops differ across the batch and across steps.
+            # Per-sample geometry (random-crop or mixed-geometry batch): upload
+            # directly, no cache -- it differs across the batch and steps.
             geometry = geom_batch.to(self.device, non_blocking=True)
             features = (
                 feat_batch.to(self.device, non_blocking=True)

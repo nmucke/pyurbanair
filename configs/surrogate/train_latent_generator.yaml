@@ -49,8 +49,11 @@ trainer:
 optimizer:
   weight_decay: 1.0e-2
 batch_sampler:
+  # Batches mix frames of every trajectory on one grid shape (different
+  # geometries) for more diverse steps; max_latent_tokens still bounds them.
   batch_size: 16
   cell_budget: 393216
+  group_by: grid
 dataloader:
   num_workers: 8
   collate_fn:

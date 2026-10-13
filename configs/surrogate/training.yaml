@@ -72,6 +72,9 @@ batch_sampler:
   shuffle: true
   drop_last: true
   seed: 0
+  # trajectory: one trajectory per batch. grid: frames of any trajectories on
+  # one grid shape (per-sample geometry; snapshot and latent-cache data only).
+  group_by: trajectory
 
 # batch_size / shuffle / drop_last come from the sampler.
 dataloader:
