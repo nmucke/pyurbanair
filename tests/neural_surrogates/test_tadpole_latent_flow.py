@@ -801,7 +801,11 @@ def test_sample_decode_override_uses_the_same_latents(tmp_path):
         decode_halo_size=32,
     )
     glob = m.sample(
-        params_hist, geom, initial_noise=noise, num_steps=2, decode_spatial_mode="global"
+        params_hist,
+        geom,
+        initial_noise=noise,
+        num_steps=2,
+        decode_spatial_mode="global",
     )
     assert torch.equal(same, base)  # local ignores the halo size
     assert torch.equal(latents[0], latents[2])

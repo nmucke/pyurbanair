@@ -271,7 +271,9 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
     assert f"generated_decode_{trained_mode}" not in summary["scalars"]
     for m in others:
         assert "diversity" in summary["scalars"][f"generated_decode_{m}"]
-    assert [(r["sampler"], r["num_steps"], r["nfe"]) for r in summary["step_sweep"]] == [
+    assert [
+        (r["sampler"], r["num_steps"], r["nfe"]) for r in summary["step_sweep"]
+    ] == [
         ("euler", 2, 2),
         ("euler", 5, 5),
         ("heun", 2, 4),
