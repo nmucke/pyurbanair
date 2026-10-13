@@ -20,6 +20,15 @@ forward_model:
   save_only_last_timestep: false
   verbose: false
   boundary_condition: periodic # inflow_outflow #
+  # inflow_outflow only: PALM's outflow damping layer relaxes u/v/w toward the
+  # initial profile over the last `width` m before the radiation outflow, at up
+  # to `factor` 1/s. Without it the reversed flow behind the last obstacle meets
+  # the outflow and the non-dissipative pw-scheme diverges within ~10 s
+  # (xie_and_castro); factor 0.1 is not enough. Cyclic runs never get these keys
+  # (PALM rejects them, PAC0352). null -> write nothing. See docs/pypalm.md §8.
+  outflow_damping:
+    factor: 1.0            # 1/s; outflow_damping_factor
+    width: 4.0             # m from the outflow edge; outflow_damping_width
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
   # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #
@@ -79,6 +88,11 @@ forward_model:
     end: null              # inflow_disturbance_end, grid pts; null -> PALM auto (min(100, 3nx/4))
     level_b: null          # disturbance_level_b, m; null -> PALM auto (zu(3))
     level_t: null          # disturbance_level_t, m; null -> PALM auto (zu(nzt/3))
+  # Seed of PALM's random disturbances (the initial kick and the inflow
+  # perturbations above): &initialization_parameters ensemble_member_nr, an int
+  # in [0, 2000]. null writes nothing (PALM's default 0). One value per run:
+  # ensemble members all inherit it. Change it for a replica of a turbulent truth.
+  random_seed: null
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

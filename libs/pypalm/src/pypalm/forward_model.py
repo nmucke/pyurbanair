@@ -41,7 +41,11 @@ from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
 from .utils.nudging_utils import apply_nudging_driver, remove_nudging_files
 from .utils.p3d_utils import P3DFile
 from .utils.vertical_profile import build_profile_shape
-from .utils.warm_start_utils import write_warmstart_driver
+from .utils.warm_start_utils import (
+    build_init_profile_dataset,
+    write_init_driver,
+    write_warmstart_driver,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -86,6 +90,29 @@ DEFAULT_NUDGING_CONFIG: dict = {
 # The four &initialization_parameters switches PALM's nudging path requires
 # (LSF0001/0003/0005 constraint chain); toggled together.
 _NUDGING_SWITCHES = ("nudging", "large_scale_forcing", "lsf_exception", "humidity")
+
+# ``random_seed`` -> &initialization_parameters ensemble_member_nr, PALM's only
+# seed (modules.f90:638, parin.f90:213). It offsets every column ID of the
+# 'random-parallel' generator by 1E6*(ensemble_member_nr - 1000) in a 32-bit
+# integer (random_generator_parallel_mod.f90:129,176-177); this range keeps that
+# offset within +-1E9, leaving room for the grid's own column IDs.
+RANDOM_SEED_RANGE = (0, 2000)
+
+
+def validate_random_seed(random_seed: Optional[int]) -> Optional[int]:
+    """Return ``random_seed`` as an int, or None; raise if PALM can't take it."""
+    if random_seed is None:
+        return None
+    if isinstance(random_seed, bool) or not isinstance(random_seed, int):
+        raise TypeError(f"random_seed must be an int or null, got {random_seed!r}")
+    low, high = RANDOM_SEED_RANGE
+    if not low <= random_seed <= high:
+        raise ValueError(f"random_seed must be in [{low}, {high}], got {random_seed}")
+    return random_seed
+
+
+# &initialization_parameters keys of PALM's outflow damping layer (parin.f90:253).
+_OUTFLOW_DAMPING_KEYS = ("outflow_damping_factor", "outflow_damping_width")
 
 
 def _augment_runtime_library_paths(env: dict[str, str]) -> None:
@@ -158,6 +185,8 @@ class ForwardModel(BaseForwardModel):
         sgs_constant: Optional[float] = None,
         nudging_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
+        random_seed: Optional[int] = None,
+        outflow_damping: Optional[dict] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -202,6 +231,13 @@ class ForwardModel(BaseForwardModel):
         # turbulence generator).
         self._inlet_turbulence = inlet_turbulence
         validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Seed of PALM's random disturbances. None writes nothing (PALM's
+        # default ensemble_member_nr = 0); see `_apply_random_seed`.
+        self.random_seed = validate_random_seed(random_seed)
+        # Outflow damping layer for inflow_outflow runs; None writes nothing.
+        # See `_apply_outflow_damping` and docs/pypalm.md §8.
+        self._outflow_damping = outflow_damping
+        self._validate_outflow_damping()
 
         self.dirs = get_palm_directory_paths(
             case_dir=pathlib.Path(case_dir),
@@ -214,8 +250,12 @@ class ForwardModel(BaseForwardModel):
         self._stage_input_dir()
 
         self.params = _merge_params(DEFAULT_PARAMS, None)
+        # Cell-centre (u, v) inflow profile from the last _apply_inflow_settings;
+        # the inflow_outflow cold start writes it as an LOD=1 driver.
+        self._init_uv_profile: Optional[tuple[np.ndarray, np.ndarray]] = None
         self._apply_runtime_and_domain()
         self._apply_boundary_condition()
+        self._apply_random_seed()
 
         if nx is not None and ny is not None and bounds is not None:
             dz = (bounds[2][1] - bounds[2][0]) / nz if nz else 1.0
@@ -282,6 +322,28 @@ class ForwardModel(BaseForwardModel):
     def _p3d_set_array(self, section: str, key: str, values: Iterable[float]) -> None:
         p3d = P3DFile(self.p3d_path)
         p3d.set_array(section, key, values)
+        p3d.write()
+
+    def _apply_random_seed(self) -> None:
+        """Write ``random_seed`` as ``ensemble_member_nr``; no-op when unset.
+
+        It seeds only the 'random-parallel' generator (PALM's default,
+        modules.f90:582), which draws both the initial kick and the in-run
+        inflow disturbances (disturb_field.f90:126-139). The other generators
+        ignore it, so a template that selects one is rejected.
+        """
+        if self.random_seed is None:
+            return
+        p3d = P3DFile(self.p3d_path)
+        generator = p3d.get_value("initialization_parameters", "random_generator")
+        if generator is not None and generator.strip("'\"") != "random-parallel":
+            raise ValueError(
+                f"random_seed needs random_generator='random-parallel', but the "
+                f"_p3d template sets {generator}: PALM ignores the seed there."
+            )
+        p3d.set_value(
+            "initialization_parameters", "ensemble_member_nr", self.random_seed
+        )
         p3d.write()
 
     def _apply_runtime_and_domain(self) -> None:
@@ -354,6 +416,12 @@ class ForwardModel(BaseForwardModel):
                     )
             p3d.set_string("initialization_parameters", "bc_lr", "cyclic")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
+            # A positive outflow_damping_factor under cyclic bc_lr/bc_ns is a
+            # PALM error (PAC0352). Zero any key a template carries; a clean
+            # template is left byte-identical.
+            for key in _OUTFLOW_DAMPING_KEYS:
+                if key in p3d.sections.get("initialization_parameters", {}):
+                    p3d.set_value("initialization_parameters", key, 0.0)
             p3d.write()
         else:
             # Standard PALM urban inflow: non-cyclic east-west, cyclic north-south.
@@ -363,12 +431,64 @@ class ForwardModel(BaseForwardModel):
             p3d.set_string("initialization_parameters", "bc_lr", "dirichlet/radiation")
             p3d.set_string("initialization_parameters", "bc_ns", "cyclic")
             p3d.set_string("initialization_parameters", "psolver", "multigrid_noopt")
+            self._apply_outflow_damping(p3d)
             p3d.write()
             # multigrid needs uniform subdomains, and PALM's auto-decomposition
             # puts the larger factor on npey — which usually fails to divide the
             # grid. Pin a slab decomposition (npex=ncpu, npey=1) derived from
             # NCPU so any ncpu that divides nx+1 works (see ncpu_utils).
             self._apply_processor_topology()
+
+    def _validate_outflow_damping(self) -> None:
+        """Reject an ``outflow_damping`` block PALM would reject or ignore.
+
+        ``outflow_damping_factor`` is a relaxation rate in 1/s and
+        ``outflow_damping_width`` a distance in metres from the outflow edge
+        (init_3d_model.f90:1717-1720); PALM aborts on a width outside
+        [0, domain length] (PAC0351, check_parameters.f90:2603). A width under
+        two cells is legal but leaves a one-cell sink, so it only warns.
+        """
+        cfg = self._outflow_damping
+        if cfg is None:
+            return
+        factor = float(cfg["factor"])
+        width = float(cfg["width"])
+        if factor < 0.0:
+            raise ValueError(f"outflow_damping.factor must be >= 0 1/s, got {factor}")
+        if width <= 0.0:
+            raise ValueError(f"outflow_damping.width must be > 0 m, got {width}")
+        if self.nx and self.bounds is not None:
+            xmin, xmax = self.bounds[0]
+            dx = (xmax - xmin) / self.nx
+            if width > xmax - xmin:
+                raise ValueError(
+                    f"outflow_damping.width={width} m exceeds the domain length "
+                    f"{xmax - xmin} m (PALM PAC0351)."
+                )
+            if width < 2 * dx:
+                logger.warning(
+                    "outflow_damping.width=%.3g m is under two cells (dx=%.3g m); "
+                    "the damping layer degenerates to a single-cell sink.",
+                    width,
+                    dx,
+                )
+
+    def _apply_outflow_damping(self, p3d: P3DFile) -> None:
+        """Write PALM's outflow damping layer for an inflow_outflow run.
+
+        Behind the last obstacle the flow reverses at the radiation outflow
+        boundary, and the non-dissipative ``pw-scheme`` advection cannot damp
+        it: xie_and_castro diverges within ~10 s without this. PALM relaxes
+        u, v, w (and pt) toward the initial profile over the last ``width``
+        metres at up to ``factor`` 1/s (prognostic_equations.f90:391).
+        ``None`` writes nothing, leaving whatever the template sets.
+        """
+        cfg = self._outflow_damping
+        if cfg is None:
+            return
+        section = "initialization_parameters"
+        p3d.set_value(section, "outflow_damping_factor", float(cfg["factor"]))
+        p3d.set_value(section, "outflow_damping_width", float(cfg["width"]))
 
     def _apply_processor_topology(self) -> None:
         """Pin npex/npey in runtime_parameters from NCPU (slab decomposition).
@@ -496,6 +616,7 @@ class ForwardModel(BaseForwardModel):
         p3d.set_value("initialization_parameters", "vg_surface", float(v0))
         self._apply_sgs_setting(p3d, self.params)
 
+        self._init_uv_profile = None
         if self.bounds is not None and self.nz:
             zmin, zmax = self.bounds[2]
             dz = (zmax - zmin) / self.nz
@@ -513,6 +634,7 @@ class ForwardModel(BaseForwardModel):
             p3d.set_array("initialization_parameters", "u_profile", u_profile.tolist())
             p3d.set_array("initialization_parameters", "v_profile", v_profile.tolist())
             p3d.set_array("initialization_parameters", "uv_heights", heights.tolist())
+            self._init_uv_profile = (u_profile[1:], v_profile[1:])
 
         p3d.write()
 
@@ -1048,7 +1170,10 @@ class ForwardModel(BaseForwardModel):
         """Run PALM, optionally warm-started from ``state``.
 
         ``state is None`` → cold start (with spinup): PALM initializes from
-        analytic profiles (``initializing_actions='set_constant_profiles'``).
+        the analytic inflow profile — under ``periodic`` via
+        ``initializing_actions='set_constant_profiles'``, under
+        ``inflow_outflow`` via an LOD=1 ``init_atmosphere_*`` driver and
+        ``'read_from_file'`` (see ``_reset_cold_init``).
 
         ``state`` provided → warm start (no spinup): the resolved u/v/w field is
         injected as PALM's full 3D initial condition via the dynamic-driver
@@ -1150,11 +1275,41 @@ class ForwardModel(BaseForwardModel):
         ``initializing_actions = 'read_from_file'`` (and disturbances disabled)
         in the namelist; reset both so a subsequent cold start initializes from
         analytic profiles and re-enables the turbulence-seeding perturbation.
+
+        Under ``inflow_outflow`` the analytic profile goes in as an LOD=1
+        ``init_atmosphere_*`` driver read with ``'read_from_file'``, not as
+        ``set_constant_profiles``: the latter zeroes u/v on the whole first fluid
+        level, and the dirichlet/radiation inflow face then keeps u=v=0 there for
+        the entire run (docs/pypalm.md §8). The driver is merged into a
+        time-varying ``inflow_plane_*`` driver when one was just written; a stale
+        driver from a prior run was already removed by ``_apply_inflow_settings``.
+        Must run AFTER ``_apply_inflow_settings``, which builds the profile.
         """
+        actions = "set_constant_profiles"
+        if (
+            self.boundary_condition == "inflow_outflow"
+            and self._init_uv_profile is not None
+            and self.bounds is not None
+            and self.nx
+            and self.ny
+            and self.nz
+        ):
+            u_profile, v_profile = self._init_uv_profile
+            write_init_driver(
+                self.dynamic_driver_path,
+                build_init_profile_dataset(
+                    u_profile,
+                    v_profile,
+                    bounds=self.bounds,
+                    nx=int(self.nx),
+                    ny=int(self.ny),
+                    nz=int(self.nz),
+                    pt_surface=DEFAULT_PT_SURFACE,
+                ),
+            )
+            actions = "read_from_file"
         self._p3d_set_string(
-            "initialization_parameters",
-            "initializing_actions",
-            "set_constant_profiles",
+            "initialization_parameters", "initializing_actions", actions
         )
         self._p3d_set_value("runtime_parameters", "create_disturbances", True)
 

@@ -76,6 +76,7 @@ Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
 | `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (4.0 m), `profile_config` (default `power_law` with `alpha=0.25`). See §8. |
 | `inlet_turbulence` | Switchable inlet turbulence (`enabled`, default `false`) → PALM's random inflow disturbances. Absent (`None`) is a strict no-op. `inflow_outflow` only. See §8. |
+| `random_seed` | Seed of PALM's random disturbances → `&initialization_parameters ensemble_member_nr`, an int in `[0, 2000]`. `None` (default) writes nothing. See §7. |
 | `verbose` | When `False`, stdout/stderr captured; failures surface the last 80 lines |
 
 On construction, `__init__` copies case files to `INPUT/`, writes grid+time
@@ -87,8 +88,14 @@ into `_p3d`, applies boundary conditions (and calls
 
 The single-run entry point called by `BaseForwardModel.__call__`.
 
-- **Cold start** (`state is None`): PALM initialises from analytic profiles
-  (`initializing_actions = 'set_constant_profiles'`).
+- **Cold start** (`state is None`): PALM initialises from the analytic inflow
+  profile. Under `periodic` that is `initializing_actions =
+  'set_constant_profiles'`; under `inflow_outflow`, `_reset_cold_init` writes
+  the same cell-centre profile as LOD=1 `init_atmosphere_u/v/w/pt/qv` into the
+  `_dynamic` NetCDF (merged into the time-varying driver when there is one)
+  and sets `initializing_actions = 'read_from_file'`, because
+  `set_constant_profiles` zeroes the first fluid level, inflow face included
+  (§8 "Near-wall inflow zeroed by set_constant_profiles").
 - **Warm start** (`state` provided): calls `_apply_warmstart(state)`, which
   writes `init_atmosphere_u/v/w/pt/qv` (LOD=2) into the `_dynamic` NetCDF via
   `write_warmstart_driver` and sets `initializing_actions = 'read_from_file'`.
@@ -143,7 +150,8 @@ then by whether the params carry a `time` dim:
 - All paths then write `ug_surface`/`vg_surface` (inert with `omega = 0`;
   initial condition only) and `u_profile`/`v_profile`/`uv_heights` (the
   vertical shear profile prepended with a z=0 no-slip anchor), so the run
-  starts consistent with the initial nudging target.
+  starts consistent with the initial nudging target. The cell-centre part of
+  that profile is kept for the inflow_outflow cold-start LOD=1 driver.
 - Model-error knobs are applied via `_resolve_profile_config` and
   `_apply_sgs_setting` (see §5).
 
@@ -216,8 +224,9 @@ once and broadcast across time; the spinup plateau is prepended by
 `_prepend_spinup_plateau` (t=0 values held constant for `[0, spinup_time]`).
 PALM's `turbulent_inflow` module reads this file and linearly interpolates in
 time between snapshots at the dirichlet boundary. The dynamic driver also
-carries the `init_atmosphere_*` fields when warm-starting (the two mechanisms
-coexist in one PIDS_DYNAMIC file sharing the same 0-based vertical axes).
+carries the `init_atmosphere_*` fields — LOD=2 when warm-starting, LOD=1 on
+an inflow_outflow cold start (the two mechanisms coexist in one PIDS_DYNAMIC
+file sharing the same 0-based vertical axes).
 
 ---
 
@@ -367,6 +376,13 @@ Key field notes:
 - `boundary_condition: inflow_outflow` — triggers the multigrid solver +
   npex/npey slab decomposition. `periodic` instead selects the nudging driver
   (§8).
+- `outflow_damping:` — `factor` (default `1.0`, 1/s) and `width` (default
+  `4.0`, metres from the outflow edge), written as `&initialization_parameters
+  outflow_damping_factor` / `outflow_damping_width` on `inflow_outflow` runs
+  only. Periodic runs never get them (any a template carries are zeroed);
+  `outflow_damping: null` writes nothing. Staging raises on `factor < 0`,
+  `width <= 0` or a width longer than the domain, and warns on a width under
+  two cells. See §8 "inflow_outflow diverges at the outflow without damping".
 - `nudging_config:` — `enabled` (default `true`; `false` restores un-driven
   periodic staging), `tnudge` (relaxation timescale, s), `nnudge_meters` (no
   nudging below this height), `profile_config` (vertical shear shape). Only
@@ -378,6 +394,7 @@ Key field notes:
   auto-derivation). Requires `boundary_condition: inflow_outflow`; staging
   raises otherwise. **`enabled: false` does not disable PALM's
   `turbulent_inflow` module** — see §8.
+- `random_seed: null` — the seed of PALM's random disturbances; see below.
 - `compile: false` — PALM is compiled once at install time via
   `__init__.py`, not per-run.
 - `failure: ${ensemble.failure}` — pulls the shared `resample_from_successes`
@@ -424,6 +441,44 @@ injected field is not shocked.
 `initial_seed` defaults to **true**: it is what breaks symmetry so turbulence can
 develop from PALM's smooth analytic initial profile. With it false, transition
 has to be tripped by the topography alone and develops later.
+
+### `random_seed`: PALM's one seed
+
+PALM has no seed key of its own. Its random disturbances are seeded by
+`ensemble_member_nr` (integer, default 0, `modules.f90:638`), a key of
+`&initialization_parameters` (`parin.f90:213`). Each init calls
+`init_parallel_random_generator` (`init_3d_model.f90:822-826`), which gives
+every grid column the start ID
+`j*(nx+1) + i + 1 + 1E6*(ensemble_member_nr - 1000)`
+(`random_generator_parallel_mod.f90:176-177`; the 1D variant at `:129`). The
+same per-column streams then draw both the initial kick
+(`init_3d_model.f90:1488-1490`) and the in-run inflow disturbances
+(`time_integration.f90:966-989`), both through `disturb_field`
+(`disturb_field.f90:126-139`).
+
+This holds only for `random_generator = 'random-parallel'`, PALM's default
+(`modules.f90:582`; also an `&initialization_parameters` key, `parin.f90:271`).
+`'numerical-recipes'` always starts from the fixed `iran = -1234567`
+(`modules.f90:657`, `disturb_field.f90:115-125`), and `'system-specific'`
+uses Fortran's `RANDOM_NUMBER` (`:140-150`); neither reads the seed. Apart from
+seeding, `ensemble_member_nr` only adds an `en-no:` tag to the run header
+(`check_parameters.f90:248-249`, `header.f90:296-298`).
+
+`random_seed` (in `forward_model`) writes that key:
+
+- `null` (the default) writes nothing, so the `_p3d` is byte-identical to a
+  run without the knob, and PALM uses 0.
+- An int is written once to `&initialization_parameters` at construction.
+  It must lie in `[0, 2000]`: the column ID is a 32-bit integer, and this keeps
+  the offset within ±1E9. Out-of-range values, non-integers and a template
+  that selects another `random_generator` raise before PALM starts.
+- `0` reproduces the default run. Any other value gives a different
+  realisation of both the kick and the inflow disturbances.
+- It is one value per run. Ensemble members are copies of the staged model,
+  so they all get the same seed (as today, when they all get 0). pyudales
+  derives per-member seeds from the experiment name instead; pypalm does not.
+- Every warm-started window re-initialises the generator from the same seed,
+  as PALM does without the knob.
 
 ## 8. Known gotchas
 
@@ -550,8 +605,8 @@ Kataoka & Mizuno recycling (the true analogue of uDALES `iinletgen=1`) requires
 `initializing_actions = 'cyclic_fill'` or `'read_restart_data'`
 (`turbulent_inflow_mod.f90:337-343`, `TUI0006`) — i.e. a *precursor run* whose
 3D fields are cyclically filled in. pypalm cold-starts from
-`'set_constant_profiles'` and warm-starts from `'read_from_file'`, so neither
-staging path satisfies it. It also needs `dx < recycling_width < nx·dx`
+`'set_constant_profiles'` (periodic) or `'read_from_file'` (inflow_outflow) and
+warm-starts from `'read_from_file'`, so no staging path satisfies it. It also needs `dx < recycling_width < nx·dx`
 (`:346-349`, `TUI0007`; the default is `HUGE(1.0)`, so it is effectively
 mandatory) and `bc_lr = 'dirichlet/radiation'` (`:316-320`, `TUI0004`).
 Enabling recycling would mean adding a precursor-run + restart-data feature, not
@@ -630,6 +685,88 @@ building": every cell in that region gets a large non-zero height, blocking
 airflow over the entire base rather than only the actual buildings. Pylbm and
 pyudales handle the same geometry correctly with their 3D approaches.
 
+### inflow_outflow diverges at the outflow without damping (pw-scheme)
+
+On xie_and_castro, `boundary_condition: inflow_outflow` without damping
+diverges within ~10 s. Behind the last cube the flow reverses at the radiation
+outflow boundary, and the case's `momentum_advec = 'pw-scheme'` (2nd-order
+Piacsek-Williams, chosen in 55574ce to match uDALES CD2) adds no numerical
+dissipation to absorb it. PALM's outflow damping layer fixes it, so
+`configs/model/pypalm.yaml` turns it on by default (`outflow_damping`, §7).
+
+PALM semantics (vendored source, `packages/palm/model/src/`):
+- `outflow_damping_factor` and `outflow_damping_width` are
+  `&initialization_parameters` keys (`parin.f90:253-254`), both defaulting to
+  `0.0` (`modules.f90:975-976`), i.e. off.
+- `width` is in **metres**: the layer covers `i*dx > nx*dx - width` with a
+  `factor * sin^2` ramp up to `factor` at the outflow edge
+  (`init_3d_model.f90:1712-1744`). `factor` is a relaxation rate (1/s): the
+  prognostic equations add `- MAX(rdf, odf_x, odf_y) * (u - u_init)` to u, v
+  and w (`prognostic_equations.f90:391`, `:474`, `:554`) and to pt (`:638`).
+- PAC0351 (`check_parameters.f90:2603-2615`): width must be in
+  `[0, (nx+1)*dx]`.
+- PAC0352 (`check_parameters.f90:2621-2657`): a positive factor needs a
+  `dirichlet/radiation` (or reverse) `bc_lr`/`bc_ns`; under cyclic BCs it
+  aborts. Hence the periodic branch zeroes any keys.
+- PAC0353 (`check_parameters.f90:2665-2668`): topography height must be zero
+  at the inflow column. Cases with a building on the inflow edge cannot use
+  damping (pypalm does not pre-check this; PALM aborts at start).
+
+Evidence (2026-10 diagnosis): factor 1.0, width 4 m is stable for 600 s on
+30x40x16, 50x40x16, 64x40x16 (domain x to 80 m) and 64x80x32, with inlet
+disturbances on and off. The flow stays unsteady: temporal std of u ~0.22 m/s,
+the same as the undamped run before it blows up. Factor 0.1 still diverges.
+
+The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
+across runs) is very likely the same outflow instability; not yet confirmed by
+a rerun with damping.
+
+### Near-wall inflow zeroed by set_constant_profiles
+
+Before 2026-10, inflow_outflow cold starts used `initializing_actions =
+'set_constant_profiles'`. The profile itself is right: `check_parameters.f90:672-697`
+builds `u_init` from `u_profile`/`uv_heights` (`u_init(1)` = 2.089 m/s at
+`zu(1)` = 1 m for 6 m/s at 10°). But `init_3d_model.f90:707-720`
+(`set_constant_profiles`, `ibc_uv_b /= 1`, no LSM/USM spinup) then zeroes u
+and v wherever `topo_flags` bits 20/21 are unset, and those need fluid at
+k-1..k+1 (`topography_mod.f90:1575-1590`). So the whole k=1 level is zeroed,
+boundary columns included. With `bc_lr = 'dirichlet/radiation'` the inflow
+face is never re-imposed from `u_init` (`dynamics_mod.f90:1287-1288` copies
+`u_p(:,:,nxl) = u_p(:,:,nxl-1)`), so u = v = 0 at z = 1 m on the inflow face
+for the whole run (zero in every raw output frame).
+
+The `read_from_file` path (`init_3d_model.f90:~566-610`) sets u = `u_init`
+for every column, ghosts included, and masks only topography. pypalm now
+writes the same cell-centre profile as LOD=1 `init_atmosphere_u/v/w/pt/qv`
+(`warm_start_utils.build_init_profile_dataset`; LOD=1 still needs the
+`x`/`xu`/`y`/`yv` dims, else DRV0003) and reads it with `read_from_file`.
+`u_profile`/`uv_heights` stay in `_p3d`. Periodic cold starts (nudging
+re-imposes the near-wall flow) and warm starts (LOD=2, already
+`read_from_file`) are unchanged. This changes inflow_outflow cold-start runs
+by design.
+
+Evidence (xie_and_castro, 10°/6.0 m/s, inlet disturbances on, against a uDALES
+run with the same inflow): before the fix, the y-mean time-mean inflow |U|
+ratio uDALES/PALM was 3.56 at z = 1 m and 1.45 at z = 2 m, and the fitted
+profile exponent 0.43 (target 0.25). With the LOD=1 driver the ratio is
+≈1.00 near the wall, the exponent 0.24-0.26, and the run is stable.
+Through `run_forward.py` (540 s after 30 s spinup, `ncpu=1`, frames ≥ 30 s),
+ratio uDALES/PALM of the y-mean time-mean |U|:
+
+| x \ z (m) | 1 | 3 | 5 | 9 | 15 | 21 |
+|---|---|---|---|---|---|---|
+| −19 m | 1.01 | 1.02 | 1.01 | 0.97 | 0.98 | 1.01 |
+| −5 m | 1.10 | 0.98 | 0.97 | 0.96 | 0.98 | 1.03 |
+
+**Open: inflow_outflow warm starts have the same failure, at every height.**
+The LOD=2 reader fills `u` from `nxlu` (= 1) and copies it to `nxlu-1`
+(`netcdf_data_input_mod.f90:2339-2351`), which is `nxl`, so the ghost column
+`nxl-1` keeps the `u = 0` it was reset to. `dynamics_mod.f90:1287-1288` then
+copies that zero onto the inflow face. In a 2-window xie_and_castro run
+(`forward.rollout_steps=1`) the inflow-face u is 0 at all heights for the whole
+warm window and the domain-mean u falls from 4.0 to 0.36 m/s. Before the LOD=1
+fix the same warm window diverged after ~21 s. Not fixed yet.
+
 ### Member divergence in ensembles (~15%)
 
 PALM's own divergence detection terminates the run (exit 0) before the first
@@ -706,6 +843,7 @@ bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |
 | Inlet turbulence on/off | `inlet_turbulence` in `pypalm.yaml`; [`utils/inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) |
+| Seed of the random disturbances | `random_seed` in `pypalm.yaml` (→ `ensemble_member_nr`, §7) |
 | Warm-start (state injection) | [`utils/warm_start_utils.write_warmstart_driver`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) |
 | Vertical stagger unification | `_load_and_postprocess_state` in [`forward_model.py`](../libs/pypalm/src/pypalm/forward_model.py) |
 | Topography from STL | [`stl_to_palm.stl_to_palm_topography`](../libs/pypalm/src/pypalm/stl_to_palm.py) |
