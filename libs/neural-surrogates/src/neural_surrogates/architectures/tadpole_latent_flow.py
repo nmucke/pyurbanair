@@ -32,9 +32,10 @@ for S / B / L):
    latents (``D_geom = n_geometry_channels*Cl``, folded-geometry AEs only).
 
 Geometry enters the velocity network as *conditioning* only, through the
-spatial FiLM of :class:`~neural_surrogates.architectures.tadpole_stepper.ParamConditionedSubnetwork`:
-a folded-geometry AE (``encode_geometry=True``) supplies its deterministic,
-normalised geometry latents; a geometry-branch AE supplies the branch's
+spatial FiLM of :class:`~neural_surrogates.architectures.tadpole_stepper.ParamConditionedSubnetwork`
+(or, with ``velocity_conditioning="adaln"``, a per-token projection added to
+the hidden tokens): a folded-geometry AE (``encode_geometry=True``) supplies
+its deterministic, normalised geometry latents; a geometry-branch AE supplies the branch's
 stride-16 feature (its full pyramid is handed to the decoder). An AE with
 neither geometry path is rejected -- there would be nothing to condition on.
 
@@ -51,10 +52,13 @@ step; conditioning layers (param FiLM, geometry FiLM) start receiving
 gradients once it has moved.
 
 Conditioning vector = ``concat(z-scored flattened params_hist (Hp*P),
-sinusoidal embedding of the flow time tau (time_embed_dim))``, fed to the
-subnetwork's input FiLM. ``tau`` is an artificial integration coordinate in
-``[0, 1]``; it has nothing to do with physical time or the parameter-history
-cadence.
+sinusoidal embedding of the flow time tau (time_embed_dim))``. With
+``velocity_conditioning="input_film"`` (default) it is fed to the subnetwork's
+input FiLM, once; with ``"adaln"`` the velocity network is an
+:class:`~neural_surrogates.architectures.latent_velocity_adaln.AdaLNVelocityNet`
+that modulates every block from it (DiT adaLN-Zero). ``tau`` is an artificial
+integration coordinate in ``[0, 1]``; it has nothing to do with physical time
+or the parameter-history cadence.
 
 Flow objective and sampling
 ---------------------------
@@ -211,7 +215,14 @@ class TadpoleLatentGenerator(nn.Module):
         ``num_heads``. An explicit value below ``D`` is rejected (see the
         module docstring).
     n_layers, num_heads, mlp_ratio, film_hidden:
-        Velocity-net transformer / FiLM-MLP sizing.
+        Velocity-net transformer / FiLM-MLP sizing (with ``"adaln"``,
+        ``film_hidden`` is the width of the conditioning embedding).
+    velocity_conditioning:
+        ``"input_film"`` (default): a ``ParamConditionedSubnetwork`` that
+        applies the conditioning vector once, as a FiLM on the input tokens,
+        and the geometry as a spatial FiLM. ``"adaln"``: an
+        ``AdaLNVelocityNet`` with per-block adaLN-Zero conditioning and
+        additive per-token geometry.
     use_checkpoint:
         Recompute velocity-transformer blocks during backward to reduce
         activation memory.
@@ -245,6 +256,7 @@ class TadpoleLatentGenerator(nn.Module):
         film_hidden: int = 128,
         mlp_ratio: int = 4,
         use_checkpoint: bool = False,
+        velocity_conditioning: str = "input_film",
         num_sampling_steps: int = 50,
         latent_eps: float = 1e-6,
         max_latent_tokens: int | None = None,
@@ -268,6 +280,11 @@ class TadpoleLatentGenerator(nn.Module):
             )
         if float(latent_eps) <= 0:
             raise ValueError(f"latent_eps must be > 0, got {latent_eps}")
+        if velocity_conditioning not in ("input_film", "adaln"):
+            raise ValueError(
+                "velocity_conditioning must be 'input_film' or 'adaln', got "
+                f"{velocity_conditioning!r}"
+            )
         if max_latent_tokens is not None and int(max_latent_tokens) < 1:
             raise ValueError(
                 f"max_latent_tokens must be None or >= 1, got {max_latent_tokens}"
@@ -347,19 +364,38 @@ class TadpoleLatentGenerator(nn.Module):
         self.num_heads = heads
         self.mlp_ratio = int(mlp_ratio)
         self.use_checkpoint = bool(use_checkpoint)
+        self.velocity_conditioning = velocity_conditioning
         self.cond_dim = self.param_history_steps * self.n_params + self.time_embed_dim
-        self.velocity_net = ParamConditionedSubnetwork(
-            in_dim=d,
-            n_params=self.cond_dim,
-            n_layers=self.n_layers,
-            num_heads=heads,
-            hidden_size=h,
-            param_conditioning="film",
-            mlp_ratio=int(mlp_ratio),
-            film_hidden=int(film_hidden),
-            use_checkpoint=self.use_checkpoint,
-            geom_cond_dim=self.geom_cond_dim,
-        )
+        self.velocity_net: nn.Module
+        if velocity_conditioning == "adaln":
+            from neural_surrogates.architectures.latent_velocity_adaln import (
+                AdaLNVelocityNet,
+            )
+
+            self.velocity_net = AdaLNVelocityNet(
+                in_dim=d,
+                cond_dim=self.cond_dim,
+                geom_cond_dim=self.geom_cond_dim,
+                n_layers=self.n_layers,
+                num_heads=heads,
+                hidden_size=h,
+                mlp_ratio=self.mlp_ratio,
+                film_hidden=int(film_hidden),
+                use_checkpoint=self.use_checkpoint,
+            )
+        else:
+            self.velocity_net = ParamConditionedSubnetwork(
+                in_dim=d,
+                n_params=self.cond_dim,
+                n_layers=self.n_layers,
+                num_heads=heads,
+                hidden_size=h,
+                param_conditioning="film",
+                mlp_ratio=int(mlp_ratio),
+                film_hidden=int(film_hidden),
+                use_checkpoint=self.use_checkpoint,
+                geom_cond_dim=self.geom_cond_dim,
+            )
 
         # -- normalisation buffers ------------------------------------------ #
         self.register_buffer("latent_mean", torch.zeros(self.working_latent_dim))
@@ -479,6 +515,7 @@ class TadpoleLatentGenerator(nn.Module):
         return (
             f"D={self.state_latent_dim}, hidden_size={self.hidden_size}, "
             f"n_layers={self.n_layers}, num_heads={self.num_heads}, "
+            f"velocity_conditioning={self.velocity_conditioning!r}, "
             f"geom_cond_dim={self.geom_cond_dim}, "
             f"spatial_mode={self.spatial_mode!r}, "
             f"trainable_params={self.count_parameters():,}"

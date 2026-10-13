@@ -184,6 +184,23 @@ def test_latent_generator_trains_from_the_cache(
     assert bool(model.latent_stats_installed)
 
 
+def test_adaln_latent_generator_rebuilds_from_its_config(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    from neural_surrogates.architectures.latent_velocity_adaln import AdaLNVelocityNet
+
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path, trained, "architecture.velocity_conditioning=adaln"
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    assert saved.architecture.velocity_conditioning == "adaln"
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert isinstance(model.velocity_net, AdaLNVelocityNet)
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)

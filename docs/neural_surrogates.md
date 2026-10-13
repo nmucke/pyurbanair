@@ -1929,7 +1929,7 @@ AE and the generator trainers share one implementation.
 is a plain `nn.Module` (not a `_TadpoleFieldIO` mixin user — it delegates field
 I/O to the AE it owns) with three parts: a **frozen** nested `TadpoleAE`
 (`self.ae`), a flow-matching **velocity network** (a `ParamConditionedSubnetwork`,
-§31) and the **normalisation buffers** (`latent_mean` / `latent_std` /
+§31, or an adaLN-Zero `AdaLNVelocityNet`, below) and the **normalisation buffers** (`latent_mean` / `latent_std` /
 `latent_stats_installed`, `param_mean` / `param_std`).
 
 **Frozen AE.** Exactly one of `pretrained_ae_dir` (training: the AE export's
@@ -2009,12 +2009,36 @@ actual `count_parameters()` (also in `extra_repr`), not the paper's figure.
 
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
-input FiLM; `tau` is scaled by `_TAU_SCALE = 1000` before the standard
+input FiLM (but see adaLN-Zero below); `tau` is scaled by `_TAU_SCALE = 1000` before the standard
 sinusoidal embedding (the SD3 / rectified-flow convention) so small `tau`
 differences do not collapse. `velocity(z, tau, params_hist, cond)` validates
 shapes (`params_hist` is `(B, Hp, P)` in **raw physical units**; z-scored inside)
 and refuses `B * Zl*Yl*Xl > max_latent_tokens` — naive global attention
 allocates `B*heads*N*N`, and a physical-cell budget alone does not bound it.
+
+**adaLN-Zero velocity net (`velocity_conditioning: adaln`).** The default
+`input_film` applies the conditioning vector once, to the input tokens, and
+leaves every transformer block unconditioned — weak for a velocity that must
+act very differently near `tau = 0` (noise) and `tau = 1` (developed field).
+`adaln` builds `AdaLNVelocityNet`
+([architectures/latent_velocity_adaln.py](../libs/neural-surrogates/src/neural_surrogates/architectures/latent_velocity_adaln.py),
+the DiT design on the vendored `AttentionBlock` / `LlamaMLP` / 3-D sincos
+positions): `c = MLP(cond)` of width `film_hidden`; every block and the final
+affine-free LayerNorm take shift / scale (/ gate) from `c` through a
+zero-initialised `Linear`, and the output `Linear(h, D)` is zero-initialised,
+so each block is the identity and the output is `0` at init. Gradients reach
+the output projection on step 1, the modulation layers and `geom_proj` on
+step 2 and the conditioning MLP on step 3 (tested). Geometry varies per token,
+so it cannot ride the global adaLN path: `geom_proj = Linear(G, h)` is added
+to every token after the input projection — the same as projecting
+`concat(z, geom_cond)`, the usual way spatial conditions enter a diffusion
+backbone — with default (non-zero) init. `hidden_size`, the `>= D` rule,
+`n_layers`, `num_heads`, `mlp_ratio`, `use_checkpoint`, `max_latent_tokens`
+and the precision policy are shared. For `D = h = 1536`, 6 layers,
+`mlp_ratio: 4`, `film_hidden: 128`, `Hp*P = 24`: 241.1 M parameters vs
+236.4 M for `input_film` (`G = 1536`); the modulation costs ~1.2 M per block
+because `c` is `film_hidden` wide, not `h`. A config without the key builds
+`input_film`, so existing artifacts rebuild and load unchanged.
 
 **Flow objective.** `forward(state, params_hist, geometry, geom_features=None,
 *, generator=None)` encodes the normalised target `z1`, draws `z0 ~ N(0, I)`
@@ -2134,7 +2158,7 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: input_film` (or `adaln`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2382,6 +2406,7 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Latent cache (`prepare_latent_cache`, `LatentCacheDataset`) | [datasets/latent_cache.py](../libs/neural-surrogates/src/neural_surrogates/datasets/latent_cache.py) |
 | Shared parameter-table reader (`load_param_table`) | [datasets/_params.py](../libs/neural-surrogates/src/neural_surrogates/datasets/_params.py) |
 | `TadpoleLatentGenerator` / `LatentEncoding` | [architectures/tadpole_latent_flow.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_latent_flow.py) |
+| `AdaLNVelocityNet` (`velocity_conditioning: adaln`) | [architectures/latent_velocity_adaln.py](../libs/neural-surrogates/src/neural_surrogates/architectures/latent_velocity_adaln.py) |
 | Shared spatial helpers (`encode_spatial` / `decode_spatial`) | [architectures/_tadpole_spatial.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_spatial.py) |
 | `ParamConditionedSubnetwork` (the velocity net) | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
 | `LatentFlowMatchingTrainer` | [training/flow_matching.py](../libs/neural-surrogates/src/neural_surrogates/training/flow_matching.py) |

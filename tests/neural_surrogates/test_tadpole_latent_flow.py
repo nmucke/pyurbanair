@@ -20,6 +20,11 @@ What is locked down here:
   seeds give distinct states, ``num_steps`` override, masking/shape.
 * **Self-contained reload** -- ``skip_pretrained_load=True, ae_kwargs=...`` +
   ``load_state_dict(strict=True)`` reproduces samples and every buffer.
+* **adaLN-Zero velocity net** (``velocity_conditioning="adaln"``) -- zero
+  output at init, output projection trained first and the modulation next,
+  ``tau`` changes the velocity once trained, checkpointing leaves gradients
+  unchanged, the default build is the unchanged FiLM net, and the
+  self-contained reload round-trips.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps
 (``diffusers`` / ``timm`` / ``einops``), like the neighbouring Tadpole tests.
@@ -729,6 +734,8 @@ def test_self_contained_reload_reproduces_samples(tmp_path):
     fresh = instantiate(cfg, n_state_channels=C, n_params=P)
     assert isinstance(fresh, TadpoleLatentGenerator)
     assert fresh.ae_fingerprint is None
+    # a node without the key (every pre-adaln artifact) rebuilds the FiLM net
+    assert fresh.velocity_conditioning == "input_film"
     assert not bool(fresh.latent_stats_installed)
     fresh.load_state_dict(torch.load(tmp_path / "weights.pt"), strict=True)
     fresh.eval()
@@ -739,4 +746,154 @@ def test_self_contained_reload_reproduces_samples(tmp_path):
     assert torch.equal(fresh.param_std, m.param_std)
     assert all(not p.requires_grad for p in fresh.ae.parameters())
     out = fresh.sample(params_hist, geom, initial_noise=noise)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# 7. adaLN-Zero velocity conditioning (velocity_conditioning="adaln").
+# --------------------------------------------------------------------------- #
+
+
+def test_default_velocity_net_is_the_unchanged_film_subnetwork(tmp_path):
+    from neural_surrogates.architectures.tadpole_stepper import (
+        ParamConditionedSubnetwork,
+    )
+
+    ae_dir = _make_ae_export(tmp_path, "local", "branch")
+    default = _generator(ae_dir)
+    assert default.velocity_conditioning == "input_film"
+    assert isinstance(default.velocity_net, ParamConditionedSubnetwork)
+    explicit = _generator(ae_dir, velocity_conditioning="input_film")
+    # weights trained before the option existed still load strictly
+    explicit.load_state_dict(default.state_dict(), strict=True)
+    prefixes = {k.split(".")[1] for k in default.state_dict() if k.startswith("vel")}
+    assert prefixes == {"seqmodel", "param_mlp", "geom_film"}
+    with pytest.raises(ValueError, match="velocity_conditioning"):
+        _generator(ae_dir, velocity_conditioning="cross_attention")
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_adaln_zero_at_init_trains_output_projection_then_modulation(
+    tmp_path, geometry
+):
+    from neural_surrogates.architectures.latent_velocity_adaln import AdaLNVelocityNet
+
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
+    m = _generator(ae_dir, velocity_conditioning="adaln", n_layers=2)
+    assert isinstance(m.velocity_net, AdaLNVelocityNet)
+    assert "velocity_conditioning='adaln'" in repr(m)
+    assert m.count_parameters() == sum(p.numel() for p in m.velocity_net.parameters())
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    m.train()
+    state, geom, params_hist = _inputs(b=2)
+    feats = _sdf_feats(m, geom)
+    net = m.velocity_net
+    modulations = [b.modulation[-1] for b in net.blocks] + [net.out_modulation[-1]]
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    assert torch.count_nonzero(v_pred) == 0  # every block is the identity
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    assert torch.count_nonzero(net.out_proj.weight.grad) > 0
+    for layer in modulations:  # blocked by the zero output projection
+        assert torch.count_nonzero(layer.weight.grad) == 0
+    assert torch.count_nonzero(net.geom_proj.weight.grad) == 0
+    opt.step()
+    opt.zero_grad()
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    for layer in modulations:
+        assert torch.count_nonzero(layer.weight.grad) > 0
+    assert torch.count_nonzero(net.geom_proj.weight.grad) > 0
+    # the embedding c reaches the loss only through the (still zero) modulation
+    assert torch.count_nonzero(net.cond_mlp[0].weight.grad) == 0
+    opt.step()
+    opt.zero_grad()
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    assert torch.count_nonzero(net.cond_mlp[0].weight.grad) > 0
+
+
+def test_adaln_tau_changes_the_velocity_after_training_steps(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    m = _generator(ae_dir, velocity_conditioning="adaln")
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    state, geom, params_hist = _inputs(b=2)
+    cond = m.encode_latents(state, geom, _sdf_feats(m, geom))
+    z = torch.randn_like(cond.z)
+
+    def v(tau: float) -> torch.Tensor:
+        return m.velocity(z, torch.full((2,), tau), params_hist, cond)
+
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-2)
+    m.train()
+    for _ in range(3):
+        v_pred, v_target = m(state, params_hist, geom, _sdf_feats(m, geom))
+        torch.nn.functional.mse_loss(v_pred, v_target).backward()
+        opt.step()
+        opt.zero_grad()
+    m.eval()
+    with torch.no_grad():
+        assert not torch.allclose(v(0.0), v(1.0), atol=1e-6)
+        assert not torch.allclose(v(0.1), v(0.2), atol=1e-6)
+
+
+def test_adaln_checkpointing_keeps_outputs_and_gradients(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "local", "branch")
+    plain = _generator(ae_dir, velocity_conditioning="adaln", n_layers=2)
+    ckpt = _generator(
+        ae_dir, velocity_conditioning="adaln", n_layers=2, use_checkpoint=True
+    )
+    with torch.no_grad():
+        for p in plain.velocity_net.parameters():
+            p.normal_(std=0.05)
+    ckpt.load_state_dict(plain.state_dict(), strict=True)
+    z = torch.randn(2, plain.state_latent_dim, 1, 1, 2)
+    cond = torch.randn(2, plain.cond_dim)
+    geom_cond = torch.randn(2, plain.geom_cond_dim, 1, 1, 2)
+    outs = []
+    for m in (plain, ckpt):
+        out = m.velocity_net(z, cond, geom_cond=geom_cond)
+        out.square().sum().backward()
+        outs.append(out)
+    torch.testing.assert_close(outs[0], outs[1])
+    for (name, a), b in zip(
+        plain.velocity_net.named_parameters(), ckpt.velocity_net.parameters()
+    ):
+        torch.testing.assert_close(a.grad, b.grad, msg=name)
+
+
+def test_adaln_self_contained_reload_reproduces_samples(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "halo", "fold")
+    m = _generator(ae_dir, velocity_conditioning="adaln", num_sampling_steps=2).eval()
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 12.0], [3.0, 4.0])
+    with torch.no_grad():  # move the zero-init layers so sampling is non-trivial
+        for p in m.velocity_net.parameters():
+            if torch.count_nonzero(p) == 0:
+                p.normal_(std=0.05)
+    _, geom, params_hist = _inputs(b=2, grid=RECT_GRID)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(RECT_GRID))
+    ref = m.sample(params_hist, geom, initial_noise=noise)
+    torch.save(m.state_dict(), tmp_path / "weights.pt")
+
+    node = {
+        "_target_": "neural_surrogates.TadpoleLatentGenerator",
+        "param_history_steps": HP,
+        "skip_pretrained_load": True,
+        "pretrained_ae_dir": None,
+        "ae_kwargs": m.ae_kwargs,
+        "num_sampling_steps": 2,
+        "velocity_conditioning": "adaln",
+        **NET,
+    }
+    cfg = OmegaConf.create(OmegaConf.to_yaml(OmegaConf.create(node)))
+    fresh = instantiate(cfg, n_state_channels=C, n_params=P)
+    assert fresh.velocity_conditioning == "adaln"
+    fresh.load_state_dict(torch.load(tmp_path / "weights.pt"), strict=True)
+    out = fresh.eval().sample(params_hist, geom, initial_noise=noise)
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)

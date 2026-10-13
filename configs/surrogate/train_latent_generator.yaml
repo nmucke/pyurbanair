@@ -20,6 +20,9 @@ architecture:
   film_hidden: 128
   mlp_ratio: 4
   use_checkpoint: false
+  # How params + flow time reach the velocity net: input_film (one FiLM on the
+  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block).
+  velocity_conditioning: input_film
   normalize: true
   num_sampling_steps: 50
   latent_eps: 1.0e-6
