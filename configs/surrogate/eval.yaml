@@ -45,12 +45,24 @@ autoencoder:
 latent_generator:
   model_dir: ${paths.weights_dir}/latent_generator_s
   output_dir: ${.model_dir}/eval
-  # Held-out snapshots compared against, spread over the trajectories.
+  # Held-out snapshots compared against, spread over the trajectories. The real
+  # pairwise spread (so diversity_ratio) and the Reynolds stresses need several
+  # snapshots per grid: with one per grid (e.g. 8 over 7 test grids) they are NaN.
   max_snapshots: 8
   num_noise_seeds: 4
   batch_size: 4
-  # Sampling steps tried in the step sweep.
+  # ODE sampler of the main samples: euler (NFE = steps) | heun (NFE = 2 x steps).
+  sampler: euler
+  # Sampling steps tried in the step sweep, once per entry of `samplers`
+  # (e.g. [euler, heun]; null -> `sampler` only).
   num_steps_sweep: [5, 25, 50, 100]
+  samplers: null
+  # Decoder spatial policies to compare on the same latents, e.g.
+  # [local, halo, global]; each one differing from the AE's trained policy adds
+  # generated_decode_<mode> and ae_recon_decode_<mode>. null -> none.
+  decode_modes: null
+  # Halo of a halo decode (a multiple of 16); null -> the AE's halo_size.
+  decode_halo_size: null
   # Figures of real vs generated fields.
   num_figures: 2
   # Velocity values pooled for the histograms, and their bins.

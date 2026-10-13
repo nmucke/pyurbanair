@@ -63,7 +63,10 @@ per sample: ``z_tau = (1 - tau) z0 + tau z1``, ``v_target = z1 - z0``, and the
 trainer minimises ``MSE(velocity(z_tau, tau, history, geometry), v_target)``
 over all state-latent channels (padded positions included -- no voxel mask is
 meaningful in latent space). :meth:`TadpoleLatentGenerator.sample` integrates
-``dz/dtau = velocity`` with explicit Euler from 0 to 1 in fp32 and decodes.
+``dz/dtau = velocity`` from 0 to 1 in fp32 -- explicit Euler (default) or Heun
+(explicit trapezoidal, two velocity evaluations per step) -- and decodes,
+optionally with a different decoder spatial policy than the AE was trained in
+(an evaluation probe; the latent grid stays the trained one).
 
 Precision: the frozen encoder, geometry conditioning and latent statistics
 always run in fp32 with autocast explicitly disabled; only the velocity
@@ -105,6 +108,10 @@ from torch import nn
 # sinusoidal embedding was designed for (as SD3 / rectified-flow models do), so
 # the embedding resolves small tau differences instead of collapsing them.
 _TAU_SCALE = 1000.0
+
+# ODE samplers of :meth:`TadpoleLatentGenerator.sample` -> velocity evaluations
+# (NFE) per step: Euler 1, Heun 2 (predictor + corrector on every interval).
+SAMPLER_NFE_PER_STEP = {"euler": 1, "heun": 2}
 
 # Hydra bookkeeping keys that may sit in an exported ``architecture`` node.
 _HYDRA_KEYS = ("_target_", "_partial_", "_recursive_", "_convert_", "_args_")
@@ -827,28 +834,28 @@ class TadpoleLatentGenerator(nn.Module):
 
     # -- decoding ----------------------------------------------------------- #
 
-    def _resolve_decode_mode(self, mode: str | None, latent_grid: Sequence[int]) -> str:
-        """The spatial mode :meth:`decode_latents` runs the frozen decoder in.
+    def _resolve_decode_mode(
+        self, mode: str | None, halo_size: int | None
+    ) -> tuple[str, int]:
+        """``(spatial_mode, halo_size)`` :meth:`decode_latents` runs the frozen
+        decoder with.
 
-        ``None`` inherits the AE's trained ``spatial_mode``. An override changes
-        the DECODER only -- the latent grid (and so the flow model's input)
-        stays the trained mode's: ``global`` decodes the whole latent grid at
-        once, ``local`` / ``halo`` tile it into ``encoder_crop_size`` cores,
-        which needs the padded grid to be a multiple of the crop size (always
-        true when the AE was trained in local or halo mode)."""
-        if mode is None:
-            return self.spatial_mode
-        validate_spatial_mode(mode, self.halo_size)
-        if mode != "global":
-            padded = tuple(int(n) * STRIDE for n in latent_grid)
-            if any(n % c for n, c in zip(padded, self.encoder_crop_size)):
-                raise ValueError(
-                    f"decode spatial_mode={mode!r} tiles the padded grid {padded} "
-                    f"into encoder_crop_size {tuple(self.encoder_crop_size)}, but "
-                    f"it is not a multiple (the AE pads for "
-                    f"spatial_mode={self.spatial_mode!r})"
-                )
-        return mode
+        ``None`` inherits the AE's trained ``spatial_mode`` / ``halo_size``. An
+        override changes the DECODER only: the latent grid (and so the flow
+        model's input) stays the one the trained mode's padding defines, and
+        the decoder's geometry features live on that same padded grid. ``global``
+        decodes the whole latent grid at once; ``local`` tiles it into
+        ``encoder_crop_size`` cores and ``halo`` adds ``halo_size`` cells of
+        latent context around each core (clipped at the grid edge). When the
+        padded grid is not a multiple of the crop (an AE trained ``global``),
+        the last tile along an axis is simply shorter -- no latents are
+        invented to fill it. The decoder computes a different function in each
+        mode; only the trained one reproduces the AE's reconstruction.
+        """
+        resolved = self.spatial_mode if mode is None else mode
+        halo = self.halo_size if halo_size is None else halo_size
+        validate_spatial_mode(resolved, halo)
+        return resolved, halo
 
     def decode_latents(
         self,
@@ -856,12 +863,15 @@ class TadpoleLatentGenerator(nn.Module):
         cond: LatentEncoding,
         *,
         spatial_mode: str | None = None,
+        halo_size: int | None = None,
     ) -> torch.Tensor:
         """Normalised state latents ``(B, D, Zl, Yl, Xl)`` -> physical state
         ``(B, C, d, h, w)`` on the original grid, obstacle cells zeroed.
 
-        ``spatial_mode`` overrides the decoder's spatial processing for this
-        call (see :meth:`_resolve_decode_mode`); ``None`` keeps the AE's."""
+        ``spatial_mode`` (``local`` / ``halo`` / ``global``) and ``halo_size``
+        (halo mode; a nonnegative multiple of 16) override the decoder's
+        spatial processing for this call (see :meth:`_resolve_decode_mode`);
+        ``None`` keeps the AE's."""
         expected = self.latent_grid_for(cond.orig_shape)
         if z.dim() != 5 or z.shape[1] != self.state_latent_dim:
             raise ValueError(
@@ -869,7 +879,7 @@ class TadpoleLatentGenerator(nn.Module):
                 f"{tuple(z.shape)}"
             )
         self._check_latent_grid(z, expected, "z")
-        mode = self._resolve_decode_mode(spatial_mode, expected)
+        mode, halo = self._resolve_decode_mode(spatial_mode, halo_size)
         b = z.shape[0]
         c, cl = self.n_state_channels, self.latent_channels
         with self._autocast_off(z.device):
@@ -893,7 +903,7 @@ class TadpoleLatentGenerator(nn.Module):
                 folded,
                 mode,
                 self.encoder_crop_size,
-                self.halo_size,
+                halo,
                 cond.decoder_geom_feats,
             )  # (B*C_work, 1, Dp, Hp, Wp)
             d, h, w = cond.orig_shape
@@ -1145,18 +1155,26 @@ class TadpoleLatentGenerator(nn.Module):
         param_names: Sequence[str] | None = None,
         history_dt_seconds: float | None = None,
         decode_spatial_mode: str | None = None,
+        decode_halo_size: int | None = None,
+        sampler: str = "euler",
     ) -> torch.Tensor:
         """Generate physical states ``(B, C, d, h, w)`` for ``params_hist``.
 
-        Explicit Euler from ``tau = 0`` to ``1`` in fp32 (autocast disabled),
-        then :meth:`decode_latents`. Pass ``initial_noise`` ``(B, D, Zl, Yl,
+        Integrates from ``tau = 0`` to ``1`` in ``num_steps`` equal intervals in
+        fp32 (autocast disabled), then :meth:`decode_latents`. ``sampler``:
+        ``"euler"`` (explicit Euler, ``num_steps`` velocity evaluations) or
+        ``"heun"`` (explicit trapezoidal: an Euler predictor, then the average
+        of the velocities at both ends of the interval -- the full step on
+        every interval, ``tau = 1`` included, so ``2 * num_steps`` evaluations;
+        see ``SAMPLER_NFE_PER_STEP``). Pass ``initial_noise`` ``(B, D, Zl, Yl,
         Xl)`` for reproducible per-member noise **or** a ``generator`` -- never
         both. ``param_names`` / ``history_dt_seconds`` state what the caller
         believes the ``params_hist`` columns and their spacing are; they are
         checked once here against the installed schema (see
         :meth:`set_conditioning_schema`) rather than per Euler step.
-        ``decode_spatial_mode`` overrides the decoder's spatial processing
-        (``None``: the AE's trained mode; see :meth:`_resolve_decode_mode`).
+        ``decode_spatial_mode`` / ``decode_halo_size`` override the decoder's
+        spatial processing (``None``: the AE's trained policy; see
+        :meth:`_resolve_decode_mode`); the sampled latents are the same.
         """
         self._check_conditioning_schema(param_names, history_dt_seconds, "sample")
         if initial_noise is not None and generator is not None:
@@ -1173,12 +1191,16 @@ class TadpoleLatentGenerator(nn.Module):
         steps = self.num_sampling_steps if num_steps is None else int(num_steps)
         if steps < 1:
             raise ValueError(f"num_steps must be >= 1, got {num_steps}")
+        if sampler not in SAMPLER_NFE_PER_STEP:
+            raise ValueError(
+                f"sampler must be one of {sorted(SAMPLER_NFE_PER_STEP)}, got {sampler!r}"
+            )
+        self._resolve_decode_mode(decode_spatial_mode, decode_halo_size)
 
         cond = self.geometry_condition(
             geometry, geom_features, batch_size=b, device=device
         )
         latent_grid = self.latent_grid_for(cond.orig_shape)
-        self._resolve_decode_mode(decode_spatial_mode, latent_grid)
         assert cond.geom_cond is not None
         self._check_latent_grid(cond.geom_cond, latent_grid, "geometry conditioning")
         shape = (b, self.state_latent_dim, *latent_grid)
@@ -1195,5 +1217,18 @@ class TadpoleLatentGenerator(nn.Module):
             dt = 1.0 / steps
             for i in range(steps):
                 tau = torch.full((b,), i * dt, device=device, dtype=torch.float32)
-                z = z + dt * self.velocity(z, tau, params_hist, cond)
-            return self.decode_latents(z, cond, spatial_mode=decode_spatial_mode)
+                if sampler == "euler":
+                    z = z + dt * self.velocity(z, tau, params_hist, cond)
+                    continue
+                v = self.velocity(z, tau, params_hist, cond)
+                tau_next = torch.full(
+                    (b,), (i + 1) * dt, device=device, dtype=torch.float32
+                )
+                v_next = self.velocity(z + dt * v, tau_next, params_hist, cond)
+                z = z + (0.5 * dt) * (v + v_next)
+            return self.decode_latents(
+                z,
+                cond,
+                spatial_mode=decode_spatial_mode,
+                halo_size=decode_halo_size,
+            )

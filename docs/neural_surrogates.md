@@ -1947,7 +1947,8 @@ keeps the AE in `eval()` after `BaseTraining` calls `model.train()`. The AE
 **must** have a geometry path — `encode_geometry=True` (folded geometry latents)
 or a `geometry_branch` — else construction raises: there would be nothing to
 condition on. Its `spatial_mode` / `encoder_crop_size` / `halo_size` are
-inherited (recorded in `ae_kwargs`) and cannot change at sampling time. The
+inherited (recorded in `ae_kwargs`); they fix the latent grid, and only the
+decoder's spatial policy can be overridden at sampling time (below). The
 sha256 of the export's `weights.pt` is stored as `ae_fingerprint`.
 
 **One canonical full-grid latent for all spatial modes.** The velocity network
@@ -2040,13 +2041,47 @@ stats too.
 
 **Sampling.** `sample(params_hist (B, Hp, P), geometry (*grid) | (B, *grid)
 fluid mask, geom_features=None, *, initial_noise=None, generator=None,
-num_steps=None) -> (B, C, *grid)` in physical units, obstacles zeroed: explicit
-Euler from `tau = 0` to `1` in `num_steps` (default `num_sampling_steps`, 50)
-steps — `z += dt * velocity(z, i*dt, …)` — then `decode_latents`. Pass
+num_steps=None, sampler="euler", decode_spatial_mode=None,
+decode_halo_size=None) -> (B, C, *grid)` in physical units, obstacles zeroed:
+integrate from `tau = 0` to `1` in `num_steps` (default `num_sampling_steps`,
+50) equal intervals, then `decode_latents`. `sampler`:
+
+| `sampler` | Step | NFE |
+|---|---|---|
+| `euler` (default) | `z += dt * v(z, i*dt)` | `num_steps` |
+| `heun` | explicit trapezoidal: `v0 = v(z, i*dt)`, `v1 = v(z + dt*v0, (i+1)*dt)`, `z += dt/2 * (v0 + v1)` — the full step on **every** interval, `tau = 1` included (the velocity is defined there; nothing is skipped) | `2 * num_steps` |
+
+NFE = velocity-network evaluations (`SAMPLER_NFE_PER_STEP`); compare samplers
+at equal NFE, not equal steps. Pass
 `initial_noise` `(B, D, Zl, Yl, Xl)` for reproducible per-member noise **or** a
 `generator`; both at once is rejected. Fixed seeds guarantee identical initial
 noise per member, not bitwise-identical kernels across batch sizes / devices;
 the tests use tolerances.
+
+**Decode-time spatial policy (evaluation probe).** `decode_latents(z, cond, *,
+spatial_mode=None, halo_size=None)` and `sample(…, decode_spatial_mode=,
+decode_halo_size=)` decode the **same** latents with another decoder policy;
+`None` is the AE's trained one, unchanged. A local-mode AE decodes each tile
+independently, so generated latents of neighbouring tiles must agree almost
+exactly or the field shows seams on the tile grid; the override separates such
+decoder seams from generator errors. The latent grid is always the trained
+mode's (`latent_grid_for`: padded to the crop for local/halo, to 16 for
+global), and the branch features (`_full_grid_feats`) sit on that same padded
+grid, so no mode needs latents or features re-padded:
+
+| Decode mode | What the decoder sees |
+|---|---|
+| `local` | each `encoder_crop_size` core alone |
+| `halo` | each core plus `halo_size` (default the AE's; nonnegative multiple of 16) latent cells of context, clipped at the padded edge; output keeps the core. `halo_size: 0` equals local |
+| `global` | the whole padded latent grid at once (padding latents included — they are the encodings of the zero-padded input), cropped afterwards |
+
+When the padded grid is not a multiple of the crop (an AE trained `global`),
+local / halo give the last tile along an axis fewer cells rather than inventing
+latents to fill it. Caveat: the decoder was trained in **one** policy; the
+others compute a different function (§26 "Spatial processing": the frozen AE is
+a function of its training tile), so an override's own AE reconstruction
+(`ae_recon_decode_<mode>` in §39) is the baseline to judge it by, not the
+trained `ae_recon`.
 
 **Precision policy.** The frozen encoder, geometry conditioning, latent
 statistics and the whole sampling loop always run in **fp32** with
@@ -2234,7 +2269,20 @@ spread over the trajectories) under matched geometry and history:
   last parameter row repeated `Hp` times);
 * the conditioning probes `generated_shuffled_history` (histories permuted
   between snapshots) and `generated_omitted_history` (the training-mean
-  parameters), and one `generated_steps<k>` per entry of `num_steps_sweep`.
+  parameters), and one `generated_steps<k>` per entry of `num_steps_sweep`;
+* with `samplers` (e.g. `[euler, heun]`) the step sweep runs per sampler:
+  `generated_<sampler>_steps<k>` for samplers other than `sampler` (the
+  main samples' sampler, default `euler`). `step_sweep` rows in
+  `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
+  plots against NFE, one line per sampler;
+* with `decode_modes` (e.g. `[local, halo, global]`, halo from
+  `decode_halo_size`, default the AE's), per mode that differs from the trained
+  policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
+  — as `generated`, decoded that way) and `ae_recon_decode_<mode>` (the real
+  latents decoded that way). Comparing the two isolates decoder effects (tile
+  seams) from generator effects (§36, decode-time spatial policy). They join
+  `metrics.csv`, `summary.json`, the profile / histogram / spectrum figures
+  (mode-coloured; AE dotted) and the `states_*.png` rows.
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
@@ -2259,7 +2307,14 @@ each generated-vs-real number must lie within its `acceptance` factor
 `max(AE baseline, held-out bootstrap variability)` (`bootstrap_resamples`),
 and the diversity must reach `diversity_min_ratio` of the real spread (near
 zero is mode collapse). A non-finite number is a failure. The verdict is
-printed as `PASS` / `FAIL: …` and written to `summary.json`.
+printed as `PASS` / `FAIL: …` and written to `summary.json`. The gate judges
+`generated` against `ae_recon` only — the sampler and decode-mode variants are
+diagnostics.
+
+The real pairwise spread (so the diversity ratio) and the Reynolds stresses
+need several snapshots **per grid**: the default `max_snapshots: 8` over, e.g., 7
+test grids leaves one per grid and makes them NaN (a gate failure). Raise it
+(e.g. 64) for a meaningful verdict.
 
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,

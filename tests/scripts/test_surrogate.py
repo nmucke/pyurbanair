@@ -227,6 +227,46 @@ def test_evaluate_latent_generator(
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
 
 
+def test_evaluate_latent_generator_decode_modes_and_samplers(
+    session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """Decode-mode variants and a per-sampler step sweep add their own sources;
+    the trained mode adds none, and the gate still judges `generated`."""
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
+        "latent_generator.decode_modes=[local,halo,global]",
+        "latent_generator.samplers=[euler,heun]",
+        "latent_generator.max_snapshots=6",
+        root=session_root,
+    )
+    trained_mode = trained["train_autoencoder"].architecture.spatial_mode
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
+    out = pathlib.Path(cfg.latent_generator.output_dir)
+    summary = json.loads((out / "summary.json").read_text())
+    others = [m for m in ("local", "halo", "global") if m != trained_mode]
+    assert summary["decode_modes"] == others
+    expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}
+    expected |= {"generated_steps2", "generated_steps5"}
+    expected |= {"generated_heun_steps2", "generated_heun_steps5"}
+    assert expected <= set(summary["scalars"])
+    assert f"generated_decode_{trained_mode}" not in summary["scalars"]
+    for m in others:
+        assert "diversity" in summary["scalars"][f"generated_decode_{m}"]
+    assert [(r["sampler"], r["num_steps"], r["nfe"]) for r in summary["step_sweep"]] == [
+        ("euler", 2, 2),
+        ("euler", 5, 5),
+        ("heun", 2, 4),
+        ("heun", 5, 10),
+    ]
+    with open(out / "metrics.csv") as f:
+        sources = {line.split(",")[0] for line in f.readlines()[1:]}
+    assert expected <= sources
+    for name in ("profiles.png", "histograms.png", "spectra.png", "step_sweep.png"):
+        assert (out / name).exists(), name
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_generate_data(tmp_path: pathlib.Path) -> None:
     cfg = compose("surrogate/generate_data", "+test=generate_data", root=tmp_path)
