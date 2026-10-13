@@ -649,55 +649,198 @@ def test_sampling_noise_is_per_member_and_batch_invariant(tmp_path, geometry):
     assert shared.shape == (3, C, *GRID)
 
 
-def test_decode_spatial_mode_override(tmp_path):
-    """``decode_latents(spatial_mode=)`` / ``sample(decode_spatial_mode=)``
-    change only the decoder's patching: ``None`` is the trained mode exactly,
-    ``global`` decodes the two x-tiles of GRID jointly (a different field), and
-    a tiled override on a grid padded only to stride 16 is refused."""
-    ae_dir = _make_ae_export(tmp_path / "local", "local", "fold")
+def _ae_in_mode(ae_dir: Path, mode: str) -> TadpoleAE:
+    """The exported AE's weights, run in spatial ``mode`` (same state-dict keys)."""
+    cfg = OmegaConf.load(ae_dir / "config.yaml")
+    kwargs = OmegaConf.to_container(cfg.architecture, resolve=True)
+    assert isinstance(kwargs, dict)
+    kwargs.pop("_target_")
+    kwargs.update(latent_type="mode", spatial_mode=mode)
+    ae = TadpoleAE(n_state_channels=C, **kwargs)
+    ae.load_state_dict(torch.load(ae_dir / "weights.pt", map_location="cpu"))
+    return ae.eval()
+
+
+def _ae_decode(
+    ae: TadpoleAE,
+    m: TadpoleLatentGenerator,
+    enc: LatentEncoding,
+    state: torch.Tensor,
+    geom: torch.Tensor,
+    feats: torch.Tensor,
+) -> torch.Tensor:
+    """``enc.z`` decoded through ``ae``'s OWN ``decode`` path (its fold layout
+    in local mode, its feature folding), denormalised and masked."""
+    from einops import rearrange
+
+    b = state.shape[0]
+    full = m._denormalize_latents(enc.z, 0)
+    if enc.geom_latents is not None:
+        full = torch.cat([full, enc.geom_latents], dim=1)
+    cw = full.shape[1] // m.latent_channels
+    folded = full.reshape(b * cw, m.latent_channels, *full.shape[2:])
+    gf = ae._branch_features(geom, feats, state)
+    if gf is not None:
+        gf = ae._fold_geom_feats(gf, cw)
+    if ae.spatial_mode == "local":  # one latent cell per (cubic CROP) tile
+        u, v, w = folded.shape[2:]
+        tiles = rearrange(folded, "N L U V W -> (N U V W) L 1 1 1")
+        decoded = rearrange(
+            ae.decode(tiles, gf),
+            "(N U V W) 1 a b c -> N 1 (U a) (V b) (W c)",
+            U=u,
+            V=v,
+            W=w,
+        )
+    else:
+        decoded = ae.decode(folded, gf)
+    d, h, w = enc.orig_shape
+    recon = decoded.reshape(b, cw, *decoded.shape[2:])[:, :C, :d, :h, :w]
+    return ae._denormalize_state(recon) * geom.unsqueeze(1)
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_decode_spatial_mode_override(tmp_path, geometry):
+    """``decode_latents(spatial_mode=, halo_size=)`` decodes the SAME latent
+    grid with another decoder policy: ``None`` is the trained mode exactly (and
+    so is naming it), each mode equals that mode's own AE decode path on a
+    padded (non-crop-multiple) grid, obstacles stay zero, and halo 0 is local."""
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
     m = _generator(ae_dir).eval()
     _install_nontrivial_latent_stats(m)
-    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
-    state, geom, params_hist = _inputs(b=2)
-    enc = m.encode_latents(state, geom)
-    assert enc.z is not None
-    trained = m.decode_latents(enc.z, enc)
-    torch.testing.assert_close(
-        m.decode_latents(enc.z, enc, spatial_mode="local"), trained, atol=0, rtol=0
-    )
-    global_dec = m.decode_latents(enc.z, enc, spatial_mode="global")
-    assert global_dec.shape == trained.shape
-    assert torch.isfinite(global_dec).all()
-    assert torch.count_nonzero(global_dec * (1 - geom.unsqueeze(1))) == 0
-    assert not torch.allclose(global_dec, trained)
-
-    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
-    sampled = m.sample(
-        params_hist,
-        geom,
-        initial_noise=noise,
-        num_steps=2,
-        decode_spatial_mode="global",
-    )
-    assert not torch.allclose(
-        sampled, m.sample(params_hist, geom, initial_noise=noise, num_steps=2)
-    )
+    state, geom, _ = _inputs(b=2, grid=RECT_GRID)
+    feats = _sdf_feats(m, geom)
+    with torch.no_grad():
+        enc = m.encode_latents(state, geom, feats)
+        trained = m.decode_latents(enc.z, enc)
+        assert torch.equal(m.decode_latents(enc.z, enc, spatial_mode="local"), trained)
+        decoded = {}
+        for mode in MODES:
+            out = m.decode_latents(enc.z, enc, spatial_mode=mode)
+            assert out.shape == state.shape
+            assert torch.isfinite(out).all()
+            assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+            ref = _ae_decode(_ae_in_mode(ae_dir, mode), m, enc, state, geom, feats)
+            torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+            decoded[mode] = out
+        assert not torch.allclose(decoded["global"], trained)
+        assert not torch.allclose(decoded["halo"], trained)
+        torch.testing.assert_close(
+            m.decode_latents(enc.z, enc, spatial_mode="halo", halo_size=0),
+            trained,
+            atol=1e-6,
+            rtol=1e-6,
+        )
     with pytest.raises(ValueError, match="spatial_mode"):
         m.decode_latents(enc.z, enc, spatial_mode="patchwise")
+    with pytest.raises(ValueError, match="halo_size"):
+        m.decode_latents(enc.z, enc, spatial_mode="halo", halo_size=8)
+
+
+def test_decode_override_inherited_halo_and_global_ae(tmp_path):
+    """A halo AE: ``None`` and naming ``halo`` agree, ``halo_size`` overrides
+    the trained halo. A global AE pads only to stride 16, so a crop wider than
+    16 leaves the (16, 32, 48) padded grid non-tileable in x: local / halo
+    decode it with a shorter last tile instead of refusing or padding."""
+    h_dir = _make_ae_export(tmp_path / "halo", "halo", "branch")
+    h = _generator(h_dir).eval()
+    _install_nontrivial_latent_stats(h)
+    state, geom, _ = _inputs(b=1, grid=RECT_GRID)
+    feats = _sdf_feats(h, geom)
+    with torch.no_grad():
+        enc = h.encode_latents(state, geom, feats)
+        trained = h.decode_latents(enc.z, enc)
+        assert torch.equal(h.decode_latents(enc.z, enc, spatial_mode="halo"), trained)
+        assert torch.equal(h.decode_latents(enc.z, enc, halo_size=16), trained)
+        assert not torch.allclose(h.decode_latents(enc.z, enc, halo_size=0), trained)
 
     g_dir = _make_ae_export(tmp_path / "global", "global", "fold")
     g = _generator(g_dir).eval()
     _install_nontrivial_latent_stats(g)
-    _, rect_geom, _ = _inputs(b=1, grid=RECT_GRID)
-    cond = g.geometry_condition(rect_geom)
-    z = torch.zeros(1, g.state_latent_dim, *g.latent_grid_for(RECT_GRID))
-    assert g.decode_latents(z, cond, spatial_mode="global").shape[2:] == RECT_GRID
-    # With the fixtures' cubic crop 16 every stride-16 grid tiles; a wider crop
-    # (as real AEs use) leaves the (16, 32, 48) padded grid untileable in x.
-    assert g.decode_latents(z, cond, spatial_mode="local").shape[2:] == RECT_GRID
-    g.encoder_crop_size = (16, 32, 32)
-    with pytest.raises(ValueError, match="not a multiple"):
-        g.decode_latents(z, cond, spatial_mode="local")
+    g.encoder_crop_size = (16, 32, 32)  # decoder tiles only; global encodes whole
+    with torch.no_grad():
+        enc = g.encode_latents(state, geom, _sdf_feats(g, geom))
+        assert enc.z.shape[2:] == (1, 2, 3)  # (16, 32, 48) / 16: not 32-tileable
+        for mode in MODES:
+            out = g.decode_latents(enc.z, enc, spatial_mode=mode)
+            assert out.shape == state.shape
+            assert torch.isfinite(out).all()
+            assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+
+
+def _moving_generator(tmp_path: Path) -> TadpoleLatentGenerator:
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    with torch.no_grad():
+        torch.nn.init.normal_(m.velocity_net.seqmodel.out_proj.weight, std=0.05)
+        torch.nn.init.normal_(m.velocity_net.param_mlp[-1].weight, std=0.05)
+    return m
+
+
+def test_sample_decode_override_uses_the_same_latents(tmp_path):
+    m = _moving_generator(tmp_path)
+    _, geom, params_hist = _inputs(b=2)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
+    latents = []
+    orig = m.decode_latents
+
+    def spy(z, cond, **kw):  # type: ignore[no-untyped-def]
+        latents.append(z.clone())
+        return orig(z, cond, **kw)
+
+    m.decode_latents = spy  # type: ignore[method-assign]
+    base = m.sample(params_hist, geom, initial_noise=noise, num_steps=2)
+    same = m.sample(
+        params_hist,
+        geom,
+        initial_noise=noise,
+        num_steps=2,
+        decode_spatial_mode="local",
+        decode_halo_size=32,
+    )
+    glob = m.sample(
+        params_hist, geom, initial_noise=noise, num_steps=2, decode_spatial_mode="global"
+    )
+    assert torch.equal(same, base)  # local ignores the halo size
+    assert torch.equal(latents[0], latents[2])
+    assert not torch.allclose(glob, base)
+    with pytest.raises(ValueError, match="halo_size"):
+        m.sample(params_hist, geom, decode_spatial_mode="halo", decode_halo_size=-16)
+
+
+def test_heun_sampler(tmp_path):
+    """Heun = Euler predictor + trapezoidal corrector on every interval: 2 NFE
+    per step, tau = i*dt then (i+1)*dt, and it matches a manual integration."""
+    m = _moving_generator(tmp_path)
+    _, geom, params_hist = _inputs(b=2)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
+    taus: list[torch.Tensor] = []
+    hook = m.velocity_net.register_forward_pre_hook(lambda _, a: taus.append(1))
+    euler = m.sample(params_hist, geom, initial_noise=noise, num_steps=3)
+    assert len(taus) == 3
+    taus.clear()
+    heun = m.sample(params_hist, geom, initial_noise=noise, num_steps=3, sampler="heun")
+    assert len(taus) == 3 * 2
+    hook.remove()
+    assert not torch.allclose(heun, euler)
+    assert m.sample(
+        params_hist, geom, initial_noise=noise, num_steps=3, sampler="euler"
+    ).equal(euler)
+
+    cond = m.geometry_condition(geom, batch_size=2)
+    z, dt = noise.clone(), 1.0 / 3
+    with torch.no_grad():
+        for i in range(3):
+            t0, t1 = torch.full((2,), i * dt), torch.full((2,), (i + 1) * dt)
+            v0 = m.velocity(z, t0, params_hist, cond)
+            v1 = m.velocity(z + dt * v0, t1, params_hist, cond)
+            z = z + 0.5 * dt * (v0 + v1)
+        manual = m.decode_latents(z, cond)
+    torch.testing.assert_close(heun, manual, atol=1e-5, rtol=1e-5)
+    with pytest.raises(ValueError, match="sampler"):
+        m.sample(params_hist, geom, initial_noise=noise, sampler="rk4")
 
 
 # --------------------------------------------------------------------------- #
