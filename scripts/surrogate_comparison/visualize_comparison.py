@@ -29,10 +29,10 @@ Outputs, in the run dir:
                          model saturates
   statistics_slices.png  time-mean u and resolved TKE at `figures.level`: truth,
                          then one row per model (trajectory `figures.sample`)
-  animation_speed.mp4    |U| at `figures.level` against lead time: truth, each
-                         model, then each model - truth (trajectory
-                         `figures.sample`); a .gif when ffmpeg is unavailable.
-                         `figures.animation: null` skips it
+  animation_speed.mp4    |U| at `figures.level` against lead time: truth and each
+                         model on the first row, each model - truth on the
+                         second (trajectory `figures.sample`); a .gif when
+                         ffmpeg is unavailable. `figures.animation: null` skips it
   summary.csv/.tex       headline scalars per model and persistence (mean over the samples)
 """
 
@@ -455,8 +455,10 @@ def _animate_speed(
     times: np.ndarray,
 ) -> pathlib.Path:
     """animation_speed.mp4: |U| at `level` per lead step (thinned to
-    `max_frames`): truth, each model clipped as in slices.png, then each
-    model - truth. Colour limits are fixed over the whole rollout."""
+    `max_frames`): truth and each model clipped as in slices.png, then a row of
+    each model - truth. Colour limits are fixed over the whole rollout; the
+    error scale is the median model's, so a diverging model saturates rather
+    than washing out the others."""
     opts = cfg.figures.animation
     frames = frame_indices(n, int(opts.max_frames))
 
@@ -469,18 +471,18 @@ def _animate_speed(
     models = {name: np.clip(layer(pred[:n]), 0, bound) for name, pred in preds.items()}
     vmax = float(np.nanpercentile(reference, 99.5))
     errors = {name: field - reference for name, field in models.items()}
-    spread = max(
-        (float(np.nanpercentile(np.abs(e), 99.5)) for e in errors.values()),
-        default=1.0,
-    )
-    row = [Panel("truth", reference, "viridis", 0.0, vmax, "value")]
-    row += [Panel(name, f, "viridis", 0.0, vmax, "value") for name, f in models.items()]
-    row += [
-        Panel(f"{name} - truth", e, "RdBu_r", -spread, spread, "error")
+    spreads = [float(np.nanpercentile(np.abs(e), 99.5)) for e in errors.values()]
+    spread = float(np.median(spreads)) if spreads else 1.0
+    values = [Panel("truth", reference, "viridis", 0.0, vmax, "value")]
+    values += [
+        Panel(name, f, "viridis", 0.0, vmax, "value") for name, f in models.items()
+    ]
+    differences = [
+        Panel(f"{name}\n- truth", e, "RdBu_r", -spread, spread, "error")
         for name, e in errors.items()
     ]
     path: pathlib.Path = animate_slices(
-        [row],
+        [values, differences],
         times[1:][frames] - times[0],
         run_dir / "animation_speed.mp4",
         title=f"|U| [m/s] at z index {level}, lead",
