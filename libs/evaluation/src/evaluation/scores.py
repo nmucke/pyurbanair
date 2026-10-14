@@ -725,13 +725,18 @@ def vector_sensor_metrics(
       * ``spread(t) = sqrt(mean_s sum_c var_ens,c)`` -- the ensemble spread on
         the same vector norm as ``rmse`` (``ddof=1``; ``nan`` for one member),
         so :func:`spread_skill` compares like with like.
+      * ``acc(t)`` -- the anomaly correlation of the ensemble mean with the
+        truth, pooled over sensors and components: both minus each sensor's
+        truth time mean over the scored period (the climatology baseline's
+        reference, in-sample). 1 when the fluctuations match in pattern,
+        whatever their amplitude; 0 when no better than that time mean.
 
     Args:
         truth_comp: ``(component, time, sensor)`` truth series.
         ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
 
     Returns:
-        ``{"rmse": (T,), "energy_score": (T,), "spread": (T,)}``.
+        ``{"rmse": (T,), "energy_score": (T,), "spread": (T,), "acc": (T,)}``.
     """
     components = [str(c) for c in np.asarray(truth_comp["component"].values)]
     # Per-component metrics reuse the shared compute_sensor_metrics, which also
@@ -750,10 +755,17 @@ def vector_sensor_metrics(
         spread = np.sqrt(members.var(axis=1, ddof=1).sum(axis=0).mean(axis=1))
     else:
         spread = np.full(rmse.shape, np.nan)
+    mean = truth.mean(axis=1, keepdims=True)  # (C,1,S) each sensor's time mean
+    pred, true = members.mean(axis=1) - mean, truth - mean  # (C,T,S) anomalies
+    with np.errstate(invalid="ignore", divide="ignore"):
+        acc = (pred * true).sum(axis=(0, 2)) / np.sqrt(
+            (pred**2).sum(axis=(0, 2)) * (true**2).sum(axis=(0, 2))
+        )
     return {
         "rmse": rmse,
         "energy_score": _energy_score(members, truth),
         "spread": spread,
+        "acc": acc,
     }
 
 

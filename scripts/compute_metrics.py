@@ -52,8 +52,10 @@ window-indexed ones also list `per_window` values):
                   the ensemble's median spectrum, per window. Native grids,
                   no interpolation.
   sensors         sanity check, per sensor set (assimilated and held-out
-                  validation): RMSE of the ensemble-mean (u, v, w) vector and
-                  its energy score (multivariate CRPS), per time step.
+                  validation): RMSE of the ensemble-mean (u, v, w) vector, its
+                  energy score (multivariate CRPS) and its anomaly correlation
+                  (ACC: about each sensor's truth time mean, pooled over sensors
+                  and components), per time step.
   spread_skill    sanity check, per sensor set: ensemble spread on the same vector norm and the
                   spread-skill ratio (~1 when calibrated); the prior's ratio when
                   the prior states were saved.
@@ -283,6 +285,7 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
             "num_sensors": int(posterior_s.sizes["sensor"]),
             "velocity_vector_rmse": series_stats(vector["rmse"]),
             "velocity_vector_energy_score": series_stats(vector["energy_score"]),
+            "velocity_vector_acc": series_stats(vector["acc"]),
         }
         metrics["spread_skill"][name] = {
             "ratio": _finite(spread_skill(vector["spread"], vector["rmse"], n_members)),
