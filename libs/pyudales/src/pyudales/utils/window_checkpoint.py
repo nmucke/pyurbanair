@@ -15,13 +15,14 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy.io import FortranEOFError, FortranFile
 
-from .config_utils import create_config_sh
-from .inlet_turbulence_utils import (
+from pyurbanair.utils.digital_filter import (
     ELAPSED_TIME_FILENAME,
     derive_seed,
     read_elapsed_time,
     write_elapsed_time,
 )
+
+from .config_utils import create_config_sh
 from .namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .warm_start_utils import CARRY_DIRNAME, CARRY_META_NAME
 
