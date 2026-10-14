@@ -103,7 +103,19 @@ def _loss_and_grads(model: Any, amp: bool) -> tuple:
     with torch.autocast("cpu", dtype=torch.bfloat16, enabled=amp):
         loss = model(model(state, params, geom), params, geom).float().square().mean()
     loss.backward()
-    grads = {n: p.grad for n, p in model.named_parameters() if p.requires_grad}
+    # torch 2.12's CPU bf16 Conv3d weight gradient intermittently returns
+    # uninitialised memory (also single-threaded and with oneDNN off), so under
+    # autocast those gradients are left out; all others stay exact.
+    conv_weights = {
+        f"{n}.weight"
+        for n, m in model.named_modules()
+        if amp and isinstance(m, torch.nn.Conv3d)
+    }
+    grads = {
+        n: p.grad
+        for n, p in model.named_parameters()
+        if p.requires_grad and n not in conv_weights
+    }
     return loss.detach(), grads
 
 
