@@ -75,3 +75,19 @@ def test_compare_surrogates_workflow(
     assert (run_dir / "rollouts" / "dft" / "sample_0000.nc").exists()
     assert (run_dir / "metrics.yaml").exists()
     assert (run_dir / "rmse.png").exists()
+
+
+def test_compare_models_workflow(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    run_dir = tmp_path / "model_comparison"
+    _workflow(
+        "compare_models.sh",
+        *_overrides(tmp_path, session_root),
+        "+test=tiny",
+        "models=[a:neural_surrogate_tiny,b:neural_surrogate_tiny]",
+        "replicas=2",
+    )
+    assert (run_dir / "fields" / "b" / "replica_1.nc").exists()
+    assert (run_dir / "metrics.csv").exists()
+    assert (run_dir / "difference_noise.png").exists()

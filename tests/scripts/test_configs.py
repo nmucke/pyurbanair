@@ -19,6 +19,7 @@ ENTRY_POINTS = [
     "forward",
     "assimilation",
     "comparison",
+    "model_comparison",
     *(f"surrogate/{p.stem}" for p in sorted((CONFIGS / "surrogate").glob("*.yaml"))),
 ]
 ENTRY_POINTS.remove("surrogate/architectures")  # entries, not a run config
