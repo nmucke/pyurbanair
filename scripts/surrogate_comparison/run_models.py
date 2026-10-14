@@ -4,7 +4,7 @@ Config: configs/comparison.yaml. The first step of
 workflows/compare_surrogates.sh; compute_metrics.py and visualize_comparison.py
 (next to this script) score and draw the run dir it writes.
 
-    python scripts/comparison/run_models.py \
+    python scripts/surrogate_comparison/run_models.py \
         'models=[model_weights/local_fno,model_weights/dft_s]'
 
 Every model starts from the same frame, the latest any model needs as history

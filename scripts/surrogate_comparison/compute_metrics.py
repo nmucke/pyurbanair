@@ -1,8 +1,8 @@
 """Score the rollouts of a surrogate comparison and write `metrics.yaml` and `metrics.nc`.
 
-    python scripts/comparison/compute_metrics.py <run dir> [key=value ...]
+    python scripts/surrogate_comparison/compute_metrics.py <run dir> [key=value ...]
 
-The run dir is what scripts/comparison/run_models.py wrote: `config.yaml`,
+The run dir is what scripts/surrogate_comparison/run_models.py wrote: `config.yaml`,
 `models.yaml` and `rollouts/<label>/sample_<NNNN>.nc`. The overrides are
 applied to its config.yaml (e.g. `metrics.max_pdf_values=50000`). The truth and
 the fluid mask are read from the corpus again, with the first model's training

@@ -208,7 +208,7 @@ weights.
 ## 4. Comparing models
 
 `workflows/compare_surrogates.sh` (scripts in
-[scripts/comparison/](../scripts/comparison/), config
+[scripts/surrogate_comparison/](../scripts/surrogate_comparison/), config
 [comparison.yaml](../configs/comparison.yaml)) compares any steppers, ours and
 the baselines, on the same test trajectories. The metrics and figures are in
 [scripts_and_configs.md](scripts_and_configs.md) §2.3b. For the baselines:

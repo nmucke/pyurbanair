@@ -1,4 +1,4 @@
-"""Turbulence statistics for comparing rollouts (scripts/comparison/).
+"""Turbulence statistics for comparing rollouts (scripts/surrogate_comparison/).
 
 Fields are ``(T, C, nz, ny, nx)`` arrays; ``fluid`` is the ``(nz, ny, nx)``
 boolean mask. Fluctuations are taken about each cell's time mean over the

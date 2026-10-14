@@ -63,7 +63,7 @@ configs/
   it needs and appends its workflow name (`smoother`, `filtering`, `hybrid`) to
   `paths.results_dir`.
 - **`comparison.yaml`** — `common`, plus the models to compare, the split,
-  and the `metrics` and `figures` blocks of `scripts/comparison/`.
+  and the `metrics` and `figures` blocks of `scripts/surrogate_comparison/`.
   `paths.results_dir` is the run dir.
 - **`common.yaml`** — `paths` (per-machine scratch), the one `ensemble` budget
   and Hydra's run dir.
@@ -262,10 +262,10 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
 
 `scripts/utils/eval_common.py` holds the loading and slice-figure helpers shared by the
-evaluation scripts and `scripts/comparison/`. See [neural_surrogates.md](neural_surrogates.md) for the
+evaluation scripts and `scripts/surrogate_comparison/`. See [neural_surrogates.md](neural_surrogates.md) for the
 library side.
 
-### 2.3b Surrogate comparison (`scripts/comparison/`)
+### 2.3b Surrogate comparison (`scripts/surrogate_comparison/`)
 
 Compares several trained steppers (ours and the published baselines) on the
 same trajectories, the same start frame and fluid cells only, against
@@ -306,7 +306,7 @@ wrote.
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
-| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
+| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py` and `surrogate_comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
 
 ```bash
 bash workflows/forward_workflow.sh model=pylbm params=static_truth

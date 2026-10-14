@@ -1,6 +1,6 @@
 """Figures and the headline table of a surrogate comparison run.
 
-    python scripts/comparison/visualize_comparison.py <run dir> [key=value ...]
+    python scripts/surrogate_comparison/visualize_comparison.py <run dir> [key=value ...]
 
 The overrides are applied to the run's config.yaml (e.g. `figures.level=4`).
 The run dir is what run_models.py wrote and compute_metrics.py scored. Every

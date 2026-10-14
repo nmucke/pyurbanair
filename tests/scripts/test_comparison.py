@@ -1,4 +1,4 @@
-"""scripts/comparison/: run_models, compute_metrics and visualize_comparison on
+"""scripts/surrogate_comparison/: run_models, compute_metrics and visualize_comparison on
 the tiny trained steppers.
 
 `comparison_run` is one run dir shared by the module: run_models on the tiny
@@ -33,7 +33,7 @@ def run_models(
         *overrides,
         root=session_root,
     )
-    load_script("scripts/comparison/run_models.py").run(cfg)
+    load_script("scripts/surrogate_comparison/run_models.py").run(cfg)
     return cfg
 
 
@@ -205,7 +205,9 @@ def test_run_models_rerun_replaces_the_rollouts(
 def compute_metrics(
     run_dir: pathlib.Path, *overrides: str
 ) -> tuple[dict, xarray.Dataset]:
-    load_script("scripts/comparison/compute_metrics.py").run(run_dir, list(overrides))
+    load_script("scripts/surrogate_comparison/compute_metrics.py").run(
+        run_dir, list(overrides)
+    )
     return (
         OmegaConf.to_container(OmegaConf.load(run_dir / "metrics.yaml")),
         xarray.load_dataset(run_dir / "metrics.nc"),
@@ -289,8 +291,10 @@ def test_compute_metrics_and_visualize_write_every_output(
     comparison_run: pathlib.Path,
 ) -> None:
     overrides = ["figures.level=1", "figures.spectra_levels=[1]", "figures.sample=0"]
-    load_script("scripts/comparison/compute_metrics.py").run(comparison_run, overrides)
-    load_script("scripts/comparison/visualize_comparison.py").run(
+    load_script("scripts/surrogate_comparison/compute_metrics.py").run(
+        comparison_run, overrides
+    )
+    load_script("scripts/surrogate_comparison/visualize_comparison.py").run(
         comparison_run, overrides
     )
     figures = ["rmse", "acc", "energy", "divergence", "profiles", "spectra", "pdfs"]
@@ -313,7 +317,7 @@ def test_compute_metrics_refuses_rollouts_of_another_split(
 def test_divergence_rms_is_exact_on_linear_fields() -> None:
     """Central differences are exact on linear fields, with dz != dy != dx."""
     divergence_rms = load_script(
-        "scripts/comparison/compute_metrics.py"
+        "scripts/surrogate_comparison/compute_metrics.py"
     )._divergence_rms
     z, y, x = np.meshgrid(*(np.arange(5.0),) * 3, indexing="ij")
     dz, dy, dx = 1.0, 2.0, 3.0

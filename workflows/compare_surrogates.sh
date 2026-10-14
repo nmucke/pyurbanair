@@ -6,9 +6,9 @@
 # e.g.
 #   bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno,model_weights/dft_s]' max_steps=50
 #
-# Runs scripts/comparison/run_models.py with the overrides (configs/comparison.yaml),
-# then compute_metrics.py and visualize_comparison.py on its run dir,
-# <paths.results_dir>. Run it inside the dev environment (`pixi shell -e dev`).
+# Runs scripts/surrogate_comparison/run_models.py with the overrides
+# (configs/comparison.yaml), then compute_metrics.py and
+# visualize_comparison.py on its run dir, <paths.results_dir>. Run it inside the dev environment (`pixi shell -e dev`).
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -17,12 +17,12 @@ if [[ $# -lt 1 ]]; then
 fi
 
 cd "$(dirname "$0")/.."
-script=scripts/comparison/run_models.py
+script=scripts/surrogate_comparison/run_models.py
 
 # The run dir, resolved from the same overrides (Hydra prints the value only).
 run_dir=$(python "$script" "$@" --cfg job --resolve -p paths.results_dir | tail -n 1)
 
 python "$script" "$@"
-python scripts/comparison/compute_metrics.py "$run_dir"
-python scripts/comparison/visualize_comparison.py "$run_dir"
+python scripts/surrogate_comparison/compute_metrics.py "$run_dir"
+python scripts/surrogate_comparison/visualize_comparison.py "$run_dir"
 echo "Done: $run_dir"

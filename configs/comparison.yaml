@@ -1,7 +1,7 @@
 # @package _global_
 # Surrogate comparison (workflows/compare_surrogates.sh): every trained stepper
 # rolled out on the same trajectories from the same start frame
-# (scripts/comparison/run_models.py), scored on fluid cells against persistence
+# (scripts/surrogate_comparison/run_models.py), scored on fluid cells against persistence
 # and the truth's turbulence statistics (compute_metrics.py) and drawn
 # (visualize_comparison.py).
 defaults:
