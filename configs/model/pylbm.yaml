@@ -22,7 +22,7 @@ forward_model:
   # DRAM-bandwidth-bound: little gain beyond the physical performance cores.
   ncpu: 1
   verbose: false
-  boundary_condition: inflow_outflow
+  boundary_condition: ${flow.boundary_condition}  # configs/common.yaml
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
   # forms const = 2.5*smagorinsky**2 (m_vreman.F90). This is the DEFAULT: a
   # `sgs_constant` in the params sampler (configs/params/*.yaml) overrides it, so

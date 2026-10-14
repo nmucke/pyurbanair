@@ -37,3 +37,49 @@ ensemble:
 hydra:
   run:
     dir: ${paths.results_dir}/hydra/${hydra.job.name}/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
+# Flow setup shared by the LES backends, so that a uDALES and a PALM run of the
+# same case simulate the same flow: configs/model/pyudales.yaml and pypalm.yaml
+# read every key below, pylbm.yaml the boundary condition. Override here (or
+# with `flow.*` on the CLI) to change both at once. The parity audit behind
+# these values is in docs/pypalm.md §8 "Cross-model parity with pyudales".
+# Cases override what depends on the geometry (xie_and_castro: the outflow
+# buffer; xie_and_castro_periodic: periodic, no inlet turbulence).
+flow:
+  # inflow_outflow (inflow face at xmin, outflow at xmax, cyclic in y) or
+  # periodic (cyclic in x and y, driven by nudging).
+  boundary_condition: inflow_outflow
+  # inflow_outflow only: metres of flat ground added downstream of
+  # domain.bounds (whole cells; ncpu must divide the extended nx). The outflow,
+  # and PALM's outflow damping layer, then sit outside the bounds, and the
+  # state is cropped back to them. null: the outflow is at xmax.
+  outflow_buffer: null
+  # Mean inflow profile and nudging target: U(z) = velocity_magnitude *
+  # (z/z_ref)^alpha. z_ref is pinned, so velocity_magnitude means the same wind
+  # whatever the domain height (unset it defaults to the domain top).
+  profile:
+    type: power_law
+    alpha: 0.25
+    z_ref: 64.0
+  # Periodic runs: relaxation timescale (s) of the slab-mean u, v toward the
+  # profile, and the height (m) below which nothing is nudged. 16 m keeps the
+  # Xie & Castro canopy (cubes up to 17.2 m) driven by the shear layer.
+  nudging:
+    tnudge: 15.0
+    nnudge_meters: 16.0
+  # inflow_outflow: synthetic turbulent inflow from the shared digital filter
+  # (src/pyurbanair/utils/digital_filter.py), identical planes in both backends
+  # for the same seed. sigma_u = intensity * |U(z)|, v' and w' 0.7x. The
+  # length scales are integral scales in m (x via Taylor's hypothesis);
+  # time_step (s) must divide the window. seed: null derives one per member
+  # from its name ("999" for a uDALES run, "urban_run" for PALM, "000", ... for
+  # ensemble members), so set it to share one realisation between a uDALES and
+  # a PALM run. false: the laminar mean profile.
+  inlet_turbulence:
+    enabled: true
+    intensity: 0.15
+    length_scale_x: 24.0
+    length_scale_y: 12.0
+    length_scale_z: 12.0
+    time_step: 0.5
+    seed: null

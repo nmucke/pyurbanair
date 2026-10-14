@@ -71,7 +71,8 @@ Key constructor arguments (all wired from
 | `simulation_time` | Window length in seconds; written to `&RUN runtime` |
 | `spinup_time` | Prepended spin-up in seconds; effective runtime = `simulation_time + spinup_time` |
 | `nx/ny/nz`, `bounds` | Domain overrides → `itot/jtot/ktot`, `xlen/ylen/zsize` in namoptions |
-| `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`) |
+| `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`); the config reads `flow.boundary_condition` |
+| `outflow_buffer` | `inflow_outflow` only: metres of flat ground added downstream of `bounds`, the output cropped back (§5); `None` (default) no buffer |
 | `closure` | SGS closure: `"smagorinsky"` / `"vreman"` → exclusive `&NAMSUBGRID` switches; `None` (default) keeps the template's. `"oneeqn"` is rejected — see §4 |
 | `nudging_config` | Nudging tunables dict; see §6 |
 | `inlet_turbulence` | Turbulent-inlet block. `None`/`false` (default) is a strict no-op; `true` switches the inlet to synthetic driver planes (`BCxm=3`) and turns nudging off. See §6.1 |
@@ -419,6 +420,23 @@ uDALES requires preprocessing that converts an STL geometry into IBM (Immersed
 Boundary Method) input files (`solid_*.txt`, `fluid_boundary_*.txt`,
 `facet_sections_*.txt`, `facets.inp`, `facetarea.inp`). Two paths exist:
 
+**The floor is a wall only under STL ground facets.** With an STL the
+domain bottom is not a wall: `modibm.f90::bottom` applies its wall function
+only with `lbottom`, which stays `.false.`, and the ghost `u0(:,:,kb-1)` is
+never set, so an uncovered floor carries molecular stress only (free-slip).
+`ForwardModel._fit_stl_geometry` therefore adds ground facets (two triangles
+per strip, `utils/stl_utils.fit_stl_to_domain`) where the STL's ground does
+not reach along x: xie_and_castro's upstream fetch x < 0 had a free-slip floor
+until 2026-10 (PALM's is a rough wall; extending it lowered the time-mean u at
+z = 1 m by 0.10-0.18 m/s at x = -10..0). With `outflow_buffer` the grid is
+extended by whole cells, buildings beyond `bounds` are dropped (one that
+straddles the edge raises), the ground is clipped there and the buffer gets
+flat ground, as `stl_to_palm_topography(x_max=...)` does for PALM. The state is
+cropped back to `bounds`; a warm start fills the buffer by repeating the last
+column, which makes the window-boundary jump about twice as large (mean |Δu|
+0.18 vs 0.12 m/s without the buffer, one frame). STLs that already cover the
+floor are not rewritten.
+
 **Keep the domain top 1.5 cells above the buildings.** Upstream's
 `matchFacetsCells.f90` does not clamp a facet's top cell in z, so geometry
 ending in the top cell of the w-grid makes it read past its arrays: the facet
@@ -476,8 +494,14 @@ pyudales applies inflow via **nudging** (under both boundary conditions)
 unless `inlet_turbulence.enabled` is set, which
 replaces both the nudged inlet face and the interior relaxation with synthetic
 driver planes (§6.1). The nudging generates a
-`timedepnudge.inp.<expnr>` file and enables `&PHYSICS lnudge=.true.`,
-`ltimedepnudge=.true.` in namoptions.
+`timedepnudge.inp.<expnr>` file and enables `&PHYSICS ltimedepnudge=.true.`
+(the inlet face follows it) and `lnudge` (the interior relaxation) in
+namoptions. `nudging_config.interior_nudging` decides `lnudge` under
+`inflow_outflow`: `false` since 2026-10, as PALM has no interior forcing
+there (it was `true`; see docs/pypalm.md §8 "Cross-model parity with
+pyudales"). Periodic runs always nudge the interior, their only driver.
+`tnudge`, `nnudge_meters` and `profile_config` come from `flow` in
+`configs/common.yaml`, shared with pypalm.
 
 **`apply_time_varying_inflow`**
 ([`utils/nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py)):
@@ -744,6 +768,20 @@ larger seed overflows `ir*8121` and biases the perturbations. It only matters on
 run inherits its copied state, and uDALES does not re-randomize. Off by
 default, so default runs are unchanged.
 
+### 6.3 Parity with pypalm
+
+The boundary condition, outflow buffer, inflow profile, nudging and inlet
+turbulence values are shared with pypalm through `flow` in
+`configs/common.yaml` (cases override it: `xie_and_castro` sets a 20 m buffer,
+`xie_and_castro_periodic` periodic without inlet turbulence). The item-by-item
+audit, the residual differences (SGS closure above all, the open lid, the
+initial state) and the recommended spin-up per setup are in
+[docs/pypalm.md §8 "Cross-model parity with pyudales"](pypalm.md#cross-model-parity-with-pyudales).
+Output frames are labelled with their target times (dt, 2·dt, …,
+`simulation_time`) like pypalm's and pylbm's, not with uDALES' dump times
+(the first step past each target, e.g. 1.076 s); before 2026-10 they carried
+the dump times.
+
 ## 7. Instability watchdog
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
@@ -871,13 +909,14 @@ forward_model:
   experiment_name: "999"
   matlab_bin: null            # only python_or_matlab: matlab needs it
   ncpu: 1
-  boundary_condition: inflow_outflow
+  boundary_condition: ${flow.boundary_condition}   # shared flow setup, configs/common.yaml
+  outflow_buffer: ${flow.outflow_buffer}
   closure: vreman             # smagorinsky | vreman | null (keep template)
   per_member_irandom: false   # true -> one cold-start seed per run (§6.2)
   nudging_config:
     tnudge: 15.0
     nnudge_meters: 16.0         # skip nudging below this height (m)
-    interior_nudging: true      # false -> inflow at the boundary only
+    interior_nudging: false     # true -> also relax the interior (inflow_outflow)
     profile_config:
       type: power_law
       alpha: 0.25
@@ -888,7 +927,7 @@ forward_model:
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: true             # synthetic driver planes, BCxm=3 (§6.1); false = no-op
+    enabled: ${flow.inlet_turbulence.enabled}  # synthetic driver planes, BCxm=3 (§6.1)
     intensity: 0.15           # u'_rms / |U_mean(z)|
     length_scale_x/y/z: 24/12/12   # m, digital-filter integral length scales
     time_step: 0.5            # s, &DRIVER dtdriver

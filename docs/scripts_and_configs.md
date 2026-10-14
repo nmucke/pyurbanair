@@ -72,8 +72,10 @@ configs/
 - **`comparison.yaml`** — `common`, plus the models to compare, the split,
   and the `metrics` and `figures` blocks of `scripts/surrogate_comparison/`.
   `paths.results_dir` is the run dir.
-- **`common.yaml`** — `paths` (per-machine scratch), the one `ensemble` budget
-  and Hydra's run dir.
+- **`common.yaml`** — `paths` (per-machine scratch), the one `ensemble` budget,
+  Hydra's run dir and the `flow` setup the LES backends share (boundary
+  condition, outflow buffer, inflow profile, nudging, inlet turbulence; cases
+  override it, see [pypalm §8](pypalm.md#cross-model-parity-with-pyudales)).
 
 Every key of these blocks, and the common overrides, are listed in
 [`configs/README.md`](../configs/README.md).
@@ -99,8 +101,8 @@ genuine model error.
 | File | Backend | Notable fields |
 |---|---|---|
 | `pylbm.yaml` | Lattice Boltzmann | `cuda`, `ncpu` (OpenMP threads; CPU build only), `verbose`, `profile_config`, `boundary_condition`, `inlet_turbulence` |
-| `pyudales.yaml` | uDALES (staggered grid) | `ncpu`, `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7) |
-| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx`), `boundary_condition`, `nudging_config` |
+| `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
+| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
 | `neural_surrogate.yaml` | learned stepper | `model_dir` (a `scripts/surrogate/train.py` output), `spinup_source` (`forward_model \| training_data \| generative`), `spinup_forward_model`, `generative_spinup`, `default_params`; `solver_name: pylbm` |
 
 ### 1.4 `params/`

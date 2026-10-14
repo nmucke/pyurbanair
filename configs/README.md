@@ -11,7 +11,7 @@ forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
 comparison.yaml     # entry point: surrogate comparison (scripts/surrogate_comparison/)
 model_comparison.yaml  # entry point: CFD backend comparison (scripts/comparison/)
-common.yaml         # paths (per machine), ensemble budget, Hydra run dir
+common.yaml         # paths (per machine), ensemble budget, Hydra run dir, flow setup
 model/  case/  params/
 surrogate/          # neural-surrogate configs (see below)
 assimilation_settings/   # one file per component, all options inside
@@ -35,6 +35,9 @@ bash workflows/assimilation_workflow.sh smoother <overrides>    # or filtering /
 ```bash
 # Hydra groups
 case=barcelona  model=pylbm                          # forward
+case=xie_and_castro_periodic                         # periodic, nudged (sets flow.*)
+flow.inlet_turbulence.enabled=false                  # laminar inflow in uDALES and PALM
+flow.inlet_turbulence.seed=7                         # the same inflow realisation in both
 paths.machine=snellius                                # or delftblue / local (job scripts set it)
 model@assim_model=pylbm  params@prior_params=static   # DA
 
@@ -65,6 +68,7 @@ observation.aggregation.interval_seconds=30
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
 | `paths.*` | `machine`, `results_root`, `scratch`, `experiment_dir` (= `scratch.<machine>`), `weights_dir`, `training_data_dir` from `common.yaml` (`machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the entry point |
+| `flow.*` | the flow setup pyudales and pypalm share (`common.yaml`, cases override): `boundary_condition`, `outflow_buffer`, `profile` (`type`, `alpha`, `z_ref`), `nudging` (`tnudge`, `nnudge_meters`), `inlet_turbulence` (`enabled`, `intensity`, `length_scale_x/y/z`, `time_step`, `seed`); pylbm reads `boundary_condition` |
 | `ensemble.*` | one budget for every workflow (`common.yaml`): `ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`, `failure` (`policy: raise \| resample_from_successes`, `jitter_scale`, `seed`) |
 
 The component options in `assimilation_settings/` and the slots that select them:

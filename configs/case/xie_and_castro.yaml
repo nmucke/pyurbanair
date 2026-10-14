@@ -19,13 +19,21 @@ domain:
   # front of the Xie & Castro array (which starts at x=5).
   # Keep nx and ny EVEN: PALM's default poisfft pressure solver rejects an odd
   # number of grid points along a cyclic direction (PAC0071 / PAC0072).
-  nx: 30
+  nx: 50
   ny: 40
   nz: 16
   bounds:
-    - [-20.0, 40.0]
+    - [-20.0, 80.0]
     - [0.0, 80.0]
     - [0.0, 32.0]
+
+flow:
+  # The bounds end 5 m behind the fourth cube column, in its wake. Both LES
+  # backends add 20 m of flat ground there (x = 80-100 m, nx 50 -> 60, so
+  # ncpu must divide 60, and for PALM leave an even slab: 1, 2, 3, 5 or 6), so
+  # neither uDALES' convective outflow nor PALM's radiation outflow and damping
+  # layer sit in the wake that is compared (docs/pypalm.md §8).
+  outflow_buffer: 20.0
 
 geometry:
   # One folder per case (see geometries/README.md): the STL every backend
@@ -92,9 +100,9 @@ time:
   # window is `simulation_time` long with a `spinup_time` constant-inflow plateau
   # in front; the state is written every `output_frequency` s. The number of
   # windows is a compute knob set in assimilation.yaml.
-  simulation_time: 180.0
+  simulation_time: 300.0
   output_frequency: 1.0
-  spinup_time: 30.0
+  spinup_time: 120.0
   # Time-varying parameter knot spacing: the dynamic samplers take a new value
   # every `seconds_per_knot` seconds over `simulation_time`; a non-multiple
   # window end is reached by linear extrapolation.

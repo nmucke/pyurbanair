@@ -751,7 +751,11 @@ def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
 
     from pyurbanair.utils.digital_filter import elapsed_time_path
 
-    cfg = _smoke_cfg(tmp_path, "model.forward_model.inlet_turbulence.enabled=false")
+    cfg = _smoke_cfg(
+        tmp_path,
+        "model.forward_model.inlet_turbulence.enabled=false",
+        "model.forward_model.nudging_config.interior_nudging=false",
+    )
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
     fm.run_single()
@@ -765,7 +769,8 @@ def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
     # The nudging path owns the inlet, and no &DRIVER section was invented.
     assert namoptions.get_value_as_int("BC", "BCxm") == 2
     assert not namoptions.has_section("DRIVER")
-    assert namoptions.get_value_as_bool("PHYSICS", "lnudge") is True
+    assert namoptions.get_value_as_bool("PHYSICS", "ltimedepnudge") is True
+    assert namoptions.get_value_as_bool("PHYSICS", "lnudge") is False
 
 
 def test_wrapper_never_writes_iinletgen() -> None:

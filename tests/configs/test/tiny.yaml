@@ -10,6 +10,11 @@ domain:
   nz: 6
   bounds: [[0.0, 20.0], [0.0, 20.0], [0.0, 15.0]]
 
+# No outflow buffer: the tiny bounds cut through the block, and the buffer
+# would triple the grid.
+flow:
+  outflow_buffer: null
+
 time:
   simulation_time: 3.0
   output_frequency: 1.0
