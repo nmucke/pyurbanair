@@ -69,7 +69,8 @@ MODEL_IDS = {model["id"] for model in MODELS}
 
 # Curated run settings. `key` is the Hydra override path; the default is read
 # from the composed forward config of the first model in `models` (all models
-# when absent).
+# when absent), unless the field sets one. A choice is a plain value or
+# {value, label}; the value None sends no override.
 FIELDS: list[dict[str, Any]] = [
     {
         "key": "time.simulation_time",
@@ -184,6 +185,21 @@ FIELDS: list[dict[str, Any]] = [
         "models": ["pylbm", "pypalm"],
         "help": "Perturb the inflow to trigger turbulence (on by default in uDALES).",
     },
+    {
+        "key": "model.forward_model.boundary_condition",
+        "label": "Boundary condition",
+        "type": "choice",
+        "models": ["pylbm", "pypalm", "pyudales"],
+        # None keeps each model's own config value: the models differ.
+        "default": None,
+        "choices": [
+            {"value": None, "label": "Model default"},
+            {"value": "inflow_outflow", "label": "Inflow / outflow"},
+            {"value": "periodic", "label": "Periodic"},
+        ],
+        "help": "Inflow at the upwind side and outflow at the other, or "
+        "periodic in x. Inlet turbulence needs inflow / outflow.",
+    },
 ]
 FIELDS_BY_KEY = {field["key"]: field for field in FIELDS}
 _CASE_PARAMETERS = inspect.signature(Tools.prepare_city_case).parameters
@@ -209,8 +225,8 @@ def lookup(config: Any, key: str) -> Any:
     return config
 
 
-def field_override(key: str, value: Any) -> str:
-    """Validate one settings entry and return its Hydra override."""
+def field_override(key: str, value: Any) -> str | None:
+    """Validate one settings entry and return its Hydra override, if any."""
     field = FIELDS_BY_KEY.get(key)
     if field is None:
         raise RequestError(400, f"Unknown setting: {key}")
@@ -220,11 +236,10 @@ def field_override(key: str, value: Any) -> str:
             raise RequestError(400, f"{field['label']} must be true or false")
         return f"{key}={'true' if value else 'false'}"
     if kind == "choice":
-        if value not in field["choices"]:
-            raise RequestError(
-                400, f"{field['label']} must be one of {field['choices']}"
-            )
-        return f"{key}={value}"
+        values = [c["value"] if isinstance(c, dict) else c for c in field["choices"]]
+        if value not in values:
+            raise RequestError(400, f"{field['label']} must be one of {values}")
+        return None if value is None else f"{key}={value}"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RequestError(400, f"{field['label']} must be a number")
     # The range first: a huge JSON integer overflows the float conversions.
@@ -319,7 +334,12 @@ class App:
         fields = []
         for field in FIELDS:
             first = field.get("models", [MODELS[0]["id"]])[0]
-            fields.append({**field, "default": lookup(configs[first], field["key"])})
+            default = (
+                field["default"]
+                if "default" in field
+                else lookup(configs[first], field["key"])
+            )
+            fields.append({**field, "default": default})
         options = {
             "models": MODELS,
             "fields": fields,
@@ -423,7 +443,11 @@ class App:
             f"model={model}",
             *BASE_OVERRIDES,
             *case["overrides"],
-            *(field_override(key, value) for key, value in settings.items()),
+            *(
+                override
+                for key, value in settings.items()
+                if (override := field_override(key, value)) is not None
+            ),
             *extra,
         ]
         plan = self.tools.prepare_forward_run(overrides)
