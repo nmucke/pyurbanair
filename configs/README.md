@@ -10,6 +10,7 @@ Groups, scripts and workflows are described in
 forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
 comparison.yaml     # entry point: surrogate comparison (scripts/surrogate_comparison/)
+model_comparison.yaml  # entry point: CFD backend comparison (scripts/comparison/)
 common.yaml         # paths (per machine), ensemble budget, Hydra run dir
 model/  case/  params/
 surrogate/          # neural-surrogate configs (see below)
@@ -59,6 +60,7 @@ observation.aggregation.interval_seconds=30
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |
 | `hybrid.*` | `likelihood_allocation` (tempering is `filtering.beta`) |
+| `models`, `overrides`, `replicas`, `seed`, `replica_seed`, `discard_time`, `metrics.*`, `figures.*` | `model_comparison.yaml`: the backends to compare (`name` or `label:name` entries), per-label overrides of any key (`+overrides.<label>.<key>=...`), runs per model, the base seed and the keys that carry it per backend, extra seconds dropped, height bands (fractions of the canopy height), Welch segment, slice heights |
 | `forward.*` | `ensemble`, `rollout_steps`, `initial_state` (NetCDF path or `{path, member, time_index}`), `save_windows` |
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
