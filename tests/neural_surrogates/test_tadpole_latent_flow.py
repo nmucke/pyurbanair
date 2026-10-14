@@ -20,6 +20,11 @@ What is locked down here:
   seeds give distinct states, ``num_steps`` override, masking/shape.
 * **Self-contained reload** -- ``skip_pretrained_load=True, ae_kwargs=...`` +
   ``load_state_dict(strict=True)`` reproduces samples and every buffer.
+* **adaLN-Zero velocity net** (``velocity_conditioning="adaln"``) -- zero
+  output at init, output projection trained first and the modulation next,
+  ``tau`` changes the velocity once trained, checkpointing leaves gradients
+  unchanged, the default build is the unchanged FiLM net, and the
+  self-contained reload round-trips.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps
 (``diffusers`` / ``timm`` / ``einops``), like the neighbouring Tadpole tests.
@@ -644,55 +649,202 @@ def test_sampling_noise_is_per_member_and_batch_invariant(tmp_path, geometry):
     assert shared.shape == (3, C, *GRID)
 
 
-def test_decode_spatial_mode_override(tmp_path):
-    """``decode_latents(spatial_mode=)`` / ``sample(decode_spatial_mode=)``
-    change only the decoder's patching: ``None`` is the trained mode exactly,
-    ``global`` decodes the two x-tiles of GRID jointly (a different field), and
-    a tiled override on a grid padded only to stride 16 is refused."""
-    ae_dir = _make_ae_export(tmp_path / "local", "local", "fold")
+def _ae_in_mode(ae_dir: Path, mode: str) -> TadpoleAE:
+    """The exported AE's weights, run in spatial ``mode`` (same state-dict keys)."""
+    cfg = OmegaConf.load(ae_dir / "config.yaml")
+    kwargs = OmegaConf.to_container(cfg.architecture, resolve=True)
+    assert isinstance(kwargs, dict)
+    kwargs.pop("_target_")
+    kwargs.update(latent_type="mode", spatial_mode=mode)
+    ae = TadpoleAE(n_state_channels=C, **kwargs)
+    ae.load_state_dict(torch.load(ae_dir / "weights.pt", map_location="cpu"))
+    return ae.eval()
+
+
+def _ae_decode(
+    ae: TadpoleAE,
+    m: TadpoleLatentGenerator,
+    enc: LatentEncoding,
+    state: torch.Tensor,
+    geom: torch.Tensor,
+    feats: torch.Tensor,
+) -> torch.Tensor:
+    """``enc.z`` decoded through ``ae``'s OWN ``decode`` path (its fold layout
+    in local mode, its feature folding), denormalised and masked."""
+    from einops import rearrange
+
+    b = state.shape[0]
+    full = m._denormalize_latents(enc.z, 0)
+    if enc.geom_latents is not None:
+        full = torch.cat([full, enc.geom_latents], dim=1)
+    cw = full.shape[1] // m.latent_channels
+    folded = full.reshape(b * cw, m.latent_channels, *full.shape[2:])
+    gf = ae._branch_features(geom, feats, state)
+    if gf is not None:
+        gf = ae._fold_geom_feats(gf, cw)
+    if ae.spatial_mode == "local":  # one latent cell per (cubic CROP) tile
+        u, v, w = folded.shape[2:]
+        tiles = rearrange(folded, "N L U V W -> (N U V W) L 1 1 1")
+        decoded = rearrange(
+            ae.decode(tiles, gf),
+            "(N U V W) 1 a b c -> N 1 (U a) (V b) (W c)",
+            U=u,
+            V=v,
+            W=w,
+        )
+    else:
+        decoded = ae.decode(folded, gf)
+    d, h, w = enc.orig_shape
+    recon = decoded.reshape(b, cw, *decoded.shape[2:])[:, :C, :d, :h, :w]
+    return ae._denormalize_state(recon) * geom.unsqueeze(1)
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_decode_spatial_mode_override(tmp_path, geometry):
+    """``decode_latents(spatial_mode=, halo_size=)`` decodes the SAME latent
+    grid with another decoder policy: ``None`` is the trained mode exactly (and
+    so is naming it), each mode equals that mode's own AE decode path on a
+    padded (non-crop-multiple) grid, obstacles stay zero, and halo 0 is local."""
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    state, geom, _ = _inputs(b=2, grid=RECT_GRID)
+    feats = _sdf_feats(m, geom)
+    with torch.no_grad():
+        enc = m.encode_latents(state, geom, feats)
+        trained = m.decode_latents(enc.z, enc)
+        assert torch.equal(m.decode_latents(enc.z, enc, spatial_mode="local"), trained)
+        decoded = {}
+        for mode in MODES:
+            out = m.decode_latents(enc.z, enc, spatial_mode=mode)
+            assert out.shape == state.shape
+            assert torch.isfinite(out).all()
+            assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+            ref = _ae_decode(_ae_in_mode(ae_dir, mode), m, enc, state, geom, feats)
+            torch.testing.assert_close(out, ref, atol=1e-4, rtol=1e-4)
+            decoded[mode] = out
+        assert not torch.allclose(decoded["global"], trained)
+        assert not torch.allclose(decoded["halo"], trained)
+        torch.testing.assert_close(
+            m.decode_latents(enc.z, enc, spatial_mode="halo", halo_size=0),
+            trained,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+    with pytest.raises(ValueError, match="spatial_mode"):
+        m.decode_latents(enc.z, enc, spatial_mode="patchwise")
+    with pytest.raises(ValueError, match="halo_size"):
+        m.decode_latents(enc.z, enc, spatial_mode="halo", halo_size=8)
+
+
+def test_decode_override_inherited_halo_and_global_ae(tmp_path):
+    """A halo AE: ``None`` and naming ``halo`` agree, ``halo_size`` overrides
+    the trained halo. A global AE pads only to stride 16, so a crop wider than
+    16 leaves the (16, 32, 48) padded grid non-tileable in x: local / halo
+    decode it with a shorter last tile instead of refusing or padding."""
+    h_dir = _make_ae_export(tmp_path / "halo", "halo", "branch")
+    h = _generator(h_dir).eval()
+    _install_nontrivial_latent_stats(h)
+    state, geom, _ = _inputs(b=1, grid=RECT_GRID)
+    feats = _sdf_feats(h, geom)
+    with torch.no_grad():
+        enc = h.encode_latents(state, geom, feats)
+        trained = h.decode_latents(enc.z, enc)
+        assert torch.equal(h.decode_latents(enc.z, enc, spatial_mode="halo"), trained)
+        assert torch.equal(h.decode_latents(enc.z, enc, halo_size=16), trained)
+        assert not torch.allclose(h.decode_latents(enc.z, enc, halo_size=0), trained)
+
+    g_dir = _make_ae_export(tmp_path / "global", "global", "fold")
+    g = _generator(g_dir).eval()
+    _install_nontrivial_latent_stats(g)
+    g.encoder_crop_size = (16, 32, 32)  # decoder tiles only; global encodes whole
+    with torch.no_grad():
+        enc = g.encode_latents(state, geom, _sdf_feats(g, geom))
+        assert enc.z.shape[2:] == (1, 2, 3)  # (16, 32, 48) / 16: not 32-tileable
+        for mode in MODES:
+            out = g.decode_latents(enc.z, enc, spatial_mode=mode)
+            assert out.shape == state.shape
+            assert torch.isfinite(out).all()
+            assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+
+
+def _moving_generator(tmp_path: Path) -> TadpoleLatentGenerator:
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
     m = _generator(ae_dir).eval()
     _install_nontrivial_latent_stats(m)
     m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
-    state, geom, params_hist = _inputs(b=2)
-    enc = m.encode_latents(state, geom)
-    assert enc.z is not None
-    trained = m.decode_latents(enc.z, enc)
-    torch.testing.assert_close(
-        m.decode_latents(enc.z, enc, spatial_mode="local"), trained, atol=0, rtol=0
-    )
-    global_dec = m.decode_latents(enc.z, enc, spatial_mode="global")
-    assert global_dec.shape == trained.shape
-    assert torch.isfinite(global_dec).all()
-    assert torch.count_nonzero(global_dec * (1 - geom.unsqueeze(1))) == 0
-    assert not torch.allclose(global_dec, trained)
+    with torch.no_grad():
+        torch.nn.init.normal_(m.velocity_net.seqmodel.out_proj.weight, std=0.05)
+        torch.nn.init.normal_(m.velocity_net.param_mlp[-1].weight, std=0.05)
+    return m
 
+
+def test_sample_decode_override_uses_the_same_latents(tmp_path):
+    m = _moving_generator(tmp_path)
+    _, geom, params_hist = _inputs(b=2)
     noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
-    sampled = m.sample(
+    latents = []
+    orig = m.decode_latents
+
+    def spy(z, cond, **kw):  # type: ignore[no-untyped-def]
+        latents.append(z.clone())
+        return orig(z, cond, **kw)
+
+    m.decode_latents = spy  # type: ignore[method-assign]
+    base = m.sample(params_hist, geom, initial_noise=noise, num_steps=2)
+    same = m.sample(
+        params_hist,
+        geom,
+        initial_noise=noise,
+        num_steps=2,
+        decode_spatial_mode="local",
+        decode_halo_size=32,
+    )
+    glob = m.sample(
         params_hist,
         geom,
         initial_noise=noise,
         num_steps=2,
         decode_spatial_mode="global",
     )
-    assert not torch.allclose(
-        sampled, m.sample(params_hist, geom, initial_noise=noise, num_steps=2)
-    )
-    with pytest.raises(ValueError, match="spatial_mode"):
-        m.decode_latents(enc.z, enc, spatial_mode="patchwise")
+    assert torch.equal(same, base)  # local ignores the halo size
+    assert torch.equal(latents[0], latents[2])
+    assert not torch.allclose(glob, base)
+    with pytest.raises(ValueError, match="halo_size"):
+        m.sample(params_hist, geom, decode_spatial_mode="halo", decode_halo_size=-16)
 
-    g_dir = _make_ae_export(tmp_path / "global", "global", "fold")
-    g = _generator(g_dir).eval()
-    _install_nontrivial_latent_stats(g)
-    _, rect_geom, _ = _inputs(b=1, grid=RECT_GRID)
-    cond = g.geometry_condition(rect_geom)
-    z = torch.zeros(1, g.state_latent_dim, *g.latent_grid_for(RECT_GRID))
-    assert g.decode_latents(z, cond, spatial_mode="global").shape[2:] == RECT_GRID
-    # With the fixtures' cubic crop 16 every stride-16 grid tiles; a wider crop
-    # (as real AEs use) leaves the (16, 32, 48) padded grid untileable in x.
-    assert g.decode_latents(z, cond, spatial_mode="local").shape[2:] == RECT_GRID
-    g.encoder_crop_size = (16, 32, 32)
-    with pytest.raises(ValueError, match="not a multiple"):
-        g.decode_latents(z, cond, spatial_mode="local")
+
+def test_heun_sampler(tmp_path):
+    """Heun = Euler predictor + trapezoidal corrector on every interval: 2 NFE
+    per step, tau = i*dt then (i+1)*dt, and it matches a manual integration."""
+    m = _moving_generator(tmp_path)
+    _, geom, params_hist = _inputs(b=2)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
+    taus: list[torch.Tensor] = []
+    hook = m.velocity_net.register_forward_pre_hook(lambda _, a: taus.append(1))
+    euler = m.sample(params_hist, geom, initial_noise=noise, num_steps=3)
+    assert len(taus) == 3
+    taus.clear()
+    heun = m.sample(params_hist, geom, initial_noise=noise, num_steps=3, sampler="heun")
+    assert len(taus) == 3 * 2
+    hook.remove()
+    assert not torch.allclose(heun, euler)
+    assert m.sample(
+        params_hist, geom, initial_noise=noise, num_steps=3, sampler="euler"
+    ).equal(euler)
+
+    cond = m.geometry_condition(geom, batch_size=2)
+    z, dt = noise.clone(), 1.0 / 3
+    with torch.no_grad():
+        for i in range(3):
+            t0, t1 = torch.full((2,), i * dt), torch.full((2,), (i + 1) * dt)
+            v0 = m.velocity(z, t0, params_hist, cond)
+            v1 = m.velocity(z + dt * v0, t1, params_hist, cond)
+            z = z + 0.5 * dt * (v0 + v1)
+        manual = m.decode_latents(z, cond)
+    torch.testing.assert_close(heun, manual, atol=1e-5, rtol=1e-5)
+    with pytest.raises(ValueError, match="sampler"):
+        m.sample(params_hist, geom, initial_noise=noise, sampler="rk4")
 
 
 # --------------------------------------------------------------------------- #
@@ -729,6 +881,8 @@ def test_self_contained_reload_reproduces_samples(tmp_path):
     fresh = instantiate(cfg, n_state_channels=C, n_params=P)
     assert isinstance(fresh, TadpoleLatentGenerator)
     assert fresh.ae_fingerprint is None
+    # a node without the key (every pre-adaln artifact) rebuilds the FiLM net
+    assert fresh.velocity_conditioning == "input_film"
     assert not bool(fresh.latent_stats_installed)
     fresh.load_state_dict(torch.load(tmp_path / "weights.pt"), strict=True)
     fresh.eval()
@@ -739,4 +893,154 @@ def test_self_contained_reload_reproduces_samples(tmp_path):
     assert torch.equal(fresh.param_std, m.param_std)
     assert all(not p.requires_grad for p in fresh.ae.parameters())
     out = fresh.sample(params_hist, geom, initial_noise=noise)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# 7. adaLN-Zero velocity conditioning (velocity_conditioning="adaln").
+# --------------------------------------------------------------------------- #
+
+
+def test_default_velocity_net_is_the_unchanged_film_subnetwork(tmp_path):
+    from neural_surrogates.architectures.tadpole_stepper import (
+        ParamConditionedSubnetwork,
+    )
+
+    ae_dir = _make_ae_export(tmp_path, "local", "branch")
+    default = _generator(ae_dir)
+    assert default.velocity_conditioning == "input_film"
+    assert isinstance(default.velocity_net, ParamConditionedSubnetwork)
+    explicit = _generator(ae_dir, velocity_conditioning="input_film")
+    # weights trained before the option existed still load strictly
+    explicit.load_state_dict(default.state_dict(), strict=True)
+    prefixes = {k.split(".")[1] for k in default.state_dict() if k.startswith("vel")}
+    assert prefixes == {"seqmodel", "param_mlp", "geom_film"}
+    with pytest.raises(ValueError, match="velocity_conditioning"):
+        _generator(ae_dir, velocity_conditioning="cross_attention")
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_adaln_zero_at_init_trains_output_projection_then_modulation(
+    tmp_path, geometry
+):
+    from neural_surrogates.architectures.latent_velocity_adaln import AdaLNVelocityNet
+
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
+    m = _generator(ae_dir, velocity_conditioning="adaln", n_layers=2)
+    assert isinstance(m.velocity_net, AdaLNVelocityNet)
+    assert "velocity_conditioning='adaln'" in repr(m)
+    assert m.count_parameters() == sum(p.numel() for p in m.velocity_net.parameters())
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    m.train()
+    state, geom, params_hist = _inputs(b=2)
+    feats = _sdf_feats(m, geom)
+    net = m.velocity_net
+    modulations = [b.modulation[-1] for b in net.blocks] + [net.out_modulation[-1]]
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    assert torch.count_nonzero(v_pred) == 0  # every block is the identity
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    assert torch.count_nonzero(net.out_proj.weight.grad) > 0
+    for layer in modulations:  # blocked by the zero output projection
+        assert torch.count_nonzero(layer.weight.grad) == 0
+    assert torch.count_nonzero(net.geom_proj.weight.grad) == 0
+    opt.step()
+    opt.zero_grad()
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    for layer in modulations:
+        assert torch.count_nonzero(layer.weight.grad) > 0
+    assert torch.count_nonzero(net.geom_proj.weight.grad) > 0
+    # the embedding c reaches the loss only through the (still zero) modulation
+    assert torch.count_nonzero(net.cond_mlp[0].weight.grad) == 0
+    opt.step()
+    opt.zero_grad()
+
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    torch.nn.functional.mse_loss(v_pred, v_target).backward()
+    assert torch.count_nonzero(net.cond_mlp[0].weight.grad) > 0
+
+
+def test_adaln_tau_changes_the_velocity_after_training_steps(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    m = _generator(ae_dir, velocity_conditioning="adaln")
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    state, geom, params_hist = _inputs(b=2)
+    cond = m.encode_latents(state, geom, _sdf_feats(m, geom))
+    z = torch.randn_like(cond.z)
+
+    def v(tau: float) -> torch.Tensor:
+        return m.velocity(z, torch.full((2,), tau), params_hist, cond)
+
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-2)
+    m.train()
+    for _ in range(3):
+        v_pred, v_target = m(state, params_hist, geom, _sdf_feats(m, geom))
+        torch.nn.functional.mse_loss(v_pred, v_target).backward()
+        opt.step()
+        opt.zero_grad()
+    m.eval()
+    with torch.no_grad():
+        assert not torch.allclose(v(0.0), v(1.0), atol=1e-6)
+        assert not torch.allclose(v(0.1), v(0.2), atol=1e-6)
+
+
+def test_adaln_checkpointing_keeps_outputs_and_gradients(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "local", "branch")
+    plain = _generator(ae_dir, velocity_conditioning="adaln", n_layers=2)
+    ckpt = _generator(
+        ae_dir, velocity_conditioning="adaln", n_layers=2, use_checkpoint=True
+    )
+    with torch.no_grad():
+        for p in plain.velocity_net.parameters():
+            p.normal_(std=0.05)
+    ckpt.load_state_dict(plain.state_dict(), strict=True)
+    z = torch.randn(2, plain.state_latent_dim, 1, 1, 2)
+    cond = torch.randn(2, plain.cond_dim)
+    geom_cond = torch.randn(2, plain.geom_cond_dim, 1, 1, 2)
+    outs = []
+    for m in (plain, ckpt):
+        out = m.velocity_net(z, cond, geom_cond=geom_cond)
+        out.square().sum().backward()
+        outs.append(out)
+    torch.testing.assert_close(outs[0], outs[1])
+    for (name, a), b in zip(
+        plain.velocity_net.named_parameters(), ckpt.velocity_net.parameters()
+    ):
+        torch.testing.assert_close(a.grad, b.grad, msg=name)
+
+
+def test_adaln_self_contained_reload_reproduces_samples(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "halo", "fold")
+    m = _generator(ae_dir, velocity_conditioning="adaln", num_sampling_steps=2).eval()
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 12.0], [3.0, 4.0])
+    with torch.no_grad():  # move the zero-init layers so sampling is non-trivial
+        for p in m.velocity_net.parameters():
+            if torch.count_nonzero(p) == 0:
+                p.normal_(std=0.05)
+    _, geom, params_hist = _inputs(b=2, grid=RECT_GRID)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(RECT_GRID))
+    ref = m.sample(params_hist, geom, initial_noise=noise)
+    torch.save(m.state_dict(), tmp_path / "weights.pt")
+
+    node = {
+        "_target_": "neural_surrogates.TadpoleLatentGenerator",
+        "param_history_steps": HP,
+        "skip_pretrained_load": True,
+        "pretrained_ae_dir": None,
+        "ae_kwargs": m.ae_kwargs,
+        "num_sampling_steps": 2,
+        "velocity_conditioning": "adaln",
+        **NET,
+    }
+    cfg = OmegaConf.create(OmegaConf.to_yaml(OmegaConf.create(node)))
+    fresh = instantiate(cfg, n_state_channels=C, n_params=P)
+    assert fresh.velocity_conditioning == "adaln"
+    fresh.load_state_dict(torch.load(tmp_path / "weights.pt"), strict=True)
+    out = fresh.eval().sample(params_hist, geom, initial_noise=noise)
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)

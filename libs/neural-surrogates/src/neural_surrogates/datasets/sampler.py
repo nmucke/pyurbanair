@@ -9,6 +9,12 @@ batch. :class:`TrajectoryBatchSampler` restores both invariants by drawing
 every batch from a single trajectory — no padding, no per-sample geometry
 copies, and the architectures (P3D pads any grid to a multiple of 16
 internally) need no changes.
+
+``group_by="grid"`` relaxes this to one *grid shape* per batch: frames of
+different trajectories (different geometries) on the same grid share a batch,
+for more diverse gradients per step. The tensors still stack; the geometry
+then travels per sample, which the snapshot collates and latent-cache items
+support (``transition_collate`` does not, and says so).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ if TYPE_CHECKING:  # annotation-only: the sampler touches no dataset internals
 
 
 class TrajectoryBatchSampler(Sampler[list[int]]):
-    """Yield batches whose samples all come from one trajectory.
+    """Yield batches whose samples all come from one trajectory (or one grid).
 
     Samples of one trajectory share a grid and a geometry, so grouping batches
     per trajectory keeps ``transition_collate`` (and the trainer's per-batch
@@ -59,6 +65,17 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
         batch size is then dropped entirely.
     seed:
         Base seed for the per-epoch shuffles.
+    group_by:
+        ``"trajectory"`` (default): every batch holds frames of one
+        trajectory, as described above. ``"grid"``: every batch holds frames
+        of one grid shape, drawn across all trajectories on that grid
+        (shuffled within the grid, batch order shuffled across grids;
+        ``shuffle=False`` gives a deterministic grid-major order). The batch
+        size, ``cell_budget`` and ``drop_last`` then apply per grid shape
+        instead of per trajectory. Geometries then differ within a batch, so
+        it needs a collate that ships per-sample geometry
+        (``snapshot_collate``, ``snapshot_history_collate``, the latent
+        cache's default collate), not ``transition_collate``.
 
     The dataset's flat index is re-read at every ``__iter__`` (and ``__len__``),
     so a mid-training ``set_pushforward_steps`` — the pushforward curriculum —
@@ -73,7 +90,12 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         drop_last: bool = False,
         seed: int = 0,
+        group_by: str = "trajectory",
     ) -> None:
+        if group_by not in ("trajectory", "grid"):
+            raise ValueError(
+                f"group_by must be 'trajectory' or 'grid', got {group_by!r}"
+            )
         if batch_size is None and cell_budget is None:
             raise ValueError("set batch_size, cell_budget, or both")
         if batch_size is not None and batch_size < 1:
@@ -86,25 +108,39 @@ class TrajectoryBatchSampler(Sampler[list[int]]):
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.seed = int(seed)
+        self.group_by = group_by
         self._epoch = 0
 
-    def _batch_size_for(self, traj: int) -> int:
+    def _batch_size_for(self, key: int | tuple[int, ...]) -> int:
+        """Batch size of a group: a trajectory index or a grid shape."""
         if self.cell_budget is None:
             assert self.batch_size is not None  # enforced in __init__
             return self.batch_size
-        budget = max(1, self.cell_budget // math.prod(self.dataset.grid_shape(traj)))
+        grid = key if isinstance(key, tuple) else self.dataset.grid_shape(key)
+        budget = max(1, self.cell_budget // math.prod(grid))
         return budget if self.batch_size is None else min(self.batch_size, budget)
 
-    def _batches(self, generator: torch.Generator | None) -> list[list[int]]:
-        by_traj: dict[int, list[int]] = {}
+    def _groups(self) -> dict[int | tuple[int, ...], list[int]]:
+        """Flat indices per batch group (a trajectory, or a grid shape), in
+        first-seen order."""
+        groups: dict[int | tuple[int, ...], list[int]] = {}
+        grids: dict[int, tuple[int, ...]] = {}
         for flat, (traj, _t) in enumerate(self.dataset.sample_index):
-            by_traj.setdefault(traj, []).append(flat)
+            key: int | tuple[int, ...] = traj
+            if self.group_by == "grid":
+                if traj not in grids:
+                    grids[traj] = tuple(self.dataset.grid_shape(traj))
+                key = grids[traj]
+            groups.setdefault(key, []).append(flat)
+        return groups
+
+    def _batches(self, generator: torch.Generator | None) -> list[list[int]]:
         batches: list[list[int]] = []
-        for traj, flats in by_traj.items():
+        for key, flats in self._groups().items():
             if generator is not None:
                 order = torch.randperm(len(flats), generator=generator).tolist()
                 flats = [flats[i] for i in order]
-            size = self._batch_size_for(traj)
+            size = self._batch_size_for(key)
             for start in range(0, len(flats), size):
                 batch = flats[start : start + size]
                 if self.drop_last and len(batch) < size:

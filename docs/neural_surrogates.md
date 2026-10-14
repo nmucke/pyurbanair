@@ -294,6 +294,22 @@ recompile per distinct grid shape — fine for the idealized pool (14
 shapes at 2 m resolution), impractical for the realistic pool (~98
 shapes); leave `compile_model: false` there.
 
+`group_by` (default `trajectory`, the behaviour above, with the same batches
+for a seed as before the key existed) can be set to `grid`: batches then hold
+frames of *any* trajectories on one grid shape — shuffled within each shape,
+batch order shuffled across shapes, `shuffle: false` a fixed shape-major order
+— so a step sees several geometries instead of one trajectory's correlated
+frames. `batch_size`, `cell_budget` and `drop_last` apply per shape (`len()`
+and `batch_sizes` follow). The geometry then varies within a batch, so only
+the snapshot collates (`snapshot_collate` / `snapshot_history_collate`, which
+fall back to stacking per-sample masks and SDF features as `(B, *grid)` when
+the items' deduped masks are not one object) and the latent-cache items (whose
+`geom` the default collate stacks) support it; `transition_collate` rejects
+the mixed batch. `_prepare_snapshot_batch` uploads such per-sample geometry
+directly and never caches it, so its shared-geometry cache cannot go stale.
+Each sample of a mixed batch may reopen its trajectory's file in the worker
+(one file is kept open), which a latent cache's memory maps make cheap.
+
 #### SDF geometry features (`sdf_features`)
 
 Built with a non-`none` `sdf_features` mode (default `none`), the dataset also
@@ -1578,7 +1594,8 @@ same command resumes from `checkpoint.pt`; `num_epochs` is the total.
 **Batching.** `training.yaml` ships the `TrajectoryBatchSampler` (§6), which
 replaces `dataloader.batch_size` / `shuffle` / `drop_last` (set the batch size
 on `batch_sampler`), draws every batch from one trajectory (needed for
-multi-geometry corpora) and caps it at `max(1, cell_budget // cells)` cells:
+multi-geometry corpora; `group_by: grid` mixes trajectories of one grid shape
+instead, §6) and caps it at `max(1, cell_budget // cells)` cells:
 on large grids that silently drops the batch to 1, so size `cell_budget`
 from a known-good run (`batch_size * cells_per_sample`).
 `train_autoencoder.yaml` sets `batch_size: 8`, `cell_budget: 393216` and
@@ -1916,8 +1933,9 @@ keeps them, so `get_normalization_stats` (`training/data_utils.py`) yields
 parameter mean/std over all saved times unchanged, and the inherited
 `sample_index` / geometry dedup let `TrajectoryBatchSampler` (§6) bucket a
 multi-geometry split as before. `snapshot_history_collate` delegates to
-`snapshot_collate`: a shared geometry (+ SDF) ships once as `(1, *grid)`, and
-`params_hist` goes through the default collate to `(B, Hp, P)`. On the trainer
+`snapshot_collate`: a shared geometry (+ SDF) ships once as `(1, *grid)`, a
+batch mixing geometries (`group_by: grid`, §6) stacks them as `(B, *grid)`,
+and `params_hist` goes through the default collate to `(B, Hp, P)`. On the trainer
 side, `BaseTraining._prepare_snapshot_batch(batch) -> (state, geometry,
 features)` — device upload plus the cached shared-geometry broadcast — was
 hoisted out of `AutoencoderTrainer._prepare_ae_batch` (kept as a wrapper) so the
@@ -1929,7 +1947,7 @@ AE and the generator trainers share one implementation.
 is a plain `nn.Module` (not a `_TadpoleFieldIO` mixin user — it delegates field
 I/O to the AE it owns) with three parts: a **frozen** nested `TadpoleAE`
 (`self.ae`), a flow-matching **velocity network** (a `ParamConditionedSubnetwork`,
-§31) and the **normalisation buffers** (`latent_mean` / `latent_std` /
+§31, or an adaLN-Zero `AdaLNVelocityNet`, below) and the **normalisation buffers** (`latent_mean` / `latent_std` /
 `latent_stats_installed`, `param_mean` / `param_std`).
 
 **Frozen AE.** Exactly one of `pretrained_ae_dir` (training: the AE export's
@@ -1947,7 +1965,8 @@ keeps the AE in `eval()` after `BaseTraining` calls `model.train()`. The AE
 **must** have a geometry path — `encode_geometry=True` (folded geometry latents)
 or a `geometry_branch` — else construction raises: there would be nothing to
 condition on. Its `spatial_mode` / `encoder_crop_size` / `halo_size` are
-inherited (recorded in `ae_kwargs`) and cannot change at sampling time. The
+inherited (recorded in `ae_kwargs`); they fix the latent grid, and only the
+decoder's spatial policy can be overridden at sampling time (below). The
 sha256 of the export's `weights.pt` is stored as `ae_fingerprint`.
 
 **One canonical full-grid latent for all spatial modes.** The velocity network
@@ -2009,12 +2028,36 @@ actual `count_parameters()` (also in `extra_repr`), not the paper's figure.
 
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
-input FiLM; `tau` is scaled by `_TAU_SCALE = 1000` before the standard
+input FiLM (but see adaLN-Zero below); `tau` is scaled by `_TAU_SCALE = 1000` before the standard
 sinusoidal embedding (the SD3 / rectified-flow convention) so small `tau`
 differences do not collapse. `velocity(z, tau, params_hist, cond)` validates
 shapes (`params_hist` is `(B, Hp, P)` in **raw physical units**; z-scored inside)
 and refuses `B * Zl*Yl*Xl > max_latent_tokens` — naive global attention
 allocates `B*heads*N*N`, and a physical-cell budget alone does not bound it.
+
+**adaLN-Zero velocity net (`velocity_conditioning: adaln`).** The default
+`input_film` applies the conditioning vector once, to the input tokens, and
+leaves every transformer block unconditioned — weak for a velocity that must
+act very differently near `tau = 0` (noise) and `tau = 1` (developed field).
+`adaln` builds `AdaLNVelocityNet`
+([architectures/latent_velocity_adaln.py](../libs/neural-surrogates/src/neural_surrogates/architectures/latent_velocity_adaln.py),
+the DiT design on the vendored `AttentionBlock` / `LlamaMLP` / 3-D sincos
+positions): `c = MLP(cond)` of width `film_hidden`; every block and the final
+affine-free LayerNorm take shift / scale (/ gate) from `c` through a
+zero-initialised `Linear`, and the output `Linear(h, D)` is zero-initialised,
+so each block is the identity and the output is `0` at init. Gradients reach
+the output projection on step 1, the modulation layers and `geom_proj` on
+step 2 and the conditioning MLP on step 3 (tested). Geometry varies per token,
+so it cannot ride the global adaLN path: `geom_proj = Linear(G, h)` is added
+to every token after the input projection — the same as projecting
+`concat(z, geom_cond)`, the usual way spatial conditions enter a diffusion
+backbone — with default (non-zero) init. `hidden_size`, the `>= D` rule,
+`n_layers`, `num_heads`, `mlp_ratio`, `use_checkpoint`, `max_latent_tokens`
+and the precision policy are shared. For `D = h = 1536`, 6 layers,
+`mlp_ratio: 4`, `film_hidden: 128`, `Hp*P = 24`: 241.1 M parameters vs
+236.4 M for `input_film` (`G = 1536`); the modulation costs ~1.2 M per block
+because `c` is `film_hidden` wide, not `h`. A config without the key builds
+`input_film`, so existing artifacts rebuild and load unchanged.
 
 **Flow objective.** `forward(state, params_hist, geometry, geom_features=None,
 *, generator=None)` encodes the normalised target `z1`, draws `z0 ~ N(0, I)`
@@ -2040,13 +2083,47 @@ stats too.
 
 **Sampling.** `sample(params_hist (B, Hp, P), geometry (*grid) | (B, *grid)
 fluid mask, geom_features=None, *, initial_noise=None, generator=None,
-num_steps=None) -> (B, C, *grid)` in physical units, obstacles zeroed: explicit
-Euler from `tau = 0` to `1` in `num_steps` (default `num_sampling_steps`, 50)
-steps — `z += dt * velocity(z, i*dt, …)` — then `decode_latents`. Pass
+num_steps=None, sampler="euler", decode_spatial_mode=None,
+decode_halo_size=None) -> (B, C, *grid)` in physical units, obstacles zeroed:
+integrate from `tau = 0` to `1` in `num_steps` (default `num_sampling_steps`,
+50) equal intervals, then `decode_latents`. `sampler`:
+
+| `sampler` | Step | NFE |
+|---|---|---|
+| `euler` (default) | `z += dt * v(z, i*dt)` | `num_steps` |
+| `heun` | explicit trapezoidal: `v0 = v(z, i*dt)`, `v1 = v(z + dt*v0, (i+1)*dt)`, `z += dt/2 * (v0 + v1)` — the full step on **every** interval, `tau = 1` included (the velocity is defined there; nothing is skipped) | `2 * num_steps` |
+
+NFE = velocity-network evaluations (`SAMPLER_NFE_PER_STEP`); compare samplers
+at equal NFE, not equal steps. Pass
 `initial_noise` `(B, D, Zl, Yl, Xl)` for reproducible per-member noise **or** a
 `generator`; both at once is rejected. Fixed seeds guarantee identical initial
 noise per member, not bitwise-identical kernels across batch sizes / devices;
 the tests use tolerances.
+
+**Decode-time spatial policy (evaluation probe).** `decode_latents(z, cond, *,
+spatial_mode=None, halo_size=None)` and `sample(…, decode_spatial_mode=,
+decode_halo_size=)` decode the **same** latents with another decoder policy;
+`None` is the AE's trained one, unchanged. A local-mode AE decodes each tile
+independently, so generated latents of neighbouring tiles must agree almost
+exactly or the field shows seams on the tile grid; the override separates such
+decoder seams from generator errors. The latent grid is always the trained
+mode's (`latent_grid_for`: padded to the crop for local/halo, to 16 for
+global), and the branch features (`_full_grid_feats`) sit on that same padded
+grid, so no mode needs latents or features re-padded:
+
+| Decode mode | What the decoder sees |
+|---|---|
+| `local` | each `encoder_crop_size` core alone |
+| `halo` | each core plus `halo_size` (default the AE's; nonnegative multiple of 16) latent cells of context, clipped at the padded edge; output keeps the core. `halo_size: 0` equals local |
+| `global` | the whole padded latent grid at once (padding latents included — they are the encodings of the zero-padded input), cropped afterwards |
+
+When the padded grid is not a multiple of the crop (an AE trained `global`),
+local / halo give the last tile along an axis fewer cells rather than inventing
+latents to fill it. Caveat: the decoder was trained in **one** policy; the
+others compute a different function (§26 "Spatial processing": the frozen AE is
+a function of its training tile), so an override's own AE reconstruction
+(`ae_recon_decode_<mode>` in §39) is the baseline to judge it by, not the
+trained `ae_recon`.
 
 **Precision policy.** The frozen encoder, geometry conditioning, latent
 statistics and the whole sampling loop always run in **fp32** with
@@ -2107,8 +2184,9 @@ is generator-shaped (`ae`, `latent_stats_installed`, `velocity_net`), that no AE
 parameter is thawed, that the optimizer holds only `requires_grad` parameters and
 none of the AE's (weight decay on frozen tensors would still move them), and
 that both loaders yield at least one batch (a `TrajectoryBatchSampler` with
-`drop_last=True` and fewer samples per trajectory than its batch size is the
-usual way to get an empty loader). The latent mean/std are model buffers, so
+`drop_last=True` and fewer samples per trajectory — per grid shape with
+`group_by: grid` — than its batch size is the usual way to get an empty
+loader). The latent mean/std are model buffers, so
 `weights.pt` and `checkpoint.pt` both carry them and `BaseTraining.fit` restores
 them on resume; they must be installed *before* training and are never
 recomputed here. `fit()` refuses to resume from a checkpoint whose
@@ -2134,13 +2212,14 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
 | `physical_metadata` | `units` (one entry per state **and** parameter variable), `coordinate_order: [z, y, x]`, `geometry_mask_convention` (must equal `MASK_CONVENTION`, which deployment checks), `notes` |
 | `trainer` | `LatentFlowMatchingTrainer`, `val_seed: 0`; `amp` wraps the velocity net only |
 | `optimizer` | AdamW, `weight_decay: 1.0e-2`, handed only the velocity-net parameters |
+| `batch_sampler` | `batch_size: 16`, `cell_budget: 393216`, `group_by: grid`: a batch mixes the frames of every trajectory on one grid shape (§6) instead of one trajectory's correlated frames; tokens per batch are still `B * Zl*Yl*Xl` of one shape, so `max_latent_tokens` bounds it as before. Validation keeps `shuffle: false`, a fixed order |
 
 The task takes `state_vars` / `sdf_features` / `sdf_clamp_cells` from the AE
 export (the frozen encoder only understands its own inputs) and forces
@@ -2234,7 +2313,20 @@ spread over the trajectories) under matched geometry and history:
   last parameter row repeated `Hp` times);
 * the conditioning probes `generated_shuffled_history` (histories permuted
   between snapshots) and `generated_omitted_history` (the training-mean
-  parameters), and one `generated_steps<k>` per entry of `num_steps_sweep`.
+  parameters), and one `generated_steps<k>` per entry of `num_steps_sweep`;
+* with `samplers` (e.g. `[euler, heun]`) the step sweep runs per sampler:
+  `generated_<sampler>_steps<k>` for samplers other than `sampler` (the
+  main samples' sampler, default `euler`). `step_sweep` rows in
+  `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
+  plots against NFE, one line per sampler;
+* with `decode_modes` (e.g. `[local, halo, global]`, halo from
+  `decode_halo_size`, default the AE's), per mode that differs from the trained
+  policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
+  — as `generated`, decoded that way) and `ae_recon_decode_<mode>` (the real
+  latents decoded that way). Comparing the two isolates decoder effects (tile
+  seams) from generator effects (§36, decode-time spatial policy). They join
+  `metrics.csv`, `summary.json`, the profile / histogram / spectrum figures
+  (mode-coloured; AE dotted) and the `states_*.png` rows.
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
@@ -2259,7 +2351,13 @@ each generated-vs-real number must lie within its `acceptance` factor
 `max(AE baseline, held-out bootstrap variability)` (`bootstrap_resamples`),
 and the diversity must reach `diversity_min_ratio` of the real spread (near
 zero is mode collapse). A non-finite number is a failure. The verdict is
-printed as `PASS` / `FAIL: …` and written to `summary.json`.
+printed as `PASS` / `FAIL: …` and written to `summary.json`. The gate judges
+`generated` against `ae_recon` only — the sampler and decode-mode variants are
+diagnostics.
+
+The real pairwise spread (so the diversity ratio) and the Reynolds stresses
+need several snapshots **per grid**: with one per grid (e.g. `max_snapshots: 8`
+over 7 test grids) they are NaN, a gate failure; the default is 64.
 
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
@@ -2382,6 +2480,7 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Latent cache (`prepare_latent_cache`, `LatentCacheDataset`) | [datasets/latent_cache.py](../libs/neural-surrogates/src/neural_surrogates/datasets/latent_cache.py) |
 | Shared parameter-table reader (`load_param_table`) | [datasets/_params.py](../libs/neural-surrogates/src/neural_surrogates/datasets/_params.py) |
 | `TadpoleLatentGenerator` / `LatentEncoding` | [architectures/tadpole_latent_flow.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_latent_flow.py) |
+| `AdaLNVelocityNet` (`velocity_conditioning: adaln`) | [architectures/latent_velocity_adaln.py](../libs/neural-surrogates/src/neural_surrogates/architectures/latent_velocity_adaln.py) |
 | Shared spatial helpers (`encode_spatial` / `decode_spatial`) | [architectures/_tadpole_spatial.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_spatial.py) |
 | `ParamConditionedSubnetwork` (the velocity net) | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
 | `LatentFlowMatchingTrainer` | [training/flow_matching.py](../libs/neural-surrogates/src/neural_surrogates/training/flow_matching.py) |

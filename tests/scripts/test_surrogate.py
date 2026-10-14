@@ -184,6 +184,23 @@ def test_latent_generator_trains_from_the_cache(
     assert bool(model.latent_stats_installed)
 
 
+def test_adaln_latent_generator_rebuilds_from_its_config(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    from neural_surrogates.architectures.latent_velocity_adaln import AdaLNVelocityNet
+
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path, trained, "architecture.velocity_conditioning=adaln"
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    assert saved.architecture.velocity_conditioning == "adaln"
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert isinstance(model.velocity_net, AdaLNVelocityNet)
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)
@@ -225,6 +242,48 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+
+
+def test_evaluate_latent_generator_decode_modes_and_samplers(
+    session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """Decode-mode variants and a per-sampler step sweep add their own sources;
+    the trained mode adds none, and the gate still judges `generated`."""
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
+        "latent_generator.decode_modes=[local,halo,global]",
+        "latent_generator.samplers=[euler,heun]",
+        "latent_generator.max_snapshots=6",
+        root=session_root,
+    )
+    trained_mode = trained["train_autoencoder"].architecture.spatial_mode
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
+    out = pathlib.Path(cfg.latent_generator.output_dir)
+    summary = json.loads((out / "summary.json").read_text())
+    others = [m for m in ("local", "halo", "global") if m != trained_mode]
+    assert summary["decode_modes"] == others
+    expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}
+    expected |= {"generated_steps2", "generated_steps5"}
+    expected |= {"generated_heun_steps2", "generated_heun_steps5"}
+    assert expected <= set(summary["scalars"])
+    assert f"generated_decode_{trained_mode}" not in summary["scalars"]
+    for m in others:
+        assert "diversity" in summary["scalars"][f"generated_decode_{m}"]
+    assert [
+        (r["sampler"], r["num_steps"], r["nfe"]) for r in summary["step_sweep"]
+    ] == [
+        ("euler", 2, 2),
+        ("euler", 5, 5),
+        ("heun", 2, 4),
+        ("heun", 5, 10),
+    ]
+    with open(out / "metrics.csv") as f:
+        sources = {line.split(",")[0] for line in f.readlines()[1:]}
+    assert expected <= sources
+    for name in ("profiles.png", "histograms.png", "spectra.png", "step_sweep.png"):
+        assert (out / name).exists(), name
 
 
 @pytest.mark.integration  # type: ignore[misc]

@@ -192,3 +192,22 @@ def test_cached_batch_matches_snapshot_batch_and_fits(tmp_path):
     history = cached_trainer.fit()
     assert len(history["val"]) == 1
     assert all(torch.isfinite(torch.tensor(v)) for v in history["val"])
+
+
+# --------------------------------------------------------------------------- #
+# adaLN-Zero velocity net.
+# --------------------------------------------------------------------------- #
+
+
+def test_trainer_fits_an_adaln_generator(tmp_path):
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir, velocity_conditioning="adaln")
+    train_ds, val_ds = _dataset(data_dir, "train"), _dataset(data_dir, "val")
+    train, val = _loader(train_ds, shuffle=True), _loader(val_ds)
+    trainer = _trainer(model, train, val)
+    model.compute_latent_normalization(trainer.prepared_batches(train))
+    out_proj = model.velocity_net.out_proj.weight.clone()
+    history = trainer.fit()
+    assert len(history["val"]) == 1
+    assert all(torch.isfinite(torch.tensor(v)) for v in history["val"])
+    assert not torch.equal(model.velocity_net.out_proj.weight, out_proj)

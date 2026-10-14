@@ -17,9 +17,12 @@ architecture:
   n_layers: 4
   num_heads: 8
   time_embed_dim: 64
-  film_hidden: 128
-  mlp_ratio: 4
+  film_hidden: 512  # width of the conditioning embedding every adaLN block reads
+  mlp_ratio: 2  # 177M with adaln at hidden 1536; the width cannot drop below D
   use_checkpoint: false
+  # How params + flow time reach the velocity net: input_film (one FiLM on the
+  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block).
+  velocity_conditioning: adaln
   normalize: true
   num_sampling_steps: 50
   latent_eps: 1.0e-6
@@ -44,13 +47,18 @@ physical_metadata:
   notes: ""
 trainer:
   _target_: neural_surrogates.LatentFlowMatchingTrainer
+  # Floor of the cosine schedule: the loss still improves at the end of a run.
+  lr_min: 1.0e-5
   compile_dynamic: null
   val_seed: 0
 optimizer:
   weight_decay: 1.0e-2
 batch_sampler:
+  # Batches mix frames of every trajectory on one grid shape (different
+  # geometries) for more diverse steps; max_latent_tokens still bounds them.
   batch_size: 16
   cell_budget: 393216
+  group_by: grid
 dataloader:
   num_workers: 8
   collate_fn:
