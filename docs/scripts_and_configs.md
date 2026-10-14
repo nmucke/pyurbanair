@@ -221,8 +221,9 @@ to change:
   `&RUN irandom` is also derived from the experiment name.
 - PALM: `model.forward_model.random_seed` (null leaves PALM's default
   `ensemble_member_nr = 0`; set an integer in `[0, 2000]` other than the
-  truth's). It seeds both the initial kick and the inflow disturbances; see
-  [pypalm.md](pypalm.md) §7.
+  truth's). It seeds the initial kick and the random inflow disturbances, and
+  is mixed into the digital-filter inflow seed (or set
+  `inlet_turbulence.seed`); see [pypalm.md](pypalm.md) §7-8.
 - A time-varying truth: the same sampler seed and horizon must reproduce the
   truth's parameter trajectory.
 

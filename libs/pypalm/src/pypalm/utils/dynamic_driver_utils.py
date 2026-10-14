@@ -149,12 +149,16 @@ def write_dynamic_driver_file(
     zw: np.ndarray,
     y: np.ndarray,
     pt_surface: float = DEFAULT_PT_SURFACE,
+    w_plane: Optional[np.ndarray] = None,
 ) -> None:
     """Write ``<case>_dynamic`` NetCDF with the variables PALM requires.
 
     Shapes (PALM enforces exact dim lengths in turbulent_inflow_init):
       - time_seconds: (T,) — PALM requires time_inflow[0] == 0.0
-      - u_profiles, v_profiles: (T, Nz) — broadcast across y to (T, Nz, Ny)
+      - u_profiles, v_profiles: (T, Nz) — broadcast across y to (T, Nz, Ny) —
+        or full (T, Nz, Ny) planes (the turbulent inflow of
+        :mod:`.inlet_turbulence_utils`)
+      - w_plane: (T, Nz-1, Ny), or None for zeros
       - z: (Nz,) scalar-grid heights; len must equal PALM's ``nz``
       - zw: (Nz-1,) w-grid heights; len must equal PALM's ``nz-1``
       - y: (Ny,) spanwise cell centres; len must equal PALM ``ny+1``
@@ -162,7 +166,7 @@ def write_dynamic_driver_file(
 
     Variables written:
       - inflow_plane_u/v(time_inflow, z, y) — from u/v_profiles
-      - inflow_plane_w(time_inflow, zw, y) — zeros (mean flow only)
+      - inflow_plane_w(time_inflow, zw, y) — ``w_plane``, zeros by default
       - inflow_plane_e(time_inflow, z, y) — zeros (no SGS-TKE inflow)
       - inflow_plane_pt(time_inflow, z, y) — constant pt_surface
         (required unless ``neutral = .T.``, which is not PALM's default)
@@ -183,19 +187,25 @@ def write_dynamic_driver_file(
     n_z = z.shape[0]
     n_zw = zw.shape[0]
     n_y = y.shape[0]
-    if u_profiles.shape != (n_time, n_z) or v_profiles.shape != (n_time, n_z):
+    planes = []
+    for name, values in (("u", u_profiles), ("v", v_profiles)):
+        if values.shape == (n_time, n_z):
+            values = values[:, :, None]
+        elif values.shape != (n_time, n_z, n_y):
+            raise ValueError(
+                f"{name} inflow shape mismatch: got {values.shape}, expected "
+                f"({n_time}, {n_z}) or ({n_time}, {n_z}, {n_y})"
+            )
+        planes.append(np.broadcast_to(values, (n_time, n_z, n_y)).astype(np.float32))
+    u_plane, v_plane = planes
+    if w_plane is None:
+        w_plane = np.zeros((n_time, n_zw, n_y), dtype=np.float32)
+    elif w_plane.shape != (n_time, n_zw, n_y):
         raise ValueError(
-            f"u/v profile shape mismatch: got u={u_profiles.shape}, v={v_profiles.shape}, "
-            f"expected ({n_time}, {n_z})"
+            f"w inflow shape mismatch: got {w_plane.shape}, expected "
+            f"({n_time}, {n_zw}, {n_y})"
         )
-
-    u_plane = np.broadcast_to(u_profiles[:, :, None], (n_time, n_z, n_y)).astype(
-        np.float32
-    )
-    v_plane = np.broadcast_to(v_profiles[:, :, None], (n_time, n_z, n_y)).astype(
-        np.float32
-    )
-    w_plane = np.zeros((n_time, n_zw, n_y), dtype=np.float32)
+    w_plane = np.asarray(w_plane, dtype=np.float32)
     e_plane = np.zeros((n_time, n_z, n_y), dtype=np.float32)
     pt_plane = np.full((n_time, n_z, n_y), float(pt_surface), dtype=np.float32)
 
@@ -322,17 +332,7 @@ def apply_time_varying_inflow(
         y=y,
     )
 
-    # PALM gates turbulent_inflow via the presence of a
-    # &turbulent_inflow_parameters namelist block (see
-    # turbulent_inflow_mod.f90:544-582). The module activates iff that block
-    # is present AND switch_off_module == .false. — no boolean in
-    # &initialization_parameters.
-    p3d = P3DFile(p3d_path)
-    p3d.set_value("turbulent_inflow_parameters", "switch_off_module", False)
-    p3d.set_string(
-        "turbulent_inflow_parameters", "turbulent_inflow_method", "read_from_file"
-    )
-    p3d.write()
+    enable_turbulent_inflow(p3d_path)
 
     u0_init, v0_init = angle_to_velocity(float(angles[0]), float(speeds[0]))
     return xarray.Dataset(
@@ -342,6 +342,23 @@ def apply_time_varying_inflow(
         },
         attrs={"u0_init": float(u0_init), "v0_init": float(v0_init)},
     )
+
+
+def enable_turbulent_inflow(p3d_path: pathlib.Path) -> None:
+    """Point PALM's ``turbulent_inflow`` module at the ``_dynamic`` planes.
+
+    PALM gates turbulent_inflow via the presence of a
+    ``&turbulent_inflow_parameters`` namelist block (see
+    turbulent_inflow_mod.f90:544-582). The module activates iff that block is
+    present AND ``switch_off_module == .false.`` — no boolean in
+    ``&initialization_parameters``.
+    """
+    p3d = P3DFile(p3d_path)
+    p3d.set_value("turbulent_inflow_parameters", "switch_off_module", False)
+    p3d.set_string(
+        "turbulent_inflow_parameters", "turbulent_inflow_method", "read_from_file"
+    )
+    p3d.write()
 
 
 def disable_turbulent_inflow(p3d_path: pathlib.Path) -> None:

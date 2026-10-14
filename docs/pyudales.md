@@ -546,9 +546,12 @@ is what `inlet_turbulence.enabled: true` drives, fed by driver planes
 The block is wired through the `inlet_turbulence: Optional[dict]` constructor
 arg, validated by `validate_inlet_turbulence` and implemented by
 [`utils/inlet_turbulence_utils.py`](../libs/pyudales/src/pyudales/utils/inlet_turbulence_utils.py)
-(physics + orchestration) on top of
+(plane layout + orchestration) on top of
 [`utils/driver_file_utils.py`](../libs/pyudales/src/pyudales/utils/driver_file_utils.py)
-(binary I/O). **Absent, `{}`, or `enabled: false` writes nothing at all** —
+(binary I/O). The digital filter itself, the per-member seed and the clock
+below live in
+[`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py),
+shared with pypalm's turbulent inflow (docs/pypalm.md §8). **Absent, `{}`, or `enabled: false` writes nothing at all** —
 byte-identical namoptions and no driver files. Unknown keys are warned about and
 ignored. `enabled: true` requires `boundary_condition: inflow_outflow`; under
 `periodic` there is no inlet face and it raises.

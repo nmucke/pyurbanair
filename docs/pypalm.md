@@ -75,7 +75,7 @@ Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 | `simulation_time`, `output_frequency`, `spinup_time` | Written to `_p3d` (`end_time`, `dt_data_output`, `averaging_interval`) |
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
 | `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (16.0 m), `profile_config` (default `power_law` with `alpha=0.25`, `z_ref=64` m). See §8. |
-| `inlet_turbulence` | Switchable inlet turbulence (`enabled`, default `false`) → PALM's random inflow disturbances. Absent (`None`) is a strict no-op. `inflow_outflow` only. See §8. |
+| `inlet_turbulence` | Switchable inlet turbulence (`enabled`, default `false`). `method: digital_filter` (default) imposes synthetic turbulent inflow planes; `random_disturbances` turns on PALM's own inflow disturbances. Absent (`None`) is a strict no-op. `inflow_outflow` only. See §8. |
 | `random_seed` | Seed of PALM's random disturbances → `&initialization_parameters ensemble_member_nr`, an int in `[0, 2000]`. `None` (default) writes nothing. See §7. |
 | `verbose` | When `False`, stdout/stderr captured; failures surface the last 80 lines |
 
@@ -151,10 +151,14 @@ then by whether the params carry a `time` dim:
   has them* — so a prior periodic run in the same experiment dir cannot leak
   the LSF apparatus into an inflow run. On a clean template the switches are
   left absent, so inflow staging is unchanged.
-- **Inlet turbulence** is applied separately, in `run_single` *after* the
-  warm/cold init block (`_apply_inlet_turbulence`), because both write
-  `create_disturbances`. It is orthogonal to the driver selection above and
-  composes with all three rows. See §8.
+- **Digital-filter inflow** (`inlet_turbulence.method: digital_filter`)
+  replaces both `inflow_outflow` rows: `apply_digital_filter_inflow` writes
+  mean-plus-fluctuation `inflow_plane_u/v/w` for static and time-varying params
+  alike and switches the `turbulent_inflow` reader on. See §8.
+- **Random disturbances** (`method: random_disturbances`) are applied
+  separately, in `run_single` *after* the warm/cold init block
+  (`_apply_inlet_turbulence`), because both write `create_disturbances`. They
+  compose with any driver row. See §8.
 - All paths then write `ug_surface`/`vg_surface` (inert with `omega = 0`;
   initial condition only) and `u_profile`/`v_profile`/`uv_heights` (the
   vertical shear profile prepended with a z=0 no-slip anchor), so the run
@@ -340,8 +344,8 @@ Write site: `_apply_sgs_setting` in `ForwardModel` →
 | [`forward_model_utils.py`](../libs/pypalm/src/pypalm/utils/forward_model_utils.py) | `create_new_forward_model` — deep-copies a template `ForwardModel` and retargets its dirs to a fresh per-member directory. Used by `EnsembleForwardModel._create_new_forward_model`. |
 | [`inflow_utils.py`](../libs/pypalm/src/pypalm/utils/inflow_utils.py) | `angle_to_velocity(angle_deg, wind_speed) -> (u, v)`. Mirrors pyudales; duplicated deliberately so pypalm has no runtime dependency on pyudales. |
 | [`vertical_profile.py`](../libs/pypalm/src/pypalm/utils/vertical_profile.py) | `build_profile_shape(profile_config, heights, zsize)` — returns a dimensionless `s(z)` shape. Supports `"uniform"` and `"power_law"` (with `alpha`). |
-| [`dynamic_driver_utils.py`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) | Time-varying inflow driver: `write_dynamic_driver_file`, `apply_time_varying_inflow`, `disable_turbulent_inflow`, `is_time_varying_params`. Writes the PALM PIDS_DYNAMIC NetCDF with `inflow_plane_u/v/w/e/pt`. |
-| [`inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) | Switchable inlet turbulence: `apply_inlet_turbulence`, `validate_inlet_turbulence`, `is_inlet_turbulence_enabled`. Drives PALM's random inflow-disturbance namelist keys. Module docstring carries the PALM `file:line` evidence for why recycling / STG are not usable here. See §8. |
+| [`dynamic_driver_utils.py`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) | Time-varying inflow driver: `write_dynamic_driver_file` (mean profiles or full planes), `apply_time_varying_inflow`, `enable_turbulent_inflow`/`disable_turbulent_inflow`, `is_time_varying_params`. Writes the PALM PIDS_DYNAMIC NetCDF with `inflow_plane_u/v/w/e/pt`. |
+| [`inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) | Switchable inlet turbulence: `apply_digital_filter_inflow` / `build_digital_filter_planes` (turbulent inflow planes from the shared generator in [`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py)), `apply_inlet_turbulence` (random-disturbance namelist keys), `validate_inlet_turbulence`. Module docstring carries the PALM `file:line` evidence for why recycling / STG are not usable here. See §8. |
 | [`nudging_utils.py`](../libs/pypalm/src/pypalm/utils/nudging_utils.py) | Periodic nudging driver: `apply_nudging_driver`, `write_nudging_data`, `write_inert_lsf_data`, `remove_nudging_files`. Writes the ASCII `NUDGING_DATA` + inert `LSF_DATA`. Shares the schedule builders with `dynamic_driver_utils`. See §8. |
 | [`warm_start_utils.py`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) | Warm-start via PALM LOD=2: `build_init_atmosphere_dataset`, `write_warmstart_driver`. Merges `init_atmosphere_*` fields into the same PIDS_DYNAMIC file as the inflow planes, using 0-based PALM-native vertical axes (required by DRV0005 value checks). |
 | [`clean_up_utils.py`](../libs/pypalm/src/pypalm/utils/clean_up_utils.py) | `clean_palm_output_dir` (wipes OUTPUT/MONITORING/RESTART, leaves INPUT). `clean_palm_input_dir` (optional, keeps `_p3d`/`_topo`). |
@@ -405,12 +409,16 @@ Key field notes:
   nudging below this height), `profile_config` (vertical shear shape). Only
   `profile_config` applies under `inflow_outflow`; the rest drive the periodic
   nudging path. See §8.
-- `inlet_turbulence:` — `enabled` (default `false`), `dt_disturb` (5.0 s),
-  `amplitude` (0.25 m/s), and the optional `begin`/`end` (grid points) and
-  `level_b`/`level_t` (m) bounds of the perturbed region (`null` → PALM's own
-  auto-derivation). Requires `boundary_condition: inflow_outflow`; staging
-  raises otherwise. **`enabled: false` does not disable PALM's
-  `turbulent_inflow` module** — see §8.
+- `inlet_turbulence:` — `enabled` (default `false`), `method`
+  (`digital_filter`, the default, or `random_disturbances`), `initial_seed`.
+  `digital_filter` takes pyudales' keys and values: `intensity` (0.15),
+  `length_scale_x/y/z` (24/12/12 m), `time_step` (0.5 s, must divide the
+  window), `seed` (`null` → derived from the member name and `random_seed`).
+  `random_disturbances` takes `dt_disturb` (5.0 s), `amplitude` (0.25 m/s), and
+  the optional `begin`/`end` (grid points) and `level_b`/`level_t` (m) bounds
+  of the perturbed region (`null` → PALM's own auto-derivation). Requires
+  `boundary_condition: inflow_outflow`; staging raises otherwise. **`enabled:
+  false` does not disable PALM's `turbulent_inflow` module** — see §8.
 - `random_seed: null` — the seed of PALM's random disturbances; see below.
 - `compile: false` — PALM is compiled once at install time via
   `__init__.py`, not per-run.
@@ -427,15 +435,18 @@ python scripts/run_smoother.py model@assim_model=pypalm model@truth_model=pylbm 
 ---
 
 
-### `inlet_turbulence`: two independent switches
+### `inlet_turbulence`: `initial_seed` and the random disturbances
 
-PALM has two distinct disturbance mechanisms, and both are gated by the single
+`initial_seed` is independent of `enabled` and `method`. With `method:
+digital_filter` the random disturbances stay off and only `initial_seed`
+decides whether the cold-start kick fires. With `method: random_disturbances`
+PALM has two distinct disturbance mechanisms, both gated by the single
 `&runtime_parameters create_disturbances` flag:
 
 | Sub-key | Mechanism | PALM site |
 |---|---|---|
 | `initial_seed` | one-off random kick on u/v at cold-start init | `init_3d_model.f90:1488` |
-| `enabled` | perturbations re-injected near the inflow all run, paced by `dt_disturb` | `time_integration.f90:966-989` |
+| `enabled` (with `random_disturbances`) | perturbations re-injected near the inflow all run, paced by `dt_disturb` | `time_integration.f90:966-989` |
 
 `create_disturbances` is written unconditionally by the cold-start init path
 (`_reset_cold_init`), so before this split `enabled: false` **still fired the
@@ -501,6 +512,9 @@ seeding, `ensemble_member_nr` only adds an `en-no:` tag to the run header
   the bit-identical run (checked: seeds 0 and 1 on a periodic run, max |Δu| =
   0 at 60 s). Construction then raises. Under `periodic` only `initial_seed:
   true` can carry the seed, and it only reaches cold starts.
+- The digital-filter inflow (§8) has its own seed (`inlet_turbulence.seed`,
+  else hashed from the member name); `random_seed` is mixed into that hash, so
+  a replica with another `random_seed` also gets a new inflow realisation.
 
 ## 8. Known gotchas
 
@@ -677,95 +691,160 @@ periodic case for cyclic runs.
   real model difference near the walls (wall model, SGS closure).
   uDALES needs ~120 s from rest; it runs ~1.5x faster on one rank.
 
-### Switchable inlet turbulence — and what `turbulent_inflow` actually is
+### Switchable inlet turbulence: digital-filter inflow planes
 
-`inlet_turbulence.enabled` is the cross-backend inlet-turbulence switch. For
-PALM it drives the **random inflow-disturbance** machinery, *not* the
-`turbulent_inflow` module. Evidence, from the vendored PALM 25.10 sources under
-`libs/pypalm/palm_model_system/MAKE_DEPOSITORY_default/`:
+`inlet_turbulence.enabled` is the cross-backend inlet-turbulence switch.
+`method: digital_filter` (the default) gives PALM the same synthetic turbulent
+inflow as uDALES; `method: random_disturbances` keeps PALM's own disturbances.
+Line numbers below refer to the vendored PALM 25.10
+`packages/palm/model/src/`.
 
-**`turbulent_inflow_method` accepts four values**
-(`turbulent_inflow_mod.f90:283-286`): `'read_from_file'`,
-`'recycle_turbulent_fluctuation'` (the module default,
-`turbulent_inflow_mod.f90:151`), `'recycle_absolute_value'` and
-`'recycle_absolute_value_thermodynamic'`. The module is gated purely on the
-presence of a `&turbulent_inflow_parameters` block with
-`switch_off_module = .false.` (`turbulent_inflow_mod.f90:544-572`) — there is no
-boolean in `&initialization_parameters`.
+**How `digital_filter` works.** `apply_digital_filter_inflow` writes
+`inflow_plane_u/v/w(time_inflow, z, y)` into the `_dynamic` driver: the mean
+profile from `inflow_angle`/`velocity_magnitude`/`vertical_inflow_exponent`
+(static or time-varying, spinup plateau included) plus Xie & Castro (2008)
+digital-filter fluctuations, one plane every `time_step` s over PALM's
+`end_time` plus two margin planes. It then switches `turbulent_inflow` on with
+`turbulent_inflow_method = 'read_from_file'`. That reader is built for
+precursor planes: at every Runge-Kutta substep it interpolates the planes
+linearly in time and imposes u at the inflow face and v, w, e at the ghost
+column (`turbulent_inflow_mod.f90:1006-1230`), and it corrects the mass flux
+at the radiation outflow (`:476-536`). The fluctuations come from
+[`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py),
+the generator pyudales' inlet uses (docs/pyudales.md §6.1), with its keys and
+statistics: `sigma_u = intensity * |U_mean(z)|`, v' and w' at 0.7x, the plane
+mean of u' removed per record, AR(1) time scale `length_scale_x /
+velocity_magnitude`. For the same seed, grid and record grid the PALM planes
+equal the uDALES inlet planes value for value
+(`test_matches_the_udales_inlet_planes`), so a PALM truth and a uDALES model
+can be driven by the *same* inflow realisation. The seed is
+`inlet_turbulence.seed`, else a hash of the member name with `random_seed`
+mixed in, so ensemble members and replicas differ.
 
-**Recycling exists but is not reachable from a config toggle.** The classic
-Kataoka & Mizuno recycling (the true analogue of uDALES `iinletgen=1`) requires
-`initializing_actions = 'cyclic_fill'` or `'read_restart_data'`
-(`turbulent_inflow_mod.f90:337-343`, `TUI0006`) — i.e. a *precursor run* whose
-3D fields are cyclically filled in. pypalm cold-starts from
-`'set_constant_profiles'` (periodic) or `'read_from_file'` (inflow_outflow) and
-warm-starts from `'read_from_file'`, so no staging path satisfies it. It also needs `dx < recycling_width < nx·dx`
-(`:346-349`, `TUI0007`; the default is `HUGE(1.0)`, so it is effectively
-mandatory) and `bc_lr = 'dirichlet/radiation'` (`:316-320`, `TUI0004`).
-Enabling recycling would mean adding a precursor-run + restart-data feature, not
-a knob.
+Windows continue each other: the member's elapsed time is persisted to
+`<experiment_dir>/inlet_turbulence_clock.json` (as in pyudales), each window
+writes the slice of the member's turbulence history from that time on, and the
+clock is reset when a model or ensemble member is built. `time_step` must
+divide the window length. A warm-started window also gets a correct inflow face
+on this path, because the reader re-imposes it every substep (contrast the
+open warm-start issue in "Near-wall inflow zeroed by set_constant_profiles").
+Not handled: a member substituted after a failure keeps its own clock rather
+than the donor's (statistically harmless, unlike pyudales which copies it).
 
-**The synthetic turbulence generator is also out.** For idealized (non-nested)
-setups it demands an `STG_PROFILES` input file
-(`synthetic_turbulence_generator_mod.f90:412-417`, `STG0007`),
-`random_generator = 'random-parallel'` (`:451-455`, `STG0010`), and it is
-**mutually exclusive with `turbulent_inflow`** (`:444-448`, `STG0009`) — so it
-could never coexist with the time-varying inflow driver.
+**Measured** (10°, 6.0 m/s, `z_ref` 64 m, α 0.25, 2 m grid, `ny` 40, `nz`
+16, 600 s after 60 s spinup, frames from t = 100 s; empty domain x = -20..140 m
+unless stated). Integral scales at z = 9 m from u'; the Taylor length uses the
+local mean speed (3.7 m/s), whereas the generator converts `length_scale_x`
+with `velocity_magnitude`.
 
-**What we actually use.** For a non-cyclic lateral boundary PALM re-injects
-random u/v perturbations in the strip
-`[inflow_disturbance_begin, inflow_disturbance_end]` for the whole run
-(`time_integration.f90:966-989`; the comment at `:980-985` reads "runs with a
-non-cyclic lateral wall need perturbations near the inflow throughout the whole
-simulation"). This needs no extra file, no precursor, and is orthogonal to
-`turbulent_inflow`. It is off in practice today only because `dt_disturb`
-defaults to `9999999.9` (`modules.f90:939`) — the loop never fires. Setting a
-finite `dt_disturb` is what turns it on. Relevant namelist keys and sections:
-`inflow_disturbance_begin`/`_end` in `&initialization_parameters`
-(`parin.f90:222-223`); `create_disturbances`, `dt_disturb`,
-`disturbance_amplitude`, `disturbance_energy_limit`, `disturbance_level_b`/`_t`
-in `&runtime_parameters` (`parin.f90:348-369`). All of them default sensibly:
-`begin = min(10, nx/2)`, `end = min(100, 3nx/4)`
-(`check_parameters.f90:2755-2768`), `level_b = zu(3)`, `level_t = zu(nzt/3)`
-(`:2690-2738`) — so only `dt_disturb` is really required.
+| plane | mean-profile error (rms, z ≤ 25 m) | TI u / v / w at 9 m | T_int | L_y | spectral slope 0.08-0.4 Hz |
+|---|---|---|---|---|---|
+| inflow face (x = -20) | 0.5 % | 0.131 / 0.102 / 0.091 | 2.7 s | 10.6 m | -1.7 |
+| 20 m fetch (x = 0) | 2.8 % | 0.115 / 0.108 / 0.076 | 4.1 s | 9.9 m | -3.4 |
+| 80 m fetch (x = 60) | 5.6 % | 0.132 / 0.118 / 0.066 | 5.2 s | 7.6 m | -2.9 |
+| 120 m fetch (x = 100) | 5.1 % | 0.148 / 0.117 / 0.072 | 6.0 s | 6.8 m | -2.6 |
 
-**Rejected combination — `turbulent_inflow` is not a turbulence switch.** On the
-`inflow_outflow` path (static params included) pypalm already sets
-`turbulent_inflow_method = 'read_from_file'`. In that mode the module is the
-*reader* for the `_dynamic` NetCDF carrying `inflow_plane_u/v`
-(`turbulent_inflow_mod.f90:456-459`), i.e. it is the only thing connecting the
-ESMDA-estimated `inflow_angle`/`velocity_magnitude` to the solver. Exposing an
-"inlet turbulence off" switch that disabled it would silently sever parameter
-estimation while the run still completed successfully — strictly worse than no
-knob. **`inlet_turbulence.enabled: false` therefore never touches
-`turbulent_inflow`**, and there is deliberately no way to request "time-varying
-inflow with `turbulent_inflow` off".
+- The face reproduces the planes (time correlation 0.99 with the written
+  u-plane at 9 m; planes' own TI_u 0.134). TI_u at the face is 0.17 at 1 m and
+  0.12 above 9 m, below the nominal 0.15 because the u' plane-mean removal costs
+  energy with `length_scale_z` 12 m on a 32 m plane — exactly as on uDALES.
+- Over the fetch the resolved turbulence neither dies nor blows up: TI_u at
+  9 m dips to 0.115 within 20 m (the grid damps the smallest injected scales,
+  slope steepens to -3.4) and then grows back as wall shear produces
+  turbulence near the ground; TI_w decays from 0.09 to 0.07. The mean profile
+  stays within 1 % above 5 m; near the ground it adapts to PALM's wall model
+  (z = 1 m speed -10 % at 20 m fetch, -20 % at 80 m).
+- A second seed (`random_seed: 17`) gives the same statistics (TI_u at 9 m
+  0.126 vs 0.131 at the face, length scales within 10 %) and an uncorrelated
+  realisation (u' correlation with the first < 0.03 at every plane); the 180 s
+  means of the two differ by 0.12 m/s rms — the realisation noise.
+- On xie_and_castro with the inflow moved upstream (x = -60..40, 50x40x16, two
+  300 s windows, the second warm-started), the plane 25 m in front of the
+  array (x = -20) has TI_u / TI_v / TI_w = 0.17 / 0.16 / 0.10 at 9 m, L_y 6 m,
+  and turbulence up to the domain top (TI_u 0.11 at 17-23 m). The warm window
+  keeps the face mean (4.04 m/s) and its fluctuations.
+
+**`random_disturbances` is not an inflow turbulence.** It re-injects
+uncorrelated per-grid-point u/v kicks of `amplitude` m/s into the strip
+`[inflow_disturbance_begin, inflow_disturbance_end]` every `dt_disturb`
+(`time_integration.f90:966-989`; off by default through `dt_disturb =
+9999999.9`, `modules.f90:939`). Intensity and length scales are not
+prescribed, `disturbance_level_b` cannot go below `zu(3)` = 5 m (PAC0153,
+`check_parameters.f90:2698-2701`), and the auto strip
+(`check_parameters.f90:2755-2768`) on xie_and_castro is x = 0-22 m, z = 5-9 m,
+inside the first building row. In the SGS Round-2 PALM truth (that strip,
+`dt_disturb` 5 s) the inflow face carried no fluctuation at all, and at x =
+-10 m TI_u at 9 m was 0.18 but with L_y ≈ 1 m (grid noise) and TI_u < 0.04
+above 17 m. Moving the strip upstream does not fix it: on the empty domain
+with the strip at the inflow (`begin` 1, `end` 10, i.e. x = -18..0 m,
+`level_b` 5 m, `level_t` 25 m, 0.25 m/s every 5 s) TI_u at 9 m is 0.02 at
+x = 0 and 0.036 at x = 100 m, with L_y ≈ 1.3 m and T_int < 1 s: the
+grid-scale kicks are dissipated before they organise, so 120 m of fetch is
+not enough to develop an inflow turbulence comparable with uDALES'.
+
+The disturbances *do* act: in the Round-2 pilot the `palm_smooth` (off) and
+`palm_turb` (on) states differ by 0.24 m/s rms. The pilot's report showing them
+identical came from its analysis script (`round2_pilot_v2.py` mapped both names
+to the same `palm_truth` run), not from PALM.
+
+**Neither PALM alternative fits pypalm's staging.**
+
+- *Recycling* (`turbulent_inflow_method = 'recycle_*'`, the analogue of
+  uDALES `iinletgen=1`) needs `initializing_actions = 'cyclic_fill'` or
+  `'read_restart_data'` (`turbulent_inflow_mod.f90:337-343`, `TUI0006`), i.e. a
+  precursor run plus restart plumbing, and `dx < recycling_width < nx·dx`
+  (`:346-349`, `TUI0007`). It recycles toward the precursor's mean, so the
+  estimated inflow would not reach the solver, and it doubles the cost.
+- The *synthetic turbulence generator* (the same digital-filter family)
+  requires, for idealized setups, `initializing_actions =
+  'set_constant_profiles'` or `'read_restart_data'`
+  (`synthetic_turbulence_generator_mod.f90:390-396`, `STG0004`) — which rules
+  out pypalm's LOD=1 cold start (see "Near-wall inflow zeroed by
+  set_constant_profiles") and every warm start — plus an `STG_PROFILES` file
+  (`:412-417`, `STG0007`) and `random_generator = 'random-parallel'`
+  (`STG0010`). It also excludes `read_from_file` inflow
+  (`turbulent_inflow_mod.f90:323-328`, `TUI0005`), so time-varying inflow
+  parameters could not reach the solver, and its mean is the static initial
+  profile.
+
+**`turbulent_inflow` is not a turbulence switch.** On every `inflow_outflow` run
+(static or time-varying params, laminar or `digital_filter`) the module is the
+*reader* of the `_dynamic` planes
+(`turbulent_inflow_mod.f90:456-459`), the only thing connecting the
+ESMDA-estimated `inflow_angle`/`velocity_magnitude` to the solver.
+**`inlet_turbulence.enabled: false` therefore never touches
+`turbulent_inflow`.**
 
 **Precedence.**
 
 1. `inlet_turbulence` absent, or `enabled: false` → nothing is written on a
-   clean template (the teardown only resets keys that are already present, the
-   same present-keys-only discipline as `_disable_nudging_apparatus`). Today's
-   behaviour is preserved exactly, *including* the implicit
-   turbulent-inflow-on-dynamic-driver coupling.
-2. `enabled: true` → applied in `run_single` after the warm/cold init block, so
-   it overrides the `create_disturbances` value written there. On a **warm
-   start** `disturbance_energy_limit` is forced to `0.0`, which suppresses the
-   one-off initial kick of the injected field (`init_3d_model.f90:1488` is gated
-   on `create_disturbances .AND. disturbance_energy_limit /= 0.0`) while keeping
+   clean template (the teardown only resets disturbance keys that are already
+   present). No clock file is written.
+2. `method: digital_filter` → the planes replace both `inflow_outflow` driver
+   rows in `_apply_inflow_settings`; the disturbance keys are handled as in 1
+   (`initial_seed` still decides the kick).
+3. `method: random_disturbances` → applied in `run_single` after the warm/cold
+   init block, so it overrides the `create_disturbances` value written there.
+   On a **warm start** `disturbance_energy_limit` is forced to `0.0`, which
+   suppresses the one-off initial kick (`init_3d_model.f90:1488` is gated on
+   `create_disturbances .AND. disturbance_energy_limit /= 0.0`) while keeping
    the in-run inflow perturbations alive via the `ELSEIF` branch at
-   `time_integration.f90:976` — preserving the existing "don't shock the
-   warm-started field" intent. On a cold start the limit stays at PALM's default
-   `0.01`, so the initial kick still fires as it does today.
-3. `periodic` + `enabled: true` → **rejected at construction** with a
-   `ValueError`. Under cyclic BCs PALM derives no inflow strip at all
-   (`check_parameters.f90:2754`) and the "keep perturbing near the inflow"
-   branch is gated on `.NOT. bc_lr_cyc .OR. .NOT. bc_ns_cyc`
-   (`time_integration.f90:976-978`), so the knob would be a silent no-op.
+   `time_integration.f90:976`. On a cold start the limit stays at PALM's
+   default `0.01`. PALM's `HEADER` reports `Disturbance impulse (u,v) every :
+   5.00 s` when they are on.
+4. `periodic` + `enabled: true` → **rejected at construction** with a
+   `ValueError`: there is no inflow face for either method
+   (`turbulent_inflow_mod.f90:316-319`, `TUI0004`; `check_parameters.f90:2754`,
+   `time_integration.f90:976-978`).
 
-Verified by smoke run: PALM's own `HEADER` reports
-`Disturbance impulse (u,v) every : 5.00 s` and
-`Disturbances continued during the run from i/j = 10 to i/j = 55`.
+**Recommended setup for a PALM truth in cross-model tests:**
+`boundary_condition: inflow_outflow`, `inlet_turbulence: {enabled: true,
+method: digital_filter}` with the same `intensity`/`length_scale_*`/`time_step`
+as the uDALES model, `initial_seed: false`, outflow damping on, and at least
+~25 m (two `length_scale_y`) of empty fetch before the first building; vary
+`random_seed` for replicas. Give uDALES the same `inlet_turbulence.seed` (or the
+same member name) to share the realisation, or different seeds to keep it as
+noise.
 
 ### STL topography and the height-map limitation
 
@@ -1055,7 +1134,7 @@ bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 | ncpu / processor topology | `ncpu` in `pypalm.yaml`; `derive_npex_npey` validates divisibility |
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |
-| Inlet turbulence on/off | `inlet_turbulence` in `pypalm.yaml`; [`utils/inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) |
+| Inlet turbulence on/off, method | `inlet_turbulence` in `pypalm.yaml`; [`utils/inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py); generator in [`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py) |
 | Outflow damping / empty outflow buffer | `outflow_damping`, `outflow_buffer` in `pypalm.yaml` (§7, §8) |
 | Seed of the random disturbances | `random_seed` in `pypalm.yaml` (→ `ensemble_member_nr`, §7) |
 | Warm-start (state injection) | [`utils/warm_start_utils.write_warmstart_driver`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) |

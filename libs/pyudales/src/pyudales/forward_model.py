@@ -11,6 +11,12 @@ from typing import Optional
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    derive_seed,
+    read_elapsed_time,
+    reset_elapsed_time,
+    write_elapsed_time,
+)
 
 from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH, _script_dir
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
@@ -26,12 +32,8 @@ from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
     apply_inlet_turbulence,
-    derive_seed,
     is_inlet_turbulence_enabled,
-    read_elapsed_time,
-    reset_elapsed_time,
     validate_inlet_turbulence,
-    write_elapsed_time,
 )
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
@@ -475,7 +477,7 @@ class ForwardModel(BaseForwardModel):
 
         # Seconds of synthetic turbulence history this member has consumed,
         # used to pick the slice each window gets (see
-        # utils.inlet_turbulence_utils.read_elapsed_time, which documents why
+        # pyurbanair.utils.digital_filter.read_elapsed_time, which documents why
         # this is not exactly physical time under ESMDA). It cannot be read back
         # from `state`:
         # `_prepare_warmstart` writes timee=0 into every restart, so the solver
