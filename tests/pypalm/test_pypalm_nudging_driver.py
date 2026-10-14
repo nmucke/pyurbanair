@@ -28,6 +28,7 @@ _SMOKE = [
     "model=pypalm",
     "model.forward_model.ncpu=1",
     "model.forward_model.nudging_config.enabled=true",
+    "model.forward_model.nudging_config.nnudge_meters=4.0",
 ]
 
 # inflow_outflow selects PALM's multigrid pressure solver, which needs uniform
@@ -344,3 +345,12 @@ def test_warmstart_driver_holds_every_initial_field(
     with xarray.open_dataset(fm.dynamic_driver_path) as driver:
         missing = {n for n in required if f"init_atmosphere_{n}" not in driver}
     assert not missing
+
+
+def test_cutoff_above_every_level_raises(tmp_path: pathlib.Path) -> None:
+    """A cutoff above the top cell centre would leave the run un-driven."""
+    fm = _make_model(
+        tmp_path, *_PERIODIC, "model.forward_model.nudging_config.nnudge_meters=9.0"
+    )
+    with pytest.raises(ValueError, match="no nudged level"):
+        fm._apply_inflow_settings(_static_params())

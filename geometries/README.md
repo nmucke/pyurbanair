@@ -38,6 +38,15 @@ geometry:
 
 `tests/scripts/test_configs.py` checks that every path a case points at exists.
 
+Several cases can share one folder. `case=xie_and_castro_periodic` reads the
+same `xie_and_castro/` files as `case=xie_and_castro` but crops the STL to one
+80 m × 80 m repeat unit of the array (x, y in [5, 85]), the domain to use with
+`boundary_condition: periodic`. The array's heights repeat every 80 m in x and
+y; the default crop, with its 25 m upstream fetch and two of the eight cube
+columns, is meant for inflow_outflow and is not periodic. A larger periodic
+domain must stay a whole number of units, starting on x, y = 5 + 20k so cube
+faces fall on cell faces at a 2 m grid.
+
 `scripts/tools/prepare_case_stl.py` turns a raw buildings + ground export into
 a case STL (it made the Barcelona one); `scripts/tools/benchmark_geometry.py`
 generates Xie & Castro style layouts. The Barcelona files (~70 MB) are

@@ -117,3 +117,30 @@ def test_seed_rejects_a_generator_that_ignores_it(tmp_path: pathlib.Path) -> Non
     )
     with pytest.raises(ValueError, match="random-parallel"):
         fm._apply_random_seed()
+
+
+def test_seed_without_any_disturbance_raises(tmp_path: pathlib.Path) -> None:
+    """With no disturbance at all PALM never draws a random number: periodic
+    runs (no inflow perturbations) with initial_seed off are bit-identical for
+    every seed, so a set seed is rejected rather than silently ignored."""
+    with pytest.raises(Exception, match="initial_seed"):
+        _make_model(
+            tmp_path,
+            "model.forward_model.boundary_condition=periodic",
+            "model.forward_model.inlet_turbulence.enabled=false",
+            "model.forward_model.inlet_turbulence.initial_seed=false",
+            "model.forward_model.random_seed=7",
+        )
+
+
+def test_periodic_seed_with_initial_kick_is_written(tmp_path: pathlib.Path) -> None:
+    from pypalm.utils.p3d_utils import P3DFile
+
+    fm = _make_model(
+        tmp_path,
+        "model.forward_model.boundary_condition=periodic",
+        "model.forward_model.inlet_turbulence.enabled=false",
+        "model.forward_model.random_seed=7",
+    )
+    p3d = P3DFile(fm.p3d_path)
+    assert p3d.get_value("initialization_parameters", "ensemble_member_nr") == "7"

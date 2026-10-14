@@ -34,6 +34,7 @@ from .utils.dynamic_driver_utils import (
 from .utils.inflow_utils import angle_to_velocity
 from .utils.inlet_turbulence_utils import (
     apply_inlet_turbulence,
+    is_initial_seed_enabled,
     is_inlet_turbulence_enabled,
     validate_inlet_turbulence,
 )
@@ -234,6 +235,20 @@ class ForwardModel(BaseForwardModel):
         # Seed of PALM's random disturbances. None writes nothing (PALM's
         # default ensemble_member_nr = 0); see `_apply_random_seed`.
         self.random_seed = validate_random_seed(random_seed)
+        # The seed only reaches PALM through its random disturbances. With both
+        # switched off nothing draws from the generator and every seed gives the
+        # bit-identical run, which is never what a set seed asks for.
+        if (
+            self.random_seed is not None
+            and not is_initial_seed_enabled(inlet_turbulence)
+            and not is_inlet_turbulence_enabled(inlet_turbulence)
+        ):
+            raise ValueError(
+                "random_seed has no effect with inlet_turbulence.initial_seed and "
+                "inlet_turbulence.enabled both false: PALM then draws no random "
+                "disturbances, so every seed gives the same run. Set "
+                "initial_seed: true (or enabled: true under inflow_outflow)."
+            )
         # Outflow damping layer for inflow_outflow runs; None writes nothing.
         # See `_apply_outflow_damping` and docs/pypalm.md §8.
         self._outflow_damping = outflow_damping
@@ -1175,8 +1190,9 @@ class ForwardModel(BaseForwardModel):
         ``inflow_outflow`` via an LOD=1 ``init_atmosphere_*`` driver and
         ``'read_from_file'`` (see ``_reset_cold_init``).
 
-        ``state`` provided → warm start (no spinup): the resolved u/v/w field is
-        injected as PALM's full 3D initial condition via the dynamic-driver
+        ``state`` provided → warm start (no spinup): the resolved u/v field is
+        injected as PALM's full 3D initial condition (PALM zeroes w and its
+        initial pressure solve rebuilds it) via the dynamic-driver
         ``init_atmosphere_*`` LOD=2 mechanism and ``initializing_actions`` is
         switched to ``'read_from_file'`` (see :mod:`.utils.warm_start_utils`).
         Warm-start carries no subgrid state — PALM re-derives SGS-TKE — so the

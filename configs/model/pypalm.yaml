@@ -48,10 +48,18 @@ forward_model:
   nudging_config:
     enabled: true          # false -> today's un-driven periodic staging
     tnudge: 15.0           # s; relaxation timescale, matches pyudales
-    nnudge_meters: 4.0     # no nudging below this height (via huge tnudge)
+    # No nudging below this height (via huge tnudge). Same value as pyudales:
+    # above the canopy, so the canopy is driven by the shear layer, not held to
+    # the target by the nudging. 4 m nudged the canopy too, which made the
+    # canopy-level wind ~3x uDALES's (docs/pypalm.md §8).
+    nnudge_meters: 16.0
     profile_config:
       type: power_law
       alpha: 0.25
+      # Height at which velocity_magnitude is the speed; same as pyudales, so
+      # the parameter means the same wind in both backends (unset it would
+      # default to the domain top).
+      z_ref: 64.0
   # Switchable inlet turbulence. For PALM this is the built-in random
   # inflow-disturbance machinery (create_disturbances + dt_disturb), the only
   # inlet-turbulence generator that is independently toggleable on our staging:
