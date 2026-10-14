@@ -736,7 +736,8 @@ columns (x = 36-40 m), which is the near wake of the second cube column
 (x = 25-35 m). `outflow_buffer` moves the outflow and the layer into empty
 ground behind `domain.bounds` (the case array is cropped at x = 40, inside
 the gap before the next column at x = 45, so the geometry inside the bounds is
-unchanged). Laminar runs (10°, 5 m/s, power law 0.25, no inlet disturbances,
+unchanged). Laminar runs (10°, 5 m/s, power law 0.25 with `z_ref` = the
+32 m domain top, no inlet disturbances,
 30 s spin-up, 540 s, `ncpu=1`), 540-s mean at the case sensors, buffered
 40 m with the default damping inside the buffer as reference:
 
@@ -770,7 +771,9 @@ fetch matters when that sensor is used.
 
 Recommended laminar truth for cross-model work on xie_and_castro:
 `outflow_buffer: 40` with the default damping (factor 1.0, width 4 m, now
-inside the buffer), `ncpu` dividing the extended nx (50 at 2 m), 30 s spin-up.
+inside the buffer), `ncpu` dividing the extended nx (50 at 2 m), 30 s spin-up,
+and the inflow profile's `z_ref` pinned explicitly (these numbers use the
+32 m domain top).
 Not the default: `outflow_buffer: null` keeps existing runs unchanged.
 
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%

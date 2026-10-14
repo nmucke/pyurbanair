@@ -32,6 +32,8 @@ _SMOKE = [
     "model.forward_model.inlet_turbulence.initial_seed=true",
     "model.forward_model.nudging_config.profile_config.type=power_law",
     "model.forward_model.nudging_config.profile_config.alpha=0.25",
+    # Reference height = domain top, as _expected_profile assumes.
+    "++model.forward_model.nudging_config.profile_config.z_ref=null",
 ]
 
 # inflow_outflow selects the multigrid solver: ncpu must divide nx.
