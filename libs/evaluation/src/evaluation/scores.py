@@ -730,13 +730,17 @@ def vector_sensor_metrics(
         truth time mean over the scored period (the climatology baseline's
         reference, in-sample). 1 when the fluctuations match in pattern,
         whatever their amplitude; 0 when no better than that time mean.
+      * ``member_acc(t)`` -- the same ACC of each member, averaged over the
+        members: how well a single realisation, with its own turbulence,
+        follows the truth. Below ``acc`` by the members' unpredictable part,
+        which the ensemble mean averages out.
 
     Args:
         truth_comp: ``(component, time, sensor)`` truth series.
         ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
 
     Returns:
-        ``{"rmse": (T,), "energy_score": (T,), "spread": (T,), "acc": (T,)}``.
+        ``{"rmse", "energy_score", "spread", "acc", "member_acc"}``, each ``(T,)``.
     """
     components = [str(c) for c in np.asarray(truth_comp["component"].values)]
     # Per-component metrics reuse the shared compute_sensor_metrics, which also
@@ -756,17 +760,28 @@ def vector_sensor_metrics(
     else:
         spread = np.full(rmse.shape, np.nan)
     mean = truth.mean(axis=1, keepdims=True)  # (C,1,S) each sensor's time mean
-    pred, true = members.mean(axis=1) - mean, truth - mean  # (C,T,S) anomalies
-    with np.errstate(invalid="ignore", divide="ignore"):
-        acc = (pred * true).sum(axis=(0, 2)) / np.sqrt(
-            (pred**2).sum(axis=(0, 2)) * (true**2).sum(axis=(0, 2))
-        )
+    true = truth - mean  # (C,T,S) anomalies
+    member_anomalies = members - mean[:, None]  # (C,E,T,S)
     return {
         "rmse": rmse,
         "energy_score": _energy_score(members, truth),
         "spread": spread,
-        "acc": acc,
+        "acc": _anomaly_correlation(member_anomalies.mean(axis=1), true),
+        "member_acc": _anomaly_correlation(member_anomalies, true[:, None]).mean(
+            axis=0
+        ),
     }
+
+
+def _anomaly_correlation(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
+    """Correlation of ``(C, ..., T, S)`` anomalies, pooled over the components
+    and sensors: ``(..., T)``."""
+    axes = (0, -1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result: np.ndarray = (pred * true).sum(axis=axes) / np.sqrt(
+            (pred**2).sum(axis=axes) * (true**2).sum(axis=axes)
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,9 @@ no registries. The only class with state is
   ensemble spread and anomaly correlation (ACC) of the `(u, v, w)` vector per
   time step; the spread uses the same vector norm as the RMSE, so
   `spread_skill` compares like with like; the ACC's anomalies are taken about
-  each sensor's truth time mean, the climatology baseline's reference),
+  each sensor's truth time mean, the climatology baseline's reference;
+  `member_acc` is each member's ACC averaged over the members, below the
+  ensemble mean's `acc` by the turbulence the averaging removes),
   `compute_sensor_metrics`, `sensor_rmse`.
 - **Window statistics**: `window_statistics_summary` scores every
   `statistic x quantity` pair (`mean_u`, `variance_magnitude`, ...) with CRPS,
@@ -225,7 +227,7 @@ time-varying parameter's knots averaged within each window):
 | `canopy_profiles` | per profile (`u`, `tke`, `uw`, intrinsic averages over each level's fluid cells) and source: `profile_rmse`, the RMSE over z of the ensemble-mean profile against the truth's, per window |
 | `sensor_distributions` | per sensor set, quantity (`u`, `v`, `w`, `magnitude`) and source: `distribution_scores` per window of its sensor values (frames × sensors × members) against the truth's: `w2` with `location`/`scale`/`shape`, `kl`, `*_per_sensor`, `*_member_median`; `truth_halves`, the truth's first half-window against its second (assumes stationarity) |
 | `spectra` | per component, height group and source: the `large`, `mid` and `near_cutoff` band energy ratios (dB) and the `log_spectral_distance` of the members' median spanwise spectrum against the truth's, per window. A truth spectrum on another grid is interpolated onto the ensemble's wavenumbers (NaN beyond its own cutoff). A group without fully fluid lines is null, and a log line says so |
-| `sensors` | sanity check, per sensor set (`assimilation`, `validation`): RMSE, energy score and anomaly correlation (`velocity_vector_acc`) of the instantaneous `(u, v, w)` vector |
+| `sensors` | sanity check, per sensor set (`assimilation`, `validation`): RMSE, energy score and anomaly correlation of the instantaneous `(u, v, w)` vector: of the ensemble mean (`velocity_vector_acc`) and averaged over the members (`velocity_vector_member_acc`) |
 | `spread_skill` | sanity check, per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
 | `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
 | `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank, per source |
