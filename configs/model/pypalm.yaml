@@ -45,8 +45,8 @@ forward_model:
   # DIFFUSIVITY in m^2/s, not a dimensionless constant like uDALES/pylbm take.
   # Setting it is a regime switch: it replaces PALM's prognostic SGS-TKE closure
   # with constant-Km and forces constant_flux_layer=.false. (PAC0149), disabling
-  # the wall model. The dimensionless ~0.24 used by the other backends is far too
-  # little dissipation as m^2/s and diverges. null keeps PALM's own closure.
+  # the wall model. The dimensionless 0.07-0.15 used by the other backends is far
+  # too little dissipation as m^2/s and diverges. null keeps PALM's own closure.
   # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
   sgs_constant: null
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert

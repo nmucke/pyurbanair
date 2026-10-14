@@ -26,12 +26,15 @@ parameters:
   # uDALES cs / PALM km_constant proxy), so set the range to the ASSIMILATION
   # model. Keep the prior near/above the solver's stable threshold — too little
   # SGS dissipation diverges the run (docs/archive/esmda_model_error_parameters.md §8).
-  # Default range targets the uDALES xie_and_castro case (tuned at cs=0.24).
+  # Default range targets uDALES' Vreman c_vreman around its 0.12 default
+  # (configs/model/pyudales.yaml). Below ~0.10 energy piles up at the grid scale;
+  # on xie_and_castro 0.05 still runs, 0.04 can diverge at the outflow
+  # (docs/pyudales.md §7).
   sgs_constant:
     _target_: pyurbanair.static_parameters.Normal
-    mean: 0.22
-    std: 0.03
-    min: 0.18
+    mean: 0.12
+    std: 0.02
+    min: 0.07
 
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
