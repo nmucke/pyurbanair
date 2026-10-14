@@ -23,6 +23,11 @@ Per lead step (metrics.nc, dims source x lead, truncated to the shortest rollout
   std_ratio_<var>   spatial std of the prediction / the truth's (energy retention)
   divergence_rms    RMS of du/dx + dv/dy + dw/dz, central differences on the cells
                     whose six neighbours are fluid; `truth` is the reference
+  tke, tke_<var>    resolved TKE averaged over the fluid cells, 0.5 sum_c (u_c -
+                    mean u_c)^2, and per component 0.5 (u_c - mean u_c)^2, with
+                    each source's own time mean over its rollout (per cell, over
+                    the finite frames): a smoothing model loses it, a diverging
+                    one grows it; `truth` is the reference, persistence is 0
 
 Window statistics (over the rollout's lead steps; NaN for an unstable rollout):
   mean_u_rmse, tke_rmse   RMSE of the time-mean u and resolved-TKE fields
@@ -174,7 +179,12 @@ def _score_sample(
         "sample": sample,
         "times": times - times[0],
         "z": z,
-        "curves": {TRUTH: {"divergence_rms": _divergence_rms(truth, ctx, spacing)}},
+        "curves": {
+            TRUTH: {
+                "divergence_rms": _divergence_rms(truth, ctx, spacing),
+                **_tke(_fluid_values(truth, fluid), state_vars),
+            }
+        },
         "stats": {
             HALVES: _compare(
                 _statistics(truth[:half], ctx), _statistics(truth[half:], ctx), ctx
@@ -220,10 +230,8 @@ def _curves(
     spacing: tuple[float, float, float],
 ) -> dict[str, np.ndarray]:
     fluid, state_vars = ctx["fluid"], ctx["vars"]
-    cells = np.flatnonzero(fluid)
     with np.errstate(all="ignore"):  # an unstable rollout gives inf / NaN curves
-        # (T, C, n_fluid); `take` on the flat cells is much faster than a mask.
-        p, t = (np.take(f.reshape(*f.shape[:2], -1), cells, -1) for f in (pred, truth))
+        p, t = _fluid_values(pred, fluid), _fluid_values(truth, fluid)
         f8 = np.float64  # float32 sums over ~1e8 values lose digits
         mse = ((p - t) ** 2).mean(axis=-1, dtype=f8)
         anomaly_t = t - t.mean(axis=0, dtype=f8).astype(t.dtype)
@@ -238,7 +246,28 @@ def _curves(
             curves[f"rmse_{var}"] = np.sqrt(mse[:, c])
             curves[f"std_ratio_{var}"] = std_ratio[:, c]
         curves["divergence_rms"] = _divergence_rms(pred, ctx, spacing)
+        curves |= _tke(p, state_vars)
     return curves
+
+
+def _fluid_values(fields: np.ndarray, fluid: np.ndarray) -> np.ndarray:
+    """(T, C, n_fluid) values on the fluid cells; `take` on the flat cells is
+    much faster than a mask."""
+    return np.take(fields.reshape(*fields.shape[:2], -1), np.flatnonzero(fluid), -1)
+
+
+def _tke(values: np.ndarray, state_vars: list[str]) -> dict[str, np.ndarray]:
+    """(T,) resolved TKE, total and per component, averaged over the fluid cells
+    of (T, C, n_fluid) `values`, about their own time mean over the finite frames."""
+    velocity = [state_vars.index(v) for v in VELOCITY]
+    v = values[:, velocity]
+    finite = np.isfinite(v).all(axis=(1, 2))
+    with np.errstate(all="ignore"):
+        mean = v[finite].mean(axis=0, dtype=np.float64).astype(v.dtype)
+        energy = 0.5 * ((v - mean) ** 2).mean(axis=-1, dtype=np.float64)  # (T, 3)
+    return {"tke": energy.sum(axis=1)} | {
+        f"tke_{var}": energy[:, c] for c, var in enumerate(VELOCITY)
+    }
 
 
 def _divergence_rms(
