@@ -188,6 +188,7 @@ class ForwardModel(BaseForwardModel):
         inlet_turbulence: Optional[dict] = None,
         random_seed: Optional[int] = None,
         outflow_damping: Optional[dict] = None,
+        outflow_buffer: Optional[float] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -238,6 +239,13 @@ class ForwardModel(BaseForwardModel):
         # Outflow damping layer for inflow_outflow runs; None writes nothing.
         # See `_apply_outflow_damping` and docs/pypalm.md §8.
         self._outflow_damping = outflow_damping
+        # Empty outflow buffer: PALM runs on a grid extended downstream by
+        # ``outflow_buffer`` m of flat ground, and the output is cropped back to
+        # ``nx``/``bounds``. None runs on ``bounds`` as given. See
+        # `_extend_for_outflow_buffer` and docs/pypalm.md §8.
+        self._output_nx: Optional[int] = None
+        self._output_x_max: Optional[float] = None
+        self._extend_for_outflow_buffer(outflow_buffer)
         self._validate_outflow_damping()
 
         self.dirs = get_palm_directory_paths(
@@ -258,15 +266,17 @@ class ForwardModel(BaseForwardModel):
         self._apply_boundary_condition()
         self._apply_random_seed()
 
-        if nx is not None and ny is not None and bounds is not None:
-            dz = (bounds[2][1] - bounds[2][0]) / nz if nz else 1.0
+        # self.nx/self.bounds include an outflow buffer; x_max empties it.
+        if self.nx is not None and ny is not None and self.bounds is not None:
+            dz = (self.bounds[2][1] - self.bounds[2][0]) / nz if nz else 1.0
             self.topography = stl_to_palm_topography(
                 stl_path=stl_path,
                 dirs=self.dirs,
-                nx=nx,
+                nx=self.nx,
                 ny=ny,
-                bounds=bounds,
+                bounds=self.bounds,
                 dz=dz,
+                x_max=self._output_x_max,
             )
             self._p3d_set_string(
                 "initialization_parameters", "topography", "read_from_file"
@@ -439,6 +449,41 @@ class ForwardModel(BaseForwardModel):
             # grid. Pin a slab decomposition (npex=ncpu, npey=1) derived from
             # NCPU so any ncpu that divides nx+1 works (see ncpu_utils).
             self._apply_processor_topology()
+
+    def _extend_for_outflow_buffer(self, buffer: Optional[float]) -> None:
+        """Extend the PALM grid downstream by ``buffer`` m of flat ground.
+
+        The radiation outflow and the damping layer then sit in an empty
+        buffer instead of in the wake of the last obstacle inside ``bounds``;
+        ``_load_and_postprocess_state`` crops the output back to ``nx`` /
+        ``bounds``. The buffer is rounded up to whole cells, and ``ncpu`` must
+        divide the extended ``nx``.
+        """
+        if buffer is None:
+            return
+        buffer = float(buffer)
+        if self.boundary_condition != "inflow_outflow":
+            raise ValueError("outflow_buffer needs boundary_condition='inflow_outflow'")
+        if buffer <= 0.0:
+            raise ValueError(f"outflow_buffer must be > 0 m, got {buffer}")
+        if not self.nx or self.bounds is None:
+            raise ValueError("outflow_buffer needs nx and bounds")
+        (xmin, xmax), y_bounds, z_bounds = self.bounds
+        dx = (xmax - xmin) / self.nx
+        cells = int(np.ceil(buffer / dx - 1e-9))
+        self._output_nx = int(self.nx)
+        self._output_x_max = float(xmax)
+        self.nx = int(self.nx) + cells
+        self.bounds = ((xmin, xmax + cells * dx), y_bounds, z_bounds)
+        if self._outflow_damping is not None:
+            width = float(self._outflow_damping["width"])
+            if width > cells * dx:
+                logger.warning(
+                    "outflow_damping.width=%.3g m is wider than the %.3g m outflow "
+                    "buffer, so the damping layer reaches into bounds.",
+                    width,
+                    cells * dx,
+                )
 
     def _validate_outflow_damping(self) -> None:
         """Reject an ``outflow_damping`` block PALM would reject or ignore.
@@ -1149,6 +1194,11 @@ class ForwardModel(BaseForwardModel):
 
         if "z" in state.dims and state.sizes["z"] > 1:
             state = state.isel(z=slice(1, None))
+
+        # Drop the outflow buffer: the state covers `bounds` as configured.
+        if self._output_nx is not None:
+            keep = slice(0, self._output_nx)
+            state = state.isel({d: keep for d in ("x", "xu") if d in state.dims})
 
         # Unify onto a single z axis so u/v/w have matching shapes for
         # downstream viz and aggregation. Interpolate w from zw onto z

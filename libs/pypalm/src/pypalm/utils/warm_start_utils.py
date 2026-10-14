@@ -107,6 +107,9 @@ def _interp_to(
     """
     xdim = "xu" if "xu" in da.dims else "x"
     ydim = "yv" if "yv" in da.dims else "y"
+    # Columns past the state's last one (an outflow buffer the state does not
+    # cover) repeat that column instead of extrapolating.
+    x_phys = np.minimum(x_phys, float(da[xdim].max()))
     out = da.interp(
         {xdim: x_phys, ydim: y_phys, "z": z_phys},
         method="linear",
