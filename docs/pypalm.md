@@ -734,7 +734,7 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
 | upstream ground | wall (STL ground extended over the fetch since 2026-10; before it was free-slip) | wall | aligned |
 | walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0; first point 1 m (dz/2) in both |
 | SGS | Vreman, c = 0.24 | Deardorff 1.5-order TKE | cannot be aligned, see below |
-| advection, time | CD2, RK3, CFL 0.7, dt_max 1 s | pw-scheme (2nd order), RK3, CFL 0.7, dt_max 1 s | aligned up to the scheme |
+| advection, time | CD2, RK3, CFL 0.7, dt_max 1 s | ws-scheme (5th order upwind, since 2026-10; pw-scheme before), RK3, CFL 0.7, dt_max 1 s | different on purpose: uDALES has only CD2, and the undamped pw-scheme left grid-scale streaks; see "Grid-scale streaks" |
 | pressure solver | FFT (cosine in x under inflow-outflow) | multigrid (inflow_outflow), FFT (periodic) | both converged; not a parity issue |
 | initial state | rest (+0.01 m/s noise) | the profile (no kick, `initial_seed: false`) | different, covered by the spin-up |
 | output | instantaneous u, v, w (+p) every `output_frequency`, labelled dt, 2dt, … | instantaneous u, v, w, same labels (uDALES used actual dump times before 2026-10) | aligned; uDALES u, v on faces (`xm`, `ym`), w on `zm`; PALM `xu`, `yv`, w interpolated to `z`, plus a ghost level at 33 m |
@@ -764,6 +764,9 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
   0.12 vs 0.25). Above the canopy the array-mean u agrees within 0.23 m/s.
   With laminar inflow uDALES reaches a steady state (TKE < 0.001 m²/s²
   everywhere) while PALM's wakes shed (array TKE 0.16 m²/s² at 1 m).
+  These TKE and wake numbers are from the pw-scheme. Much of the excess
+  PALM TKE was grid noise, and with the ws-scheme laminar PALM is steady too;
+  see "Grid-scale streaks".
   Periodic: slab-mean u within 0.17 m/s below 13 m and 0.08 m/s above; TKE
   agrees near the ground and PALM has 20-60 % less above 13 m.
 
@@ -950,14 +953,105 @@ building": every cell in that region gets a large non-zero height, blocking
 airflow over the entire base rather than only the actual buildings. Pylbm and
 pyudales handle the same geometry correctly with their 3D approaches.
 
+### Grid-scale streaks with the pw-scheme: xie_and_castro uses the ws-scheme
+
+Until 2026-10 xie_and_castro ran `momentum_advec = 'pw-scheme'` (2nd-order
+Piacsek-Williams, chosen in 55574ce to match uDALES CD2). PALM's time-mean |U|
+then had steady spanwise streaks, 2-4 cells wide, from the inflow face to the
+array (and one at y ≈ 47 m at z = 23 m), even with a laminar, y-homogeneous
+inflow. The time-mean w alternated sign cell by cell in x and y in front of
+the array.
+
+**Cause.** Under central differences a 2Δx wave has group velocity -U: the
+grid-scale wiggles that the building edges generate travel *upstream* and
+stand between the face and the array. Nothing damps them. The pw-scheme has no
+numerical dissipation, and in front of the array PALM's SGS TKE is nearly zero
+(e = 0 on the inflow planes; 0.006-0.014 m²/s² at x = -19..-15, z = 9 m), so
+Km ≈ 0.02 m²/s and the cell Reynolds number is ~400. uDALES runs the same CD2,
+but its Vreman c = 0.24 (§ "Cross-model parity") reacts to the wiggles' own
+gradients and damps them.
+
+**Bisection** (laminar inflow, 2 m grid, x = [-20, 80] + 20 m buffer, 420 s,
+statistics over 120-420 s; metric: rms over x = -18..-6 of the y-deviation of
+the time-mean u, m/s; one ingredient changed at a time from the first row):
+
+| variant | z = 1 | 9 | 15 | 23 m |
+|---|---|---|---|---|
+| pw, as in the comparison (kick on, npex 5) | 0.27 | 0.51 | 0.45 | 0.088 |
+| npex 1 | 0.26 | 0.51 | 0.45 | 0.085 |
+| no initial kick | 0.26 | 0.51 | 0.47 | 0.088 |
+| no buildings | 0.000 | 0.000 | 0.000 | 0.000 |
+| multigrid 12 cycles (default 4) | 0.26 | 0.51 | 0.44 | 0.085 |
+| static inflow (`turbulent_inflow` off, face from `u_init`) | 0.28 | 0.50 | 0.41 | 0.081 |
+| no outflow damping | 0.27 | 0.50 | 0.46 | 0.083 |
+| no-slip lid | 0.28 | 0.50 | 0.46 | 0.087 |
+| pw + `km_constant = 0.2` m²/s (diagnostic only) | 0.10 | 0.17 | 0.15 | 0.026 |
+| **ws-scheme** | 0.09 | 0.05 | 0.03 | 0.005 |
+| pw, turbulent inflow | 0.22 | 0.42 | 0.39 | 0.092 |
+| ws, turbulent inflow | 0.11 | 0.06 | 0.09 | 0.076 |
+| uDALES laminar / turbulent | 0.08 / 0.08 | 0.06 / 0.09 | 0.05 / 0.10 | 0.015 / 0.11 |
+
+The inflow planes, the multigrid convergence, the decomposition, the kick,
+the damping and the lid do not matter. Two side findings: with `mg_cycles =
+-1` (iterate to `residual_limit` 1e-6) PALM aborts with PAC0265 because the
+mean residual stalls at 1.8e-6. With 4 or 12 cycles the divergence after the
+solve is the same (~1.5e-3), so it is not what drives the streaks. The
+pw-scheme also biased the upstream y-mean u at 9 m by +0.2 m/s (3.21 against
+the 3.02 m/s profile; ws 2.99, uDALES 3.03).
+
+**Fix.** `geometries/xie_and_castro/_p3d` sets `momentum_advec` and
+`scalar_advec` to `'ws-scheme'`, PALM's default (5th-order upwind-biased
+Wicker-Skamarock). It is also what Barcelona runs. Its implicit dissipation
+acts mainly at 2-4Δ. **This is a parity trade-off:** uDALES only implements
+CD2 for momentum (`iadv_mom = 2`), so the advection schemes now differ. Yet
+pw-scheme "parity" was only nominal: CD2 in uDALES is damped by a 3x-typical
+Vreman viscosity, whereas pw in PALM is not damped at all. Matched by the
+scheme names, the two models had unmatched grid-scale dissipation. With the
+ws-scheme the two behave alike (comparison workflow, 2 replicas, `ncpu` 5,
+uDALES vs PALM):
+
+| | pw | ws |
+|---|---|---|
+| laminar: domain rms of time-mean u difference | 0.413 | 0.376 |
+| laminar: PALM replica noise of time-mean u | 0.065 | 0.006 (uDALES 0.006) |
+| laminar: field TKE distance | 0.133 | 0.008 |
+| laminar: sensor mean speed distance | 0.578 | 0.484 |
+| laminar: array resolved TKE at 1 m (uDALES 0.004) | 0.40 | 0.009 |
+| laminar: profile u distance | 0.130 | 0.141 |
+| turbulent: domain rms of time-mean u difference (replica noise 0.13-0.15) | 0.372 | 0.351 |
+| turbulent: field / profile TKE distance | 0.173 / 0.140 | 0.076 / 0.041 |
+| turbulent: sensor mean speed / sensor std distance | 0.536 / 0.214 | 0.455 / 0.155 |
+| turbulent: profile u distance | 0.147 | 0.158 |
+| turbulent: upstream streak metric at 9 / 15 m (above) | 0.33 / 0.37 | 0.06 / 0.11 |
+| turbulent: upstream TKE at 9 m, x = -19..-7 (uDALES 0.15) | 0.27 | 0.13 |
+| turbulent: array resolved TKE at 1 m (uDALES 0.04) | 0.59 | 0.14 |
+
+So the "PALM's wakes shed with laminar inflow" and "injected turbulence
+decays slower in PALM" differences recorded before (§ "Cross-model parity")
+were mostly pw-scheme grid noise. With laminar inflow, PALM-ws is steady like
+uDALES. The array-mean u at 1 m rises from 0.70 to 0.92 m/s (uDALES 1.32). The
+remaining canopy difference is the SGS closure. Periodic (FFT, no inflow
+face, never streaky) moves closer too: field mean-u distance 0.215 → 0.179
+(replica noise 0.13-0.14), profile u 0.126 → 0.064, profile TKE 0.108 →
+0.056, sensor mean speed 0.194 → 0.098 (now within the noise).
+The ws-scheme costs ~1.2-1.5x the wall time (laminar 420 s run: 28 → 43 s
+at npex 4).
+
+Tests: `tests/pypalm/test_pypalm_advection.py` (staging, and an `integration`
+run on a 30 x 20 x 16 grid where the upstream y-std of the time-mean u is
+0.10-0.34 m/s with pw and ≤ 0.013 m/s with ws).
+
 ### inflow_outflow diverges at the outflow without damping (pw-scheme)
 
-On xie_and_castro, `boundary_condition: inflow_outflow` without damping
-diverges within ~10 s. Behind the last cube the flow reverses at the radiation
-outflow boundary, and the case's `momentum_advec = 'pw-scheme'` (2nd-order
-Piacsek-Williams, chosen in 55574ce to match uDALES CD2) adds no numerical
+With the pw-scheme, xie_and_castro under `boundary_condition: inflow_outflow`
+without damping diverges within ~10 s. Behind the last cube the flow reverses
+at the radiation outflow boundary, and the pw-scheme adds no numerical
 dissipation to absorb it. PALM's outflow damping layer fixes it, so
 `configs/model/pypalm.yaml` turns it on by default (`outflow_damping`, §7).
+The ws-scheme the case runs now is stable without damping: 360 s on the case
+domain without buffer or damping, min u at the outflow -1.1 m/s. The damping
+stays on by default because it keeps reversed flow out of the outflow column;
+inside the buffer it changes nothing upstream.
 
 PALM semantics (vendored source, `packages/palm/model/src/`):
 - `outflow_damping_factor` and `outflow_damping_width` are

@@ -554,8 +554,8 @@ class ForwardModel(BaseForwardModel):
         """Write PALM's outflow damping layer for an inflow_outflow run.
 
         Behind the last obstacle the flow reverses at the radiation outflow
-        boundary, and the non-dissipative ``pw-scheme`` advection cannot damp
-        it: xie_and_castro diverges within ~10 s without this. PALM relaxes
+        boundary; with the non-dissipative ``pw-scheme`` advection
+        xie_and_castro diverged within ~10 s without this. PALM relaxes
         u, v, w (and pt) toward the initial profile over the last ``width``
         metres at up to ``factor`` 1/s (prognostic_equations.f90:391).
         ``None`` writes nothing, leaving whatever the template sets.

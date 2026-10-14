@@ -35,8 +35,11 @@
     ! --- aligned with uDALES xie_and_castro setup ---
     neutral = .T.,              ! match uDALES ltempeq=.false. (neutral, momentum-only)
     omega = 0.0,                ! match uDALES lcoriol=.false. (no Coriolis)
-    momentum_advec = 'pw-scheme',   ! 2nd-order Piacsek-Williams ~ uDALES iadv_mom=2 (CD2)
-    scalar_advec = 'pw-scheme',
+    ! 5th-order upwind (the PALM default), not the 2nd-order pw-scheme (as
+    ! uDALES CD2): pw-scheme grid-scale wiggles from the buildings travel upstream
+    ! and stand as spanwise streaks (docs/pypalm.md section 8, Grid-scale streaks)
+    momentum_advec = 'ws-scheme',
+    scalar_advec = 'ws-scheme',
     cfl_factor = 0.7,           ! match uDALES courant=0.7
     bc_uv_t = 'neumann',        ! free-slip lid, as uDALES BCtopm 1 (periodic) / 3 (inflow-outflow)
 
