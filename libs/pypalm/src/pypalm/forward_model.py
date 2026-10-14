@@ -27,6 +27,7 @@ from .utils.dir_utils import PALMDirectoryPaths, get_palm_directory_paths
 from .utils.dynamic_driver_utils import (
     DEFAULT_PT_SURFACE,
     apply_time_varying_inflow,
+    as_inflow_schedule,
     disable_turbulent_inflow,
     is_time_varying_params,
     remove_dynamic_driver_file,
@@ -567,8 +568,9 @@ class ForwardModel(BaseForwardModel):
         #   periodic  -> nudging driver (static OR time-varying), unless the
         #                escape hatch nudging_config.enabled=false restores
         #                today's un-driven periodic staging;
-        #   inflow_outflow static       -> current static path;
-        #   inflow_outflow time-varying -> current dynamic-driver path.
+        #   inflow_outflow (static OR time-varying) -> dynamic-driver path,
+        #                static params as a constant schedule;
+        #   periodic without nudging    -> static (or dynamic-driver) path.
         # The inflow_outflow branches also run symmetric hygiene so a template
         # (or a prior periodic run in the same experiment_dir) cannot leak the
         # LSF/nudging apparatus into an inflow run.
@@ -577,18 +579,27 @@ class ForwardModel(BaseForwardModel):
 
         if use_nudging:
             angle, speed = self._stage_nudging_driver(profile_config)
-        elif _is_time_varying_params(self.params):
+        elif (
+            _is_time_varying_params(self.params)
+            or self.boundary_condition == "inflow_outflow"
+        ):
             if self.bounds is None or not self.nz or not self.ny:
                 raise ValueError(
-                    "Time-varying inflow requires bounds, nz, and ny to be set "
-                    "on ForwardModel (needed to construct the dynamic driver)."
+                    "inflow_outflow and time-varying inflow require bounds, nz, "
+                    "and ny to be set on ForwardModel (needed to construct the "
+                    "dynamic driver)."
                 )
             # Writes <case>_dynamic NetCDF and flips on turbulent_inflow in the
             # namelist. Returns a scalar params Dataset holding the t=0 values
             # so we still populate ug_surface/u_profile for initialisation.
+            # Static inflow_outflow params go through the same driver as a
+            # constant schedule: the inflow planes are the only thing that
+            # re-imposes the inflow face every step. Without them a warm start
+            # (LOD=2) leaves the inflow ghost column at u=0 and PALM copies that
+            # onto the face for the whole run (docs/pypalm.md §8).
             self._disable_nudging_apparatus()
             init_params = apply_time_varying_inflow(
-                params=self.params,
+                params=as_inflow_schedule(self.params, self.simulation_time),
                 p3d_path=self.p3d_path,
                 driver_path=self.dynamic_driver_path,
                 bounds=self.bounds,
@@ -600,8 +611,8 @@ class ForwardModel(BaseForwardModel):
             angle = float(init_params["inflow_angle"].item())
             speed = float(init_params["velocity_magnitude"].item())
         else:
-            # Static path — make sure a stale dynamic driver from a prior
-            # time-varying run, and any nudging apparatus from a prior periodic
+            # Static periodic path (nudging_config.enabled=false) — make sure a
+            # stale dynamic driver from a prior inflow_outflow run, and any nudging apparatus from a prior periodic
             # run, in the same experiment_dir don't leak in.
             disable_turbulent_inflow(self.p3d_path)
             remove_dynamic_driver_file(self.dynamic_driver_path)
