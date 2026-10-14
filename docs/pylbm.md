@@ -102,6 +102,7 @@ Key constructor parameters:
 | `ncpu` | 1 | OpenMP threads. `> 1` builds the gfortran binary with `MP=1` and runs it with `OMP_NUM_THREADS=ncpu`; `1` is the serial build, launched exactly as before. A CUDA build ignores it with a warning (§3) |
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
+| `outflow_buffer` | None | `inflow_outflow` only: metres of empty ground added past `bounds`' xmax; states are cropped back to `bounds`. See §5 "Outflow buffer" |
 | `ground_boundary` | None | `"no_slip"` / `"free_slip"`: the domain bottom (`kbnd` 12 / 22, the lid free-slip either way); None leaves the solver's 22. See §5 "Ground and lid" |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
 | `inlet_turbulence` | None | Inflow-turbulence dict, e.g. `{"enabled":True,"method":"digital_filter","seed":1}` or `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (`random_forcing`, the default method); see §7 |
@@ -155,7 +156,8 @@ The public entry point (called by `BaseForwardModel.__call__`):
    raised to `unlimited` / `hard` before launch to handle large
    `nx*ny*nz` automatic arrays.
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
-   with `xarray.concat`, assigns physical coordinates, scales velocity from
+   with `xarray.concat`, assigns physical coordinates, crops the outflow
+   buffer (§5), scales velocity from
    lattice units (`* C_u`), trims spin-up outputs, trims to `simulation_time /
    output_frequency` outputs, and assigns a seconds-based `time` coordinate
    (`dt, 2·dt, …, simulation_time`).
@@ -443,7 +445,7 @@ TI_u at 9 m 0.061 / 0.087 / 0.107 at 2 / 22 / 102 m past the slab (`free_slip`
 **On xie_and_castro** (`workflows/compare_models.sh`: uDALES, PALM and pylbm
 with both grounds, 2 replicas each, 10°, 5 m/s, 420 s, statistics from 150 s;
 pylbm on x = -20..100 m with the STL cut at x = 80 m, i.e. the other backends'
-20 m flat outflow buffer, see §9 "Outflow in the wake"), the distance/noise
+20 m flat outflow buffer, which `outflow_buffer` now builds), the distance/noise
 ratio of the time-mean u against PALM (against uDALES in brackets):
 
 | region | turbulent `no_slip` | turbulent `free_slip` | laminar `no_slip` | laminar `free_slip` |
@@ -465,6 +467,36 @@ boundary the other backends have, and leaves the wall-model difference visible
 instead of cancelling it, at the cost of street-level agreement (time-mean u
 distance to PALM 0.72 against 0.50 m/s, turbulent).
 `ground_boundary: free_slip` gives the earlier behaviour.
+
+### Outflow buffer
+
+`outflow_buffer` (`${flow.outflow_buffer}`: 20 m on xie_and_castro, null in
+`common.yaml` and the periodic case) mirrors pyudales and pypalm (docs/pypalm.md
+§8): `_extend_for_outflow_buffer` adds `ceil(buffer / dx)` cells past
+`bounds`' xmax, so `mod_dimensions.F90`, the bathymetry and the restarts are
+built for the extended `nx` (50 -> 60 on the case). The buffer is empty:
+`stl_to_lbm_geometry(x_max=xmax)` leaves every column past xmax fluid (the
+xie_and_castro STL has a fifth block column at x = 85-95 m), and the ground
+there is the same `kbnd` boundary as everywhere else. `run_single` crops every
+state back to `bounds` (`_crop_outflow_buffer`), so callers never see the
+buffer; a warm start pads the cropped state by repeating its last column, with
+`blanking` 0 (`_pad_outflow_buffer`). The inflow, its profile and the
+digital-filter forcing are per (y, z) and do not see `nx`. `null` changes
+nothing; a buffer with `boundary_condition: periodic` or ≤ 0 m raises.
+
+**Measured** on xie_and_castro through the normal config path (x = -20..80 m
+plus 20 m, `no_slip`, 10°, 5 m/s, 420 s, laminar and digital-filter seed 1):
+the states are on the case grid (50 x-cells, x = -19..79 m) and bit-identical
+to the same runs on the hand-extended domain with the STL cut at 80 m (the
+comparison in "Ground and lid"). Canopy TKE stays at 0.04-0.06 m²/s² across
+the array up to x = 77 m, |u| ≤ 7.1 m/s, |w| ≤ 3.1 m/s. The mean density
+settles 2.0-2.4 % above 1 within the first flow-through (fluid mean 1.0037 at
+t = 5 s, 1.016 at 20 s, 1.024 at 40 s, then steady) and stays there; it does
+the same with a free-slip ground (1.016-1.020), so it is neither the buffer nor
+the ground. As in "Frozen ground corners", nothing anchors the LBM's density
+level under a velocity inflow and a zero-gradient outflow: while the wake
+first reaches the outflow, less mass leaves than enters, and every velocity
+`u = j / rho` then reads ~2 % low.
 
 ### Bathymetry vs. generated F90
 
@@ -813,6 +845,7 @@ forward_model:
   verbose: false
   boundary_condition: inflow_outflow
   ground_boundary: no_slip     # kbnd 12; free_slip: 22 (§5)
+  outflow_buffer: ${flow.outflow_buffer}   # xie_and_castro: 20 m (§5)
   profile_config: {type: power_law, alpha: 0.25}
   inlet_turbulence: {enabled: false, method: random_forcing, amplitude: 5.0e-05,
                      update_interval: 100, intensity: 0.15, length_scale_x: 24.0,
@@ -1079,17 +1112,13 @@ trip this, rerun with `model.forward_model.verbose=true` to see the solver's own
 
 ### Outflow in the wake
 
-pylbm does not read `flow.outflow_buffer`, so on the xie_and_castro case its
-zero-gradient outflow sits at x = 80 m, 5 m behind the last block column, in
-its wake — the setup uDALES and PALM had before their 20 m buffer
-(docs/pypalm.md §8). The run does not crash, but the flow there is broken with
-either ground (420 s, 10°, 5 m/s): time-mean canopy TKE grows from 0.4 m²/s²
-at x = 37 m to 10-22 m²/s² at x = 61-77 m (PALM 0.2-0.4), |u| reaches 25 m/s
-and the mean density drifts by 2-6 %. With the domain extended to x = 100 m and
-the STL cut at x = 80 m (the other backends' flat buffer) the canopy TKE stays
-at 0.03-0.06 m²/s² over the whole array, and |u| ≤ 7 m/s. Compare pylbm on such a
-domain (`domain.nx=60`, `domain.bounds` to 100 m, `geometry.stl_path` the cut
-STL) until pylbm grows an `outflow_buffer` of its own.
+Without `outflow_buffer` the xie_and_castro outflow (zero-gradient, x = 80 m)
+sits 5 m behind the last block column, in its wake, and the flow there breaks
+down with either ground (420 s, 10°, 5 m/s): time-mean canopy TKE grows from
+0.4 m²/s² at x = 37 m to 10-22 m²/s² at x = 61-77 m (PALM 0.2-0.4), |u|
+reaches 25 m/s and the mean density drifts by 2-6 %. The case therefore sets
+`flow.outflow_buffer: 20.0`, which pylbm honours like the other backends
+(§5 "Outflow buffer"); set it whenever the bounds end in a wake.
 
 ### Domain-height SIGFPE
 

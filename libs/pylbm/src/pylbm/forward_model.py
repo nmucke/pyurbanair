@@ -105,6 +105,7 @@ class ForwardModel(BaseForwardModel):
         inlet_turbulence: Optional[dict] = None,
         ncpu: int = 1,
         ground_boundary: Optional[str] = None,
+        outflow_buffer: Optional[float] = None,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
@@ -146,6 +147,13 @@ class ForwardModel(BaseForwardModel):
                 "(docs/pylbm.md §5). The digital filter or a laminar inflow "
                 "avoid it."
             )
+        # inflow_outflow only: ``outflow_buffer`` m of empty ground added past
+        # bounds' xmax, so the outflow does not sit in the wake of the last
+        # building; every state is cropped back to ``bounds`` (pyudales and
+        # pypalm do the same). None: the outflow is at xmax.
+        self._output_nx: Optional[int] = None
+        self._output_x_max: Optional[float] = None
+        nx, bounds = self._extend_for_outflow_buffer(outflow_buffer, nx, bounds)
         # Per-backend default for the SGS constant, overridden by a `sgs_constant`
         # in the params Dataset when one is supplied. None leaves the infile
         # template's value alone. See `apply_sgs_setting`.
@@ -194,6 +202,7 @@ class ForwardModel(BaseForwardModel):
             ny=ny,
             nz=nz,
             bounds=bounds,
+            x_max=self._output_x_max,
         )
 
         # Compute cell size from bounds
@@ -705,6 +714,64 @@ class ForwardModel(BaseForwardModel):
             # Always return to original directory, even if the run failed.
             os.chdir(original_cwd)
 
+    def _extend_for_outflow_buffer(
+        self,
+        buffer: Optional[float],
+        nx: int,
+        bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    ) -> tuple[
+        int, tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    ]:
+        """Extend ``nx``/``bounds`` downstream by ``buffer`` m (whole cells).
+
+        The same rounding as pyudales' and pypalm's ``outflow_buffer``, so all
+        three run on the same extended grid. The buffer gets no buildings
+        (``stl_to_lbm_geometry(x_max=...)``) and the same ground as the rest;
+        ``run_single`` crops the output back to the original ``nx``.
+        """
+        if buffer is None:
+            return nx, bounds
+        buffer = float(buffer)
+        if self.boundary_condition != "inflow_outflow":
+            raise ValueError("outflow_buffer needs boundary_condition='inflow_outflow'")
+        if buffer <= 0.0:
+            raise ValueError(f"outflow_buffer must be > 0 m, got {buffer}")
+        (xmin, xmax), y_bounds, z_bounds = bounds
+        dx = (xmax - xmin) / nx
+        cells = int(np.ceil(buffer / dx - 1e-9))
+        self._output_nx = int(nx)
+        self._output_x_max = float(xmax)
+        return int(nx) + cells, ((xmin, xmax + cells * dx), y_bounds, z_bounds)
+
+    def _crop_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Drop the outflow buffer columns, so the state covers ``bounds``."""
+        if self._output_nx is None:
+            return state
+        return state.isel(x=slice(0, self._output_nx))
+
+    def _pad_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Fill the buffer of a cropped state by repeating its last column.
+
+        A warm start needs the full extended grid; the buffer is empty ground,
+        so the outflow column is the natural guess (pyudales and pypalm do the
+        same). The buffer holds no solids, so its ``blanking`` is 0.
+        """
+        if self._output_nx is None or state.sizes["x"] == self.x_grid.size:
+            return state
+        if state.sizes["x"] != self._output_nx:
+            raise ValueError(
+                f"warm-start state has {state.sizes['x']} x cells; expected "
+                f"{self._output_nx} (bounds) or {self.x_grid.size} (with the "
+                "outflow buffer)"
+            )
+        extra = self.x_grid.size - self._output_nx
+        tail = state.isel(x=[-1] * extra)
+        if "x" in state.coords:
+            tail = tail.assign_coords(x=self.x_grid[self._output_nx :])
+        if "blanking" in tail:
+            tail["blanking"] = xarray.zeros_like(tail["blanking"])
+        return xarray.concat([state, tail], dim="x", data_vars="minimal")
+
     def _prepare_warmstart(self, state: xarray.Dataset) -> None:
         """Write a restart file from ``state`` and arm nt0 for the next run.
 
@@ -712,6 +779,7 @@ class ForwardModel(BaseForwardModel):
         template (for ghost cells and non-equilibrium content) when
         available; otherwise falls back to a pure-equilibrium restart.
         """
+        state = self._pad_outflow_buffer(state)
         latest_restart = identify_latest_restart_iteration(self.dirs)
         if uses_digital_filter(self.inlet_turbulence):
             # The window must start on the nrturb grid (aligned_start_iteration).
@@ -819,6 +887,7 @@ class ForwardModel(BaseForwardModel):
             state = state[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
+        state = self._crop_outflow_buffer(state)
         state = scale_velocity_to_physical(state, scale=self.C_u)
 
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:

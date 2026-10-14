@@ -59,6 +59,7 @@ def compute_solid_occupancy(
     ny: int,
     nz: int,
     domain_bounds: dict[str, float] | None = None,
+    x_max: float | None = None,
 ) -> np.ndarray:
     """
     Build a 3D boolean solid-occupancy mask over the LBM grid from an STL mesh.
@@ -77,6 +78,8 @@ def compute_solid_occupancy(
         nx, ny, nz: Number of interior grid cells in x, y, z.
         domain_bounds: Physical bounds {'xmin', 'xmax', ...}. If None, the mesh
             bounding box is used.
+        x_max: Columns whose centre lies past this x stay fluid (the empty
+            outflow buffer beyond the case bounds). None: no cut.
 
     Returns:
         Boolean array ``solid`` of shape (nx, ny, nz). ``solid[i, j, k]`` is True
@@ -154,6 +157,8 @@ def compute_solid_occupancy(
     # roof ~ 0 < z_centers[0], so no cells are filled -> ground stays fluid.
     solid = z_centers[None, None, :] <= roof_height[:, :, None]
     solid &= np.isfinite(roof_height)[:, :, None]
+    if x_max is not None:
+        solid[x_centers > x_max] = False
 
     logger.info(
         "Solid occupancy: %s / %s cells (%.2f%%), %s occupied columns",
@@ -405,9 +410,7 @@ def update_solid_objects_init(
     ]
 
     # --- 0. Drop the obsolete generated-module use statement, if present. ---
-    lines = [
-        line for line in lines if line.strip() != f"use m_{experiment_name}"
-    ]
+    lines = [line for line in lines if line.strip() != f"use m_{experiment_name}"]
 
     # --- 1. Ensure `use m_read_bathymetry`. ---
     if not any(line.strip() == "use m_read_bathymetry" for line in lines):
@@ -532,6 +535,7 @@ def stl_to_lbm_geometry(
     bounds: (
         tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None
     ) = None,
+    x_max: float | None = None,
 ) -> None:
     """
     Convert an STL file to LBM geometry: a compact bathymetry file the binary
@@ -552,6 +556,7 @@ def stl_to_lbm_geometry(
         nz: Grid resolution in z-direction.
         bounds: Optional bounding box as ((xmin, xmax), (ymin, ymax), (zmin, zmax))
                 in physical coordinates. If None, uses the mesh bounding box.
+        x_max: No solid cells past this x (an outflow buffer); None: no cut.
 
     Returns:
         None.
@@ -577,6 +582,7 @@ def stl_to_lbm_geometry(
         ny=ny,
         nz=nz,
         domain_bounds=domain_bounds,
+        x_max=x_max,
     )
     if int(solid.sum()) == 0:
         raise ValueError(

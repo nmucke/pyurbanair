@@ -68,7 +68,7 @@ observation.aggregation.interval_seconds=30
 | `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
 | `paths.*` | `machine`, `results_root`, `scratch`, `experiment_dir` (= `scratch.<machine>`), `weights_dir`, `training_data_dir` from `common.yaml` (`machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the entry point |
-| `flow.*` | the flow setup pyudales and pypalm share (`common.yaml`, cases override): `boundary_condition`, `outflow_buffer`, `profile` (`type`, `alpha`, `z_ref`), `nudging` (`tnudge`, `nnudge_meters`), `inlet_turbulence` (`enabled`, `intensity`, `length_scale_x/y/z`, `time_step`, `seed`); pylbm reads `boundary_condition` |
+| `flow.*` | the flow setup pyudales and pypalm share (`common.yaml`, cases override): `boundary_condition`, `outflow_buffer`, `profile` (`type`, `alpha`, `z_ref`), `nudging` (`tnudge`, `nnudge_meters`), `inlet_turbulence` (`enabled`, `intensity`, `length_scale_x/y/z`, `time_step`, `seed`); pylbm reads all but `nudging` (and enables `inlet_turbulence` with its own switch) |
 | `ensemble.*` | one budget for every workflow (`common.yaml`): `ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`, `failure` (`policy: raise \| resample_from_successes`, `jitter_scale`, `seed`) |
 
 The component options in `assimilation_settings/` and the slots that select them:
