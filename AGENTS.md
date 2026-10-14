@@ -27,7 +27,7 @@ docs; detail lives in `docs/`.
 ```text
 configs/    Hydra configs: forward.yaml, assimilation.yaml (entry points);
             groups case/, model/, params/, assimilation_settings/; surrogate/
-scripts/    the scripts you run (run_*, compute_metrics, visualize_*,
+scripts/    the scripts you run (run_*, compute_metrics, visualize_*, comparison/,
             surrogate/, tools/); shared helpers only in scripts/utils/
 workflows/  shell pipelines: a run followed by its post-processing
 geometries/ case inputs: one folder per case (STL, namoptions, _p3d), urbantales/

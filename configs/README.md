@@ -9,6 +9,7 @@ Groups, scripts and workflows are described in
 ```
 forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
+comparison.yaml     # entry point: surrogate comparison (scripts/comparison/)
 common.yaml         # paths (per machine), ensemble budget, Hydra run dir
 model/  case/  params/
 surrogate/          # neural-surrogate configs (see below)
