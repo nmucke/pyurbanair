@@ -56,6 +56,10 @@ def test_model_config_applies_seed_and_overrides(tmp_path: pathlib.Path) -> None
     palm = script._model_config(cfg, "pypalm", "pypalm", 1, tmp_path)
     assert palm.model.name == "pypalm"
     assert palm.model.forward_model.random_seed == 6
+    # Replica r of every model shares the inflow planes.
+    assert palm.model.forward_model.inlet_turbulence.seed == 6
+    udales = script._model_config(cfg, "pyudales", "pyudales", 1, tmp_path)
+    assert udales.model.forward_model.inlet_turbulence.seed == 6
     assert palm.model.forward_model.inlet_turbulence.initial_seed is True
     assert palm.model.forward_model.boundary_condition == "inflow_outflow"
     assert palm.time.spinup_time == 7 and palm.model.forward_model.spinup_time == 7

@@ -23,16 +23,18 @@ overrides: {}
 replicas: 2
 seed: 1
 # Per backend: the keys that carry the replica's seed (`{seed}` is replaced,
-# Python format). uDALES: the inlet-turbulence seed, and the cold-start
-# perturbation seed (derived from the experiment name). PALM: its one seed,
-# with the cold-start kick switched on so a laminar inflow has a seed to act
-# on. pylbm seeds itself from the clock: its replicas always differ.
+# Python format). Both share the inlet-turbulence seed, so replica r of every
+# model gets the same digital-filter inflow planes. uDALES: plus the cold-start
+# perturbation seed (derived from the experiment name). PALM: plus its own
+# seed, with the cold-start kick switched on so a laminar inflow has a seed to
+# act on. pylbm seeds itself from the clock: its replicas always differ.
 replica_seed:
   pyudales:
     model.forward_model.inlet_turbulence.seed: "{seed}"
     model.forward_model.per_member_irandom: true
     model.forward_model.experiment_name: "{seed:03d}"
   pypalm:
+    model.forward_model.inlet_turbulence.seed: "{seed}"
     model.forward_model.random_seed: "{seed}"
     model.forward_model.inlet_turbulence.initial_seed: true
 # Seconds of output dropped at the start of every run, on top of the
