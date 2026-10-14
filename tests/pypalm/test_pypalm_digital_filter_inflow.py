@@ -30,7 +30,7 @@ _GRID = [
     "model.forward_model.boundary_condition=inflow_outflow",
     "model.forward_model.ncpu=1",
     "model.forward_model.random_seed=null",
-    "+model.forward_model.nudging_config.profile_config.z_ref=64.0",
+    "++model.forward_model.nudging_config.profile_config.z_ref=64.0",
     "model.forward_model.nudging_config.profile_config.alpha=0.25",
     # The values the tests assert on.
     "model.forward_model.inlet_turbulence.enabled=true",
@@ -230,14 +230,17 @@ def test_member_starts_its_own_clock(tmp_path: pathlib.Path) -> None:
     assert not (member.dirs.experiment_dir / clock.name).exists()
 
 
-def test_disabled_writes_no_driver_and_no_clock(
+def test_disabled_writes_laminar_planes_and_no_clock(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # inflow_outflow always imposes the face through inflow planes; disabled,
+    # they are the mean profile, constant in time.
     fm = _model(tmp_path, *_OFF)
     _fake_run(fm, monkeypatch)
     fm._apply_inflow_settings(_params())
-    assert not fm.dynamic_driver_path.exists()
-    assert _p3d(fm, "turbulent_inflow_parameters", "switch_off_module") is None
+    with xarray.open_dataset(fm.dynamic_driver_path) as ds:
+        u = ds["inflow_plane_u"].values
+    assert np.allclose(u, u[:1])
     fm.run_single(None, _params())
     assert not (fm.dirs.experiment_dir / "inlet_turbulence_clock.json").exists()
 
