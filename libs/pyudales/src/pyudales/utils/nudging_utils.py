@@ -273,6 +273,9 @@ def apply_time_varying_inflow(
             excluded from nudging.
         spinup_time: Duration of the spinup period in seconds.  During spinup
             the nudging holds the initial parameter values constant.
+        interior_nudging: Relax the domain interior toward the profile
+            (``lnudge``) under ``inflow_outflow``. Periodic runs always nudge
+            the interior: it is their only momentum source.
     """
     namoptions_path = dirs.experiment_dir / f"namoptions.{dirs.experiment_name}"
     namoptions = NamoptionsFile(namoptions_path)
@@ -358,7 +361,7 @@ def apply_time_varying_inflow(
         len(time_seconds),
         nnudge,
         tnudge,
-        interior_nudging=interior_nudging,
+        interior_nudging=interior_nudging or boundary_condition == "periodic",
     )
 
     # Under inflow_outflow BCs the west inlet face (plus nudging) drives the

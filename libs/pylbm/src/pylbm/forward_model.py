@@ -19,6 +19,13 @@ from pylbm.utils import get_lbm_directory_paths
 
 from pyurbanair.base_ensemble_forward_model import ForwardModelRunFailure
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    derive_seed,
+    read_elapsed_time,
+    reset_elapsed_time,
+    validate_time_step_divides_window,
+    write_elapsed_time,
+)
 from pyurbanair.utils.solver_process import run_solver
 
 from .stl_to_lbm import stl_to_lbm_geometry
@@ -34,11 +41,19 @@ from .utils.build_tree_utils import compute_build_signature, read_build_stamp
 from .utils.compile_utils import validate_cuda_setting
 from .utils.environment_utils import identify_environment
 from .utils.infile_utils import _augment_runtime_library_paths
+from .utils.inlet_turbulence_utils import (
+    aligned_start_iteration,
+    digital_filter_settings,
+    disable_lturb,
+    uses_digital_filter,
+    write_digital_filter_forcing,
+)
 from .utils.mod_dimensions_utils import set_experiment
 from .utils.params_utils import (
     apply_sgs_setting,
     extract_initial_params,
     is_time_varying_params,
+    reference_speed_scale,
     remove_uvel_shear_file,
     remove_uvel_time_file,
     resolve_profile_config,
@@ -46,9 +61,11 @@ from .utils.params_utils import (
     write_uvel_time_file,
 )
 from .utils.state_utils import scale_velocity_to_physical
+from .utils.vertical_profile import build_profile_shape
 from .utils.warm_start_utils import (  # noqa: F401  (MAX_ITERATION re-exported)
     ITERATION_FIELD_WIDTH,
     MAX_ITERATION,
+    clean_all_restart_files,
     identify_latest_restart_iteration,
     remove_old_restart_files,
     write_restart_file_from_xarray,
@@ -131,6 +148,15 @@ class ForwardModel(BaseForwardModel):
             experiment_name=experiment_name,
         )
 
+        # Physical seconds of digital-filter inflow this member has consumed;
+        # the authoritative copy is on disk (pyurbanair.utils.digital_filter
+        # read_elapsed_time) because parallel ensembles run members in workers.
+        self._elapsed_time = 0.0
+        if uses_digital_filter(self.inlet_turbulence):
+            # A clock left by an earlier model in this experiment dir would
+            # start this one mid-history.
+            reset_elapsed_time(self.dirs)
+
         # Generate geometry file
         stl_to_lbm_geometry(
             stl_path=stl_path,
@@ -149,6 +175,7 @@ class ForwardModel(BaseForwardModel):
         self.y_grid = (np.arange(ny) + 0.5) * dy + bounds[1][0]
         self.z_grid = (np.arange(nz) + 0.5) * dz + bounds[2][0]
 
+        self._dy, self._dz = dy, dz
         self.min_cell_size = min(dx, dy, dz)
         self.min_cell_size = np.round(self.min_cell_size, 1)
 
@@ -188,6 +215,8 @@ class ForwardModel(BaseForwardModel):
         # Derived during compile() once infile.in exists (C_t = C_l / C_u).
         self.num_timesteps = 0
         self.output_frequency_timesteps = 0
+        # nt1 - nt0 of the window _set_scaling_factors last configured.
+        self._window_timesteps = 0
         # Warm-start override: when set, _set_scaling_factors uses this as nt0
         # instead of defaulting to 0. Consumed (reset to None) after each use.
         self._nt0_override: int | None = None
@@ -373,6 +402,7 @@ class ForwardModel(BaseForwardModel):
         # Note the iteration counter ACCUMULATES across warm starts, so a long
         # rollout reaches the ceiling even when no single window is near it.
         nt1 = nt0 + total_timesteps
+        self._window_timesteps = total_timesteps
         if nt1 > MAX_ITERATION:
             raise ValueError(
                 f"LBM final timestep nt1={nt1} exceeds the maximum representable "
@@ -553,6 +583,10 @@ class ForwardModel(BaseForwardModel):
                 profile_config=override_cfg,
             )
         apply_sgs_setting(params, self.dirs, default=self.sgs_constant)
+        # 1.0 unless profile_config sets z_ref (see reference_speed_scale).
+        speed_scale = reference_speed_scale(
+            override_cfg or self.profile_config, self._profile_heights, self._zsize
+        )
 
         if is_time_varying_params(params):
             # The LBM matches the schedule against its absolute clock
@@ -566,12 +600,17 @@ class ForwardModel(BaseForwardModel):
                 dirs=self.dirs,
                 spinup_time=self.spinup_time,
                 time_offset=nt0 * dt,
+                speed_scale=speed_scale,
             )
             initial_params = extract_initial_params(params)
-            apply_inflow_settings(params=initial_params, dirs=self.dirs)
+            apply_inflow_settings(
+                params=initial_params, dirs=self.dirs, speed_scale=speed_scale
+            )
         else:
             remove_uvel_time_file(self.dirs)
-            apply_inflow_settings(params=params, dirs=self.dirs)
+            apply_inflow_settings(
+                params=params, dirs=self.dirs, speed_scale=speed_scale
+            )
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         """Save simulation results to disk."""
@@ -643,6 +682,11 @@ class ForwardModel(BaseForwardModel):
         available; otherwise falls back to a pure-equilibrium restart.
         """
         latest_restart = identify_latest_restart_iteration(self.dirs)
+        if uses_digital_filter(self.inlet_turbulence):
+            # The window must start on the nrturb grid (aligned_start_iteration).
+            latest_restart = aligned_start_iteration(
+                latest_restart, self._window_timesteps
+            )
         restart_iteration = write_restart_file_from_xarray(
             state=state,
             dirs=self.dirs,
@@ -665,6 +709,23 @@ class ForwardModel(BaseForwardModel):
                 "or call run() and process non-NETCDF diagnostics."
             )
 
+        digital_filter = uses_digital_filter(self.inlet_turbulence)
+        if digital_filter:
+            if params is None:
+                raise ValueError(
+                    "inlet_turbulence.method=digital_filter needs inflow params "
+                    "(inflow_angle, velocity_magnitude) to build its planes."
+                )
+            # Refresh from disk: in a parallel ensemble this object was just
+            # unpickled into a worker, so the in-memory clock may be stale.
+            self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
+            # Off until this window's buffers exist, so the restart writer
+            # below does not look for a turbulence file to copy.
+            disable_lturb(self.dirs)
+        window_runtime = float(self.simulation_time) + (
+            0.0 if state is not None else float(self.spinup_time)
+        )
+
         saved_spinup_time = self.spinup_time
         try:
             if state is not None:
@@ -676,6 +737,12 @@ class ForwardModel(BaseForwardModel):
                 # inflow speed changes between windows.
                 self._set_scaling_factors(params)
                 self._prepare_warmstart(state)
+            elif digital_filter:
+                # The forcing buffers are only read on a restart (nt0 > 0), so
+                # a digital-filter cold start is a restart from the state the
+                # solver's own cold start would build.
+                self._set_scaling_factors(params)
+                self._prepare_digital_filter_cold_start(params)
 
             # Finalize scaling: applies nt0 from the warm-start restart (set by
             # _prepare_warmstart) and the current C_u/timestep duration.
@@ -687,6 +754,8 @@ class ForwardModel(BaseForwardModel):
             # at the wrong (large) clock time and clamp to its last value.
             if params is not None:
                 self._apply_inflow_settings(params)
+            if digital_filter:
+                self._apply_digital_filter(params)
 
             # Remove stale output files before running to prevent files from a
             # previous run (which may have used a different iout) being collected.
@@ -736,7 +805,107 @@ class ForwardModel(BaseForwardModel):
 
         remove_old_restart_files(self.dirs)
 
+        if digital_filter:
+            # Advance the member's clock only on success, and persist it (the
+            # forkserver worker's attributes die with it).
+            self._elapsed_time += window_runtime
+            write_elapsed_time(self.dirs, self._elapsed_time)
+
         return state
+
+    def _inflow_profile(self, params: xarray.Dataset) -> tuple[Optional[dict], float]:
+        """The active vertical-profile config and its ``uini`` scale."""
+        profile = resolve_profile_config(params, self.profile_config)
+        if profile is None:
+            profile = self.profile_config
+        scale = reference_speed_scale(profile, self._profile_heights, self._zsize)
+        return profile, scale
+
+    def _inflow_schedule(
+        self, params: xarray.Dataset
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Window-relative ``(time, speed, angle)`` knots, spinup plateau included.
+
+        The schedule ``write_uvel_time_file`` hands the solver, before its shift
+        onto the absolute clock.
+        """
+        speed = np.atleast_1d(params["velocity_magnitude"].values).astype(float)
+        angle = np.atleast_1d(params["inflow_angle"].values).astype(float)
+        if not is_time_varying_params(params):
+            return np.zeros(1), speed[:1], angle[:1]
+        times = params["time"].values.astype(float)
+        times = times - times[0]
+        speed = np.broadcast_to(speed, times.shape)
+        angle = np.broadcast_to(angle, times.shape)
+        if self.spinup_time > 0:
+            times = np.concatenate([[0.0], times + self.spinup_time])
+            speed = np.concatenate([speed[:1], speed])
+            angle = np.concatenate([angle[:1], angle])
+        return times, speed, angle
+
+    def _prepare_digital_filter_cold_start(self, params: xarray.Dataset) -> None:
+        """Write the cold-start state as a restart at the first aligned iteration.
+
+        The state is what ``inipert`` builds on ``nt0 = 0``: the inflow profile
+        everywhere (``uini * uvel_shear`` along ``udir``), rho = 1, w = 0 --
+        without its 1e-5 density noise, which is no longer needed to break
+        symmetry once the inflow is turbulent. Old restarts are removed first:
+        a cold start must not inherit a template's non-equilibrium part.
+        """
+        profile, scale = self._inflow_profile(params)
+        _, speed, angle = self._inflow_schedule(params)
+        shape = build_profile_shape(profile, self._profile_heights, self._zsize)
+        speed_z = float(speed[0]) * scale * shape / shape[-1]
+        theta = np.deg2rad(float(angle[0]))
+        nz, ny, nx = self.z_grid.size, self.y_grid.size, self.x_grid.size
+        ones = np.ones((nz, ny, nx))
+        state = xarray.Dataset(
+            {
+                "rho": (("z", "y", "x"), ones),
+                "u": (("z", "y", "x"), ones * (speed_z * np.cos(theta))[:, None, None]),
+                "v": (("z", "y", "x"), ones * (speed_z * np.sin(theta))[:, None, None]),
+                "w": (("z", "y", "x"), 0.0 * ones),
+            }
+        )
+        clean_all_restart_files(self.dirs)
+        self._nt0_override = write_restart_file_from_xarray(
+            state=state,
+            dirs=self.dirs,
+            restart_iteration=aligned_start_iteration(None, self._window_timesteps),
+        )
+
+    def _apply_digital_filter(self, params: xarray.Dataset) -> None:
+        """Write this window's digital-filter forcing (see inlet_turbulence_utils)."""
+        config = self.inlet_turbulence or {}
+        settings = digital_filter_settings(config)
+        validate_time_step_divides_window(
+            float(self.spinup_time) + float(self.simulation_time),
+            settings["time_step"],
+        )
+        seed = settings["seed"]
+        seed = derive_seed(self.dirs.experiment_name) if seed is None else int(seed)
+        profile, scale = self._inflow_profile(params)
+        knot_times, knot_speed, knot_angle = self._inflow_schedule(params)
+        write_digital_filter_forcing(
+            dirs=self.dirs,
+            config=config,
+            seed=seed,
+            nt0=self._get_infile_int_value("nt0", 0),
+            window_steps=self._window_timesteps,
+            seconds_per_timestep=float(self.seconds_per_timestep or 0.0),
+            c_u=float(self.C_u),
+            window_start_time=self._elapsed_time,
+            knot_times=knot_times,
+            knot_speed=knot_speed,
+            knot_angle=knot_angle,
+            speed_scale=scale,
+            profile_config=profile,
+            ny=self.y_grid.size,
+            nz=self.z_grid.size,
+            dy=self._dy,
+            dz=self._dz,
+            zsize=self._zsize,
+        )
 
     def disable_spinup(self) -> None:
         """Disable spinup so subsequent runs use only simulation_time."""

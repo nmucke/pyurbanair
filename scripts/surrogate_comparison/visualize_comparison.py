@@ -29,6 +29,10 @@ Outputs, in the run dir:
                          model saturates
   statistics_slices.png  time-mean u and resolved TKE at `figures.level`: truth,
                          then one row per model (trajectory `figures.sample`)
+  animation_speed.mp4    |U| at `figures.level` against lead time: truth, each
+                         model, then each model - truth (trajectory
+                         `figures.sample`); a .gif when ffmpeg is unavailable.
+                         `figures.animation: null` skips it
   summary.csv/.tex       headline scalars per model and persistence (mean over the samples)
 """
 
@@ -50,6 +54,7 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import load_states, open_dataset, plot_slice_rows, speed  # noqa: E402
+from slice_animation import Panel, animate_slices, frame_indices  # noqa: E402
 
 # One colour per model, in models.yaml order; the reference sources are fixed.
 PALETTE = [
@@ -389,6 +394,9 @@ def _plot_slices(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> None:
         )
         print(f"  + {run_dir / 'tke_slices.png'}")
 
+    if cfg.figures.get("animation") is not None:
+        _animate_speed(cfg, run_dir, truth, preds, n, level, fluid, times)
+
     # Time-mean u and resolved TKE over the rollout window, one scale per column.
     stats = {"truth": _statistics(truth, level)} | {
         name: _statistics(pred[:n], level) for name, pred in preds.items()
@@ -434,6 +442,53 @@ def _tke_slices(fields: np.ndarray, level: int, steps: list[int]) -> list[np.nda
     with np.errstate(all="ignore"):
         mean = layer[finite].mean(axis=0)
         return [0.5 * ((layer[s - 1] - mean) ** 2).sum(axis=0) for s in steps]
+
+
+def _animate_speed(
+    cfg: DictConfig,
+    run_dir: pathlib.Path,
+    truth: np.ndarray,
+    preds: dict[str, np.ndarray],
+    n: int,
+    level: int,
+    fluid: np.ndarray,
+    times: np.ndarray,
+) -> pathlib.Path:
+    """animation_speed.mp4: |U| at `level` per lead step (thinned to
+    `max_frames`): truth, each model clipped as in slices.png, then each
+    model - truth. Colour limits are fixed over the whole rollout."""
+    opts = cfg.figures.animation
+    frames = frame_indices(n, int(opts.max_frames))
+
+    def layer(states: np.ndarray) -> np.ndarray:
+        values = np.sqrt((states[frames, :, level] ** 2).sum(axis=1))
+        return np.where(fluid, values, np.nan)
+
+    reference = layer(truth[:n])
+    bound = 1.5 * float(np.nanmax(reference))
+    models = {name: np.clip(layer(pred[:n]), 0, bound) for name, pred in preds.items()}
+    vmax = float(np.nanpercentile(reference, 99.5))
+    errors = {name: field - reference for name, field in models.items()}
+    spread = max(
+        (float(np.nanpercentile(np.abs(e), 99.5)) for e in errors.values()),
+        default=1.0,
+    )
+    row = [Panel("truth", reference, "viridis", 0.0, vmax, "value")]
+    row += [Panel(name, f, "viridis", 0.0, vmax, "value") for name, f in models.items()]
+    row += [
+        Panel(f"{name} - truth", e, "RdBu_r", -spread, spread, "error")
+        for name, e in errors.items()
+    ]
+    path: pathlib.Path = animate_slices(
+        [row],
+        times[1:][frames] - times[0],
+        run_dir / "animation_speed.mp4",
+        title=f"|U| [m/s] at z index {level}, lead",
+        fps=int(opts.fps),
+        dpi=int(opts.dpi),
+        labels=("x index", "y index"),
+    )
+    return path
 
 
 def _statistics(fields: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:

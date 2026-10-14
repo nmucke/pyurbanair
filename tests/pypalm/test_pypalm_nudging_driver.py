@@ -28,6 +28,7 @@ _SMOKE = [
     "model=pypalm",
     "model.forward_model.ncpu=1",
     "model.forward_model.nudging_config.enabled=true",
+    "model.forward_model.nudging_config.nnudge_meters=4.0",
 ]
 
 # inflow_outflow selects PALM's multigrid pressure solver, which needs uniform
@@ -197,7 +198,9 @@ def test_inflow_outflow_static_no_nudging_apparatus(tmp_path: pathlib.Path) -> N
     # Clean template never had the nudging switches -> staging leaves them absent
     # (byte-identical to today apart from the _nudge/_lsf cleanup).
     assert _nudging_switches_absent_or_off(fm)
-    assert not fm.dynamic_driver_path.exists()
+    # Static params ride the inflow-plane driver as a constant schedule.
+    assert fm.dynamic_driver_path.exists()
+    assert _turbulent_inflow_active(fm)
 
 
 def test_inflow_outflow_time_varying_uses_dynamic_driver(
@@ -344,3 +347,12 @@ def test_warmstart_driver_holds_every_initial_field(
     with xarray.open_dataset(fm.dynamic_driver_path) as driver:
         missing = {n for n in required if f"init_atmosphere_{n}" not in driver}
     assert not missing
+
+
+def test_cutoff_above_every_level_raises(tmp_path: pathlib.Path) -> None:
+    """A cutoff above the top cell centre would leave the run un-driven."""
+    fm = _make_model(
+        tmp_path, *_PERIODIC, "model.forward_model.nudging_config.nnudge_meters=9.0"
+    )
+    with pytest.raises(ValueError, match="no nudged level"):
+        fm._apply_inflow_settings(_static_params())

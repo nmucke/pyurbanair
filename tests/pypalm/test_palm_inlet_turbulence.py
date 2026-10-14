@@ -29,6 +29,9 @@ _SMOKE = [
     "model=pypalm",
     # The knob's values the tests assert on; off unless a test turns it on.
     "model.forward_model.inlet_turbulence.enabled=false",
+    # This file covers PALM's random disturbances; the digital-filter method is
+    # in test_pypalm_digital_filter_inflow.py.
+    "model.forward_model.inlet_turbulence.method=random_disturbances",
     "model.forward_model.inlet_turbulence.dt_disturb=5.0",
     "model.forward_model.inlet_turbulence.amplitude=0.25",
     "model.forward_model.inlet_turbulence.begin=null",
@@ -403,7 +406,10 @@ def test_seed_and_enabled_are_independent(
     want_kick: bool,
     want_in_run: bool,
 ) -> None:
-    vals = _apply(tmp_path, {"enabled": enabled, "initial_seed": seed})
+    vals = _apply(
+        tmp_path,
+        {"enabled": enabled, "initial_seed": seed, "method": "random_disturbances"},
+    )
     assert _kick_fires(vals) is want_kick
     assert _in_run_fires(vals) is want_in_run
 
@@ -419,6 +425,17 @@ def test_warm_start_suppresses_the_kick_even_with_seed_true(
     tmp_path: pathlib.Path,
 ) -> None:
     """Warm starts must not shock the injected field, whatever initial_seed says."""
-    vals = _apply(tmp_path, {"enabled": True, "initial_seed": True}, warm_start=True)
+    block = {"enabled": True, "initial_seed": True, "method": "random_disturbances"}
+    vals = _apply(tmp_path, block, warm_start=True)
     assert _kick_fires(vals) is False
     assert _in_run_fires(vals) is True
+
+
+@pytest.mark.parametrize("block", [None, {"enabled": False, "initial_seed": True}])  # type: ignore[misc]
+def test_warm_start_without_inlet_turbulence_never_kicks(
+    tmp_path: pathlib.Path, block: Any
+) -> None:
+    """The disabled branch must not re-enable the kick _apply_warmstart turned off."""
+    vals = _apply(tmp_path, block, warm_start=True)
+    assert _kick_fires(vals) is False
+    assert _in_run_fires(vals) is False

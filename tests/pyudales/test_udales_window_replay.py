@@ -11,11 +11,11 @@ import pytest
 import xarray as xr
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
-from pyudales.utils.inlet_turbulence_utils import derive_seed, write_elapsed_time
 from pyudales.utils.warm_start_utils import CARRY_DIRNAME, CARRY_META_NAME
 from pyudales.utils.window_checkpoint import validate_carry
 from scipy.io import FortranFile
 
+from pyurbanair.utils.digital_filter import derive_seed, write_elapsed_time
 from tests.pyudales.test_udales_discrepancy_wiring import SETTINGS, make_model
 
 

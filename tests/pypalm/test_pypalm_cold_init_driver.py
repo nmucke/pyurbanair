@@ -32,6 +32,9 @@ _SMOKE = [
     "model.forward_model.inlet_turbulence.initial_seed=true",
     "model.forward_model.nudging_config.profile_config.type=power_law",
     "model.forward_model.nudging_config.profile_config.alpha=0.25",
+    # Reference height = domain top, as _expected_profile assumes.
+    "++model.forward_model.nudging_config.profile_config.z_ref=null",
+    "model.forward_model.nudging_config.nnudge_meters=4.0",
 ]
 
 # inflow_outflow selects the multigrid solver: ncpu must divide nx.
@@ -39,7 +42,7 @@ _INFLOW_OUTFLOW = [
     "model.forward_model.boundary_condition=inflow_outflow",
     "model.forward_model.ncpu=4",
 ]
-_PERIODIC = ["model.forward_model.boundary_condition=periodic"]
+_PERIODIC = ["flow.boundary_condition=periodic", "flow.inlet_turbulence.enabled=false"]
 
 _INIT_VARS = ("u", "v", "w", "pt", "qv")
 
@@ -198,3 +201,48 @@ def test_time_varying_driver_merges_inflow_planes_and_lod1(
     assert np.allclose(ds["init_atmosphere_u"].values, u_exp, atol=1e-5)
     assert np.allclose(ds["init_atmosphere_v"].values, v_exp, atol=1e-5)
     assert ds.sizes["time_inflow"] == 4  # spinup plateau + 3 schedule points
+
+
+def test_warm_start_static_imposes_inflow_planes(tmp_path: pathlib.Path) -> None:
+    """A static warm start keeps the inflow face on the prescribed profile.
+
+    The LOD=2 reader leaves the inflow ghost column u(nxl-1) at 0, and PALM
+    copies it onto the face every step (dynamics_mod.f90:1287), so without the
+    inflow planes the face sat at u=0 for the whole warm window. The constant
+    inflow-plane driver re-imposes it every step (turbulent_inflow_rff_bc).
+    """
+    from pypalm.utils.p3d_utils import P3DFile
+
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
+    fm.run_single(params=_static_params())
+    fm.run_single(state=_warm_state(fm), params=_static_params())
+
+    p3d = P3DFile(fm.p3d_path)
+    section = "turbulent_inflow_parameters"
+    assert p3d.get_value(section, "switch_off_module") == ".false."
+    assert p3d.get_value(section, "turbulent_inflow_method").strip("'\"") == (
+        "read_from_file"
+    )
+    ds = xarray.open_dataset(fm.dynamic_driver_path)
+    assert int(ds["init_atmosphere_u"].attrs["lod"]) == 2
+    # Constant in time and y, covering the whole (spin-up free) warm window.
+    assert ds["time_inflow"].values[0] == 0.0
+    assert ds["time_inflow"].values[-1] >= fm.simulation_time
+    u_exp, v_exp = _expected_profile(fm)
+    plane_u = ds["inflow_plane_u"].values  # (time_inflow, z, y)
+    plane_v = ds["inflow_plane_v"].values
+    assert np.allclose(plane_u, u_exp[None, :, None], atol=1e-5)
+    assert np.allclose(plane_v, v_exp[None, :, None], atol=1e-5)
+    assert np.all(ds["inflow_plane_w"].values == 0.0)
+
+
+def test_cold_static_uses_the_same_inflow_planes(tmp_path: pathlib.Path) -> None:
+    """Static inflow_outflow cold starts share the driver path of warm starts."""
+    fm = _make_model(tmp_path, *_INFLOW_OUTFLOW)
+    fm.run_single(params=_static_params())
+
+    ds = xarray.open_dataset(fm.dynamic_driver_path)
+    u_exp, _ = _expected_profile(fm)
+    assert np.allclose(ds["inflow_plane_u"].values, u_exp[None, :, None], atol=1e-5)
+    # Spin-up plateau + the two knots of the constant schedule.
+    assert list(ds["time_inflow"].values) == [0.0, 3.0, 6.0]

@@ -5,7 +5,11 @@ PALM 25.10 initializes the full 3D interior from ``init_atmosphere_u/v/w/pt/qv``
 ``initializing_actions = 'read_from_file'`` (``init_3d_model.f90:478`` →
 ``netcdf_data_input_mod.f90:2095-2690``). This is pypalm's warm-start
 mechanism: the resolved velocity field a previous window returned is injected
-as the next window's initial condition.
+as the next window's initial condition. Only ``u`` and ``v`` survive:
+``read_from_file`` sets ``w = 0`` after reading, LOD=2 included
+(``init_3d_model.f90:593``), and the initial pressure solve rebuilds a
+divergence-free ``w``. ``init_atmosphere_w`` is still written because the
+reader requires it.
 
 Unlike pyudales/pylbm there is **no "carry" of subgrid state** — PALM never
 reads SGS-TKE from file (there is no ``init_atmosphere_e``; grep confirms zero
@@ -30,7 +34,15 @@ Grid contract (verified against the bundled PALM source):
   that ``_load_and_postprocess_state`` adds. We sample the (offset) state at the
   matching physical heights but label the file axis 0-based.
 * The horizontal ``x``/``xu``/``y``/``yv`` axes are **length-checked only**
-  (``DRV0004``); their values are never read, so any offset is harmless.
+  (``DRV0004``); their values are never read. What matters is where each
+  element lands: the reader puts file element ``i`` (0-based) of the
+  ``x``/``y`` axes at PALM index ``i``, but of the ``xu``/``yv`` axes at index
+  ``i+1`` (``get_variable`` starts at ``nxlu``/``nysv`` = 1,
+  ``netcdf_data_input_mod.f90:2132-2133,2339-2340,2388-2389``), i.e. at
+  ``xu = (i+1)*dx``. So ``u``/``v`` are sampled there; sampling at ``i*dx``
+  shifts the injected ``u`` one cell along x and ``v`` one cell along y. The
+  ``u`` column at ``x = 0`` (``v`` row at ``y = 0``) is not in the file:
+  PALM copies it from its neighbour (``:2344,2393``).
 * Staggering (file dim order is NetCDF/C order): ``init_atmosphere_u(z,y,xu)``,
   ``init_atmosphere_v(z,yv,x)``, ``init_atmosphere_w(zw,y,x)``,
   ``init_atmosphere_pt(z,y,x)``, ``init_atmosphere_qv(z,y,x)``.
@@ -100,6 +112,9 @@ def _interp_to(
     """
     xdim = "xu" if "xu" in da.dims else "x"
     ydim = "yv" if "yv" in da.dims else "y"
+    # Columns past the state's last one (an outflow buffer the state does not
+    # cover) repeat that column instead of extrapolating.
+    x_phys = np.minimum(x_phys, float(da[xdim].max()))
     out = da.interp(
         {xdim: x_phys, ydim: y_phys, "z": z_phys},
         method="linear",
@@ -112,8 +127,8 @@ def _interp_to(
 def _file_axes(bounds: Bounds, nx: int, ny: int, nz: int) -> dict[str, np.ndarray]:
     """The driver's 0-based PALM-native axes (see the grid contract above).
 
-    z/zw are value-checked (DRV0005); x/xu/y/yv are length-checked only but we
-    still use native values.
+    z/zw are value-checked (DRV0005); x/xu/y/yv are length-checked only, but
+    their native values are where the fields are sampled (module docstring).
     """
     (xmin, xmax), (ymin, ymax), (zmin, zmax) = (
         (float(b[0]), float(b[1])) for b in bounds
@@ -123,9 +138,9 @@ def _file_axes(bounds: Bounds, nx: int, ny: int, nz: int) -> dict[str, np.ndarra
     dz = (zmax - zmin) / nz
     return {
         "x": (np.arange(nx, dtype=np.float64) + 0.5) * dx,
-        "xu": np.arange(nx - 1, dtype=np.float64) * dx,
+        "xu": np.arange(1, nx, dtype=np.float64) * dx,
         "y": (np.arange(ny, dtype=np.float64) + 0.5) * dy,
-        "yv": np.arange(ny - 1, dtype=np.float64) * dy,
+        "yv": np.arange(1, ny, dtype=np.float64) * dy,
         "z": (np.arange(nz, dtype=np.float64) + 0.5) * dz,
         "zw": np.arange(1, nz, dtype=np.float64) * dz,
     }

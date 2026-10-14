@@ -107,9 +107,40 @@ def apply_sgs_setting(
     )
 
 
+def reference_speed_scale(
+    profile_config: Optional[dict],
+    heights: np.ndarray,
+    zsize: float,
+) -> float:
+    """Factor from ``velocity_magnitude`` to the LBM's ``uini``.
+
+    ``m_inflow.F90`` divides ``uvel_shear.dat`` by its top-cell value, so
+    ``uini`` is the speed at the top cell centre whatever ``z_ref`` the shape
+    was built with. pyudales and pypalm read ``velocity_magnitude`` as the
+    speed at ``z_ref``; to impose the same profile the LBM's ``uini`` must be
+    ``velocity_magnitude * s(z_top)``. Applied only when ``z_ref`` is set
+    explicitly, so a config without it keeps its byte-identical infile (and
+    its speed at the top cell centre, half a cell below the pyudales default
+    ``z_ref = zsize``).
+    """
+    if not profile_config or profile_config.get("z_ref") is None:
+        return 1.0
+    return float(build_profile_shape(profile_config, heights, zsize)[-1])
+
+
+def format_speed(speed: float, speed_scale: float) -> str:
+    """The ``uini`` token: one decimal as before, more when ``z_ref`` rescales it."""
+    return (
+        f"{speed * speed_scale:.1f}"
+        if speed_scale == 1.0
+        else f"{speed * speed_scale:.4f}"
+    )
+
+
 def apply_inflow_settings(
     params: xarray.Dataset,
     dirs: "DirectoryPaths",
+    speed_scale: float = 1.0,
 ) -> None:
     """
     Apply the inflow settings to infile.in.
@@ -118,6 +149,7 @@ def apply_inflow_settings(
         params: xarray.Dataset containing inflow parameters. Must contain
                inflow_angle and velocity_magnitude.
         dirs: DirectoryPaths instance containing infile_path.
+        speed_scale: :func:`reference_speed_scale` of the active profile.
 
     Raises:
         ValueError: If required parameters are missing or uini key is not found.
@@ -148,13 +180,16 @@ def apply_inflow_settings(
             f"Could not find 'uini, udir' in infile.in at {dirs.infile_path}"
         )
 
-    infile.set_value(uini_key, f"{velocity_magnitude:.1f} {inflow_angle_for_lbm:.1f}")
+    infile.set_value(
+        uini_key,
+        f"{format_speed(velocity_magnitude, speed_scale)} {inflow_angle_for_lbm:.1f}",
+    )
     infile.write()
 
     logger.info(
         f"Updated inflow settings: angle={inflow_angle:.1f}° "
         f"(written to LBM as {inflow_angle_for_lbm:.1f}°), "
-        f"velocity={velocity_magnitude:.1f} m/s"
+        f"velocity={velocity_magnitude:.1f} m/s (uini {format_speed(velocity_magnitude, speed_scale)})"
     )
 
 
@@ -181,6 +216,7 @@ def write_uvel_time_file(
     dirs: "DirectoryPaths",
     spinup_time: float = 0.0,
     time_offset: float = 0.0,
+    speed_scale: float = 1.0,
 ) -> None:
     """Write ``uvel_time.dat`` for the Fortran LBM code.
 
@@ -203,11 +239,12 @@ def write_uvel_time_file(
                      (``time - time[0]``); ``time_offset`` (= ``nt0 * dt``) then
                      places it at the warm-start clock position. 0 for a cold
                      start (``nt0 = 0``).
+        speed_scale: :func:`reference_speed_scale` of the active profile.
     """
     times = params["time"].values.astype(float)
     # Re-base global window time to window-relative, then onto the run clock.
     times = times - times[0] + time_offset
-    velocities = params["velocity_magnitude"].values.astype(float)
+    velocities = params["velocity_magnitude"].values.astype(float) * speed_scale
 
     # Broadcast scalar inflow_angle to match time dimension if needed
     if "time" in params["inflow_angle"].dims:
@@ -267,8 +304,10 @@ def write_uvel_shear_file(
 
     Note: because the Fortran normalizes by the top cell, LBM's ``uini`` is the
     speed at the top *cell center*, whereas pyudales' ``velocity_magnitude`` is
-    the speed at ``z_ref = zsize`` (domain top).  The profile *shape* matches
-    exactly; the reference height differs by half a cell (<1% for typical nz).
+    the speed at ``z_ref``. With ``z_ref`` set explicitly the caller scales
+    ``uini`` by :func:`reference_speed_scale`, so the profiles match; without
+    it (``z_ref = zsize``) the reference height differs by half a cell (<1% for
+    typical nz).
 
     Args:
         dirs: DirectoryPaths with ``experiment_dir``.

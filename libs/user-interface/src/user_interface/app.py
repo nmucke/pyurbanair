@@ -182,7 +182,8 @@ FIELDS: list[dict[str, Any]] = [
         "key": "model.forward_model.inlet_turbulence.enabled",
         "label": "Inlet turbulence",
         "type": "choice",
-        # None keeps each model's own config value: on in uDALES, off in LBM.
+        # None keeps each model's own config value: on in uDALES and PALM (the
+        # shared `flow.inlet_turbulence`), off in LBM.
         "default": None,
         "choices": [
             {"value": None, "label": "Model default"},
@@ -195,7 +196,7 @@ FIELDS: list[dict[str, Any]] = [
         "key": "model.forward_model.boundary_condition",
         "label": "Boundary condition",
         "type": "choice",
-        # None keeps each model's own config value: the models differ.
+        # None keeps the config value, `flow.boundary_condition` (the case's).
         "default": None,
         "choices": [
             {"value": None, "label": "Model default"},

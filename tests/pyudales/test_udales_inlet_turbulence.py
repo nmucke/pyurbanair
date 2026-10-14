@@ -386,7 +386,7 @@ def test_inflow_angle_is_baked_into_the_planes() -> None:
 
 def test_fluctuation_rms_matches_the_requested_intensity() -> None:
     """``sigma(z) = intensity * |U(z)|`` for u, and 0.7x that for v and w."""
-    from pyudales.utils.inlet_turbulence_utils import CROSS_COMPONENT_ANISOTROPY
+    from pyurbanair.utils.digital_filter import CROSS_COMPONENT_ANISOTROPY
 
     u, v, w = _generate(n_records=2000)
 
@@ -452,7 +452,7 @@ def test_windows_continue_each_other(tmp_path: pathlib.Path) -> None:
 
 def test_seed_is_stable_and_per_member() -> None:
     """Seeds must survive a forkserver hop, so they cannot come from ``hash()``."""
-    from pyudales.utils.inlet_turbulence_utils import derive_seed
+    from pyurbanair.utils.digital_filter import derive_seed
 
     assert derive_seed("012") == derive_seed("012")
     assert derive_seed("012") != derive_seed("013")
@@ -663,8 +663,9 @@ def test_per_member_irandom_differs_only_in_the_seed(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from pyudales.forward_model import IRANDOM_MODULUS
-    from pyudales.utils.inlet_turbulence_utils import derive_seed
     from pyudales.utils.namoptions_utils import NamoptionsFile
+
+    from pyurbanair.utils.digital_filter import derive_seed
 
     texts, seeds = [], []
     for name in ("000", "001"):
@@ -746,10 +747,15 @@ def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
     dropped into the experiment dir of every default pyudales run.
     """
     from hydra.utils import instantiate
-    from pyudales.utils.inlet_turbulence_utils import elapsed_time_path
     from pyudales.utils.namoptions_utils import NamoptionsFile
 
-    cfg = _smoke_cfg(tmp_path, "model.forward_model.inlet_turbulence.enabled=false")
+    from pyurbanair.utils.digital_filter import elapsed_time_path
+
+    cfg = _smoke_cfg(
+        tmp_path,
+        "model.forward_model.inlet_turbulence.enabled=false",
+        "model.forward_model.nudging_config.interior_nudging=false",
+    )
     fm = instantiate(cfg.model.forward_model)
     instantiate(cfg.model.prepare, forward_model=fm)
     fm.run_single()
@@ -763,7 +769,8 @@ def test_e2e_disabled_run_leaves_no_inlet_turbulence_artefacts(
     # The nudging path owns the inlet, and no &DRIVER section was invented.
     assert namoptions.get_value_as_int("BC", "BCxm") == 2
     assert not namoptions.has_section("DRIVER")
-    assert namoptions.get_value_as_bool("PHYSICS", "lnudge") is True
+    assert namoptions.get_value_as_bool("PHYSICS", "ltimedepnudge") is True
+    assert namoptions.get_value_as_bool("PHYSICS", "lnudge") is False
 
 
 def test_wrapper_never_writes_iinletgen() -> None:
@@ -1025,10 +1032,7 @@ def test_e2e_two_window_rollout_continues_the_turbulence(
 
 
 def test_clock_round_trips_through_disk(tmp_path: pathlib.Path) -> None:
-    from pyudales.utils.inlet_turbulence_utils import (
-        read_elapsed_time,
-        write_elapsed_time,
-    )
+    from pyurbanair.utils.digital_filter import read_elapsed_time, write_elapsed_time
 
     dirs = _make_dirs(tmp_path)
     assert read_elapsed_time(dirs) == 0.0
@@ -1041,7 +1045,7 @@ def test_a_clock_belonging_to_another_member_is_ignored(
 ) -> None:
     """``create_new_forward_model`` mirrors the template dir with an unfiltered
     ``copy_files``, so a stray clock could otherwise become every member's."""
-    from pyudales.utils.inlet_turbulence_utils import (
+    from pyurbanair.utils.digital_filter import (
         elapsed_time_path,
         read_elapsed_time,
         write_elapsed_time,
@@ -1060,7 +1064,7 @@ def test_a_clock_belonging_to_another_member_is_ignored(
 
 def test_reset_clears_a_persisted_clock(tmp_path: pathlib.Path) -> None:
     """A freshly built model starts at 0 however dirty the experiment dir is."""
-    from pyudales.utils.inlet_turbulence_utils import (
+    from pyurbanair.utils.digital_filter import (
         elapsed_time_path,
         read_elapsed_time,
         reset_elapsed_time,
@@ -1079,10 +1083,7 @@ def test_new_ensemble_members_do_not_inherit_the_template_clock(
     tmp_path: pathlib.Path,
 ) -> None:
     """The real path: deep-copied member + unfiltered dir copy."""
-    from pyudales.utils.inlet_turbulence_utils import (
-        elapsed_time_path,
-        write_elapsed_time,
-    )
+    from pyurbanair.utils.digital_filter import elapsed_time_path, write_elapsed_time
 
     template = _make_dirs(tmp_path / "t", "999")
     write_elapsed_time(template, 600.0)
@@ -1093,10 +1094,7 @@ def test_new_ensemble_members_do_not_inherit_the_template_clock(
     member = _make_dirs(tmp_path / "m", "000")
     elapsed_time_path(member).write_text(elapsed_time_path(template).read_text())
 
-    from pyudales.utils.inlet_turbulence_utils import (
-        read_elapsed_time,
-        reset_elapsed_time,
-    )
+    from pyurbanair.utils.digital_filter import read_elapsed_time, reset_elapsed_time
 
     reset_elapsed_time(member)
     assert not elapsed_time_path(member).exists()
@@ -1109,7 +1107,7 @@ def test_clock_is_copied_on_failure_substitution(tmp_path: pathlib.Path) -> None
     Without this the failed member's clock stays a window behind the state it
     was just handed, and the offset persists for the rest of the rollout.
     """
-    from pyudales.utils.inlet_turbulence_utils import (
+    from pyurbanair.utils.digital_filter import (
         copy_elapsed_time,
         read_elapsed_time,
         write_elapsed_time,
@@ -1189,10 +1187,9 @@ def test_e2e_parallel_ensemble_keeps_each_member_continuous(
 
 def test_time_step_must_divide_the_window(tmp_path: pathlib.Path) -> None:
     """A non-dividing time_step would slip the record grid a little every window."""
-    from pyudales.utils.inlet_turbulence_utils import (
-        apply_inlet_turbulence,
-        validate_time_step_divides_window,
-    )
+    from pyudales.utils.inlet_turbulence_utils import apply_inlet_turbulence
+
+    from pyurbanair.utils.digital_filter import validate_time_step_divides_window
 
     validate_time_step_divides_window(300.0, 0.5)
     validate_time_step_divides_window(0.0, 0.5)  # nothing to divide yet
@@ -1308,10 +1305,7 @@ def test_vertical_correlation_survives_the_edge_renormalisation() -> None:
     the *correlation* there to be checked separately — the rms test would pass
     even if it had collapsed entirely.
     """
-    from pyudales.utils.inlet_turbulence_utils import (
-        _filter_bounded,
-        filter_coefficients,
-    )
+    from pyurbanair.utils.digital_filter import _filter_bounded, filter_coefficients
 
     dz = ZSIZE / KTOT
     length_scale_z = 4.0
@@ -1337,7 +1331,7 @@ def test_burn_in_truncation_reproduces_the_full_replay() -> None:
     where the prefix IS truncated and the guarantee is numerical rather than
     exact.
     """
-    from pyudales.utils.inlet_turbulence_utils import (
+    from pyurbanair.utils.digital_filter import (
         ar1_burn_in_records,
         generate_fluctuation_fields,
     )
@@ -1360,7 +1354,7 @@ def test_burn_in_truncation_reproduces_the_full_replay() -> None:
 
 
 def test_burn_in_is_bounded_and_grows_with_the_correlation_time() -> None:
-    from pyudales.utils.inlet_turbulence_utils import ar1_burn_in_records
+    from pyurbanair.utils.digital_filter import ar1_burn_in_records
 
     assert ar1_burn_in_records(0.0) == 0
     assert ar1_burn_in_records(0.5) < ar1_burn_in_records(0.99)

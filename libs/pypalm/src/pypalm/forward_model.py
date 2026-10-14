@@ -12,6 +12,11 @@ import numpy as np
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    read_elapsed_time,
+    reset_elapsed_time,
+    write_elapsed_time,
+)
 from pyurbanair.utils.solver_process import run_solver
 
 from . import (
@@ -27,14 +32,19 @@ from .utils.dir_utils import PALMDirectoryPaths, get_palm_directory_paths
 from .utils.dynamic_driver_utils import (
     DEFAULT_PT_SURFACE,
     apply_time_varying_inflow,
+    as_inflow_schedule,
     disable_turbulent_inflow,
     is_time_varying_params,
     remove_dynamic_driver_file,
 )
 from .utils.inflow_utils import angle_to_velocity
 from .utils.inlet_turbulence_utils import (
+    apply_digital_filter_inflow,
     apply_inlet_turbulence,
+    is_initial_seed_enabled,
     is_inlet_turbulence_enabled,
+    resolve_digital_filter_seed,
+    uses_digital_filter,
     validate_inlet_turbulence,
 )
 from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
@@ -187,6 +197,7 @@ class ForwardModel(BaseForwardModel):
         inlet_turbulence: Optional[dict] = None,
         random_seed: Optional[int] = None,
         outflow_damping: Optional[dict] = None,
+        outflow_buffer: Optional[float] = None,
         save_only_last_timestep: bool = False,
         results_dir: Optional[pathlib.Path] = None,
         experiment_base_dir: Optional[pathlib.Path] = None,
@@ -225,18 +236,43 @@ class ForwardModel(BaseForwardModel):
 
         self._nudging_config = nudging_config or DEFAULT_NUDGING_CONFIG
         # Inlet turbulence: absent (None) is a strict no-op, identical to
-        # ``enabled: false``. See utils/inlet_turbulence_utils.py for why this
-        # maps onto PALM's random inflow-disturbance machinery rather than onto
-        # ``turbulent_inflow`` (which is our *time-varying inflow reader*, not a
-        # turbulence generator).
+        # ``enabled: false``. ``method: digital_filter`` imposes synthetic
+        # turbulent inflow planes, ``random_disturbances`` PALM's own inflow
+        # disturbances; see utils/inlet_turbulence_utils.py.
         self._inlet_turbulence = inlet_turbulence
         validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Seconds of digital-filter turbulence history this member has
+        # consumed; picks each window's slice of it. Persisted next to the
+        # experiment (pyurbanair.utils.digital_filter.read_elapsed_time), since
+        # parallel members run in worker processes.
+        self._elapsed_time = 0.0
         # Seed of PALM's random disturbances. None writes nothing (PALM's
         # default ensemble_member_nr = 0); see `_apply_random_seed`.
         self.random_seed = validate_random_seed(random_seed)
+        # The seed only reaches PALM through its random disturbances. With both
+        # switched off nothing draws from the generator and every seed gives the
+        # bit-identical run, which is never what a set seed asks for.
+        if (
+            self.random_seed is not None
+            and not is_initial_seed_enabled(inlet_turbulence)
+            and not is_inlet_turbulence_enabled(inlet_turbulence)
+        ):
+            raise ValueError(
+                "random_seed has no effect with inlet_turbulence.initial_seed and "
+                "inlet_turbulence.enabled both false: PALM then draws no random "
+                "disturbances, so every seed gives the same run. Set "
+                "initial_seed: true (or enabled: true under inflow_outflow)."
+            )
         # Outflow damping layer for inflow_outflow runs; None writes nothing.
         # See `_apply_outflow_damping` and docs/pypalm.md §8.
         self._outflow_damping = outflow_damping
+        # Empty outflow buffer: PALM runs on a grid extended downstream by
+        # ``outflow_buffer`` m of flat ground, and the output is cropped back to
+        # ``nx``/``bounds``. None runs on ``bounds`` as given. See
+        # `_extend_for_outflow_buffer` and docs/pypalm.md §8.
+        self._output_nx: Optional[int] = None
+        self._output_x_max: Optional[float] = None
+        self._extend_for_outflow_buffer(outflow_buffer)
         self._validate_outflow_damping()
 
         self.dirs = get_palm_directory_paths(
@@ -248,6 +284,10 @@ class ForwardModel(BaseForwardModel):
         )
 
         self._stage_input_dir()
+        if uses_digital_filter(inlet_turbulence):
+            # A clock left by an earlier model in this experiment dir would
+            # start this one mid-history.
+            reset_elapsed_time(self.dirs)
 
         self.params = _merge_params(DEFAULT_PARAMS, None)
         # Cell-centre (u, v) inflow profile from the last _apply_inflow_settings;
@@ -257,15 +297,17 @@ class ForwardModel(BaseForwardModel):
         self._apply_boundary_condition()
         self._apply_random_seed()
 
-        if nx is not None and ny is not None and bounds is not None:
-            dz = (bounds[2][1] - bounds[2][0]) / nz if nz else 1.0
+        # self.nx/self.bounds include an outflow buffer; x_max empties it.
+        if self.nx is not None and ny is not None and self.bounds is not None:
+            dz = (self.bounds[2][1] - self.bounds[2][0]) / nz if nz else 1.0
             self.topography = stl_to_palm_topography(
                 stl_path=stl_path,
                 dirs=self.dirs,
-                nx=nx,
+                nx=self.nx,
                 ny=ny,
-                bounds=bounds,
+                bounds=self.bounds,
                 dz=dz,
+                x_max=self._output_x_max,
             )
             self._p3d_set_string(
                 "initialization_parameters", "topography", "read_from_file"
@@ -439,6 +481,41 @@ class ForwardModel(BaseForwardModel):
             # NCPU so any ncpu that divides nx+1 works (see ncpu_utils).
             self._apply_processor_topology()
 
+    def _extend_for_outflow_buffer(self, buffer: Optional[float]) -> None:
+        """Extend the PALM grid downstream by ``buffer`` m of flat ground.
+
+        The radiation outflow and the damping layer then sit in an empty
+        buffer instead of in the wake of the last obstacle inside ``bounds``;
+        ``_load_and_postprocess_state`` crops the output back to ``nx`` /
+        ``bounds``. The buffer is rounded up to whole cells, and ``ncpu`` must
+        divide the extended ``nx``.
+        """
+        if buffer is None:
+            return
+        buffer = float(buffer)
+        if self.boundary_condition != "inflow_outflow":
+            raise ValueError("outflow_buffer needs boundary_condition='inflow_outflow'")
+        if buffer <= 0.0:
+            raise ValueError(f"outflow_buffer must be > 0 m, got {buffer}")
+        if not self.nx or self.bounds is None:
+            raise ValueError("outflow_buffer needs nx and bounds")
+        (xmin, xmax), y_bounds, z_bounds = self.bounds
+        dx = (xmax - xmin) / self.nx
+        cells = int(np.ceil(buffer / dx - 1e-9))
+        self._output_nx = int(self.nx)
+        self._output_x_max = float(xmax)
+        self.nx = int(self.nx) + cells
+        self.bounds = ((xmin, xmax + cells * dx), y_bounds, z_bounds)
+        if self._outflow_damping is not None:
+            width = float(self._outflow_damping["width"])
+            if width > cells * dx:
+                logger.warning(
+                    "outflow_damping.width=%.3g m is wider than the %.3g m outflow "
+                    "buffer, so the damping layer reaches into bounds.",
+                    width,
+                    cells * dx,
+                )
+
     def _validate_outflow_damping(self) -> None:
         """Reject an ``outflow_damping`` block PALM would reject or ignore.
 
@@ -477,8 +554,8 @@ class ForwardModel(BaseForwardModel):
         """Write PALM's outflow damping layer for an inflow_outflow run.
 
         Behind the last obstacle the flow reverses at the radiation outflow
-        boundary, and the non-dissipative ``pw-scheme`` advection cannot damp
-        it: xie_and_castro diverges within ~10 s without this. PALM relaxes
+        boundary; with the non-dissipative ``pw-scheme`` advection
+        xie_and_castro diverged within ~10 s without this. PALM relaxes
         u, v, w (and pt) toward the initial profile over the last ``width``
         metres at up to ``factor`` 1/s (prognostic_equations.f90:391).
         ``None`` writes nothing, leaving whatever the template sets.
@@ -567,8 +644,9 @@ class ForwardModel(BaseForwardModel):
         #   periodic  -> nudging driver (static OR time-varying), unless the
         #                escape hatch nudging_config.enabled=false restores
         #                today's un-driven periodic staging;
-        #   inflow_outflow static       -> current static path;
-        #   inflow_outflow time-varying -> current dynamic-driver path.
+        #   inflow_outflow (static OR time-varying) -> dynamic-driver path,
+        #                static params as a constant schedule;
+        #   periodic without nudging    -> static (or dynamic-driver) path.
         # The inflow_outflow branches also run symmetric hygiene so a template
         # (or a prior periodic run in the same experiment_dir) cannot leak the
         # LSF/nudging apparatus into an inflow run.
@@ -577,18 +655,54 @@ class ForwardModel(BaseForwardModel):
 
         if use_nudging:
             angle, speed = self._stage_nudging_driver(profile_config)
-        elif _is_time_varying_params(self.params):
+        elif uses_digital_filter(self._inlet_turbulence):
+            # Turbulent inflow planes in <case>_dynamic, read by
+            # turbulent_inflow — for static and time-varying params alike.
             if self.bounds is None or not self.nz or not self.ny:
                 raise ValueError(
-                    "Time-varying inflow requires bounds, nz, and ny to be set "
-                    "on ForwardModel (needed to construct the dynamic driver)."
+                    "inlet_turbulence method digital_filter requires bounds, nz "
+                    "and ny to be set on ForwardModel (needed for the inflow planes)."
+                )
+            self._disable_nudging_apparatus()
+            init_params = apply_digital_filter_inflow(
+                params=self.params,
+                config=self._inlet_turbulence or {},
+                p3d_path=self.p3d_path,
+                driver_path=self.dynamic_driver_path,
+                bounds=self.bounds,
+                nz=self.nz,
+                ny=self.ny,
+                profile_config=profile_config,
+                spinup_time=self.spinup_time,
+                simulation_time=float(self.simulation_time or 0.0),
+                window_start_time=self._elapsed_time,
+                seed=resolve_digital_filter_seed(
+                    self._inlet_turbulence, self.experiment_name, self.random_seed
+                ),
+            )
+            angle = float(init_params["inflow_angle"].item())
+            speed = float(init_params["velocity_magnitude"].item())
+        elif (
+            _is_time_varying_params(self.params)
+            or self.boundary_condition == "inflow_outflow"
+        ):
+            if self.bounds is None or not self.nz or not self.ny:
+                raise ValueError(
+                    "inflow_outflow and time-varying inflow require bounds, nz, "
+                    "and ny to be set on ForwardModel (needed to construct the "
+                    "dynamic driver)."
                 )
             # Writes <case>_dynamic NetCDF and flips on turbulent_inflow in the
             # namelist. Returns a scalar params Dataset holding the t=0 values
             # so we still populate ug_surface/u_profile for initialisation.
+            # Static inflow_outflow params go through the same driver as a
+            # constant schedule: the inflow planes are the only thing that
+            # re-imposes the inflow face every step. Without them a warm start
+            # (LOD=2) leaves the inflow ghost column at u=0 and PALM copies that
+            # onto the face for the whole run (docs/pypalm.md §8).
             self._disable_nudging_apparatus()
             init_params = apply_time_varying_inflow(
-                params=self.params,
+                params=as_inflow_schedule(self.params, self.simulation_time),
                 p3d_path=self.p3d_path,
                 driver_path=self.dynamic_driver_path,
                 bounds=self.bounds,
@@ -600,8 +714,8 @@ class ForwardModel(BaseForwardModel):
             angle = float(init_params["inflow_angle"].item())
             speed = float(init_params["velocity_magnitude"].item())
         else:
-            # Static path — make sure a stale dynamic driver from a prior
-            # time-varying run, and any nudging apparatus from a prior periodic
+            # Static periodic path (nudging_config.enabled=false) — make sure a
+            # stale dynamic driver from a prior inflow_outflow run, and any nudging apparatus from a prior periodic
             # run, in the same experiment_dir don't leak in.
             disable_turbulent_inflow(self.p3d_path)
             remove_dynamic_driver_file(self.dynamic_driver_path)
@@ -1139,6 +1253,11 @@ class ForwardModel(BaseForwardModel):
         if "z" in state.dims and state.sizes["z"] > 1:
             state = state.isel(z=slice(1, None))
 
+        # Drop the outflow buffer: the state covers `bounds` as configured.
+        if self._output_nx is not None:
+            keep = slice(0, self._output_nx)
+            state = state.isel({d: keep for d in ("x", "xu") if d in state.dims})
+
         # Unify onto a single z axis so u/v/w have matching shapes for
         # downstream viz and aggregation. Interpolate w from zw onto z
         # (linear, with extrapolation) and drop the zw dim.
@@ -1175,8 +1294,9 @@ class ForwardModel(BaseForwardModel):
         ``inflow_outflow`` via an LOD=1 ``init_atmosphere_*`` driver and
         ``'read_from_file'`` (see ``_reset_cold_init``).
 
-        ``state`` provided → warm start (no spinup): the resolved u/v/w field is
-        injected as PALM's full 3D initial condition via the dynamic-driver
+        ``state`` provided → warm start (no spinup): the resolved u/v field is
+        injected as PALM's full 3D initial condition (PALM zeroes w and its
+        initial pressure solve rebuilds it) via the dynamic-driver
         ``init_atmosphere_*`` LOD=2 mechanism and ``initializing_actions`` is
         switched to ``'read_from_file'`` (see :mod:`.utils.warm_start_utils`).
         Warm-start carries no subgrid state — PALM re-derives SGS-TKE — so the
@@ -1187,6 +1307,10 @@ class ForwardModel(BaseForwardModel):
             # No spinup on warm windows; also stops the time-varying inflow path
             # from prepending a spinup plateau (it reads ``self.spinup_time``).
             self.disable_spinup()
+        digital_filter = uses_digital_filter(self._inlet_turbulence)
+        if digital_filter:
+            self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
+        window_runtime = self.spinup_time + float(self.simulation_time or 0.0)
 
         if params is not None:
             self._apply_inflow_settings(params)
@@ -1209,7 +1333,11 @@ class ForwardModel(BaseForwardModel):
 
         self._clean_output()
         self.run()
-        return self._load_and_postprocess_state()
+        result = self._load_and_postprocess_state()
+        if digital_filter:
+            self._elapsed_time += window_runtime
+            write_elapsed_time(self.dirs, self._elapsed_time)
+        return result
 
     def _apply_warmstart(self, state: xarray.Dataset) -> None:
         """Inject ``state`` as PALM's 3D initial condition for a warm start."""
@@ -1254,10 +1382,11 @@ class ForwardModel(BaseForwardModel):
            path switch ``turbulent_inflow`` on" coupling — that coupling is the
            dynamic-driver reader, not a turbulence generator, and disabling it
            would sever the ESMDA-estimated inflow signal from the solver.
-        2. ``enabled: true`` → PALM's random inflow disturbances are turned on
-           on top of whatever inflow driver the params selected. The two are
-           orthogonal in PALM, so this composes with both the static and the
-           time-varying inflow paths.
+        2. ``method: random_disturbances`` → PALM's random inflow disturbances
+           are turned on on top of whatever inflow driver the params selected.
+        3. ``method: digital_filter`` → the disturbances stay as in 1; the
+           turbulent inflow planes were already written by
+           ``_apply_inflow_settings``.
         """
         return apply_inlet_turbulence(
             self.p3d_path, self._inlet_turbulence, warm_start=warm_start

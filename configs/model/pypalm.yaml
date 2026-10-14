@@ -19,16 +19,24 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: periodic # inflow_outflow #
+  # Shared with pyudales (configs/common.yaml `flow`), like the outflow buffer,
+  # profile, nudging and digital-filter values below.
+  boundary_condition: ${flow.boundary_condition}
   # inflow_outflow only: PALM's outflow damping layer relaxes u/v/w toward the
   # initial profile over the last `width` m before the radiation outflow, at up
-  # to `factor` 1/s. Without it the reversed flow behind the last obstacle meets
-  # the outflow and the non-dissipative pw-scheme diverges within ~10 s
-  # (xie_and_castro); factor 0.1 is not enough. Cyclic runs never get these keys
+  # to `factor` 1/s, keeping the reversed flow behind the last obstacle out of
+  # the outflow. With the non-dissipative pw-scheme (xie_and_castro until
+  # 2026-10) it was needed for stability; the ws-scheme is stable without it,
+  # but it still damps the outflow column. Cyclic runs never get these keys
   # (PALM rejects them, PAC0352). null -> write nothing. See docs/pypalm.md §8.
   outflow_damping:
     factor: 1.0            # 1/s; outflow_damping_factor
     width: 4.0             # m from the outflow edge; outflow_damping_width
+  # inflow_outflow only: extend PALM's grid downstream by this many metres of
+  # flat ground (whole cells; ncpu must divide the extended nx), so the outflow
+  # and its damping layer sit in an empty buffer, not in the wake of the last
+  # building. The output is cropped back to domain.bounds. null -> no buffer.
+  outflow_buffer: ${flow.outflow_buffer}
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
   # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #
@@ -37,8 +45,8 @@ forward_model:
   # DIFFUSIVITY in m^2/s, not a dimensionless constant like uDALES/pylbm take.
   # Setting it is a regime switch: it replaces PALM's prognostic SGS-TKE closure
   # with constant-Km and forces constant_flux_layer=.false. (PAC0149), disabling
-  # the wall model. The dimensionless ~0.24 used by the other backends is far too
-  # little dissipation as m^2/s and diverges. null keeps PALM's own closure.
+  # the wall model. The dimensionless 0.07-0.15 used by the other backends is far
+  # too little dissipation as m^2/s and diverges. null keeps PALM's own closure.
   # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
   sgs_constant: null
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert
@@ -47,41 +55,50 @@ forward_model:
   # docs/pypalm.md §"Nudging driver for periodic runs".
   nudging_config:
     enabled: true          # false -> today's un-driven periodic staging
-    tnudge: 15.0           # s; relaxation timescale, matches pyudales
-    nnudge_meters: 4.0     # no nudging below this height (via huge tnudge)
+    tnudge: ${flow.nudging.tnudge}  # s; relaxation timescale
+    # No nudging below this height (via huge tnudge). Same value as pyudales:
+    # above the canopy, so the canopy is driven by the shear layer, not held to
+    # the target by the nudging. 4 m nudged the canopy too, which made the
+    # canopy-level wind ~3x uDALES's (docs/pypalm.md §8).
+    nnudge_meters: ${flow.nudging.nnudge_meters}
+    # Inflow / nudging profile. z_ref is the height at which velocity_magnitude
+    # is the speed (unset it would default to the domain top).
     profile_config:
-      type: power_law
-      alpha: 0.25
-  # Switchable inlet turbulence. For PALM this is the built-in random
-  # inflow-disturbance machinery (create_disturbances + dt_disturb), the only
-  # inlet-turbulence generator that is independently toggleable on our staging:
-  # turbulence *recycling* needs a cyclic_fill/restart precursor run (TUI0006)
-  # and the synthetic turbulence generator needs an STG_PROFILES file and is
-  # mutually exclusive with turbulent_inflow (STG0009). Requires
-  # boundary_condition: inflow_outflow — staging raises otherwise.
-  # NOTE: `enabled: false` does NOT disable PALM's `turbulent_inflow` module.
-  # On the time-varying-params path that module is the *reader* for the
-  # `_dynamic` driver carrying inflow_angle/velocity_magnitude; switching it off
-  # would silently disconnect ESMDA from the solver. See docs/pypalm.md §8.
+      type: ${flow.profile.type}
+      alpha: ${flow.profile.alpha}
+      z_ref: ${flow.profile.z_ref}
+  # Switchable inlet turbulence (inflow_outflow only; staging raises under
+  # periodic). Two methods, see docs/pypalm.md §8:
+  #   digital_filter       turbulent inflow planes (mean profile + Xie & Castro
+  #                        digital-filter fluctuations, the generator uDALES'
+  #                        inlet uses) imposed on the inflow face through
+  #                        PALM's turbulent_inflow 'read_from_file' reader.
+  #                        Prescribed intensity and length scales, per-member
+  #                        seed, works with static/time-varying params and warm
+  #                        starts. Use this for cross-model comparisons.
+  #   random_disturbances  PALM's own re-injected random u/v kicks
+  #                        (create_disturbances + dt_disturb) in a strip that
+  #                        on xie_and_castro lies inside the first building row.
+  #                        Uncontrolled intensity/length scales; kept to
+  #                        reproduce older runs.
+  # `enabled: false` never switches PALM's turbulent_inflow module off: with
+  # time-varying params it is the reader of the mean inflow planes.
   inlet_turbulence:
-    # Two INDEPENDENT switches — PALM has two distinct disturbance mechanisms:
-    #
-    #   initial_seed  one-off random kick on u/v at cold-start init
-    #                 (init_3d_model.f90:1488). This is what breaks symmetry so
-    #                 turbulence can develop from PALM's smooth analytic initial
-    #                 profile. ON by default; set false and transition has to be
-    #                 tripped by the topography alone, so it develops later.
-    #   enabled       perturbations RE-INJECTED near the inflow for the whole
-    #                 run (time_integration.f90:966-989), paced by dt_disturb.
-    #
-    # Both are gated by &runtime_parameters create_disturbances, so previously
-    # `enabled: false` still left the t=0 kick on. `initial_seed: false` with
-    # `enabled: true` is expressed by keeping create_disturbances=.true. and
-    # setting disturbance_energy_limit=0.0, which suppresses only the kick — so
-    # all four combinations are usable. A warm start always suppresses the kick
-    # regardless, so as not to shock the injected field.
-    enabled: false
+    enabled: ${flow.inlet_turbulence.enabled}
+    method: digital_filter
+    # One-off random kick on u/v at cold-start init (init_3d_model.f90:1488),
+    # independent of `enabled`/`method`. With false and `random_disturbances`,
+    # create_disturbances stays on and disturbance_energy_limit=0.0 suppresses
+    # only the kick. A warm start always suppresses it.
     initial_seed: false
+    # --- digital_filter: shared with pyudales.yaml's block ---------------------
+    intensity: ${flow.inlet_turbulence.intensity}  # u'_rms / |U_mean(z)|; v', w' 0.7x
+    length_scale_y: ${flow.inlet_turbulence.length_scale_y}  # m, spanwise
+    length_scale_z: ${flow.inlet_turbulence.length_scale_z}  # m, vertical
+    length_scale_x: ${flow.inlet_turbulence.length_scale_x}  # m, streamwise (Taylor)
+    time_step: ${flow.inlet_turbulence.time_step}  # s between planes; divides the window
+    seed: ${flow.inlet_turbulence.seed}  # null -> from the member name (+ random_seed)
+    # --- random_disturbances --------------------------------------------------
     dt_disturb: 5.0        # s; interval between perturbation injections
     amplitude: 0.25        # m/s; PALM's disturbance_amplitude
     begin: null            # inflow_disturbance_begin, grid pts; null -> PALM auto (min(10, nx/2))
@@ -91,7 +108,8 @@ forward_model:
   # Seed of PALM's random disturbances (the initial kick and the inflow
   # perturbations above): &initialization_parameters ensemble_member_nr, an int
   # in [0, 2000]. null writes nothing (PALM's default 0). One value per run:
-  # ensemble members all inherit it. Change it for a replica of a turbulent truth.
+  # ensemble members all inherit it. Also mixed into the digital_filter seed.
+  # Change it for a replica of a turbulent truth.
   random_seed: null
   nx: ${domain.nx}
   ny: ${domain.ny}

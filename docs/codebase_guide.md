@@ -88,7 +88,7 @@ src/pyurbanair/                    # Top-level package: base classes + glue
 configs/                           # Hydra config (see §5); keys in configs/README.md
   forward.yaml                     # Entry point for run_forward.py
   assimilation.yaml                # Entry point for run_smoother/run_filtering/run_hybrid.py
-  common.yaml                      # paths (per machine), ensemble budget, Hydra run dir
+  common.yaml                      # paths (per machine), ensemble budget, Hydra run dir, flow
   case/                            # One self-contained file per case (xie_and_castro, barcelona)
   params/                          # Parameter samplers (mounted twice for DA: truth + prior)
   assimilation_settings/           # Every option of each DA component, at top level
@@ -230,8 +230,9 @@ key and the common overrides; [scripts_and_configs.md](scripts_and_configs.md)
 describes the groups, scripts and workflows.
 
 - `common.yaml` owns `paths` (`paths.machine` picks the solver scratch dir per
-  machine), the single `ensemble` budget (incl. `failure` policy) and Hydra's
-  run dir.
+  machine), the single `ensemble` budget (incl. `failure` policy), Hydra's
+  run dir and `flow`, the flow setup uDALES and PALM share (pylbm reads its
+  boundary condition), which cases override.
 - `case/` bundles domain, grid, geometry, sensors and the per-window `time`
   settings (incl. `seconds_per_knot`).
 - `model/` and `params/` contain constructor targets. Forward runs mount once;

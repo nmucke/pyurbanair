@@ -75,6 +75,7 @@ def stl_to_palm_topography(
     bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
     dz: float,
     snap_to_dz: bool = True,
+    x_max: float | None = None,
 ) -> np.ndarray:
     """Rasterize the STL buildings onto an ``(ny, nx)`` height grid and write ``_topo``.
 
@@ -86,6 +87,8 @@ def stl_to_palm_topography(
         bounds: Physical domain ((xmin, xmax), (ymin, ymax), (zmin, zmax)).
         dz: Vertical grid spacing in meters (used only when ``snap_to_dz``).
         snap_to_dz: If True, snap heights to integer multiples of ``dz``.
+        x_max: If set, cells whose centre lies beyond it get height 0 (the
+            empty outflow buffer of ``ForwardModel(outflow_buffer=...)``).
 
     Returns:
         The ``(ny, nx)`` height array that was written. y index 0 is the
@@ -111,6 +114,8 @@ def stl_to_palm_topography(
         z_top=float(zmax),
     )
     heights = np.clip(heights - zmin, 0.0, None)
+    if x_max is not None:
+        heights[:, x_centers > x_max] = 0.0
 
     if snap_to_dz and dz > 0:
         heights = np.round(heights / dz) * dz
@@ -121,7 +126,10 @@ def stl_to_palm_topography(
     np.savetxt(topo_path, heights_to_write, fmt="%.3f")
     logger.info(
         "Wrote PALM topography %s (%d x %d, max height %.3f m)",
-        topo_path, ny, nx, float(heights.max()),
+        topo_path,
+        ny,
+        nx,
+        float(heights.max()),
     )
 
     return heights

@@ -19,6 +19,7 @@ ENTRY_POINTS = [
     "forward",
     "assimilation",
     "comparison",
+    "model_comparison",
     *(f"surrogate/{p.stem}" for p in sorted((CONFIGS / "surrogate").glob("*.yaml"))),
 ]
 ENTRY_POINTS.remove("surrogate/architectures")  # entries, not a run config
@@ -108,6 +109,19 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
             "smoother",
             ["domain.nx=30", "assim_model.forward_model.ncpu=7"],
             "must divide nx",
+        ),
+        (
+            # 50 points over 100 m plus a 20 m buffer: PALM runs on 60.
+            "smoother",
+            [
+                "model@assim_model=pypalm",
+                "flow.boundary_condition=inflow_outflow",
+                "domain.nx=50",
+                "domain.bounds=[[-20.0,80.0],[0.0,80.0],[0.0,32.0]]",
+                "flow.outflow_buffer=20.0",
+                "assim_model.forward_model.ncpu=25",
+            ],
+            "must divide nx=60",
         ),
         (
             "smoother",

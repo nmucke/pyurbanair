@@ -36,7 +36,7 @@ _INFLOW_OUTFLOW = [
     "model.forward_model.boundary_condition=inflow_outflow",
     "model.forward_model.ncpu=4",
 ]
-_PERIODIC = ["model.forward_model.boundary_condition=periodic"]
+_PERIODIC = ["flow.boundary_condition=periodic", "flow.inlet_turbulence.enabled=false"]
 
 _SECTION = "initialization_parameters"
 _KEYS = ("outflow_damping_factor", "outflow_damping_width")
