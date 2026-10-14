@@ -38,6 +38,7 @@
     momentum_advec = 'pw-scheme',   ! 2nd-order Piacsek-Williams ~ uDALES iadv_mom=2 (CD2)
     scalar_advec = 'pw-scheme',
     cfl_factor = 0.7,           ! match uDALES courant=0.7
+    bc_uv_t = 'neumann',        ! free-slip lid, as uDALES BCtopm 1 (periodic) / 3 (inflow-outflow)
 
 /
 
