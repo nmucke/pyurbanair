@@ -70,6 +70,16 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     )
     assert isinstance(cfg, DictConfig)
     apply_style()
+    # Opaque white, as evaluation.figures._styled: apply_style's transparent
+    # background is unreadable on a dark-mode viewer.
+    plt.rcParams.update(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "savefig.transparent": False,
+        }
+    )
     models = dict(yaml.safe_load((run_dir / "models.yaml").read_text()))
     styles = {
         name: {"color": PALETTE[i % len(PALETTE)], "ls": "-"}
