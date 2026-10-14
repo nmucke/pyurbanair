@@ -31,6 +31,16 @@ from tests.conftest import compose
 STL_PATH = pathlib.Path("geometries/xie_and_castro/xie_castro_2008_STL.stl")
 
 
+@pytest.fixture(autouse=True)  # type: ignore[misc]
+def _private_build_root(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """These tests stamp fake builds (an empty `boltzmann`): keep them out of
+    the per-user build root tests/conftest.py shares, or a later real run
+    trusts the stamp and fails to execute the placeholder."""
+    monkeypatch.setenv("PYLBM_BUILD_ROOT", str(tmp_path / "lbm_build"))
+
+
 def _make_model(temp_dir: pathlib.Path, ncpu: int, cuda: Any = False) -> ForwardModel:
     """Construct a ForwardModel without compiling or running anything."""
     return ForwardModel(
