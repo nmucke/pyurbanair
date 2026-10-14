@@ -172,7 +172,13 @@ def _model_config(
             OmegaConf.update(model_cfg, key, _with_seed(value, seed), merge=True)
         for key, value in _flat(cfg.overrides.get(label, {})).items():
             OmegaConf.update(model_cfg, key, value, merge=True)
-        model_cfg.paths.results_dir = str(out / "runs" / label / f"replica_{replica}")
+        run = pathlib.Path("runs") / label / f"replica_{replica}"
+        model_cfg.paths.results_dir = str(out / run)
+        # Own solver scratch per run (absolute: uDALES stages from another
+        # cwd), so replicas and comparisons running at once don't share one.
+        model_cfg.paths.experiment_dir = str(
+            (pathlib.Path(cfg.paths.experiment_dir) / out.name / run).resolve()
+        )
     return model_cfg
 
 

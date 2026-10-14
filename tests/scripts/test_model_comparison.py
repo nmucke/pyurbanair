@@ -64,6 +64,7 @@ def test_model_config_applies_seed_and_overrides(tmp_path: pathlib.Path) -> None
     assert palm.model.forward_model.boundary_condition == "inflow_outflow"
     assert palm.time.spinup_time == 7 and palm.model.forward_model.spinup_time == 7
     assert palm.paths.results_dir == str(tmp_path / "runs" / "pypalm" / "replica_1")
+    assert palm.paths.experiment_dir.endswith(f"{tmp_path.name}/runs/pypalm/replica_1")
     udales = script._model_config(cfg, "pyudales", "pyudales", 0, tmp_path)
     assert udales.model.forward_model.inlet_turbulence.seed == 5
     assert udales.model.forward_model.experiment_name == "005"
