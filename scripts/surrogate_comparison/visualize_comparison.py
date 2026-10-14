@@ -443,6 +443,7 @@ def _tke_slices(fields: np.ndarray, level: int, steps: list[int]) -> list[np.nda
         mean = layer[finite].mean(axis=0)
         return [0.5 * ((layer[s - 1] - mean) ** 2).sum(axis=0) for s in steps]
 
+
 def _animate_speed(
     cfg: DictConfig,
     run_dir: pathlib.Path,
@@ -478,7 +479,7 @@ def _animate_speed(
         Panel(f"{name} - truth", e, "RdBu_r", -spread, spread, "error")
         for name, e in errors.items()
     ]
-    return animate_slices(
+    path: pathlib.Path = animate_slices(
         [row],
         times[1:][frames] - times[0],
         run_dir / "animation_speed.mp4",
@@ -487,6 +488,7 @@ def _animate_speed(
         dpi=int(opts.dpi),
         labels=("x index", "y index"),
     )
+    return path
 
 
 def _statistics(fields: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:

@@ -82,7 +82,9 @@ def animate_slices(
             ax.set_title(panel.title, fontsize=9)
             last = c == len(row) - 1 or row[c + 1].group != panel.group
             if last:  # one bar per group keeps the panels the same size
-                group = [axes[r, j] for j, p in enumerate(row) if p.group == panel.group]
+                group = [
+                    axes[r, j] for j, p in enumerate(row) if p.group == panel.group
+                ]
                 fig.colorbar(image, ax=group, shrink=0.8)
         for c in range(len(row), n_cols):
             axes[r, c].set_visible(False)

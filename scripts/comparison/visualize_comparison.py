@@ -248,13 +248,16 @@ def _animate_speed(
             default=1.0,
         )
         rows.append(
-            [Panel(f"{lb}, {at}", plane[lb], CMAP_FIELD, 0.0, vmax, "value") for lb in labels]
+            [
+                Panel(f"{lb}, {at}", plane[lb], CMAP_FIELD, 0.0, vmax, "value")
+                for lb in labels
+            ]
             + [
                 Panel(f"{a} - {b}, {at}", d, CMAP_DIFF, -spread, spread, "diff")
                 for (a, b), d in diffs.items()
             ]
         )
-    return animate_slices(
+    movie: pathlib.Path = animate_slices(
         rows,
         time[frames],
         run_dir / "animation_speed.mp4",
@@ -268,6 +271,8 @@ def _animate_speed(
             float(metrics.y[-1]),
         ],
     )
+    return movie
+
 
 def _plot_sensor_series(
     run_dir: pathlib.Path, models: dict, colors: dict, path: pathlib.Path
