@@ -18,19 +18,22 @@ otherwise. Models are labelled by their folder name (if two names clash, by the
 shortest path suffix that tells them apart, e.g. `seed0_local_fno`).
 
 Outputs, in `paths.results_dir` (the run dir):
-  config.yaml                        the resolved config
+  config.yaml                        the resolved config, `sample_indices` set
+                                     to the trajectories compared
   models.yaml                        per label: model_dir, num_history_steps,
-                                     n_parameters, seconds_per_step (inference,
-                                     first step of each rollout excluded) and
-                                     the data signature
+                                     n_parameters, seconds_per_step (inference
+                                     on `device`, first step of each rollout
+                                     excluded) and the data signature
   rollouts/<label>/sample_<NNNN>.nc  the predicted frames (lead steps 1..N) of
                                      trajectory NNNN of the split
 Persistence is not written: compute_metrics.py derives it from the truth.
+A rerun into the same run dir first removes the earlier rollouts and models.yaml.
 """
 
 from __future__ import annotations
 
 import pathlib
+import shutil
 import sys
 import time
 from typing import Any
@@ -56,7 +59,8 @@ def run(cfg: DictConfig) -> None:
     dev = device(cfg.device)
     out = pathlib.Path(cfg.paths.results_dir)
     out.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, out / "config.yaml", resolve=True)
+    shutil.rmtree(out / "rollouts", ignore_errors=True)
+    (out / "models.yaml").unlink(missing_ok=True)
 
     labels = _labels(list(cfg.models))
     signatures = _check_same_data(
@@ -74,10 +78,12 @@ def run(cfg: DictConfig) -> None:
     }
     start = max(histories.values()) - 1
     samples = (
-        range(len(data._state_files))
+        list(range(len(data._state_files)))
         if cfg.sample_indices is None
         else [int(s) for s in cfg.sample_indices]
     )
+    cfg.sample_indices = samples
+    OmegaConf.save(cfg, out / "config.yaml", resolve=True)
 
     timings = {label: [0.0, 0] for label in models}  # seconds, steps
     for sample in samples:
@@ -127,6 +133,7 @@ def run(cfg: DictConfig) -> None:
                     "num_history_steps": histories[label],
                     "n_parameters": sum(p.numel() for p in model.parameters()),
                     "seconds_per_step": timings[label][0] / timings[label][1],
+                    "device": str(dev),
                     "data": signatures[label],
                 }
                 for label, (model, _) in models.items()
@@ -140,9 +147,9 @@ def run(cfg: DictConfig) -> None:
 def _labels(model_dirs: list[str]) -> dict[str, str]:
     """A unique label per model: its folder name or, if names clash, the
     shortest path suffix that tells them apart, joined by `_` (a folder name)."""
-    if len(set(model_dirs)) != len(model_dirs):
-        raise ValueError(f"a model is listed twice: {model_dirs}")
     parts = [pathlib.Path(d).resolve().parts for d in model_dirs]
+    if len(set(parts)) != len(parts):
+        raise ValueError(f"a model is listed twice: {model_dirs}")
     for n in range(1, max(map(len, parts)) + 1):
         labels = ["_".join(p[-n:]).lstrip("_/") for p in parts]
         if len(set(labels)) == len(labels):
@@ -161,9 +168,8 @@ def _check_same_data(train_cfgs: dict[str, Any]) -> dict[str, dict[str, Any]]:
     Compares the training-data folder name (paths may differ between machines),
     the state and parameter variables (`param_vars: null` read as the corpus'
     parameter names, unknown if its param files can't be read), and the
-    corpus' output frequency where its config.yaml can be read. A root that
-    does not resolve on this machine is left out of the folder comparison
-    rather than compared as raw text.
+    corpus' output frequency where its config.yaml can be read. A root whose
+    interpolation cannot be resolved is left out of the folder comparison.
     """
 
     def signature(cfg: Any) -> dict[str, Any]:

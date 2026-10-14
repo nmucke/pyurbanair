@@ -10,8 +10,8 @@ config, `data_dir` and `split`.
 
 Sources: every model, `persistence` (the start frame repeated) and, for the
 window statistics, `truth_halves` (the first half of the truth's window against
-the second half: the sampling-noise floor of a time-averaged statistic; read
-the models' statistics against it). Everything is on the fluid cells, in m/s,
+the second half: a rough sampling-noise floor of a time-averaged statistic,
+about sqrt(2) above that of the full window, meaningful only for long rollouts). Everything is on the fluid cells, in m/s,
 per compared trajectory and then averaged over them (plain mean: one unstable
 sample makes a model's mean NaN).
 
@@ -101,12 +101,7 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     )
     assert isinstance(train_cfg, DictConfig)
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
-    samples = sorted(
-        int(p.stem.split("_")[1])
-        for p in (run_dir / "rollouts" / labels[0]).glob("sample_*.nc")
-    )
-    if not samples:
-        raise FileNotFoundError(f"no rollouts in {run_dir / 'rollouts' / labels[0]}")
+    samples = [int(s) for s in cfg.sample_indices]  # set by run_models.py
     pdf_share = int(cfg.metrics.max_pdf_values) // len(samples)
 
     scores = [
@@ -138,14 +133,25 @@ def _score_sample(
     }
     with xarray.open_dataset(files[labels[0]]) as ds:
         start, z = int(ds.attrs["start"]), ds["z"].values
+    with xarray.open_dataset(data._state_files[sample]) as ds:
+        corpus_times = ds["time"].values
     n = 0
     for path in files.values():
         with xarray.open_dataset(path) as ds:
-            n = max(n, int(ds["lead"].max()))
+            own = corpus_times[start + 1 : start + 1 + ds.sizes["time"]]
+            if (
+                (int(ds.attrs["sample"]), int(ds.attrs["start"])) != (sample, start)
+                or ds.attrs["split"] != str(cfg.split)
+                or not np.array_equal(ds["time"].values, own)
+            ):
+                raise ValueError(
+                    f"{path} is not trajectory {sample} of split {cfg.split!r} "
+                    f"from frame {start}: rerun run_models.py"
+                )
+            n = max(n, ds.sizes["time"])
     window = load_states(data, sample, range(start, start + n + 1))
     truth = window[1:]
-    with xarray.open_dataset(data._state_files[sample]) as ds:
-        times = ds["time"].values[start : start + n + 1].astype(float)
+    times = corpus_times[start : start + n + 1].astype(float)
     fluid = data.geometry_for(sample).numpy().astype(bool)
     state_vars = list(data.state_vars)
     spacing = grid_spacing(data, sample)
@@ -226,9 +232,7 @@ def _curves(
             (anomaly_p**2).sum(axis=(1, 2), dtype=f8)
             * (anomaly_t**2).sum(axis=(1, 2), dtype=f8)
         )
-        std_ratio = p.std(axis=-1, dtype=f8) / t.std(
-            axis=-1, dtype=f8
-        )  # = diagnostics.spatial_std
+        std_ratio = p.std(axis=-1, dtype=f8) / t.std(axis=-1, dtype=f8)
         curves = {"rmse": np.sqrt(mse.mean(axis=1)), "acc": acc}
         for c, var in enumerate(state_vars):
             curves[f"rmse_{var}"] = np.sqrt(mse[:, c])

@@ -22,7 +22,7 @@ Outputs, in the run dir:
                          truth, then one row per model (trajectory `figures.sample`)
   statistics_slices.png  time-mean u and resolved TKE at `figures.level`: truth,
                          then one row per model (trajectory `figures.sample`)
-  summary.csv/.tex       headline scalars per source (mean over the samples)
+  summary.csv/.tex       headline scalars per model and persistence (mean over the samples)
 """
 
 from __future__ import annotations
@@ -58,7 +58,6 @@ PALETTE = [
 REFERENCE = {
     "persistence": {"color": COLORS["prior"], "ls": "--"},
     "truth": {"color": COLORS["truth"], "ls": "-", "lw": 2.0},
-    "truth_halves": {"color": COLORS["charcoal"], "ls": ":"},
 }
 VARS = ("u", "v", "w")
 LEAD_LABEL = "lead time [s]"
@@ -120,7 +119,7 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     _plot_spectra(metrics, styles, run_dir / "spectra.png")
     _plot_pdfs(metrics, styles, run_dir / "pdfs.png")
     _plot_slices(cfg, run_dir, models)
-    _write_summary(scalars, [*models, "persistence", "truth_halves"], run_dir)
+    _write_summary(scalars, [*models, "persistence"], run_dir)
     print(f"Saved comparison figures in {run_dir}")
 
 
@@ -292,14 +291,15 @@ def _plot_pdfs(metrics: xarray.Dataset, styles: dict, path: pathlib.Path) -> Non
 def _plot_slices(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> None:
     """slices.png and statistics_slices.png of trajectory `figures.sample`."""
     first = next(iter(models))
-    files = sorted((run_dir / "rollouts" / first).glob("sample_*.nc"))
+    samples = list(cfg.sample_indices)  # set by run_models.py
     index = int(cfg.figures.sample)
-    if not 0 <= index < len(files):
-        print(f"figures.sample={index} not among the {len(files)} rollouts: no slices")
+    if not 0 <= index < len(samples):
+        print(f"figures.sample={index} not among the {len(samples)} samples: no slices")
         return
+    name_nc = f"sample_{int(samples[index]):04d}.nc"
     preds = {}
     for name in models:
-        with xarray.open_dataset(run_dir / "rollouts" / name / files[index].name) as ds:
+        with xarray.open_dataset(run_dir / "rollouts" / name / name_nc) as ds:
             preds[name] = np.stack([ds[v].values for v in VARS], axis=1)
             lead, start, sample = (
                 ds["lead"].values,

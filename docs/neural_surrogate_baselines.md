@@ -166,7 +166,7 @@ Two corrections to the papers' descriptions:
   period Aurora sees is the padded length.
 
 **SSGen** (paper 2 Eqs. 1–8) folds height into channels, so it is built for
-`n_levels` = the corpus' nz (default 16, pyudales_idealized's). It runs on the z-scored, masked
+`n_levels` = the corpus' nz (16 in `architectures.yaml`, pyudales_idealized's). It runs on the z-scored, masked
 backbone prediction, and the model adds its output (Eq. 8). Chosen where the
 paper is silent: 8 GroupNorm groups, zero padding. The paper's 9.5 M SSGen
 parameters do not follow from its description; ours has 0.1 M at 96 channels.

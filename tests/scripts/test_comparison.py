@@ -177,6 +177,24 @@ def test_run_models_labels(
     shutil.copytree(model_dirs[0], reserved)
     with pytest.raises(ValueError, match="reserved"):
         run_models(session_root, tmp_path / "r", f"models=[{reserved}]")
+    same = model_dirs[0].parent / ".." / model_dirs[0].parent.name / model_dirs[0].name
+    with pytest.raises(ValueError, match="listed twice"):
+        run_models(session_root, tmp_path / "d", f"models=[{model_dirs[0]},{same}]")
+
+
+def test_run_models_rerun_replaces_the_rollouts(
+    tmp_path: pathlib.Path, comparison_run: pathlib.Path, session_root: pathlib.Path
+) -> None:
+    """Rollouts left by an earlier run into the same dir are not scored."""
+    run_dir = tmp_path / "run"
+    shutil.copytree(comparison_run, run_dir)
+    stale = run_dir / "rollouts" / "dft" / "sample_0007.nc"
+    shutil.copy(stale.with_name("sample_0000.nc"), stale)
+    models = OmegaConf.load(run_dir / "config.yaml").models
+    run_models(session_root, run_dir, f"models=[{models[0]}]", "max_steps=1")
+    assert not (run_dir / "rollouts" / "dft").exists()
+    assert list(OmegaConf.load(run_dir / "models.yaml")) == ["local_fno"]
+    assert list(OmegaConf.load(run_dir / "config.yaml").sample_indices) == [0]
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +298,30 @@ def test_compute_metrics_and_visualize_write_every_output(
         assert (comparison_run / f"{name}.png").stat().st_size > 0, name
     summary = (comparison_run / "summary.csv").read_text().splitlines()
     assert summary[0].startswith("source,rmse,rmse_vs_persistence")
-    assert [row.split(",")[0] for row in summary[1:]] == [
-        *MODELS,
-        "persistence",
-        "truth_halves",
-    ]
+    # truth_halves is only a rough floor: kept out of the table and its bold best.
+    assert [row.split(",")[0] for row in summary[1:]] == [*MODELS, "persistence"]
     assert (comparison_run / "summary.tex").exists()
+
+
+def test_compute_metrics_refuses_rollouts_of_another_split(
+    comparison_run: pathlib.Path,
+) -> None:
+    with pytest.raises(ValueError, match="rerun run_models"):
+        compute_metrics(comparison_run, "split=val")
+
+
+def test_divergence_rms_is_exact_on_linear_fields() -> None:
+    """Central differences are exact on linear fields, with dz != dy != dx."""
+    divergence_rms = load_script(
+        "scripts/comparison/compute_metrics.py"
+    )._divergence_rms
+    z, y, x = np.meshgrid(*(np.arange(5.0),) * 3, indexing="ij")
+    dz, dy, dx = 1.0, 2.0, 3.0
+    fluid = np.ones((5, 5, 5), dtype=bool)
+    ctx = {"fluid": fluid, "vars": ["u", "v", "w"]}
+    # u = x, v = 2 y, w = 0 in physical coordinates: div = 1 + 2 = 3.
+    fields = np.stack([x * dx, 2 * y * dy, 0 * z])[None]
+    np.testing.assert_allclose(divergence_rms(fields, ctx, (dz, dy, dx)), [3.0])
+    # u = x, v = 0, w = -z: divergence-free.
+    fields = np.stack([x * dx, 0 * y, -z * dz])[None]
+    np.testing.assert_allclose(divergence_rms(fields, ctx, (dz, dy, dx)), [0.0])
