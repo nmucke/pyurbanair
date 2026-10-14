@@ -244,10 +244,12 @@ Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a sing
 value in the shared params sampler cannot be correct for all three at once.
 
 
-> **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
-> (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
-> for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
-> retune `configs/params/*.yaml` when switching a case's closure.
+> **The two constants are not on the same scale.** Vreman (2004) relates them
+> by `c_vreman ≈ 2.5 cs²`. uDALES' Fortran defaults are `cs = -1.` (→ the
+> derived `(cm³/ceps)^0.25 = 0.217`, from `cf = 2.5`, `alpha_kolm = 1.5`) and
+> `c_vreman = 0.07` (`cs ≈ 0.17`). The config default is `c_vreman = 0.12`, the
+> Vreman equivalent of that `cs = 0.217` (§7). Retune `configs/params/*.yaml`
+> when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -540,10 +542,7 @@ nnudge = int(np.count_nonzero(heights < nnudge_meters))
 where `heights` are cell centres `(0.5*dz, 1.5*dz, …)`. This takes precedence
 over the raw `nnudge` key.
 
-**`tnudge`**: nudging relaxation timescale in seconds (default 15.0). Xie & Castro
-"divergence" in practice is marginal dt-collapse at end-of-window, not a nudging
-failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.24
-(see §8).
+**`tnudge`**: nudging relaxation timescale in seconds (default 15.0).
 
 ### 6.1 Turbulent inlet — synthetic driver planes
 
@@ -805,7 +804,7 @@ and ignored.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `True` | When False, falls back to bare `subprocess.run(check=True)` |
-| `min_dt` | `1e-4` s | Absolute timestep floor |
+| `min_dt` | `1e-3` s | Absolute timestep floor (config value; a collapsed run sits near 1.6e-4 s, normal steps are 0.05-0.3 s at 2 m) |
 | `patience` | `20` | Consecutive sub-floor steps before killing |
 | `warmup_steps` | `20` | Ignore the first N steps (legitimate ramp-up) |
 | `poll_interval_s` | `2.0` | Log re-read interval |
@@ -817,13 +816,72 @@ exception the ensemble layer already treats as a member failure. The
 from a random successful donor without waiting for the slow dt-collapse crash.
 
 **Known gotchas:**
-- Xie & Castro "divergence" is typically marginal dt-collapse near end-of-window,
-  not a genuine flow instability. It is fixed by raising the SGS constant — under
-  Smagorinsky `cs 0.20 → 0.24`; under Vreman the equivalent lever is `c_vreman`,
-  where the 0.07 default diverges and ~0.25 runs clean on this case.
+- A dt collapse under `inflow_outflow` is a real instability at the **outflow
+  face**, not a marginal time step (see "Outflow backflow and the SGS
+  constant" below). The watchdog catches it only because `min_dt` is above
+  the ~1.6e-4 s the collapsed run settles at; at the old 1e-4 floor such a
+  run crawled on for hours.
 - Stale fielddumps can give NaN-padded or duplicate z-coordinates after a failed
   worker is retried. `run_single` automatically cleans the member output directory
   before restoring/staging any warmstart files for each attempt.
+
+### Outflow backflow and the SGS constant
+
+The default `c_vreman` is **0.12**: Vreman's (2004) `c = 2.5 Cs²` for
+`Cs = 0.217`, the Smagorinsky constant uDALES derives from its own Deardorff
+constants (§4). Until 2026-10 it was 0.24 (`Cs = 0.31`, the old Smagorinsky
+`cs = 0.24` carried over to `c_vreman`), because lower values "collapsed dt" on
+xie_and_castro. That collapse is the outflow, not the closure:
+
+- The outflow (`xmo_convective` for v, w and `bcpup` for u, in
+  `modboundary.f90`) advects every variable out at one speed, the bulk mean
+  `uouttot`, with a Neumann u in the lowest cell. Reversed flow reaching the
+  outflow face turns it into an inflow the condition cannot handle. CD2
+  momentum advection (the only one built, §Quick reference) adds no
+  dissipation, so the SGS viscosity is the only damping there.
+- With the outflow at x = 80 m (5 m behind the last cube column, no buffer)
+  the wake reaches the face. At c = 0.10 with turbulent inflow, dt drops from
+  0.15 s to 0.04 s at 85 s and settles near 1.6e-4 s by 110 s. Over that time
+  u on the last interior u face (x = 78 m, z = 3-9 m) goes from -9.6 to
+  -6000 m/s, while |u| stays below 7 m/s everywhere else until the blow-up
+  spreads. The run never NaNs; the adaptive step shrinks with the velocity.
+  Without the buffer dt falls below 0.01 s at ~80 s for c = 0.07, ~110 s for
+  0.10 and 120-230 s for 0.12 (laminar and turbulent inflow); 0.24 runs clean.
+- The 20 m flat `flow.outflow_buffer` of xie_and_castro (since 2026-10)
+  removes the trigger. With it c = 0.12 is stable for 1020 s, at 10 m/s, and
+  over three warm-started `params=dynamic_truth` windows. So is c = 0.07,
+  also at 30° and periodic. Backflow still reaches the face (5 % of the
+  samples, 29 % at z = 1 m, where the mean u is 0.3 m/s), so the margin is
+  finite: c = 0.05 runs, and c = 0.04 with laminar inflow diverges at the
+  face (z = 1 m) after ~380 s; a 40 m buffer makes that run stable. A case
+  without a buffer, or with buildings close to `xmax`, needs one before its
+  SGS constant is lowered.
+- Why not the literature 0.07 (`Cs ≈ 0.17`, Lilly's value for a sharp
+  spectral cut-off)? CD2 does not dissipate at the grid scale, and at 0.07
+  energy piles up there. Spanwise spectra of u' at z = 9 m (inflow_outflow,
+  turbulent) and in the periodic case, compensated by k^5/3: they rise toward
+  the 2Δ cut-off for c ≤ 0.10, are flat to slightly falling at 0.12, and fall
+  to a third of the inertial level at 0.24. The share of u' variance at
+  wavelengths under 2.7Δ is 7-10 % at 0.07, 3-5 % at 0.12, 1-2 % at 0.24 and
+  ~3 % for a k^-5/3 spectrum. Same criterion for any grid: the lowest c
+  whose spectrum does not rise at the cut-off.
+- Effect on the flow (2 m grid, 5 m/s, statistics over 150-420 s, against
+  PALM with its ws-scheme). Laminar inflow: uDALES' wakes are nearly steady
+  at 0.12 and 0.24 (canopy TKE 0.013 and 0.001 m²/s², PALM 0.003); they shed
+  at 0.07 (0.078). Turbulent inflow: canopy TKE 0.10 (0.24), 0.15 (0.12),
+  0.22 (0.07), PALM 0.13-0.15. The compare_models TKE-profile distance to
+  PALM is 0.041, 0.017 and 0.068 m²/s². The near-ground canopy mean is NOT an
+  SGS-constant effect: array-mean u at z = 1 m is 1.33-1.34 m/s for c =
+  0.12-0.24 and 1.20 at 0.07, against PALM's 0.87-0.88. The sensor-mean
+  distance stays 0.42-0.46 m/s for every c. Periodic runs barely depend on c.
+- The `model_discrepancy` patch at zero coefficients matches the stock
+  closure. The runs differ by 1e-3 m/s after the 120 s spin-up (the chaotic
+  growth of round-off), and their statistics agree (canopy TKE 0.2259 vs
+  0.2265 at c = 0.07).
+- The closure stays Vreman. In this build Smagorinsky has its Piomelli wall
+  damping commented out (`damp = 1` in `closure`), and the one-equation model
+  cannot be used (§4). Vreman's viscosity vanishes in pure shear, so it needs
+  no wall damping.
 
 ---
 
@@ -850,7 +908,7 @@ INFLOW_PARAM_NAMES = (
 | `velocity_magnitude` | `u0`/`v0` in namoptions + nudging profiles | m/s reference speed |
 | `pressure_gradient_magnitude` | `dpdx`/`dpdy` in namoptions | Pa/m; decomposed by angle. uDALES-only parameter. |
 | `vertical_inflow_exponent` (α) | Overrides `profile_config["alpha"]` in `_resolve_nudging_config` | Estimated by ESMDA; per-member shear |
-| `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). Note the two constants have different natural magnitudes (~0.17 vs 0.07). |
+| `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). The two constants are on different scales (`c_vreman ≈ 2.5 cs²`: 0.217 ↔ 0.12). |
 
 **`pressure_gradient_magnitude`** is the third parameter unique to pyudales.
 `resolve_parameter_schema` in `hydra_helpers.py` adds it to the uDALES parameter
@@ -912,6 +970,7 @@ forward_model:
   boundary_condition: ${flow.boundary_condition}   # shared flow setup, configs/common.yaml
   outflow_buffer: ${flow.outflow_buffer}
   closure: vreman             # smagorinsky | vreman | null (keep template)
+  sgs_constant: 0.12          # c_vreman = 2.5 * 0.217^2; see §7
   per_member_irandom: false   # true -> one cold-start seed per run (§6.2)
   nudging_config:
     tnudge: 15.0
@@ -922,7 +981,7 @@ forward_model:
       alpha: 0.25
   instability_check:
     enabled: true
-    min_dt: 1.0e-4
+    min_dt: 1.0e-3
     patience: 20
     warmup_steps: 20
     poll_interval_s: 2.0

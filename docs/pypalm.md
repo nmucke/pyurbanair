@@ -733,7 +733,7 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
 | outflow | convective, 20 m flat buffer (since 2026-10) | radiation + damping (1/s, 4 m), 20 m buffer | different schemes, both outside the bounds |
 | upstream ground | wall (STL ground extended over the fetch since 2026-10; before it was free-slip) | wall | aligned |
 | walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0; first point 1 m (dz/2) in both |
-| SGS | Vreman, c = 0.24 | Deardorff 1.5-order TKE | cannot be aligned, see below |
+| SGS | Vreman, c = 0.12 (0.24 before 2026-10-14) | Deardorff 1.5-order TKE | cannot be aligned, see below |
 | advection, time | CD2, RK3, CFL 0.7, dt_max 1 s | pw-scheme (2nd order), RK3, CFL 0.7, dt_max 1 s | aligned up to the scheme |
 | pressure solver | FFT (cosine in x under inflow-outflow) | multigrid (inflow_outflow), FFT (periodic) | both converged; not a parity issue |
 | initial state | rest (+0.01 m/s noise) | the profile (no kick, `initial_seed: false`) | different, covered by the spin-up |
@@ -755,7 +755,7 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
 - *Free-slip lid in PALM*: time-mean u changes ≤ 0.03 m/s (laminar).
 - *Outflow buffer*: see § "inflow_outflow diverges at the outflow"; domain rms
   difference 0.547 → 0.496 m/s (laminar).
-- *What remains* (turbulent, seeds 7 and 8): domain rms of the time-mean u
+- *What remained at c = 0.24* (turbulent, seeds 7 and 8): domain rms of the time-mean u
   difference 0.44-0.45 m/s against 0.09 (uDALES) and 0.11 m/s (PALM) between
   seeds. It sits in the canopy: the array-mean u at z = 1 m is 0.82 (uDALES)
   vs 0.37 m/s (PALM), and the resolved TKE in the array is 0.02-0.04 vs
@@ -767,15 +767,17 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
   Periodic: slab-mean u within 0.17 m/s below 13 m and 0.08 m/s above; TKE
   agrees near the ground and PALM has 20-60 % less above 13 m.
 
-**SGS closure.** uDALES runs Vreman with c = 0.24, the lowest value that
-stays stable on this grid (0.07 and 0.15 collapse dt, 0.10 collapsed dt to
-1.7e-4 s at t ≈ 130 s with turbulent inflow); a typical Vreman constant is
-0.07, so this is roughly 3x the eddy viscosity. PALM runs its prognostic
-SGS-TKE closure; its only SGS knob, `km_constant`, would replace it by a
-constant viscosity. The expected, and observed, effect: uDALES damps resolved
-fluctuations at 2 m resolution much more, so canopy turbulence, wake mixing
-and the near-ground mean differ by more than any other item above. This is a
-model difference to be measured, not tuned away.
+**SGS closure.** uDALES runs Vreman with c = 0.12, the Vreman equivalent
+of its own Smagorinsky constant 0.217; PALM runs its prognostic SGS-TKE
+closure, whose only knob, `km_constant`, would replace it by a constant
+viscosity. Until 2026-10-14 uDALES ran c = 0.24, because lower values
+collapsed dt. That was backflow through uDALES' convective outflow while it
+sat in the array's wake, gone with the 20 m buffer; why 0.12 and not the
+literature 0.07, and what c does to the comparison, is in docs/pyudales.md §7
+"Outflow backflow and the SGS constant". In short: c moves the resolved TKE
+and spectra, but not the near-ground canopy mean (array-mean u at 1 m
+1.33 m/s in uDALES for c = 0.12-0.24 against 0.87-0.88 in PALM with its
+ws-scheme), so that gap is not an SGS-constant effect.
 
 **Spin-up** (20-s blocks of the canopy-mean u and kinetic energy, cold
 start): PALM starts from the profile and is stationary within 20-40 s in
