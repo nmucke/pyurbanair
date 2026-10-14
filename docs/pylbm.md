@@ -102,12 +102,15 @@ Key constructor parameters:
 | `ncpu` | 1 | OpenMP threads. `> 1` builds the gfortran binary with `MP=1` and runs it with `OMP_NUM_THREADS=ncpu`; `1` is the serial build, launched exactly as before. A CUDA build ignores it with a warning (§3) |
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
+| `outflow_buffer` | None | `inflow_outflow` only: metres of empty ground added past `bounds`' xmax; states are cropped back to `bounds`. See §5 "Outflow buffer" |
+| `ground_boundary` | None | `"no_slip"` / `"free_slip"`: the domain bottom (`kbnd` 12 / 22, the lid free-slip either way); None leaves the solver's 22. See §5 "Ground and lid" |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
 | `inlet_turbulence` | None | Inflow-turbulence dict, e.g. `{"enabled":True,"method":"digital_filter","seed":1}` or `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (`random_forcing`, the default method); see §7 |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
 The default in [`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml) sets
-`cuda: auto`, `verbose: false`, and `boundary_condition: inflow_outflow`.
+`cuda: auto`, `verbose: false`, `boundary_condition: inflow_outflow` and
+`ground_boundary: no_slip`.
 
 #### `compile(compile=True)`
 
@@ -120,7 +123,8 @@ Triggered via the Hydra `prepare` step (see §8). Does:
    on an old restart file format.
 3. Runs the binary once with no arguments to generate `infile.in` if it does
    not already exist (`create_infile`).
-4. Sets boundary condition, `tecout`, and `experiment` name in `infile.in`.
+4. Sets the boundary conditions (`ibnd`, `jbnd`, and `kbnd` from
+   `ground_boundary`), `tecout`, and `experiment` name in `infile.in`.
 5. Applies `inlet_turbulence` (`apply_inlet_turbulence`, §7) — a no-op unless
    the knob is present *and* enabled.
 
@@ -139,8 +143,11 @@ The public entry point (called by `BaseForwardModel.__call__`):
 3. **Inflow settings** — `_apply_inflow_settings(params)` (see below). With
    `inlet_turbulence.method: digital_filter` the window is also turned into a
    restart run on the `nrturb` grid and its forcing buffers are written
-   (`_prepare_digital_filter_cold_start`, `_apply_digital_filter`; §7), and the
-   member's clock advances after a successful run.
+   (`_prepare_restart_cold_start`, `_apply_digital_filter`; §7), and the
+   member's clock advances after a successful run. A laminar cold start with
+   `ground_boundary: no_slip` is staged the same way (restart from the state
+   the solver's cold start builds), because only a restart sets the ground's
+   ghost corners (§5 "Ground and lid").
 4. **Output cleanup** — `_clean_output()` deletes all `out_*.nc` files in
    `output_dir` to prevent stale files from a prior run being collected.
 5. **Run** — `self.run()` executes the `boltzmann` binary through the shared
@@ -149,7 +156,8 @@ The public entry point (called by `BaseForwardModel.__call__`):
    raised to `unlimited` / `hard` before launch to handle large
    `nx*ny*nz` automatic arrays.
 6. **Collect** — globs `out_0000_F<iter>.nc` in `(nt0, nt1]`, concatenates
-   with `xarray.concat`, assigns physical coordinates, scales velocity from
+   with `xarray.concat`, assigns physical coordinates, crops the outflow
+   buffer (§5), scales velocity from
    lattice units (`* C_u`), trims spin-up outputs, trims to `simulation_time /
    output_frequency` outputs, and assigns a seconds-based `time` coordinate
    (`dt, 2·dt, …, simulation_time`).
@@ -301,6 +309,7 @@ Key fields set by the wrapper:
 | `iprt1` | Disables the every-iteration NetCDF dump (`0 <nt1+1> 1`); without this, warm-start runs (where the iteration counter already exceeds the trigger) produce ~20× more output files |
 | `uini, udir` | Initial inflow speed (m/s) and direction (degrees) |
 | `ibnd`, `jbnd` | x/y boundary conditions (0 = periodic, 1 = inflow-outflow) |
+| `kbnd` | z boundary: first digit the ground (k = 1), second the lid (k = nz); 1 no-slip bounce-back, 2 free-slip (`ground_boundary`, §5) |
 | `tecout` | Output format (3 = NetCDF) |
 | `ivreman` | SGS model; second token is the Smagorinsky constant (see §7) |
 | `lturb` | Inflow turbulence: `"<on> <amplitude> <nrturb>"` — all three read at once (see §7; `digital_filter` writes `T 1.0 <window steps>` per window) |
@@ -345,6 +354,149 @@ The conversion pipeline (`stl_to_lbm_geometry`):
 > inspection and cross-checking against the pyudales run (which uses the same
 > STL), but STL voxelisation edge cases (thin walls, boundary straddling) have
 > not been systematically tested.
+
+### Ground and lid
+
+`ground_boundary` (`configs/model/pylbm.yaml`: `no_slip`) picks the domain
+bottom; the lid is free-slip either way. It writes `kbnd` in `infile.in`:
+
+| `ground_boundary` | `kbnd` | k = 1 (ground, z = 0) | k = nz (lid) |
+|---|---|---|---|
+| `no_slip` (default) | 12 | half-way bounce-back | free-slip |
+| `free_slip` | 22 (the solver's own default) | free-slip | free-slip |
+| `null` | infile unchanged | — | — |
+
+What the solver does (`m_boundarycond.F90:175-205`,
+`m_boundary_k_closed_kernel.F90`): every population leaving through the ghost
+plane k = 0 comes back as its mirror, with all of `c` reversed for `opt = -1`
+(bounce-back: no-slip, wall at z = 0) or only `c_z` for `opt = +1` (specular:
+free-slip). The value returned is the one stored the step before, so the
+reflection lags by one step; in steady flow that is plain bounce-back. The
+y-edges are not involved (`jbnd = 0`), and the i-k edge routine only runs for
+closed x boundaries.
+
+**The ground under the STL.** The xie_and_castro STL carries a ground plate at
+z = 0 under x = 0..160 m. The ray-cast voxelisation (above) only fills cells
+whose centre is at or below a roof, so a plate at z = 0 fills nothing: the
+first cell row (centre 1 m) is fluid everywhere except under the blocks, on the
+fetch (x < 0, where the STL has no ground) and in the array alike. The ground
+is therefore the `kbnd` boundary everywhere, as uDALES (STL ground plus facets
+over the fetch) and PALM (MOST wall) have a wall everywhere. Until 2026-10
+pylbm left `kbnd = 22`, so its ground was free-slip everywhere while its
+buildings (full-way bounce-back, `m_solids.F90`) were no-slip.
+
+**No wall model.** The LBM has no wall function or roughness length.
+`iablvisc = 1` is not one: it adds a fixed mixing-length eddy viscosity
+`kappa u* z (1 - z/h)^2`, with `u*` from `uini` at a hard-coded z = 100 m and
+z0 = 0.1 m (`m_mechanical_ablvisc.F90`), zero at the ground, so it sets no
+wall stress. The no-slip ground is plain bounce-back on the 2 m grid.
+
+**Frozen ground corners.** No kernel writes the ghost cells where the k = 0
+plane meets the inflow (i = 0) and outflow (i = nx + 1) ghost planes, but
+their populations stream into the cells (1, j, 1) and (nx, j, 1) every step,
+so they keep whatever the initial state put there. The solver's cold start
+(`fillghosts`) copies the flow next to them, which for a no-slip ground is a
+wall moving at the inflow speed: on the empty domain below it lifted the flow
+at the inflow (w = 0.6 m/s at x = -19 m, a +14 % jet at z = 5 m) and drained
+4.2 % of the domain's mass within ~20 s. Nothing restores the mean density
+(the Krüger inflow fixes the momentum flux `rho0 u`, the zero-gradient outflow
+anchors nothing), so every velocity `u = j / rho` stayed 4.4 % high. pylbm
+therefore sets both corner columns to the resting wall (rho = 1, u = 0) in
+every restart it writes (`warm_start_utils._hold_ground_corners_at_rest`), and
+stages a no-slip cold start as a restart from the state `inipert` builds
+(`_prepare_restart_cold_start`, as for the digital filter). The density then
+stays at 1.001-1.002 on the empty domain and the jet is gone; Fortran-saved
+restarts carry the corners on to warm starts. Not covered:
+`inlet_turbulence.method: random_forcing` with `no_slip` still cold-starts
+through the solver (its restart run would need the solver's own turbulence
+buffers), so pylbm warns. With buildings the mean density still drifts, by
+about +2 % with either ground (the blocks' start-up transient), which is the
+same unanchored level, not the corners.
+
+**Measured** — empty domain x = -20..140 m (80x40x16, 2 m), 10°, 6 m/s, α 0.25,
+z_ref 64 m, 600 s after 60 s spin-up, means from t = 100 s; PALM on the same
+domain (docs/pypalm.md §8). Time- and y-mean horizontal speed at z = 1 m,
+relative to the first plane (x = -19 m), laminar / digital-filter inflow:
+
+| fetch | PALM | pylbm `free_slip` | pylbm `no_slip` |
+|---|---|---|---|
+| 10 m (x = -9) | -4 / -5 % | +2 / +2 % | -12 / -12 % |
+| 20 m (x = 1) | -9 / -9 % | +3 / +3 % | -19 / -19 % |
+| 40 m (x = 21) | -17 / -15 % | +3 / +4 % | -30 / -29 % |
+| 80 m (x = 61) | -27 / -19 % | +4 / +7 % | -44 / -43 % |
+| 120 m (x = 101) | -32 / -17 % | +5 / +11 % | -52 / -50 % |
+
+The wall stress, from the streamwise momentum budget of the time-mean flow
+(`-d/dx` of the z-integrated `u u + p`, free-slip lid, cyclic y), is 0.045 /
+0.028 m²/s² (u* 0.21 / 0.17 m/s) over x = 1..41 / 41..101 m with `no_slip`,
+and zero within ±0.005 with `free_slip`. PALM's MOST stress at its own z = 1 m
+speed is 0.056 / 0.041-0.052 m²/s² (u* 0.24 / 0.20-0.23). Against its own
+z = 1 m speed the bounce-back wall acts like a log-law wall with z0 ≈ 0.08-0.09
+m instead of 0.05 m: it is draggier, so the near-ground flow decelerates about
+twice as much as PALM's (its stress is lower only because its speed is). This
+is the residual difference of the ground. Higher up the profile follows PALM's:
+rms difference over z ≤ 25 m 0.12-0.16 m/s laminar and 0.12-0.25 m/s turbulent
+(z = 3 m -0.3..+0.2 m/s, z = 5 m up to +0.17 m/s, above 9 m within 0.1 m/s),
+against 0.06-0.27 / 0.06-0.20 m/s with `free_slip`, whose ground accelerates
+the flow where PALM's slows it. The ground does not add resolved turbulence:
+TI_u at 9 m 0.061 / 0.087 / 0.107 at 2 / 22 / 102 m past the slab (`free_slip`
+0.062 / 0.091 / 0.123).
+
+**On xie_and_castro** (`workflows/compare_models.sh`: uDALES, PALM and pylbm
+with both grounds, 2 replicas each, 10°, 5 m/s, 420 s, statistics from 150 s;
+pylbm on x = -20..100 m with the STL cut at x = 80 m, i.e. the other backends'
+20 m flat outflow buffer, which `outflow_buffer` now builds), the distance/noise
+ratio of the time-mean u against PALM (against uDALES in brackets):
+
+| region | turbulent `no_slip` | turbulent `free_slip` | laminar `no_slip` | laminar `free_slip` |
+|---|---|---|---|---|
+| all | 3.9 (4.9) | 3.6 (4.2) | 10.7 (113) | 9.4 (24) |
+| street level, z < 4.5 m | 5.3 (15) | 3.6 (8.9) | 12.7 (81) | 8.9 (31) |
+| canopy | 4.6 (5.5) | 4.4 (5.0) | 9.7 (119) | 9.0 (21) |
+| above the canopy | 2.4 (3.2) | 2.3 (3.0) | 13.8 (389) | 12.5 (39) |
+
+(PALM vs uDALES: 2.7 turbulent, 9.0 laminar. The laminar `no_slip` replicas are
+bit-identical, so the ratios against the steady uDALES run blow up.) pylbm is
+too slow near the ground in the array with either setting: plane-mean speed at
+z = 1 m 0.98 m/s with a free-slip ground and 0.57 m/s with `no_slip`, against
+1.54 (uDALES) and 1.45 m/s (PALM), laminar and turbulent alike. uDALES's
+laminar run has no turbulence either, so the gap is the LBM's walls
+(bounce-back blocks and ground on a 2 m grid, no wall model), not missing
+mixing. A free-slip ground offsets part of the draggy blocks; `no_slip` is the
+boundary the other backends have, and leaves the wall-model difference visible
+instead of cancelling it, at the cost of street-level agreement (time-mean u
+distance to PALM 0.72 against 0.50 m/s, turbulent).
+`ground_boundary: free_slip` gives the earlier behaviour.
+
+### Outflow buffer
+
+`outflow_buffer` (`${flow.outflow_buffer}`: 20 m on xie_and_castro, null in
+`common.yaml` and the periodic case) mirrors pyudales and pypalm (docs/pypalm.md
+§8): `_extend_for_outflow_buffer` adds `ceil(buffer / dx)` cells past
+`bounds`' xmax, so `mod_dimensions.F90`, the bathymetry and the restarts are
+built for the extended `nx` (50 -> 60 on the case). The buffer is empty:
+`stl_to_lbm_geometry(x_max=xmax)` leaves every column past xmax fluid (the
+xie_and_castro STL has a fifth block column at x = 85-95 m), and the ground
+there is the same `kbnd` boundary as everywhere else. `run_single` crops every
+state back to `bounds` (`_crop_outflow_buffer`), so callers never see the
+buffer; a warm start pads the cropped state by repeating its last column, with
+`blanking` 0 (`_pad_outflow_buffer`). The inflow, its profile and the
+digital-filter forcing are per (y, z) and do not see `nx`. `null` changes
+nothing; a buffer with `boundary_condition: periodic` or ≤ 0 m raises.
+
+**Measured** on xie_and_castro through the normal config path (x = -20..80 m
+plus 20 m, `no_slip`, 10°, 5 m/s, 420 s, laminar and digital-filter seed 1):
+the states are on the case grid (50 x-cells, x = -19..79 m) and bit-identical
+to the same runs on the hand-extended domain with the STL cut at 80 m (the
+comparison in "Ground and lid"). Canopy TKE stays at 0.04-0.06 m²/s² across
+the array up to x = 77 m, |u| ≤ 7.1 m/s, |w| ≤ 3.1 m/s. The mean density
+settles 2.0-2.4 % above 1 within the first flow-through (fluid mean 1.0037 at
+t = 5 s, 1.016 at 20 s, 1.024 at 40 s, then steady) and stays there; it does
+the same with a free-slip ground (1.016-1.020), so it is neither the buffer nor
+the ground. As in "Frozen ground corners", nothing anchors the LBM's density
+level under a velocity inflow and a zero-gradient outflow: while the wake
+first reaches the outflow, less mass leaves than enters, and every velocity
+`u = j / rho` then reads ~2 % low.
 
 ### Bathymetry vs. generated F90
 
@@ -611,7 +763,9 @@ the interior.
 **Measured** (same empty domain; 10°, 6 m/s, α 0.25, `z_ref` 64 m as in the
 pypalm/pyudales configs; 600 s after 60 s spinup, frames from t = 100 s;
 integral scales at z = 9 m from u'; the plane's own TI at 9 m is 0.128 / 0.111
-for u / v):
+for u / v; free-slip ground, `ground_boundary: free_slip` — the default
+`no_slip` gives the same turbulence and the near-ground profile of §5 "Ground
+and lid"):
 
 | plane (distance past the slab) | mean-profile error (rms, z ≤ 25 m) | TI u / v / w at 9 m | T_int | L_y | spectral slope 0.08-0.4 Hz |
 |---|---|---|---|---|---|
@@ -635,13 +789,15 @@ inflow face: 0 m 0.131 / 0.102 / 0.091, 2.7 s, 10.6 m; 20 m 0.115 / 0.108 /
   blow up.
 - Relative to PALM the LBM's turbulence ends up 15-25 % weaker at the same
   distance and its spectrum steeper (-3 to -5 against -1.7 to -3.4): the slab
-  halves u' at the injection point, and the LBM's ground is free-slip
-  (`kbnd = 22`, which pylbm does not change), so there is no wall shear to
-  produce turbulence near the ground as PALM's does. Integral scales match the
-  other backends (L_y 8-10 m against 7-11 m; T_int 4-7 s against 3-6 s).
+  halves u' at the injection point, and the LBM's ground makes no turbulence
+  as PALM's does: with the bounce-back ground (`no_slip`) TI_u at 9 m is
+  0.061 / 0.087 / 0.107 at 2 / 22 / 102 m, no more than over the free-slip one.
+  Integral scales match the other backends (L_y 8-10 m against 7-11 m; T_int
+  4-7 s against 3-6 s).
 - The mean profile stays within 1-4 % of PALM's target `6 (z/64)^0.25`; the
   laminar LBM run (`enabled: false`) drifts the same way (1.7-2.3 %), so that
-  is the profile adapting to the free-slip ground, not the forcing.
+  is the profile adapting to the free-slip ground, not the forcing. With
+  `no_slip` the error is 8-16 %, the near-ground deficit of §5.
 - A second seed gives the same statistics (TI_u 0.063 / 0.090 / 0.112 at 2 /
   22 / 102 m, L_y within 10 %) and an uncorrelated realisation (u' correlation
   with the first |r| < 0.04 at every plane); the 500 s means of the two differ
@@ -688,6 +844,8 @@ forward_model:
   ncpu: 1                    # OpenMP threads; >1 builds with MP=1
   verbose: false
   boundary_condition: inflow_outflow
+  ground_boundary: no_slip     # kbnd 12; free_slip: 22 (§5)
+  outflow_buffer: ${flow.outflow_buffer}   # xie_and_castro: 20 m (§5)
   profile_config: {type: power_law, alpha: 0.25}
   inlet_turbulence: {enabled: false, method: random_forcing, amplitude: 5.0e-05,
                      update_interval: 100, intensity: 0.15, length_scale_x: 24.0,
@@ -951,6 +1109,16 @@ every healthy warm start as truncated.
 Only a shortfall is an error; a surplus is trimmed as before. When a member does
 trip this, rerun with `model.forward_model.verbose=true` to see the solver's own
 `stop` message — it is the only place the reason appears.
+
+### Outflow in the wake
+
+Without `outflow_buffer` the xie_and_castro outflow (zero-gradient, x = 80 m)
+sits 5 m behind the last block column, in its wake, and the flow there breaks
+down with either ground (420 s, 10°, 5 m/s): time-mean canopy TKE grows from
+0.4 m²/s² at x = 37 m to 10-22 m²/s² at x = 61-77 m (PALM 0.2-0.4), |u|
+reaches 25 m/s and the mean density drifts by 2-6 %. The case therefore sets
+`flow.outflow_buffer: 20.0`, which pylbm honours like the other backends
+(§5 "Outflow buffer"); set it whenever the bounds end in a wake.
 
 ### Domain-height SIGFPE
 

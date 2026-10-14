@@ -71,6 +71,11 @@ from .utils.warm_start_utils import (  # noqa: F401  (MAX_ITERATION re-exported)
     write_restart_file_from_xarray,
 )
 
+# ``kbnd`` of infile.in per ``ground_boundary``, the lid free-slip in both
+# (m_boundarycond.F90): the first digit is the k=1 plane, the second k=nz;
+# 1 is half-way bounce-back (no-slip), 2 specular reflection (free-slip).
+GROUND_BOUNDARY_KBND = {"no_slip": 12, "free_slip": 22}
+
 
 class ForwardModel(BaseForwardModel):
     def __init__(
@@ -99,6 +104,8 @@ class ForwardModel(BaseForwardModel):
         profile_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
         ncpu: int = 1,
+        ground_boundary: Optional[str] = None,
+        outflow_buffer: Optional[float] = None,
     ) -> None:
         super().__init__(results_dir=results_dir)
 
@@ -117,6 +124,36 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+        # The domain bottom (z = 0): no_slip | free_slip, the lid free-slip
+        # either way (docs/pylbm.md §5). None leaves the infile's kbnd alone.
+        if ground_boundary is not None and ground_boundary not in GROUND_BOUNDARY_KBND:
+            raise ValueError(
+                f"ground_boundary must be one of {sorted(GROUND_BOUNDARY_KBND)} or "
+                f"None, got {ground_boundary!r}"
+            )
+        self.ground_boundary = ground_boundary
+        if (
+            ground_boundary == "no_slip"
+            and boundary_condition == "inflow_outflow"
+            and (inlet_turbulence or {}).get("enabled", False)
+            and (inlet_turbulence or {}).get("method", "random_forcing")
+            == "random_forcing"
+        ):
+            logger.warning(
+                "ground_boundary=no_slip with inlet_turbulence.method="
+                "random_forcing cold-starts through the solver's own "
+                "initialisation, whose frozen inflow/outflow ground corners drain "
+                "~4%% of the domain's mass and leave every velocity ~4%% high "
+                "(docs/pylbm.md §5). The digital filter or a laminar inflow "
+                "avoid it."
+            )
+        # inflow_outflow only: ``outflow_buffer`` m of empty ground added past
+        # bounds' xmax, so the outflow does not sit in the wake of the last
+        # building; every state is cropped back to ``bounds`` (pyudales and
+        # pypalm do the same). None: the outflow is at xmax.
+        self._output_nx: Optional[int] = None
+        self._output_x_max: Optional[float] = None
+        nx, bounds = self._extend_for_outflow_buffer(outflow_buffer, nx, bounds)
         # Per-backend default for the SGS constant, overridden by a `sgs_constant`
         # in the params Dataset when one is supplied. None leaves the infile
         # template's value alone. See `apply_sgs_setting`.
@@ -165,6 +202,7 @@ class ForwardModel(BaseForwardModel):
             ny=ny,
             nz=nz,
             bounds=bounds,
+            x_max=self._output_x_max,
         )
 
         # Compute cell size from bounds
@@ -341,6 +379,8 @@ class ForwardModel(BaseForwardModel):
         ibnd = 0 if self.boundary_condition == "periodic" else 1
         self._set_infile_value("ibnd", ibnd)
         self._set_infile_value("jbnd", 0)
+        if self.ground_boundary is not None:
+            self._set_infile_value("kbnd", GROUND_BOUNDARY_KBND[self.ground_boundary])
 
         # Inflow turbulence is static per model, so it is written once here and
         # inherited by ensemble members when experiment_dir is cloned. No-op
@@ -674,6 +714,64 @@ class ForwardModel(BaseForwardModel):
             # Always return to original directory, even if the run failed.
             os.chdir(original_cwd)
 
+    def _extend_for_outflow_buffer(
+        self,
+        buffer: Optional[float],
+        nx: int,
+        bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    ) -> tuple[
+        int, tuple[tuple[float, float], tuple[float, float], tuple[float, float]]
+    ]:
+        """Extend ``nx``/``bounds`` downstream by ``buffer`` m (whole cells).
+
+        The same rounding as pyudales' and pypalm's ``outflow_buffer``, so all
+        three run on the same extended grid. The buffer gets no buildings
+        (``stl_to_lbm_geometry(x_max=...)``) and the same ground as the rest;
+        ``run_single`` crops the output back to the original ``nx``.
+        """
+        if buffer is None:
+            return nx, bounds
+        buffer = float(buffer)
+        if self.boundary_condition != "inflow_outflow":
+            raise ValueError("outflow_buffer needs boundary_condition='inflow_outflow'")
+        if buffer <= 0.0:
+            raise ValueError(f"outflow_buffer must be > 0 m, got {buffer}")
+        (xmin, xmax), y_bounds, z_bounds = bounds
+        dx = (xmax - xmin) / nx
+        cells = int(np.ceil(buffer / dx - 1e-9))
+        self._output_nx = int(nx)
+        self._output_x_max = float(xmax)
+        return int(nx) + cells, ((xmin, xmax + cells * dx), y_bounds, z_bounds)
+
+    def _crop_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Drop the outflow buffer columns, so the state covers ``bounds``."""
+        if self._output_nx is None:
+            return state
+        return state.isel(x=slice(0, self._output_nx))
+
+    def _pad_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Fill the buffer of a cropped state by repeating its last column.
+
+        A warm start needs the full extended grid; the buffer is empty ground,
+        so the outflow column is the natural guess (pyudales and pypalm do the
+        same). The buffer holds no solids, so its ``blanking`` is 0.
+        """
+        if self._output_nx is None or state.sizes["x"] == self.x_grid.size:
+            return state
+        if state.sizes["x"] != self._output_nx:
+            raise ValueError(
+                f"warm-start state has {state.sizes['x']} x cells; expected "
+                f"{self._output_nx} (bounds) or {self.x_grid.size} (with the "
+                "outflow buffer)"
+            )
+        extra = self.x_grid.size - self._output_nx
+        tail = state.isel(x=[-1] * extra)
+        if "x" in state.coords:
+            tail = tail.assign_coords(x=self.x_grid[self._output_nx :])
+        if "blanking" in tail:
+            tail["blanking"] = xarray.zeros_like(tail["blanking"])
+        return xarray.concat([state, tail], dim="x", data_vars="minimal")
+
     def _prepare_warmstart(self, state: xarray.Dataset) -> None:
         """Write a restart file from ``state`` and arm nt0 for the next run.
 
@@ -681,6 +779,7 @@ class ForwardModel(BaseForwardModel):
         template (for ghost cells and non-equilibrium content) when
         available; otherwise falls back to a pure-equilibrium restart.
         """
+        state = self._pad_outflow_buffer(state)
         latest_restart = identify_latest_restart_iteration(self.dirs)
         if uses_digital_filter(self.inlet_turbulence):
             # The window must start on the nrturb grid (aligned_start_iteration).
@@ -737,12 +836,14 @@ class ForwardModel(BaseForwardModel):
                 # inflow speed changes between windows.
                 self._set_scaling_factors(params)
                 self._prepare_warmstart(state)
-            elif digital_filter:
+            elif digital_filter or self._cold_starts_from_restart(params):
                 # The forcing buffers are only read on a restart (nt0 > 0), so
                 # a digital-filter cold start is a restart from the state the
-                # solver's own cold start would build.
+                # solver's own cold start would build. So is a no-slip ground's:
+                # only a restart sets its frozen ghost corners (see
+                # warm_start_utils._hold_ground_corners_at_rest).
                 self._set_scaling_factors(params)
-                self._prepare_digital_filter_cold_start(params)
+                self._prepare_restart_cold_start(params)
 
             # Finalize scaling: applies nt0 from the warm-start restart (set by
             # _prepare_warmstart) and the current C_u/timestep duration.
@@ -786,6 +887,7 @@ class ForwardModel(BaseForwardModel):
             state = state[0].expand_dims("time", axis=0)
 
         state = state.assign(x=self.x_grid, y=self.y_grid, z=self.z_grid)
+        state = self._crop_outflow_buffer(state)
         state = scale_velocity_to_physical(state, scale=self.C_u)
 
         if self._spinup_outputs > 0 and state.sizes["time"] > self._spinup_outputs:
@@ -843,14 +945,28 @@ class ForwardModel(BaseForwardModel):
             angle = np.concatenate([angle[:1], angle])
         return times, speed, angle
 
-    def _prepare_digital_filter_cold_start(self, params: xarray.Dataset) -> None:
+    def _cold_starts_from_restart(self, params: Optional[xarray.Dataset]) -> bool:
+        """Whether a cold start without the digital filter goes through a restart.
+
+        True for a no-slip ground under inflow_outflow, whose ghost corners
+        only a restart can set. Not with ``random_forcing``, whose restart run
+        would need the solver's own turbulence buffers (warned in __init__).
+        """
+        return (
+            params is not None
+            and self.ground_boundary == "no_slip"
+            and self.boundary_condition == "inflow_outflow"
+            and not (self.inlet_turbulence or {}).get("enabled", False)
+        )
+
+    def _prepare_restart_cold_start(self, params: xarray.Dataset) -> None:
         """Write the cold-start state as a restart at the first aligned iteration.
 
         The state is what ``inipert`` builds on ``nt0 = 0``: the inflow profile
         everywhere (``uini * uvel_shear`` along ``udir``), rho = 1, w = 0 --
-        without its 1e-5 density noise, which is no longer needed to break
-        symmetry once the inflow is turbulent. Old restarts are removed first:
-        a cold start must not inherit a template's non-equilibrium part.
+        without its 1e-5 density noise (a turbulent inflow or the geometry
+        breaks the symmetry). Old restarts are removed first: a cold start must
+        not inherit a template's non-equilibrium part.
         """
         profile, scale = self._inflow_profile(params)
         _, speed, angle = self._inflow_schedule(params)

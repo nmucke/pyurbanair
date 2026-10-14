@@ -23,6 +23,16 @@ forward_model:
   ncpu: 1
   verbose: false
   boundary_condition: ${flow.boundary_condition}  # configs/common.yaml
+  # The domain bottom (z = 0, under the fetch and the streets alike): no_slip
+  # (bounce-back) or free_slip, the lid free-slip either way (infile kbnd 12 /
+  # 22). uDALES and PALM have a rough wall there (log law, z0 = 0.05 m) and a
+  # free-slip lid; the LBM has no wall model, so no_slip is the nearest match
+  # (its wall stress differs, docs/pylbm.md §5). null: the solver's kbnd 22.
+  ground_boundary: no_slip
+  # inflow_outflow only: metres of empty ground past domain.bounds' xmax (whole
+  # cells), so the outflow is not in the wake; states are cropped back to the
+  # bounds. null: the outflow is at xmax. Set per case (configs/common.yaml).
+  outflow_buffer: ${flow.outflow_buffer}
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
   # forms const = 2.5*smagorinsky**2 (m_vreman.F90). This is the DEFAULT: a
   # `sgs_constant` in the params sampler (configs/params/*.yaml) overrides it, so
