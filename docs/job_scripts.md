@@ -20,7 +20,7 @@ job_scripts/
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
-│   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
+│   ├── compare_surrogates.slurm      # workflows/compare_surrogates.sh 'models=[...]'
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)

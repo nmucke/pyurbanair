@@ -1,0 +1,34 @@
+# @package _global_
+# Surrogate comparison (workflows/compare_surrogates.sh): every trained stepper
+# rolled out on the same trajectories from the same start frame
+# (scripts/surrogate_comparison/run_models.py), scored on fluid cells against persistence
+# and the truth's turbulence statistics (compute_metrics.py) and drawn
+# (visualize_comparison.py).
+defaults:
+  - /common
+  - _self_
+
+paths:
+  results_dir: ${paths.weights_dir}/surrogate_comparison  # = the run dir
+
+device: cuda
+split: test
+# Training-data root to evaluate on; null: the first model's training data.
+data_dir: null
+# Trained model folders (config.yaml + weights.pt), all trained on the same data.
+models: []
+# Trajectories of the split to compare; null: every trajectory.
+sample_indices: null
+# Lead steps after the start frame; null: to the trajectory's end.
+max_steps: null
+
+metrics:
+  report_leads: [1, 10, 50]   # headline RMSE at these lead steps (skipped if beyond the rollout)
+  acc_threshold: 0.5          # ACC horizon: first lead where ACC drops below it
+  max_pdf_values: 200000      # velocity values pooled per model for the PDFs / Wasserstein
+
+figures:
+  sample: 0                   # which compared trajectory (index into sample_indices) the slices use
+  level: 2                    # z index of the horizontal slices
+  lead_steps: [1, 10, 50, -1] # columns of slices.png (-1: last)
+  spectra_levels: [2, 8]      # z indices of the spectra

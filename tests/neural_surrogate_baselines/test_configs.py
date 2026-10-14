@@ -28,8 +28,3 @@ def test_entry_point_resolves(name: str, tmp_path: pathlib.Path) -> None:
     assert cfg.task == "finetune_stepper" or cfg.architecture._target_.startswith(
         "neural_surrogate_baselines."
     )
-
-
-def test_compare_resolves(tmp_path: pathlib.Path) -> None:
-    cfg = compose("surrogate/baselines/compare", root=tmp_path)
-    OmegaConf.to_container(cfg, resolve=True)

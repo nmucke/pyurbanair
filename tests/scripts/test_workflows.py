@@ -59,3 +59,19 @@ def test_assimilation_workflow(
     run_dir = tmp_path / "neural_surrogate_to_neural_surrogate" / "smoother"
     assert (run_dir / "metrics.yaml").exists()
     assert (run_dir / "figures" / "parameter_evolution.png").exists()
+
+
+def test_compare_surrogates_workflow(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    run_dir = tmp_path / "comparison"
+    _workflow(
+        "compare_surrogates.sh",
+        *_overrides(tmp_path, session_root),
+        f"models=[{session_root / 'weights' / 'dft'}]",
+        "device=cpu",
+        f"paths.results_dir={run_dir}",
+    )
+    assert (run_dir / "rollouts" / "dft" / "sample_0000.nc").exists()
+    assert (run_dir / "metrics.yaml").exists()
+    assert (run_dir / "rmse.png").exists()
