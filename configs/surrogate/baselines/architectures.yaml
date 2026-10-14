@@ -23,7 +23,8 @@ local_fno:
 # Aurora with AuroraSmall's depths and heads. embed_dim 512 is the papers' 451 M
 # model; 256 is AuroraSmall's width (113 M), the size-matched arm. `ssgen` adds
 # the small-scale generator (SSRollingUrbanNet); without it this is 3DSwinUrbanNet.
-# SSGen folds height into channels, so it is built for `n_levels` = the corpus' nz.
+# SSGen folds height into channels, so it is built for `n_levels` = the corpus' nz
+# (16: pyudales_idealized, training.yaml's data).
 urbanaurora_512:
   _target_: neural_surrogate_baselines.SSRollingUrbanNet
   embed_dim: 512
@@ -38,14 +39,14 @@ urbanaurora_256:
   periodic_axes: [y]
 ssrolling_512:
   _target_: neural_surrogate_baselines.SSRollingUrbanNet
-  n_levels: 32
+  n_levels: 16
   embed_dim: 512
   num_heads: 16
   ssgen: true
   periodic_axes: [y]
 ssrolling_256:
   _target_: neural_surrogate_baselines.SSRollingUrbanNet
-  n_levels: 32
+  n_levels: 16
   embed_dim: 256
   num_heads: 8
   ssgen: true
