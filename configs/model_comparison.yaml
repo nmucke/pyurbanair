@@ -1,0 +1,52 @@
+# Forward-model comparison (workflows/compare_models.sh): several CFD backends
+# run on the same case, parameters and time (scripts/comparison/run_models.py),
+# each `replicas` times with another turbulence seed, then compared against
+# each model's own realisation noise (compute_metrics.py) and drawn
+# (visualize_comparison.py). Everything of forward.yaml applies to every model
+# (case=..., time.*, params=..., forward.*); the `model` group is not used:
+# list the backends in `models`.
+defaults:
+  - forward
+  - override params: static_truth
+  - _self_
+
+paths:
+  results_dir: ${paths.results_root}/model_comparison  # = the run dir
+
+# Model configs (configs/model/) to compare, labelled by name, or `label:name`
+# to run one backend twice under different labels.
+models: [pyudales, pypalm]
+# Per label: any key of that model's forward config, applied last, e.g.
+# +overrides.pypalm.model.forward_model.boundary_condition=inflow_outflow
+overrides: {}
+# Runs per model; replica r gets the seed `seed + r`.
+replicas: 2
+seed: 1
+# Per backend: the keys that carry the replica's seed (`{seed}` is replaced,
+# Python format). uDALES: the inlet-turbulence seed, and the cold-start
+# perturbation seed (derived from the experiment name). PALM: its one seed,
+# with the cold-start kick switched on so a laminar inflow has a seed to act
+# on. pylbm seeds itself from the clock: its replicas always differ.
+replica_seed:
+  pyudales:
+    model.forward_model.inlet_turbulence.seed: "{seed}"
+    model.forward_model.per_member_irandom: true
+    model.forward_model.experiment_name: "{seed:03d}"
+  pypalm:
+    model.forward_model.random_seed: "{seed}"
+    model.forward_model.inlet_turbulence.initial_seed: true
+# Seconds of output dropped at the start of every run, on top of the
+# backends' own time.spinup_time.
+discard_time: 0.0
+
+metrics:
+  # Height bands [lo, hi) as fractions of the canopy height H (null: open).
+  canopy_height: null           # m; null: the tallest roof of the case STL
+  height_bands:
+    street_level: [0.0, 0.25]
+    canopy: [0.25, 1.0]
+    above_canopy: [1.0, null]
+  spectrum_segment: 64          # Welch samples per segment (capped by the record)
+
+figures:
+  slice_heights: [0.1, 0.5, 1.3]  # x H: street level, mid-canopy, above the canopy
