@@ -103,7 +103,7 @@ Key constructor parameters:
 | `verbose` | True | `False` → `stderr=DEVNULL` (see §7) |
 | `boundary_condition` | `"periodic"` | `"inflow_outflow"` for real cases |
 | `profile_config` | None | Vertical shear profile dict, e.g. `{"type":"power_law","alpha":0.25}` |
-| `inlet_turbulence` | None | Inflow-turbulence forcing dict, e.g. `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (see §7) |
+| `inlet_turbulence` | None | Inflow-turbulence dict, e.g. `{"enabled":True,"method":"digital_filter","seed":1}` or `{"enabled":True,"amplitude":5e-5,"update_interval":100}` (`random_forcing`, the default method); see §7 |
 | `results_dir` | None | `None` → in-memory mode; path → on-disk mode |
 
 The default in [`configs/model/pylbm.yaml`](../configs/model/pylbm.yaml) sets
@@ -136,7 +136,11 @@ The public entry point (called by `BaseForwardModel.__call__`):
    (= `min_cell_size`) and `C_u` (= `velocity_magnitude * 15`, or 75 for no
    params) into `infile.in`, then derives `nt0/nt1/iout` (timestep range and
    output interval). Guards against `nt1 > MAX_ITERATION` (see §7).
-3. **Inflow settings** — `_apply_inflow_settings(params)` (see below).
+3. **Inflow settings** — `_apply_inflow_settings(params)` (see below). With
+   `inlet_turbulence.method: digital_filter` the window is also turned into a
+   restart run on the `nrturb` grid and its forcing buffers are written
+   (`_prepare_digital_filter_cold_start`, `_apply_digital_filter`; §7), and the
+   member's clock advances after a successful run.
 4. **Output cleanup** — `_clean_output()` deletes all `out_*.nc` files in
    `output_dir` to prevent stale files from a prior run being collected.
 5. **Run** — `self.run()` executes the `boltzmann` binary through the shared
@@ -299,7 +303,7 @@ Key fields set by the wrapper:
 | `ibnd`, `jbnd` | x/y boundary conditions (0 = periodic, 1 = inflow-outflow) |
 | `tecout` | Output format (3 = NetCDF) |
 | `ivreman` | SGS model; second token is the Smagorinsky constant (see §7) |
-| `lturb` | Inflow turbulence: `"<on> <amplitude> <update_interval>"` — all three read at once (see §7) |
+| `lturb` | Inflow turbulence: `"<on> <amplitude> <nrturb>"` — all three read at once (see §7; `digital_filter` writes `T 1.0 <window steps>` per window) |
 
 **Output filenames.** Each saved snapshot is `output/out_0000_F<iter:09d>.nc`
 where `iter` is the absolute LBM timestep. Files are collected by
@@ -360,7 +364,7 @@ approach (`generate_fortran_code`, `process_stl_to_fortran`) is still present in
 | [`dir_utils.py`](../libs/pylbm/src/pylbm/utils/dir_utils.py) | `DirectoryPaths` dataclass; `get_lbm_directory_paths` factory that reads `LBM_PATH` and constructs all experiment paths |
 | [`infile_utils.py`](../libs/pylbm/src/pylbm/utils/infile_utils.py) | `Infile` editor; `create_infile` (runs binary to generate the file); `_augment_runtime_library_paths` (prepends NVHPC/conda libs to `LD_LIBRARY_PATH` at launch) |
 | [`params_utils.py`](../libs/pylbm/src/pylbm/utils/params_utils.py) | `is_time_varying_params`, `apply_inflow_settings` (writes `uini, udir` to `infile.in`), `write_uvel_time_file`, `write_uvel_shear_file`, `apply_sgs_setting`, `resolve_profile_config`, and `remove_*` helpers |
-| [`inlet_turbulence_utils.py`](../libs/pylbm/src/pylbm/utils/inlet_turbulence_utils.py) | `validate_inlet_turbulence` (config checks, incl. the periodic guard), `apply_inlet_turbulence` (writes the 3-value `lturb` line) |
+| [`inlet_turbulence_utils.py`](../libs/pylbm/src/pylbm/utils/inlet_turbulence_utils.py) | `validate_inlet_turbulence` (config checks, incl. the periodic guard), `apply_inlet_turbulence` (the `random_forcing` `lturb` line), and the `digital_filter` path: `build_digital_filter_fluctuations`, `build_forcing_buffers`, `write_turbulence_restart`, `write_digital_filter_forcing`, `aligned_start_iteration` |
 | [`compile_utils.py`](../libs/pylbm/src/pylbm/utils/compile_utils.py) | `compile_lbm`; GPU arch detection; CUDA netcdf-fortran bootstrap |
 | [`mod_dimensions_utils.py`](../libs/pylbm/src/pylbm/utils/mod_dimensions_utils.py) | Parses and writes `mod_dimensions.F90`; `set_experiment` adds/updates the `nx/ny/nz` parameter block for the named experiment |
 | [`forward_model_utils.py`](../libs/pylbm/src/pylbm/utils/forward_model_utils.py) | `create_new_forward_model` — deep-copies template model into a per-member directory (used by `EnsembleForwardModel._create_new_forward_model`) |
@@ -403,6 +407,17 @@ Format: `k  z_metres  shape_value` per level. The Fortran renormalises by the
 top cell value so `uini` is the speed at the top cell centre. The default
 config uses `power_law` with `alpha=0.25`.
 
+**`profile_config.z_ref`.** pyudales and pypalm read `velocity_magnitude` as the
+speed at `z_ref`. Because of the top-cell renormalisation `z_ref` used to have
+no effect on the LBM at all (with `z_ref: 64` on a 32 m domain the LBM inflow
+was 20 % faster than PALM's). When `z_ref` is set, `reference_speed_scale`
+writes `uini = velocity_magnitude * s(z_top)` (to 4 decimals; also into
+`uvel_time.dat`), so the three backends impose the same profile. Without
+`z_ref` nothing changes: `uini` is the speed at the top cell centre, half a
+cell below the other backends' default `z_ref = zsize`. `pylbm.yaml` does not
+set it; pass `+model.forward_model.profile_config.z_ref=64.0` to match the
+pyudales/pypalm configs. `C_u` is still derived from `velocity_magnitude`.
+
 The shear profile is per-member when `params` contains `vertical_inflow_exponent`
 (the ESMDA model-error knob): `resolve_profile_config` overrides `alpha` and
 `write_uvel_shear_file` is called inside `_apply_inflow_settings` for each
@@ -430,37 +445,218 @@ Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a sing
 value in the shared params sampler cannot be correct for all three at once.
 
 
-### Inflow turbulence — `lturb amp nrtu` in `infile.in`
+### Inflow turbulence — `inlet_turbulence`
 
-The Fortran ships a full inflow-turbulence subsystem
-(`m_inflow_turbulence_{init,compute,apply,update,forcing}.F90`) that
-superimposes smooth pseudo-random perturbations on the inlet plane. It is not a
-per-member ESMDA parameter — it is a static model setting, applied once in
-`compile()` and inherited by ensemble members when `experiment_dir` is cloned.
+`inlet_turbulence.enabled` is the cross-backend inlet-turbulence switch;
+`method` picks the mechanism. Both use the Fortran's inflow-turbulence subsystem
+(`m_inflow_turbulence_{init,compute,apply,update,forcing}.F90`), whose three
+settings are read by one statement (`read(10,*) inflowturbulence,
+turbulence_ampl, nrturb`, the `lturb` line), so they are always rewritten
+together with `Infile.set_value_tokens`. Common rules:
+
+- **Absent (`None`) or `enabled: false` → strict no-op.** The line the solver
+  generated for itself is left byte-identical, and no file is written.
+- **Requires `boundary_condition: inflow_outflow`.** `main.F90` gates the
+  turbulence refresh on `ibnd == 1`, so `enabled: true` with `periodic` raises a
+  `ValueError` at construction instead of silently doing nothing.
+- Both inject the turbulence through a **forcing slab at `i = iturb_pos = 10`**
+  (`m_inflow_turbulence_init.F90:3`), i.e. 9.5 cells downstream of the inlet
+  face (x = -1 m on xie_and_castro at 2 m), not on the inlet face itself.
+  Upstream of the slab the flow is the laminar Krüger inflow.
+
+#### `method: random_forcing` (default) — the LBM's own perturbations
 
 ```yaml
 inlet_turbulence:
   enabled: false
+  method: random_forcing
   amplitude: 5.0e-05      # turbulence_ampl
   update_interval: 100    # nrturb — timesteps between turbulence updates
 ```
 
-The three values are read by one Fortran statement
-(`read(10,*) inflowturbulence, turbulence_ampl, nrturb`), so
-`apply_inlet_turbulence` rewrites the whole `lturb` line via
-`Infile.set_value_tokens`. Semantics:
+Applied once in `compile()` and inherited by ensemble members when
+`experiment_dir` is cloned. Values omitted while enabled fall back to the
+infile's (the solver template `m_mkinfile.F90` writes ` F 0.00005  100`).
 
-- **Absent (`None`) or `enabled: false` → strict no-op.** The line the solver
-  generated for itself is left byte-identical, so default runs are unchanged.
-- Values omitted while enabled fall back to whatever is already in `infile.in`
-  rather than to hardcoded defaults. The solver's own template (`m_mkinfile.F90`)
-  writes ` F 0.00005  100`, which is where the YAML defaults come from.
-- `update_interval` must be ≥ 1: `inflow_turbulence_init` aborts on `nrturb <= 0`
-  and `main.F90` uses it as `mod(it, nrturb)`. It also sizes the precomputed
-  `uu/vv/ww/rr(ny,nz,0:nrturb)` buffers, so large values cost memory.
-- **Requires `boundary_condition: inflow_outflow`.** `main.F90` gates the
-  turbulence refresh on `ibnd == 1`, so `enabled: true` with `periodic` raises a
-  `ValueError` at construction instead of silently doing nothing.
+**What the solver does.** Every `nrturb` steps (`main.F90:426-428`, and once at
+a cold start, `:270`) `inflow_turbulence_compute` draws `nrturb + 1` fresh
+random planes `uu/vv/ww/rr(ny, nz, 0:nrturb)` with `m_pseudo2D` (Gaussian
+covariance, decorrelation length `10/sqrt(3)` ≈ 5.8 cells, FFT-periodic in y
+**and z**, so the ground and the lid are correlated), chains them by an AR(1)
+of 0.98 per step (e-folding ~50 steps) and normalises every plane to zero mean
+and unit variance (`m_inflow_turbulence_compute.F90:19-60`). Each refresh starts
+from an independent plane, so the forcing decorrelates abruptly every `nrturb`
+steps. Every step, `inflow_turbulence_forcing` adds `amplitude * uu(:, :, lit)`
+(`lit = mod(it, nrturb)`, 0 → `nrturb`) to the slab's velocity as a Kupershtokh
+exact-difference forcing, `f += feq(rho, u + du) - feq(rho, u)`
+(`m_inflow_turbulence_forcing.F90:57-127`, applied post-collision at
+`main.F90:327`); `rr` is never used. `amplitude` is therefore a **lattice
+velocity increment per step**, not an intensity: the fluid crosses the slab in
+`1/U_lattice` ≈ 15 steps (`C_u = 15 U`), so the injected fluctuation is roughly
+`15 * amplitude * C_u` m/s and does not scale with the flow. `update_interval`
+must be ≥ 1 (`inflow_turbulence_init` aborts on `nrturb <= 0`) and sizes the
+buffers. Restart runs read the buffers back from
+`restart/turbulence_0000_<nt0>.uf` (`m_readrestart.F90:66-101`).
+
+**Seeds.** `m_seedmanagement.F90` seeds `RANDOM_NUMBER` only on a cold start
+(`nt0 = 0`): from `seed_0000.orig` when it exists, otherwise from the wall
+clock (`m_set_random_seed3.F90:33-37`, `DATE_AND_TIME` + `system_clock` + rank)
+and saves it there. `compile()` wipes the seed files, so every cold start draws
+a new clock seed and two runs of one config differ (see §9). On a warm start it
+looks for `seed.dat` — a name nothing writes — so it never reseeds, and the
+refreshes of every warm window start from the compiler's default RNG state.
+
+**Measured** (empty domain x = -20..140 m, 2 m grid, `ny` 40, `nz` 16, 10°,
+6 m/s, α 0.25, `z_ref` = top cell, 600 s after 60 s spinup, frames from
+t = 100 s; z = 9 m, local mean ≈ 4.4 m/s):
+
+| `amplitude` | plane | TI u / v / w at 9 m | T_int | L_y |
+|---|---|---|---|---|
+| 5e-5 | inflow face (x = -19) | 0.000 / 0.001 / 0.000 | — | — |
+| 5e-5 | 2 m past the slab (x = 1) | 0.009 / 0.016 / 0.015 | 1.5 s | 6.5 m |
+| 5e-5 | x = 101 | 0.017 / 0.015 / 0.006 | 3.9 s | 5.4 m |
+| 5e-4 | inflow face (x = -19) | 0.002 / 0.007 / 0.004 | — | — |
+| 5e-4 | 2 m past the slab (x = 1) | 0.093 / 0.156 / 0.157 | 1.5 s | 6.4 m |
+| 5e-4 | x = 21 | 0.130 / 0.150 / 0.125 | 1.9 s | 5.8 m |
+| 5e-4 | x = 101 | 0.143 / 0.118 / 0.100 | 4.3 s | 5.4 m |
+
+`5e-5` (the template default) is laminar for practical purposes; `5e-4` gives
+a usable intensity but with short scales (L_y ≈ 6 m ≈ 3 cells, T_int ≈ 1.5 s)
+and no handle on the spectrum, the length scales or the realisation.
+
+#### `method: digital_filter` — the inflow uDALES and PALM use
+
+```yaml
+inlet_turbulence:
+  enabled: true
+  method: digital_filter
+  intensity: 0.15         # u'_rms / |U_mean(z)|, constant in z; v', w' 0.7x
+  length_scale_y: 12.0    # m
+  length_scale_z: 12.0    # m
+  length_scale_x: 24.0    # m -> AR(1) time scale via Taylor
+  time_step: 0.5          # s between planes; must divide the window
+  seed: null              # null -> derived from the member's experiment name
+```
+
+Same keys, defaults and generator as pyudales (§6.1 of docs/pyudales.md) and
+pypalm (§8 of docs/pypalm.md):
+[`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py).
+`build_digital_filter_fluctuations` returns the fluctuation part of uDALES'
+driver planes value for value for the same seed, grid and record times
+(`test_matches_the_udales_inlet_planes`). The seed is `seed`, else
+`derive_seed(experiment_name)`: ensemble members (`000`, `001`, … on every
+backend) get the same realisations as their uDALES/PALM counterparts; a single
+run is named `runcase` here, so set `seed` explicitly to drive pylbm and
+another backend with one realisation, and change it for a replica. No solver RNG
+is involved, so a digital-filter run is bit-for-bit reproducible.
+
+**Why it goes through the forcing slab.** The LBM cannot read a time-varying
+inflow plane: the Krüger inflow (`m_boundary_i_inflow_kernel.F90:58-70`) takes
+one `uvel(nz)` profile and one `udir`, uniform in y and without w, and the only
+time input is the scalar speed/direction series `uvel_time.dat`
+(`m_inflow.F90:44-86`). The only per-(y, z, step) input is the forcing buffer,
+which `m_readrestart` loads from `restart/turbulence_0000_<nt0>.uf` on every
+run with `nt0 > 0`. So, without editing the vendored code, each window is run
+as a restart run whose buffers pylbm writes:
+
+- **Iterations.** `nrturb` = the window length `L` in steps and `nt0` a
+  multiple of `L` (`aligned_start_iteration`). The forcing reads slot
+  `mod(it, L)` (0 → `L`), so step `nt0 + l` reads slot `l`: the buffer is
+  played once, front to back, and the solver's own refresh at
+  `mod(it, nrturb) == 0` falls on `nt1`, after the last forcing. A cold start
+  writes an equilibrium restart at `nt0 = L` holding the state `inipert` would
+  build (the inflow profile everywhere, rho = 1; without its 1e-5 density
+  noise) and removes old restarts first; a warm start writes its restart at the
+  next multiple of `L` after the previous `nt1`. The iteration counter
+  therefore advances by up to `2L` per window — mind `MAX_ITERATION` (§9) on
+  long rollouts.
+- **Lattice units.** In the mean flow a slab increment `du` per step leaves a
+  jump `du / U_x` downstream (the fluid spends `1/U_x` steps in the one-cell
+  slab). pylbm writes `du = U_x(z, t) * u'/C_u` (same for v', w'),
+  `amplitude = 1`, where `U_x` is the x-velocity the inflow kernel imposes at
+  that step and height (`uini * uvel_shear * cos(udir)` in lattice units,
+  following `uvel_time.dat` when the params vary in time). The
+  exact-difference forcing leaves rho unchanged, so mass is conserved exactly;
+  the plane mean of u' is removed per record, as on the other backends, so the
+  downstream mass flux carries no mean perturbation.
+- **Time.** Planes every `time_step` s, interpolated linearly onto the steps
+  (as uDALES and PALM interpolate theirs); step `l` sits at window time
+  `(l - 1) * dt`, the clock `m_inflow.F90` uses for the mean inflow.
+- **Grid.** The planes are built on the LBM's cell centres, which are the case
+  grid's (u, v at `(k + 0.5) dz`, w on the faces averaged to the centres).
+- **Windows.** The member's elapsed physical time is persisted to
+  `<experiment_dir>/inlet_turbulence_clock.json` (reset when the model is
+  built, advanced only after a successful window) and selects the slice of the
+  member's turbulence history, so window *n* continues window *n-1*, as on
+  uDALES/PALM. As on PALM, a member substituted after a failure keeps its own
+  clock (statistically harmless).
+- **Memory.** The four buffers `(ny, nz, L + 1)` float32 stay on the device
+  for the whole run, and the restart read/write holds a host copy: 4 × 640 ×
+  29 701 × 4 B ≈ 300 MB for the 660 s empty-domain window below. pylbm warns
+  above 512 MB; long windows on large planes need shorter windows.
+
+**What the flow does with it.** For v' and w' the slab jump is the whole
+story. A streamwise force with zero plane mean is not divergence free, so half
+of the u-impulse goes into a pressure field that decays over about one
+transverse wavelength on both sides of the slab: u' is about half its target
+just downstream of the slab, shows up weakly upstream of it, and recovers
+downstream as the pressure field decays — the same projection the
+uDALES/PALM pressure solvers apply to their face planes, but applied here in
+the interior.
+
+**Measured** (same empty domain; 10°, 6 m/s, α 0.25, `z_ref` 64 m as in the
+pypalm/pyudales configs; 600 s after 60 s spinup, frames from t = 100 s;
+integral scales at z = 9 m from u'; the plane's own TI at 9 m is 0.128 / 0.111
+for u / v):
+
+| plane (distance past the slab) | mean-profile error (rms, z ≤ 25 m) | TI u / v / w at 9 m | T_int | L_y | spectral slope 0.08-0.4 Hz |
+|---|---|---|---|---|---|
+| inflow face, x = -19 (upstream) | 1.1 % | 0.002 / 0.002 / 0.002 | — | — | — |
+| x = -3 (2 m upstream) | 1.4 % | 0.037 / 0.039 / 0.036 | 3.5 s | 10.5 m | -3.4 |
+| x = 1 (2 m) | 1.6 % | 0.062 / 0.091 / 0.080 | 3.7 s | 9.3 m | -3.2 |
+| x = 21 (22 m) | 2.2 % | 0.091 / 0.088 / 0.069 | 4.7 s | 9.3 m | -3.7 |
+| x = 61 (62 m) | 3.0 % | 0.106 / 0.096 / 0.057 | 5.9 s | 8.4 m | -4.8 |
+| x = 101 (102 m) | 4.1 % | 0.123 / 0.096 / 0.057 | 6.6 s | 8.2 m | -5.0 |
+
+PALM on the same domain and inflow (docs/pypalm.md §8), by distance past its
+inflow face: 0 m 0.131 / 0.102 / 0.091, 2.7 s, 10.6 m; 20 m 0.115 / 0.108 /
+0.076, 4.1 s, 9.9 m; 80 m 0.132 / 0.118 / 0.066, 5.2 s, 7.6 m; 120 m 0.148 /
+0.117 / 0.072, 6.0 s, 6.8 m; mean-profile error 0.5-5.6 %.
+
+- The flow carries the written realisation: u' and v' at 9 m, 2 m past the
+  slab, correlate 0.78 / 0.79 with the generator's planes for that seed (1 s
+  lag). v' and w' arrive at 80-90 % of the planes' rms; u' at about half, as
+  explained above, and it recovers over the fetch (0.091 at 22 m, 0.123 at
+  102 m) while TI_w decays (0.080 → 0.057). The fluctuations neither die nor
+  blow up.
+- Relative to PALM the LBM's turbulence ends up 15-25 % weaker at the same
+  distance and its spectrum steeper (-3 to -5 against -1.7 to -3.4): the slab
+  halves u' at the injection point, and the LBM's ground is free-slip
+  (`kbnd = 22`, which pylbm does not change), so there is no wall shear to
+  produce turbulence near the ground as PALM's does. Integral scales match the
+  other backends (L_y 8-10 m against 7-11 m; T_int 4-7 s against 3-6 s).
+- The mean profile stays within 1-4 % of PALM's target `6 (z/64)^0.25`; the
+  laminar LBM run (`enabled: false`) drifts the same way (1.7-2.3 %), so that
+  is the profile adapting to the free-slip ground, not the forcing.
+- A second seed gives the same statistics (TI_u 0.063 / 0.090 / 0.112 at 2 /
+  22 / 102 m, L_y within 10 %) and an uncorrelated realisation (u' correlation
+  with the first |r| < 0.04 at every plane); the 500 s means of the two differ
+  by 0.05-0.09 m/s rms, the realisation noise.
+- On xie_and_castro with the inflow moved upstream (STL cropped to the blocks
+  at x ≤ 35 m, domain x = -60..120 m, 90x40x16, two 300 s windows, the second
+  warm-started): 20 m past the slab (x = -21, 26 m in front of the array) TI
+  u / v / w at 9 m is 0.091 / 0.089 / 0.068 in window 1 and 0.093 / 0.091 /
+  0.070 in window 2, TI_u 0.08 at 17-23 m, and in front of the first block
+  (x = -1) TI_u rises to 0.17. The warm window starts at `nt0` = 40 500 (the
+  next multiple of its 13 500 steps after 32 400) and continues the clock at
+  record 720 (360 s); the frame-to-frame change of u across the window
+  boundary (0.13 m/s) is within the ordinary range (median 0.10 m/s). PALM's
+  run on the same layout gave 0.17 / 0.16 / 0.10 25 m in front of the array,
+  with its inflow face 40 m upstream of that plane.
+- Not verified: the CUDA build (all numbers above are the gfortran/OpenMP
+  build; the buffers are read through the same `m_readrestart` CUDA branch that
+  `random_forcing` restarts already use), MPI builds (pylbm never builds with
+  MPI), and time-varying params in a full run (unit tested only).
 
 ### `C_u` scaling
 
@@ -489,7 +685,10 @@ forward_model:
   verbose: false
   boundary_condition: inflow_outflow
   profile_config: {type: power_law, alpha: 0.25}
-  inlet_turbulence: {enabled: false, amplitude: 5.0e-05, update_interval: 100}
+  inlet_turbulence: {enabled: false, method: random_forcing, amplitude: 5.0e-05,
+                     update_interval: 100, intensity: 0.15, length_scale_x: 24.0,
+                     length_scale_y: 12.0, length_scale_z: 12.0, time_step: 0.5,
+                     seed: null}
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}
@@ -534,6 +733,11 @@ model.compile=false
 model.forward_model.inlet_turbulence.enabled=true
 model.forward_model.inlet_turbulence.amplitude=2.0e-04
 model.forward_model.inlet_turbulence.update_interval=50
+
+# The digital-filter inflow uDALES and PALM use, with their profile reference
+model.forward_model.inlet_turbulence.enabled=true
+model.forward_model.inlet_turbulence.method=digital_filter
++model.forward_model.profile_config.z_ref=64.0
 ```
 
 ---
@@ -581,7 +785,9 @@ The thread count never changes the result. Seeds matter far more: on a cold star
 files, so two serial runs of one config already differ (~4e-5 m/s on the tiny
 case, ~0.1 m/s with inflow turbulence). Copy one run's `seed_0000.orig` into the
 other's experiment dir before comparing them
-(`tests/pylbm/test_pylbm_openmp.py`).
+(`tests/pylbm/test_pylbm_openmp.py`). The `digital_filter` inflow (§7) runs
+every window as a restart and never touches the solver's RNG, so its runs are
+bit-for-bit reproducible without that step.
 
 Speed-up on an Apple M-series laptop (4 performance + 6 efficiency cores):
 ~3.2x at 4 threads (3.3x on 120x120x24, 3.1x on 400x400x32), only 3.9x at 8 —
