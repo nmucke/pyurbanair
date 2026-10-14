@@ -129,7 +129,8 @@ def plot_slice_rows(
         fig.colorbar(
             im, ax=axes[r, :].tolist(), shrink=0.8, label="error" if is_error else label
         )
-    fig.savefig(path, dpi=110, bbox_inches="tight")
+    # White, not the style's transparent background: read in a dark viewer.
+    fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
