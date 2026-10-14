@@ -523,3 +523,32 @@ def test_the_blanking_mask_gives_the_new_state_to_the_fluid_cells(
     # assertions would swap, and only checking one of them would still pass.
     assert np.abs(u_zyx[solid_zyx]).max() < 1e-5
     assert np.abs(wanted[solid_zyx]).max() > 1e-3, "the fixture must actually differ"
+
+
+@pytest.mark.parametrize("kbnd, at_rest", [(12, True), (22, False)])  # type: ignore[misc]
+def test_a_no_slip_ground_holds_its_inflow_outflow_corners_at_rest(
+    tmp_path: pathlib.Path, kbnd: int, at_rest: bool
+) -> None:
+    """No kernel writes the k=0 ghosts of the i=0 / i=nx+1 columns, so the
+    restart's values stay there for the whole run; for a no-slip ground they
+    must be the resting wall (rho 1, u 0), not a copy of the moving flow."""
+    dirs = _make_dirs(tmp_path)
+    infile = pathlib.Path(dirs.infile_path)
+    infile.write_text(infile.read_text().replace("22     ! kbnd", f"{kbnd}     ! kbnd"))
+
+    iteration = write_restart_file_from_xarray(state=_make_state(), dirs=dirs)
+    restart = dirs.experiment_dir / "restart" / restart_file_name(iteration)
+    loaded = _try_load_restart_distribution(restart_file=restart, nx=NX, ny=NY, nz=NZ)
+    assert loaded is not None
+    rho, u, v, w = _compute_macrovars_from_distribution(loaded)
+
+    for i in (0, NX + 1):
+        corner = (i, slice(None), 0)
+        speed = np.abs(np.stack([u[corner], v[corner], w[corner]])).max()
+        if at_rest:
+            np.testing.assert_allclose(rho[corner], 1.0, atol=1e-6)
+            assert speed < 1e-7
+        else:
+            assert speed > 1e-3
+    # Everything else is the state's: the k=1 cells next to the corners move.
+    assert np.abs(u[1:-1, 1:-1, 1]).min() > 1e-3
