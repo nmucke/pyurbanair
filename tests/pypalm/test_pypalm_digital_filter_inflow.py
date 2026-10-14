@@ -289,3 +289,21 @@ def test_digital_filter_inflow_runs_and_continues(tmp_path: pathlib.Path) -> Non
     )
     assert clock["elapsed_time"] == pytest.approx(10.0)
     assert planes.sizes["time_inflow"] == 15
+
+
+def test_input_block_size_capped_to_the_subdomain(tmp_path: pathlib.Path) -> None:
+    """TUI0019: input_block_size <= 2 x the x-columns of one npex slab."""
+    from pypalm.utils.dynamic_driver_utils import enable_turbulent_inflow
+    from pypalm.utils.p3d_utils import P3DFile
+
+    def block(nx: int, npex: int) -> Any:
+        p3d = tmp_path / f"run_{nx}_{npex}_p3d"
+        p3d.write_text(
+            f"&initialization_parameters\n    nx = {nx - 1},\n/\n"
+            f"&runtime_parameters\n    npex = {npex},\n/\n"
+        )
+        enable_turbulent_inflow(p3d)
+        return P3DFile(p3d).get_value("turbulent_inflow_parameters", "input_block_size")
+
+    assert int(block(50, 5)) == 20
+    assert block(50, 1) is None  # PALM's default 30 fits: nothing written

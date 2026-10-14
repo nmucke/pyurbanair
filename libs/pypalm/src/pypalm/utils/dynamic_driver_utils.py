@@ -352,12 +352,25 @@ def enable_turbulent_inflow(p3d_path: pathlib.Path) -> None:
     turbulent_inflow_mod.f90:544-582). The module activates iff that block is
     present AND ``switch_off_module == .false.`` — no boolean in
     ``&initialization_parameters``.
+
+    PALM reads the planes in blocks of ``input_block_size`` time levels
+    (default 30), which must not exceed twice the x-columns of one subdomain
+    (``TUI0019``, turbulent_inflow_mod.f90:1417). With slab decomposition over
+    ``npex`` ranks the block is capped to that, and only written when capped.
     """
     p3d = P3DFile(p3d_path)
     p3d.set_value("turbulent_inflow_parameters", "switch_off_module", False)
     p3d.set_string(
         "turbulent_inflow_parameters", "turbulent_inflow_method", "read_from_file"
     )
+    nx = p3d.get_value("initialization_parameters", "nx")
+    npex = p3d.get_value("runtime_parameters", "npex")
+    if nx is not None and npex is not None:
+        max_block = 2 * ((int(nx) + 1) // int(npex))
+        if max_block < 30:
+            p3d.set_value(
+                "turbulent_inflow_parameters", "input_block_size", max_block
+            )
     p3d.write()
 
 
