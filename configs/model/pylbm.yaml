@@ -36,14 +36,29 @@ forward_model:
   profile_config:
     type: power_law
     alpha: 0.25
-  # Pseudo-random inflow perturbations (m_inflow_turbulence_*.F90), written to
-  # the three-value `lturb` line of infile.in. Defaults mirror the solver's own
-  # infile template, so `enabled: false` leaves infile.in untouched. Requires
-  # boundary_condition: inflow_outflow.
+  # Inflow turbulence through the LBM's forcing slab 10 cells downstream of the
+  # inlet (m_inflow_turbulence_*.F90). `enabled: false` leaves infile.in
+  # untouched. Requires boundary_condition: inflow_outflow. Methods:
+  #   random_forcing  the LBM's own pseudo-random perturbations (the `lturb`
+  #                   line of infile.in); `amplitude` is a lattice velocity
+  #                   increment per step: 5e-5 is ~1% TI, nearly laminar.
+  #   digital_filter  the Xie & Castro digital-filter inflow uDALES and PALM
+  #                   use (pyurbanair/utils/digital_filter.py), same keys and
+  #                   same fluctuations for the same seed; written per window as
+  #                   the forcing buffers of a restart run (docs/pylbm.md §7).
   inlet_turbulence:
     enabled: false
+    method: random_forcing
+    # --- random_forcing: defaults mirror the solver's infile template --------
     amplitude: 5.0e-05
     update_interval: 100  # timesteps between turbulence updates (nrturb)
+    # --- digital_filter: same keys and values as pyudales.yaml's block -------
+    intensity: 0.15        # u'_rms / |U_mean(z)|, constant in z; v', w' get 0.7x
+    length_scale_y: 12.0   # m, spanwise integral length scale
+    length_scale_z: 12.0   # m, vertical
+    length_scale_x: 24.0   # m, streamwise -> AR(1) time scale via Taylor
+    time_step: 0.5         # s between planes; must divide the window
+    seed: null             # null -> derived from the member's experiment name
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}
