@@ -30,7 +30,14 @@ Grid contract (verified against the bundled PALM source):
   that ``_load_and_postprocess_state`` adds. We sample the (offset) state at the
   matching physical heights but label the file axis 0-based.
 * The horizontal ``x``/``xu``/``y``/``yv`` axes are **length-checked only**
-  (``DRV0004``); their values are never read, so any offset is harmless.
+  (``DRV0004``); their values are never read, so any offset is harmless. But
+  the staggered fields are read from PALM index 1, not 0: file element ``n``
+  of ``init_atmosphere_u`` lands in ``u(i=n+1)`` (start ``nxlu``) and of
+  ``init_atmosphere_v`` in ``v(j=n+1)`` (start ``nysv``),
+  ``netcdf_data_input_mod.f90:2339,2388``. So ``xu`` must start at ``dx`` and
+  ``yv`` at ``dy``; sampling from 0 shifted every warm start one cell
+  downstream in u and one cell in y in v. PALM sets the missing ``u(0)`` and
+  ``v(0)`` by copying index 1.
 * Staggering (file dim order is NetCDF/C order): ``init_atmosphere_u(z,y,xu)``,
   ``init_atmosphere_v(z,yv,x)``, ``init_atmosphere_w(zw,y,x)``,
   ``init_atmosphere_pt(z,y,x)``, ``init_atmosphere_qv(z,y,x)``.
@@ -123,9 +130,9 @@ def _file_axes(bounds: Bounds, nx: int, ny: int, nz: int) -> dict[str, np.ndarra
     dz = (zmax - zmin) / nz
     return {
         "x": (np.arange(nx, dtype=np.float64) + 0.5) * dx,
-        "xu": np.arange(nx - 1, dtype=np.float64) * dx,
+        "xu": np.arange(1, nx, dtype=np.float64) * dx,
         "y": (np.arange(ny, dtype=np.float64) + 0.5) * dy,
-        "yv": np.arange(ny - 1, dtype=np.float64) * dy,
+        "yv": np.arange(1, ny, dtype=np.float64) * dy,
         "z": (np.arange(nz, dtype=np.float64) + 0.5) * dz,
         "zw": np.arange(1, nz, dtype=np.float64) * dz,
     }
