@@ -7,3 +7,6 @@ defaults:
 forward_model:
   ncpu: 1
   nz: 16
+  # Nudging below the 15 m lid of the tiny grid.
+  nudging_config:
+    nnudge_meters: 4.0
