@@ -70,8 +70,8 @@ with `{"error": "<message>"}`.
 - **Fields** (`FIELDS` in `app.py`) are curated Hydra override paths. Each
   default is read from the composed forward config of the first model in the
   field's `models` (all models when absent), unless the field sets its own.
-  A choice whose value is `null` sends no override: the boundary condition's
-  "Model default" keeps each model's own value. Unknown keys are rejected, and
+  A choice whose value is `null` sends no override: "Model default" of the
+  boundary condition and inlet turbulence keeps each model's own value. Unknown keys are rejected, and
   so are fields for another model; `extra_overrides` is the escape hatch.
   The inflow angle is the flow direction, counter-clockwise from +x (east).
 - **Case geometry**: `buildings` is `case_dir/buildings.geojson` reprojected to

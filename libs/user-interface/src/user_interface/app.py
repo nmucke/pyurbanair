@@ -181,15 +181,20 @@ FIELDS: list[dict[str, Any]] = [
     {
         "key": "model.forward_model.inlet_turbulence.enabled",
         "label": "Inlet turbulence",
-        "type": "bool",
-        "models": ["pylbm", "pypalm"],
-        "help": "Perturb the inflow to trigger turbulence (on by default in uDALES).",
+        "type": "choice",
+        # None keeps each model's own config value: on in uDALES, off in LBM.
+        "default": None,
+        "choices": [
+            {"value": None, "label": "Model default"},
+            {"value": True, "label": "On"},
+            {"value": False, "label": "Off"},
+        ],
+        "help": "Perturb the inflow to trigger turbulence. Needs inflow / outflow.",
     },
     {
         "key": "model.forward_model.boundary_condition",
         "label": "Boundary condition",
         "type": "choice",
-        "models": ["pylbm", "pypalm", "pyudales"],
         # None keeps each model's own config value: the models differ.
         "default": None,
         "choices": [
@@ -237,9 +242,14 @@ def field_override(key: str, value: Any) -> str | None:
         return f"{key}={'true' if value else 'false'}"
     if kind == "choice":
         values = [c["value"] if isinstance(c, dict) else c for c in field["choices"]]
-        if value not in values:
+        # By type too: 1 == True, but 1 is not an inlet-turbulence choice.
+        if not any(type(value) is type(v) and value == v for v in values):
             raise RequestError(400, f"{field['label']} must be one of {values}")
-        return None if value is None else f"{key}={value}"
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        return f"{key}={value}"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RequestError(400, f"{field['label']} must be a number")
     # The range first: a huge JSON integer overflows the float conversions.

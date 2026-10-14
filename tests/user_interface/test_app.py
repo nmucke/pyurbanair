@@ -245,7 +245,10 @@ def test_options_fields_resolve_for_each_model(app: App) -> None:
             first = field.get("models", ["pylbm"])[0]
             if model == first and "default" not in FIELDS_BY_KEY[field["key"]]:
                 assert value == field["default"]
-            assert isinstance(value, bool) == (field["type"] == "bool")
+            if field["type"] == "choice":
+                assert value in [c["value"] for c in field["choices"]]
+            else:
+                assert isinstance(value, bool) == (field["type"] == "bool")
 
 
 def test_case_lifecycle(app: App) -> None:
@@ -313,12 +316,17 @@ def test_case_failures_while_preparing(app: App) -> None:
     assert status == 400 and "city4cfd" in body["error"]
 
 
-def test_run_lifecycle(app: App) -> None:
+def test_run_lifecycle(app: App, monkeypatch: pytest.MonkeyPatch) -> None:
     tools = cast(FakeTools, app.tools)
     case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
     wait_for(app, f"api/cases/{case_id}", "status", "building")
     run = {"case_id": case_id, "model": "pylbm"}
 
+    # Every field applies to every model now; restrict one to test the check.
+    key = "time.output_frequency"
+    monkeypatch.setitem(
+        FIELDS_BY_KEY, key, {**FIELDS_BY_KEY[key], "models": ["pypalm"]}
+    )
     for bad, message in [
         ({**run, "model": "fluent"}, "model must be"),
         ({**run, "case_id": "nope"}, "Unknown case"),
@@ -335,15 +343,12 @@ def test_run_lifecycle(app: App) -> None:
             {**run, "settings": {"model.forward_model.boundary_condition": "open"}},
             "must be one of",
         ),
-        ({**run, "extra_overrides": "a=b"}, "list of strings"),
         (
-            {
-                **run,
-                "model": "pyudales",
-                "settings": {"model.forward_model.inlet_turbulence.enabled": True},
-            },
-            "does not apply",
+            {**run, "settings": {"model.forward_model.inlet_turbulence.enabled": 1}},
+            "must be one of",
         ),
+        ({**run, "extra_overrides": "a=b"}, "list of strings"),
+        ({**run, "settings": {key: 1.0}}, "does not apply"),
     ]:
         status, body, _ = request(app, "api/runs", bad)
         assert status in (400, 404) and message in body["error"], (bad, body)
@@ -357,6 +362,7 @@ def test_run_lifecycle(app: App) -> None:
                 "time.simulation_time": 2,
                 "forward.ensemble": False,
                 "model.forward_model.boundary_condition": "periodic",
+                "model.forward_model.inlet_turbulence.enabled": True,
             },
             "extra_overrides": ["forward.rollout_steps=1"],
         },
@@ -371,6 +377,7 @@ def test_run_lifecycle(app: App) -> None:
         "time.simulation_time=2.0",
         "forward.ensemble=false",
         "model.forward_model.boundary_condition=periodic",
+        "model.forward_model.inlet_turbulence.enabled=true",
         "forward.rollout_steps=1",
     ]
     # "Model default" sends no override, so each model keeps its own value.
