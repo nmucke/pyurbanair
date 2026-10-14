@@ -414,9 +414,13 @@ was 20 % faster than PALM's). When `z_ref` is set, `reference_speed_scale`
 writes `uini = velocity_magnitude * s(z_top)` (to 4 decimals; also into
 `uvel_time.dat`), so the three backends impose the same profile. Without
 `z_ref` nothing changes: `uini` is the speed at the top cell centre, half a
-cell below the other backends' default `z_ref = zsize`. `pylbm.yaml` does not
-set it; pass `+model.forward_model.profile_config.z_ref=64.0` to match the
-pyudales/pypalm configs. `C_u` is still derived from `velocity_magnitude`.
+cell below the other backends' default `z_ref = zsize`. `pylbm.yaml` reads it,
+with the profile type and alpha, from the shared `flow.profile` block
+(`configs/common.yaml`, `z_ref` 64 m), as pyudales and pypalm do; set
+`flow.profile.z_ref=null` to get the old top-cell behaviour. `C_u` is still
+derived from `velocity_magnitude`. The digital-filter keys (intensity, length
+scales, time step, seed) also come from `flow.inlet_turbulence`; `enabled` and
+`method` stay pylbm's own (off, `random_forcing`).
 
 The shear profile is per-member when `params` contains `vertical_inflow_exponent`
 (the ESMDA model-error knob): `resolve_profile_config` overrides `alpha` and
@@ -734,10 +738,9 @@ model.forward_model.inlet_turbulence.enabled=true
 model.forward_model.inlet_turbulence.amplitude=2.0e-04
 model.forward_model.inlet_turbulence.update_interval=50
 
-# The digital-filter inflow uDALES and PALM use, with their profile reference
+# The digital-filter inflow uDALES and PALM use (same flow.* settings)
 model.forward_model.inlet_turbulence.enabled=true
 model.forward_model.inlet_turbulence.method=digital_filter
-+model.forward_model.profile_config.z_ref=64.0
 ```
 
 ---

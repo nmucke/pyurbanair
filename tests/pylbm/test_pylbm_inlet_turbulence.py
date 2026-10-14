@@ -558,7 +558,7 @@ def _tiny_digital_filter_run(
         "model=pylbm_tiny",
         "model.forward_model.boundary_condition=inflow_outflow",
         "model.forward_model.sgs_constant=0.15",
-        "+model.forward_model.profile_config.z_ref=6.0",
+        "++model.forward_model.profile_config.z_ref=6.0",
         f"model.forward_model.inlet_turbulence.enabled={str(enabled).lower()}",
         "model.forward_model.inlet_turbulence.method=digital_filter",
         "model.forward_model.inlet_turbulence.intensity=0.15",

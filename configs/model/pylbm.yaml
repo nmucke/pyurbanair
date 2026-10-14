@@ -34,8 +34,9 @@ forward_model:
   # 0.15 matches the LBM's own generated infile default (m_mkinfile.F90:16).
   sgs_constant: 0.15
   profile_config:
-    type: power_law
-    alpha: 0.25
+    type: ${flow.profile.type}
+    alpha: ${flow.profile.alpha}
+    z_ref: ${flow.profile.z_ref}
   # Inflow turbulence through the LBM's forcing slab 10 cells downstream of the
   # inlet (m_inflow_turbulence_*.F90). `enabled: false` leaves infile.in
   # untouched. Requires boundary_condition: inflow_outflow. Methods:
@@ -52,13 +53,14 @@ forward_model:
     # --- random_forcing: defaults mirror the solver's infile template --------
     amplitude: 5.0e-05
     update_interval: 100  # timesteps between turbulence updates (nrturb)
-    # --- digital_filter: same keys and values as pyudales.yaml's block -------
-    intensity: 0.15        # u'_rms / |U_mean(z)|, constant in z; v', w' get 0.7x
-    length_scale_y: 12.0   # m, spanwise integral length scale
-    length_scale_z: 12.0   # m, vertical
-    length_scale_x: 24.0   # m, streamwise -> AR(1) time scale via Taylor
-    time_step: 0.5         # s between planes; must divide the window
-    seed: null             # null -> derived from the member's experiment name
+    # --- digital_filter: the shared flow block (configs/common.yaml), as
+    # pyudales and pypalm read it, so the same seed gives the same planes ------
+    intensity: ${flow.inlet_turbulence.intensity}
+    length_scale_y: ${flow.inlet_turbulence.length_scale_y}
+    length_scale_z: ${flow.inlet_turbulence.length_scale_z}
+    length_scale_x: ${flow.inlet_turbulence.length_scale_x}
+    time_step: ${flow.inlet_turbulence.time_step}
+    seed: ${flow.inlet_turbulence.seed}
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}
