@@ -43,7 +43,7 @@ configs/
   forward.yaml            # entry point: scripts/run_forward.py
   assimilation.yaml       # entry point: run_smoother.py, run_filtering.py, run_hybrid.py
   common.yaml             # run, paths (per machine), ensemble budget, Hydra run dir
-  case/                   # xie_and_castro (default), barcelona
+  case/                   # xie_and_castro (default), xie_and_castro_periodic, barcelona
   model/                  # pylbm, pyudales, pypalm, neural_surrogate
   params/                 # static, dynamic, dynamic_sine, dynamic_cosine,
                           #   static_truth, dynamic_truth, surrogate_training_data
