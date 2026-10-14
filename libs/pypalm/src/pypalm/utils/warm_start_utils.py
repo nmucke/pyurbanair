@@ -5,7 +5,11 @@ PALM 25.10 initializes the full 3D interior from ``init_atmosphere_u/v/w/pt/qv``
 ``initializing_actions = 'read_from_file'`` (``init_3d_model.f90:478`` →
 ``netcdf_data_input_mod.f90:2095-2690``). This is pypalm's warm-start
 mechanism: the resolved velocity field a previous window returned is injected
-as the next window's initial condition.
+as the next window's initial condition. Only ``u`` and ``v`` survive:
+``read_from_file`` sets ``w = 0`` after reading, LOD=2 included
+(``init_3d_model.f90:593``), and the initial pressure solve rebuilds a
+divergence-free ``w``. ``init_atmosphere_w`` is still written because the
+reader requires it.
 
 Unlike pyudales/pylbm there is **no "carry" of subgrid state** — PALM never
 reads SGS-TKE from file (there is no ``init_atmosphere_e``; grep confirms zero

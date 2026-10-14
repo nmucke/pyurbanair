@@ -1190,8 +1190,9 @@ class ForwardModel(BaseForwardModel):
         ``inflow_outflow`` via an LOD=1 ``init_atmosphere_*`` driver and
         ``'read_from_file'`` (see ``_reset_cold_init``).
 
-        ``state`` provided → warm start (no spinup): the resolved u/v/w field is
-        injected as PALM's full 3D initial condition via the dynamic-driver
+        ``state`` provided → warm start (no spinup): the resolved u/v field is
+        injected as PALM's full 3D initial condition (PALM zeroes w and its
+        initial pressure solve rebuilds it) via the dynamic-driver
         ``init_atmosphere_*`` LOD=2 mechanism and ``initializing_actions`` is
         switched to ``'read_from_file'`` (see :mod:`.utils.warm_start_utils`).
         Warm-start carries no subgrid state — PALM re-derives SGS-TKE — so the

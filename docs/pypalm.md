@@ -74,7 +74,7 @@ Key constructor args (all wired from Hydra via `configs/model/pypalm.yaml`):
 | `nx, ny, nz, bounds` | Grid; written to `_p3d` at init; required for topography + warm-start. **`nx`/`ny` must be even for `periodic` runs** — the default `poisfft` solver rejects an odd grid-point count on a cyclic boundary (PALM `PAC0071`/`PAC0072`); pypalm raises at staging instead. |
 | `simulation_time`, `output_frequency`, `spinup_time` | Written to `_p3d` (`end_time`, `dt_data_output`, `averaging_interval`) |
 | `boundary_condition` | `"periodic"` (cyclic) or `"inflow_outflow"` (dirichlet/radiation + multigrid solver) |
-| `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (4.0 m), `profile_config` (default `power_law` with `alpha=0.25`). See §8. |
+| `nudging_config` | Periodic nudging driver + inflow profile shape: `enabled` (default `true`), `tnudge` (15.0 s), `nnudge_meters` (16.0 m), `profile_config` (default `power_law` with `alpha=0.25`, `z_ref=64` m). See §8. |
 | `inlet_turbulence` | Switchable inlet turbulence (`enabled`, default `false`) → PALM's random inflow disturbances. Absent (`None`) is a strict no-op. `inflow_outflow` only. See §8. |
 | `random_seed` | Seed of PALM's random disturbances → `&initialization_parameters ensemble_member_nr`, an int in `[0, 2000]`. `None` (default) writes nothing. See §7. |
 | `verbose` | When `False`, stdout/stderr captured; failures surface the last 80 lines |
@@ -99,6 +99,10 @@ The single-run entry point called by `BaseForwardModel.__call__`.
 - **Warm start** (`state` provided): calls `_apply_warmstart(state)`, which
   writes `init_atmosphere_u/v/w/pt/qv` (LOD=2) into the `_dynamic` NetCDF via
   `write_warmstart_driver` and sets `initializing_actions = 'read_from_file'`.
+  `u`/`v` come back on PALM's own staggered points (§8 "Warm-start grid
+  contract"); **`w` does not**: PALM's `read_from_file` path sets `w = 0`
+  after reading the driver, LOD=2 included (`init_3d_model.f90:593`), and
+  the initial pressure solve rebuilds a divergence-free `w` from `u`/`v`.
   PALM then needs an initial field for every prognostic quantity it carries
   (`DRV0006`): `pt` unless `neutral`, `qv` whenever `humidity` is on, which the
   periodic nudging driver forces (see §8). Both are always written; `qv = 0`
@@ -479,6 +483,11 @@ seeding, `ensemble_member_nr` only adds an `en-no:` tag to the run header
   derives per-member seeds from the experiment name instead; pypalm does not.
 - Every warm-started window re-initialises the generator from the same seed,
   as PALM does without the knob.
+- It needs a disturbance to act on. With `inlet_turbulence.initial_seed` and
+  `enabled` both false PALM draws no random number at all, so every seed gives
+  the bit-identical run (checked: seeds 0 and 1 on a periodic run, max |Δu| =
+  0 at 60 s). Construction then raises. Under `periodic` only `initial_seed:
+  true` can carry the seed, and it only reaches cold starts.
 
 ## 8. Known gotchas
 
@@ -521,7 +530,18 @@ relaxes `thl`/`qt` when `ltempeq`/`lmoist` are on (both off in our neutral runs
 **Near-wall cutoff.** uDALES exempts the bottom `nnudge` levels outright; PALM
 has no such switch, so `nnudge_meters` is emulated by writing a huge `tnudge`
 (1e9 s) below the cutoff height, with a paired row at `cutoff ∓ ε` so the step
-is sharp rather than linearly ramped.
+is sharp rather than linearly ramped. A cutoff above the top cell centre raises
+(as in pyudales). The default, 16 m, is pyudales's and sits above most of the
+Xie & Castro canopy (cubes 2.8-17.2 m). Below it the canopy is driven by the
+shear layer; nudged, it is held to the target instead, with the steady
+deficit set by drag × `tnudge`. At the old 4 m default the canopy slab-mean u
+at z = 5 m was 1.59 m/s, against 0.51 m/s at 16 m and 0.53 m/s in uDALES at
+16 m (periodic unit below, 6 m/s at 10°).
+
+**Profile reference height.** `profile_config.z_ref` defaults to 64 m, as in
+pyudales, so `velocity_magnitude` is the same wind in both backends. Unset, it
+falls back to the domain top: at a 32 m lid that is a 19 % stronger wind than
+pyudales's for the same parameter value.
 
 **The constraint chain** (all PALM-fatal if violated) forces four
 `&initialization_parameters` switches on together: `nudging`,
@@ -577,12 +597,72 @@ Costs and limitations:
 **Escape hatch.** `nudging_config.enabled: false` restores the old un-driven
 periodic staging exactly.
 
-**Cross-backend meaning.** With this, periodic runs are nudging-driven in
-*both* pypalm and pyudales, with the same relaxation physics (slab-mean,
-volume-wide, same tnudge / cutoff / shear construction) and the same parameter
-interpretation: `inflow_angle`/`velocity_magnitude` are "the mean wind the
-domain is held to". Both backends also accept time-varying params under
-periodic BCs — any older note claiming PALM is asymmetric here is superseded.
+**Cross-backend meaning.** Periodic runs are nudging-driven in *both* pypalm
+and pyudales, with the same relaxation (fluid slab mean, every level above the
+cutoff, same `tnudge`, cutoff, shear profile and `z_ref` in the default
+configs) and the same parameter interpretation: `inflow_angle`/
+`velocity_magnitude` are "the mean wind the domain is held to". Both accept
+time-varying params under periodic BCs; both interpolate the u/v components,
+not angle and speed, linearly between knots. Remaining differences: PALM's lid
+is a Dirichlet wall at the nudging target (`bc_uv_t = 'dirichlet'`), uDALES's
+is free-slip (`BCtopm = 1`); switching PALM to `'neumann'` changed the
+300-600 s mean u by ≤ 0.07 m/s at every level, so it is left at PALM's
+default. A pyudales cold start begins from rest, a pypalm one from the target
+profile.
+
+### Periodic runs: domain, spin-up and verification
+
+Checked on `case=xie_and_castro_periodic` (one 80 m × 80 m repeat unit, 2 m
+grid, 40×40×16, lid 32 m; see §9), `inflow_angle = 10°`, `velocity_magnitude =
+6 m/s`, default nudging, one rank. The default `xie_and_castro` domain is not
+periodic (a 25 m empty fetch plus two of the eight cube columns); use the
+periodic case for cyclic runs.
+
+- **Nudged mean wind.** Above the cutoff the slab-mean u sits 3-9 % below the
+  target (4.07 vs 4.47 m/s at 21 m, 4.60 vs 4.85 at 29 m): the nudging has to
+  supply the canopy drag, so a steady deficit remains. The lid holds the target
+  exactly (`#165` fix; e.g. u = 5.95 vs 5.95 m/s at z = 33 m). After a change of
+  wind (10→40°, 6→8 m/s over one 180 s window) the nudged levels follow 2-4°
+  behind in direction (about `tnudge` of lag), and the speed deficit grows to
+  0.3-0.7 m/s.
+- **Spin-up.** A cold start begins at the target profile everywhere, so the
+  canopy decelerates: the canopy slab-mean u reaches its stationary value
+  (1.3-1.4 m/s) within ~40 s, the canopy kinetic energy within ~120 s.
+  `xie_and_castro_periodic` therefore sets `spinup_time: 150` (the default
+  case's 30 s is for inflow_outflow). The first-level zeroing of
+  `set_constant_profiles` (below) also hits periodic cold starts, but under
+  cyclic BCs it is gone in ~20 s.
+- **Turbulence.** The cube array trips the flow without any disturbance:
+  resolved TKE 0.3-0.45 m²/s² at street level, peaking at 0.9-1.0 m²/s² at
+  the canopy top (z = 13-17 m); canopy w² ≈ 0.3 m²/s².
+- **Seeds.** With `initial_seed: true`, seeds 1 and 2 differ by 0.4 m/s after
+  2 s and decorrelate within a minute (max |Δu| 4.4 m/s at 60 s), with the
+  same slab-mean profiles (≤ 0.15 m/s apart over 300-600 s).
+- **Warm starts.** Three 180 s warm windows after a 300 s cold one against an
+  840 s continuous run: slab-mean u per window within 0.1 m/s at every level,
+  and the 3-window sensor means within 0.26 m/s (the spread of single 180 s
+  sensor means between realisations is 0.02-0.19 m/s). Each boundary still has
+  a shock, because PALM zeroes the injected `w` (above): canopy w² falls from
+  0.26-0.36 to 0.06-0.08 m²/s² in the first 2 s and is back in its range after
+  15-30 s; canopy kinetic energy dips 4-7 %, mostly that lost `w`.
+  Window-mean resolved TKE is 10-25 % below the continuous run's near the
+  ground and 5-10 % at the canopy top. The stagger fix (§ "Warm-start grid
+  contract") is a separate, larger error that is gone. So a PALM **truth**
+  should be one continuous run (`forward.rollout_steps=0` with the whole
+  horizon as `simulation_time`), not warm-started windows.
+- **uDALES parity** (pyudales `closure: vreman`, `sgs_constant 0.24`, both at
+  the default nudging, 300-600 s means; PALM: mean of three realisations).
+  Slab-mean u agrees within 0.1 m/s from 3 to 25 m (PALM − uDALES: −0.08,
+  −0.05, +0.03, +0.02, +0.03, +0.02, +0.09 at 3, 5, 9, 13, 17, 21, 25 m);
+  PALM is 0.16-0.18 m/s faster at 29-31 m (its lid) and −0.10 vs +0.12 m/s at
+  1 m. Resolved TKE agrees at the canopy top (0.74-0.90 vs 0.81 at 13 m,
+  0.88-0.99 vs 1.03 at 17 m); PALM has more at street level (0.32-0.45 vs
+  0.22 at 1 m) and less above the canopy (0.25-0.40 vs 0.60 at 29 m). 180 s
+  sensor means agree within 0.35 m/s; above the canopy that is within the
+  realisation spread, but at the two street-level sensors in the wakes the
+  difference is 3-4 realisation std (e.g. u −0.71 vs −0.36..−0.44 m/s), a
+  real model difference near the walls (wall model, SGS closure).
+  uDALES needs ~120 s from rest; it runs ~1.5x faster on one rank.
 
 ### Switchable inlet turbulence — and what `turbulent_inflow` actually is
 
@@ -740,8 +820,8 @@ for every column, ghosts included, and masks only topography. pypalm now
 writes the same cell-centre profile as LOD=1 `init_atmosphere_u/v/w/pt/qv`
 (`warm_start_utils.build_init_profile_dataset`; LOD=1 still needs the
 `x`/`xu`/`y`/`yv` dims, else DRV0003) and reads it with `read_from_file`.
-`u_profile`/`uv_heights` stay in `_p3d`. Periodic cold starts (nudging
-re-imposes the near-wall flow) and warm starts (LOD=2, already
+`u_profile`/`uv_heights` stay in `_p3d`. Periodic cold starts (cyclic, so the
+zeroed level refills from its neighbours within ~20 s) and warm starts (LOD=2, already
 `read_from_file`) are unchanged. This changes inflow_outflow cold-start runs
 by design.
 
@@ -790,6 +870,21 @@ lateral faces) dramatically improves the posterior.
 
 ### Warm-start grid contract (DRV0005)
 
+**Staggered u/v.** The LOD=2 reader puts file element `i` of `xu` at PALM's
+`u(i+1)`, i.e. at x = (i+1)·dx (it starts at `nxlu = 1`,
+`netcdf_data_input_mod.f90:2132,2339`), and likewise `yv` at `v(j+1)`. The
+driver used to sample element `i` at i·dx, so every warm start shifted `u` one
+cell along x and `v` one cell along y; the pressure solve then removed the
+divergence this created. It now samples at (i+1)·dx. The `u` column at x = 0
+(`v` row at y = 0) is not in the file; PALM copies it from its neighbour
+(`:2344,2393`). This applies to both boundary conditions.
+
+**`w` is not injected.** `read_from_file` zeroes `w` after reading
+(`init_3d_model.f90:593`), so `init_atmosphere_w` is written but has no
+effect (checked: replacing it changes no output bit). The initial pressure
+solve rebuilds `w`; see §8 "Periodic runs" for the cost.
+
+
 The `init_atmosphere_*` fields in the `_dynamic` NetCDF must use **0-based
 PALM-native vertical axes** (`z[k] = (k+0.5)*dz`, `zw[k] = (k+1)*dz`) — not
 the physical-bounds offset that `_load_and_postprocess_state` adds to the
@@ -819,7 +914,9 @@ step silently yields all-zero fields due to a dyld `rrtmg.so` load failure;
 Case inputs live in [geometries/](../geometries/), one folder per case:
 
 - [geometries/xie_and_castro/](../geometries/xie_and_castro/) — the
-  Xie & Castro 2008 benchmark geometry.
+  Xie & Castro 2008 benchmark geometry. `case=xie_and_castro` crops it with an
+  upstream fetch for inflow_outflow runs; `case=xie_and_castro_periodic` is
+  one 80 m × 80 m repeat unit for periodic runs (§8).
 - [geometries/barcelona/](../geometries/barcelona/) — the Barcelona urban
   case. Each contains a `_p3d` namelist template that `ForwardModel.__init__`
   copies into `INPUT/` and edits. The folder also holds the uDALES inputs;
