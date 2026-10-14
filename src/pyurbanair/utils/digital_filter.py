@@ -390,7 +390,7 @@ def validate_time_step_divides_window(runtime_total: float, time_step: float) ->
     loudly instead, which is cheaper than a drifting inlet nobody notices.
 
     Deliberately a *runtime* check rather than part of
-    :func:`validate_inlet_turbulence`: the window length is
+    the backends' ``validate_inlet_turbulence``: the window length is
     ``spinup_time + simulation_time`` for a cold window and ``simulation_time``
     for a warm one, so it is not known until the call. That means a bad
     ``time_step`` surfaces on the first ``run_single`` rather than at

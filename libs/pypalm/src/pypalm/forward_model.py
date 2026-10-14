@@ -12,6 +12,11 @@ import numpy as np
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    read_elapsed_time,
+    reset_elapsed_time,
+    write_elapsed_time,
+)
 from pyurbanair.utils.solver_process import run_solver
 
 from . import (
@@ -33,8 +38,11 @@ from .utils.dynamic_driver_utils import (
 )
 from .utils.inflow_utils import angle_to_velocity
 from .utils.inlet_turbulence_utils import (
+    apply_digital_filter_inflow,
     apply_inlet_turbulence,
     is_inlet_turbulence_enabled,
+    resolve_digital_filter_seed,
+    uses_digital_filter,
     validate_inlet_turbulence,
 )
 from .utils.ncpu_utils import derive_npex_npey, multigrid_levels
@@ -225,12 +233,16 @@ class ForwardModel(BaseForwardModel):
 
         self._nudging_config = nudging_config or DEFAULT_NUDGING_CONFIG
         # Inlet turbulence: absent (None) is a strict no-op, identical to
-        # ``enabled: false``. See utils/inlet_turbulence_utils.py for why this
-        # maps onto PALM's random inflow-disturbance machinery rather than onto
-        # ``turbulent_inflow`` (which is our *time-varying inflow reader*, not a
-        # turbulence generator).
+        # ``enabled: false``. ``method: digital_filter`` imposes synthetic
+        # turbulent inflow planes, ``random_disturbances`` PALM's own inflow
+        # disturbances; see utils/inlet_turbulence_utils.py.
         self._inlet_turbulence = inlet_turbulence
         validate_inlet_turbulence(inlet_turbulence, boundary_condition)
+        # Seconds of digital-filter turbulence history this member has
+        # consumed; picks each window's slice of it. Persisted next to the
+        # experiment (pyurbanair.utils.digital_filter.read_elapsed_time), since
+        # parallel members run in worker processes.
+        self._elapsed_time = 0.0
         # Seed of PALM's random disturbances. None writes nothing (PALM's
         # default ensemble_member_nr = 0); see `_apply_random_seed`.
         self.random_seed = validate_random_seed(random_seed)
@@ -248,6 +260,10 @@ class ForwardModel(BaseForwardModel):
         )
 
         self._stage_input_dir()
+        if uses_digital_filter(inlet_turbulence):
+            # A clock left by an earlier model in this experiment dir would
+            # start this one mid-history.
+            reset_elapsed_time(self.dirs)
 
         self.params = _merge_params(DEFAULT_PARAMS, None)
         # Cell-centre (u, v) inflow profile from the last _apply_inflow_settings;
@@ -577,6 +593,33 @@ class ForwardModel(BaseForwardModel):
 
         if use_nudging:
             angle, speed = self._stage_nudging_driver(profile_config)
+        elif uses_digital_filter(self._inlet_turbulence):
+            # Turbulent inflow planes in <case>_dynamic, read by
+            # turbulent_inflow — for static and time-varying params alike.
+            if self.bounds is None or not self.nz or not self.ny:
+                raise ValueError(
+                    "inlet_turbulence method digital_filter requires bounds, nz "
+                    "and ny to be set on ForwardModel (needed for the inflow planes)."
+                )
+            self._disable_nudging_apparatus()
+            init_params = apply_digital_filter_inflow(
+                params=self.params,
+                config=self._inlet_turbulence or {},
+                p3d_path=self.p3d_path,
+                driver_path=self.dynamic_driver_path,
+                bounds=self.bounds,
+                nz=self.nz,
+                ny=self.ny,
+                profile_config=profile_config,
+                spinup_time=self.spinup_time,
+                simulation_time=float(self.simulation_time or 0.0),
+                window_start_time=self._elapsed_time,
+                seed=resolve_digital_filter_seed(
+                    self._inlet_turbulence, self.experiment_name, self.random_seed
+                ),
+            )
+            angle = float(init_params["inflow_angle"].item())
+            speed = float(init_params["velocity_magnitude"].item())
         elif _is_time_varying_params(self.params):
             if self.bounds is None or not self.nz or not self.ny:
                 raise ValueError(
@@ -1187,6 +1230,10 @@ class ForwardModel(BaseForwardModel):
             # No spinup on warm windows; also stops the time-varying inflow path
             # from prepending a spinup plateau (it reads ``self.spinup_time``).
             self.disable_spinup()
+        digital_filter = uses_digital_filter(self._inlet_turbulence)
+        if digital_filter:
+            self._elapsed_time = read_elapsed_time(self.dirs, self._elapsed_time)
+        window_runtime = self.spinup_time + float(self.simulation_time or 0.0)
 
         if params is not None:
             self._apply_inflow_settings(params)
@@ -1209,7 +1256,11 @@ class ForwardModel(BaseForwardModel):
 
         self._clean_output()
         self.run()
-        return self._load_and_postprocess_state()
+        result = self._load_and_postprocess_state()
+        if digital_filter:
+            self._elapsed_time += window_runtime
+            write_elapsed_time(self.dirs, self._elapsed_time)
+        return result
 
     def _apply_warmstart(self, state: xarray.Dataset) -> None:
         """Inject ``state`` as PALM's 3D initial condition for a warm start."""
@@ -1254,10 +1305,11 @@ class ForwardModel(BaseForwardModel):
            path switch ``turbulent_inflow`` on" coupling — that coupling is the
            dynamic-driver reader, not a turbulence generator, and disabling it
            would sever the ESMDA-estimated inflow signal from the solver.
-        2. ``enabled: true`` → PALM's random inflow disturbances are turned on
-           on top of whatever inflow driver the params selected. The two are
-           orthogonal in PALM, so this composes with both the static and the
-           time-varying inflow paths.
+        2. ``method: random_disturbances`` → PALM's random inflow disturbances
+           are turned on on top of whatever inflow driver the params selected.
+        3. ``method: digital_filter`` → the disturbances stay as in 1; the
+           turbulent inflow planes were already written by
+           ``_apply_inflow_settings``.
         """
         return apply_inlet_turbulence(
             self.p3d_path, self._inlet_turbulence, warm_start=warm_start
