@@ -22,6 +22,12 @@ Outputs, in the run dir:
                         headline statistics on all fluid cells, then the
                         field statistics per height band; 1 marks a difference
                         no larger than the models' realisation noise
+  animation_speed.mp4   instantaneous |U| at the slice heights against time,
+                        laid out as slices_speed.png (replica
+                        `figures.animation.replica` of every model); a .gif
+                        when ffmpeg is unavailable. `figures.animation: null`
+                        skips it
+All figures have a white background, so they read in a dark-mode viewer.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import argparse
 import itertools
 import json
 import pathlib
+import sys
 
 import numpy as np
 import xarray
@@ -45,6 +52,10 @@ from evaluation.style import (
 from matplotlib import pyplot as plt
 from omegaconf import DictConfig, OmegaConf
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
+
+from slice_animation import Panel, animate_slices, frame_indices  # noqa: E402
+
 SOLVER_COLOR = {
     "udales": MODEL_COLORS["udales"],
     "palm": MODEL_COLORS["palm"],
@@ -57,6 +68,7 @@ PROFILE_LABELS = {
     "tke": "TKE [m²/s²]",
     "uw": "u'w' [m²/s²]",
 }
+VELOCITY = ("u", "v", "w")
 SLICES = {"speed": "time-mean |U| [m/s]", "tke": "TKE [m²/s²]"}
 # The bars of difference_noise.png: (metric, quantity) on all fluid cells / sensors.
 HEADLINE = (
@@ -94,6 +106,8 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     if "spectrum" in metrics:
         _plot_spectra(metrics, colors, run_dir / "sensor_spectra.png")
     _plot_ratios(rows, list(models), run_dir / "difference_noise.png")
+    if cfg.figures.get("animation") is not None:
+        _animate_speed(run_dir, metrics, cfg)
     print(f"Saved comparison figures in {run_dir}")
 
 
@@ -193,13 +207,71 @@ def _plot_slices(
                 aspect="equal",
             )
             ax.set_title(f"{title}, z = {float(metrics.z[k]):.3g} m", fontsize=9)
-            if col in (len(labels) - 1, columns - 1):
-                fig.colorbar(image, ax=ax, shrink=0.8)
+            if col == len(labels) - 1:  # one bar per group keeps panels equal
+                fig.colorbar(image, ax=list(axes[row, : len(labels)]), shrink=0.8)
+            elif col == columns - 1:
+                fig.colorbar(image, ax=list(axes[row, len(labels) :]), shrink=0.8)
         axes[row, 0].set_ylabel("y [m]")
     for ax in axes[-1]:
         ax.set_xlabel("x [m]")
     fig.suptitle(label)
     save_png(fig, path, transparent=False)
+
+
+def _animate_speed(
+    run_dir: pathlib.Path, metrics: xarray.Dataset, cfg: DictConfig
+) -> pathlib.Path:
+    """Instantaneous |U| at the slice heights, one column per model then per
+    pair difference, one frame per output time (thinned to `max_frames`).
+    Colour limits are fixed per row over the whole run, so frames compare."""
+    opts = cfg.figures.animation
+    labels = [str(lb) for lb in metrics.label.values]
+    pairs = list(itertools.combinations(labels, 2))
+    levels = _levels(metrics, cfg)
+    speed = {}
+    for label in labels:
+        path = run_dir / "fields" / label / f"replica_{int(opts.replica)}.nc"
+        with xarray.open_dataset(path) as ds:
+            planes = ds[["u", "v", "w"]].isel(z=levels).load()
+            time = ds.time.values
+        speed[label] = np.sqrt(sum(planes[c].values ** 2 for c in VELOCITY))
+    n_time = min(len(s) for s in speed.values())
+    frames = frame_indices(n_time, int(opts.max_frames))
+    rows = []
+    for row, k in enumerate(levels):
+        at = f"z = {float(metrics.z[k]):.3g} m"
+        plane = {lb: speed[lb][frames, row] for lb in labels}
+        vmax = float(np.nanpercentile(np.concatenate(list(plane.values())), 99.5))
+        diffs = {(a, b): plane[a] - plane[b] for a, b in pairs}
+        spread = max(
+            (float(np.nanpercentile(np.abs(d), 99.5)) for d in diffs.values()),
+            default=1.0,
+        )
+        rows.append(
+            [
+                Panel(f"{lb}, {at}", plane[lb], CMAP_FIELD, 0.0, vmax, "value")
+                for lb in labels
+            ]
+            + [
+                Panel(f"{a} - {b}, {at}", d, CMAP_DIFF, -spread, spread, "diff")
+                for (a, b), d in diffs.items()
+            ]
+        )
+    movie: pathlib.Path = animate_slices(
+        rows,
+        time[frames],
+        run_dir / "animation_speed.mp4",
+        title="instantaneous |U| [m/s]",
+        fps=int(opts.fps),
+        dpi=int(opts.dpi),
+        extent=[
+            float(metrics.x[0]),
+            float(metrics.x[-1]),
+            float(metrics.y[0]),
+            float(metrics.y[-1]),
+        ],
+    )
+    return movie
 
 
 def _plot_sensor_series(

@@ -27,13 +27,13 @@ forward_model:
   # set (the chosen one .true., the others .false.), so the closure comes from
   # this config rather than from whatever the case's namoptions template ships.
   #   vreman      -> lvreman=.true.;      constant c_vreman (Fortran default 0.07)
-  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> ~0.17)
+  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> 0.217)
   #   oneeqn      -> REJECTED: the one-equation closure needs a nonzero prof.inp
   #                  'tke' column, which the wrapper's preprocessing writes as 0,
   #                  and its constants (cm/ce1/ce2) are not in the namelist.
   # The `sgs_constant` parameter follows the closure automatically: it is written
   # to cs under smagorinsky and to c_vreman under vreman. The two are NOT on the
-  # same scale (~0.17 vs 0.07) — retune the priors in configs/params/ when switching.
+  # same scale (c_vreman ~ 2.5 cs^2: 0.217 <-> 0.12) — retune the priors in configs/params/ when switching.
   # Set to null to leave the case template's switches untouched.
   closure: vreman
   # Per-backend SGS constant, written to whichever key `closure` selects
@@ -44,10 +44,14 @@ forward_model:
   # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
   # each config carries its own value: uDALES/pylbm take a dimensionless
   # Smagorinsky-family constant, PALM takes an eddy diffusivity in m^2/s.
-  # 0.24 is the verified-stable c_vreman for this domain (0.07 and 0.15 diverge;
-  # see the closure-fix commit) -- it sits near the stability floor, not at a
-  # physical central estimate.
-  sgs_constant: 0.24
+  # 0.12 is Vreman's c = 2.5 Cs^2 for Cs = 0.22, the Smagorinsky constant uDALES
+  # derives from its own Deardorff constants (cs = -1 -> (cm^3/ceps)^0.25).
+  # The literature 0.07 (Cs 0.17, a sharp spectral filter) is too little for
+  # CD2 advection, which dissipates nothing itself: energy then piles up at
+  # the grid scale. The 0.24 used before 2026-10 (Cs 0.31) only masked an
+  # outflow instability, now removed by the 20 m `flow.outflow_buffer` of
+  # xie_and_castro (docs/pyudales.md §7).
+  sgs_constant: 0.12
   # Opt-in native Vreman correction. Calibrate all feature settings explicitly.
   # Coefficients are static Dataset fields sgs_bias_b0/b1/b2 (default zero).
   model_discrepancy:
@@ -91,7 +95,7 @@ forward_model:
   # resamples it from a successful donor instead of waiting for the slow crash.
   instability_check:
     enabled: true
-    min_dt: 1.0e-4      # absolute timestep floor (s)
+    min_dt: 1.0e-3      # absolute timestep floor (s); a collapsed run sits near 1.6e-4
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0

@@ -24,9 +24,10 @@ forward_model:
   boundary_condition: ${flow.boundary_condition}
   # inflow_outflow only: PALM's outflow damping layer relaxes u/v/w toward the
   # initial profile over the last `width` m before the radiation outflow, at up
-  # to `factor` 1/s. Without it the reversed flow behind the last obstacle meets
-  # the outflow and the non-dissipative pw-scheme diverges within ~10 s
-  # (xie_and_castro); factor 0.1 is not enough. Cyclic runs never get these keys
+  # to `factor` 1/s, keeping the reversed flow behind the last obstacle out of
+  # the outflow. With the non-dissipative pw-scheme (xie_and_castro until
+  # 2026-10) it was needed for stability; the ws-scheme is stable without it,
+  # but it still damps the outflow column. Cyclic runs never get these keys
   # (PALM rejects them, PAC0352). null -> write nothing. See docs/pypalm.md §8.
   outflow_damping:
     factor: 1.0            # 1/s; outflow_damping_factor
@@ -44,8 +45,8 @@ forward_model:
   # DIFFUSIVITY in m^2/s, not a dimensionless constant like uDALES/pylbm take.
   # Setting it is a regime switch: it replaces PALM's prognostic SGS-TKE closure
   # with constant-Km and forces constant_flux_layer=.false. (PAC0149), disabling
-  # the wall model. The dimensionless ~0.24 used by the other backends is far too
-  # little dissipation as m^2/s and diverges. null keeps PALM's own closure.
+  # the wall model. The dimensionless 0.07-0.15 used by the other backends is far
+  # too little dissipation as m^2/s and diverges. null keeps PALM's own closure.
   # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
   sgs_constant: null
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert

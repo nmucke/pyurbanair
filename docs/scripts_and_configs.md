@@ -286,7 +286,7 @@ docstring lists every metric and figure.
 |---|---|---|
 | `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps` | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
 | `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
-| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy and divergence against lead time, profiles, spectra, velocity PDFs, \|U\| and statistics slices; `summary.csv` / `summary.tex` |
+| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy, divergence and TKE against lead time, profiles, spectra, velocity PDFs, \|U\|, TKE and statistics slices; `summary.csv` / `summary.tex` |
 
 The metrics, all in m/s on fluid cells:
 - **accuracy against lead time:** RMSE (total and per component), RMSE at
@@ -294,7 +294,10 @@ The metrics, all in m/s on fluid cells:
   correlation (ACC) with its horizon (first lead below `metrics.acc_threshold`);
 - **physical consistency:** each component's spatial std relative to the truth
   (smoothing), the RMS divergence (with the truth's own as the reference: the
-  cell-centred stencil is not the solver's), and whether the rollout stays finite;
+  cell-centred stencil is not the solver's), the fluid-mean resolved TKE against
+  lead time (total and per component, each source about its own time mean over
+  the rollout: smoothing loses it, divergence grows it), and whether the rollout
+  stays finite;
 - **statistics over the rollout:** RMSE of the time-mean u and resolved-TKE
   fields, profiles of mean u, TKE and -<u'w'>, spanwise-spectrum band energy in
   dB (the bands of `scripts/compute_metrics.py`), and the Wasserstein distance
@@ -302,7 +305,8 @@ The metrics, all in m/s on fluid cells:
 - **cost:** inference seconds per step and parameter count.
 
 **Caveats.** The ACC's reference mean is the truth's mean over the rollout
-window, so it depends on the window's length. `truth_halves` (first half of the
+window, so it depends on the window's length; so do the TKE curve and slices
+(each source's own mean over its window). `truth_halves` (first half of the
 truth's window against its second half) is a rough noise floor for the
 statistics, meaningful only for long rollouts.
 

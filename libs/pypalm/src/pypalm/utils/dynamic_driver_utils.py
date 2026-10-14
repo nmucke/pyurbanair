@@ -368,9 +368,7 @@ def enable_turbulent_inflow(p3d_path: pathlib.Path) -> None:
     if nx is not None and npex is not None:
         max_block = 2 * ((int(nx) + 1) // int(npex))
         if max_block < 30:
-            p3d.set_value(
-                "turbulent_inflow_parameters", "input_block_size", max_block
-            )
+            p3d.set_value("turbulent_inflow_parameters", "input_block_size", max_block)
     p3d.write()
 
 

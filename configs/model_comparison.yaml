@@ -52,3 +52,10 @@ metrics:
 
 figures:
   slice_heights: [0.1, 0.5, 1.3]  # x H: street level, mid-canopy, above the canopy
+  # animation_speed.mp4 (.gif without ffmpeg): instantaneous |U| at the slice
+  # heights; null skips it.
+  animation:
+    replica: 0          # which replica of every model is animated
+    max_frames: 150     # output times are thinned evenly to at most this many
+    fps: 10
+    dpi: 100

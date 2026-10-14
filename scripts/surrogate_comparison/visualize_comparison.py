@@ -4,7 +4,7 @@
 
 The overrides are applied to the run's config.yaml (e.g. `figures.level=4`).
 The run dir is what run_models.py wrote and compute_metrics.py scored. Every
-figure reads metrics.nc / metrics.yaml only, except the two slice figures,
+figure reads metrics.nc / metrics.yaml only, except the three slice figures,
 which read the rollouts and the truth from the corpus. Each model keeps one
 colour in every figure; persistence is dashed grey, the truth solid black.
 Curves that leave the axis (an unstable model) are clipped and marked
@@ -15,13 +15,24 @@ Outputs, in the run dir:
   acc.png                anomaly correlation vs lead time, `metrics.acc_threshold` line
   energy.png             spatial std of u, v, w relative to the truth vs lead time
   divergence.png         RMS of the velocity divergence vs lead time, truth as reference
+  tke.png                fluid-mean resolved TKE vs lead time, each source about its
+                         own time mean: total, then 0.5 u'^2, 0.5 v'^2, 0.5 w'^2
   profiles.png           time-mean u, resolved TKE and -<u'w'> vs height
   spectra.png            spanwise spectra of u' and w' at `figures.spectra_levels`
   pdfs.png               velocity PDFs per component, log density
   slices.png             |U| at z index `figures.level` at `figures.lead_steps`:
                          truth, then one row per model (trajectory `figures.sample`)
+  tke_slices.png         as slices.png, the instantaneous resolved TKE: 0.5 sum_c of
+                         the squared fluctuation about each source's own time mean
+                         over the first n frames (n: the shortest rollout); one
+                         scale, up to the truth's 99th percentile, so a diverging
+                         model saturates
   statistics_slices.png  time-mean u and resolved TKE at `figures.level`: truth,
                          then one row per model (trajectory `figures.sample`)
+  animation_speed.mp4    |U| at `figures.level` against lead time: truth, each
+                         model, then each model - truth (trajectory
+                         `figures.sample`); a .gif when ffmpeg is unavailable.
+                         `figures.animation: null` skips it
   summary.csv/.tex       headline scalars per model and persistence (mean over the samples)
 """
 
@@ -43,6 +54,7 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import load_states, open_dataset, plot_slice_rows, speed  # noqa: E402
+from slice_animation import Panel, animate_slices, frame_indices  # noqa: E402
 
 # One colour per model, in models.yaml order; the reference sources are fixed.
 PALETTE = [
@@ -70,6 +82,16 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     )
     assert isinstance(cfg, DictConfig)
     apply_style()
+    # Opaque white, as evaluation.figures._styled: apply_style's transparent
+    # background is unreadable on a dark-mode viewer.
+    plt.rcParams.update(
+        {
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
+            "savefig.facecolor": "white",
+            "savefig.transparent": False,
+        }
+    )
     models = dict(yaml.safe_load((run_dir / "models.yaml").read_text()))
     styles = {
         name: {"color": PALETTE[i % len(PALETTE)], "ls": "-"}
@@ -114,6 +136,14 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
         ["divergence RMS (fluid interior)"],
         "RMS of ∇·u [1/s]",
         run_dir / "divergence.png",
+    )
+    _lead_figure(
+        metrics,
+        styles,
+        ["tke", *(f"tke_{v}" for v in VARS)],
+        ["resolved TKE", *(f"½ {v}'²" for v in VARS)],
+        "fluid mean [m²/s²]",
+        run_dir / "tke.png",
     )
     _plot_profiles(metrics, styles, run_dir / "profiles.png")
     _plot_spectra(metrics, styles, run_dir / "spectra.png")
@@ -289,7 +319,8 @@ def _plot_pdfs(metrics: xarray.Dataset, styles: dict, path: pathlib.Path) -> Non
 
 
 def _plot_slices(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> None:
-    """slices.png and statistics_slices.png of trajectory `figures.sample`."""
+    """slices.png, tke_slices.png and statistics_slices.png of trajectory
+    `figures.sample`."""
     first = next(iter(models))
     samples = list(cfg.sample_indices)  # set by run_models.py
     index = int(cfg.figures.sample)
@@ -348,6 +379,24 @@ def _plot_slices(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> None:
         plot_slice_rows(rows, titles, fluid, run_dir / "slices.png")
         print(f"  + {run_dir / 'slices.png'}")
 
+        # Instantaneous TKE about each source's own time mean. Heavy-tailed: every
+        # row is clipped to the truth's 99th percentile, so hot spots saturate.
+        tke = {"truth": _tke_slices(truth, level, steps)} | {
+            name: _tke_slices(pred[:n], level, steps) for name, pred in preds.items()
+        }
+        bound = float(np.nanpercentile([f[fluid] for f in tke["truth"]], 99))
+        rows = [
+            (name, [np.clip(f, 0, bound) for f in fields], False)
+            for name, fields in tke.items()
+        ]
+        plot_slice_rows(
+            rows, titles, fluid, run_dir / "tke_slices.png", label="TKE [m²/s²]"
+        )
+        print(f"  + {run_dir / 'tke_slices.png'}")
+
+    if cfg.figures.get("animation") is not None:
+        _animate_speed(cfg, run_dir, truth, preds, n, level, fluid, times)
+
     # Time-mean u and resolved TKE over the rollout window, one scale per column.
     stats = {"truth": _statistics(truth, level)} | {
         name: _statistics(pred[:n], level) for name, pred in preds.items()
@@ -383,6 +432,63 @@ def _plot_slices(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> None:
         fig.colorbar(image, ax=axes[:, c].tolist(), shrink=0.6, extend="both")
     fig.suptitle(f"rollout statistics at z index {level} (sample {sample})")
     save_png(fig, run_dir / "statistics_slices.png", dpi=150, transparent=False)
+
+
+def _tke_slices(fields: np.ndarray, level: int, steps: list[int]) -> list[np.ndarray]:
+    """Resolved TKE at `level` at the lead `steps` (1-based), about the time mean
+    of the finite frames of `fields`."""
+    layer = fields[:, :, level]
+    finite = np.isfinite(layer).all(axis=(1, 2, 3))
+    with np.errstate(all="ignore"):
+        mean = layer[finite].mean(axis=0)
+        return [0.5 * ((layer[s - 1] - mean) ** 2).sum(axis=0) for s in steps]
+
+
+def _animate_speed(
+    cfg: DictConfig,
+    run_dir: pathlib.Path,
+    truth: np.ndarray,
+    preds: dict[str, np.ndarray],
+    n: int,
+    level: int,
+    fluid: np.ndarray,
+    times: np.ndarray,
+) -> pathlib.Path:
+    """animation_speed.mp4: |U| at `level` per lead step (thinned to
+    `max_frames`): truth, each model clipped as in slices.png, then each
+    model - truth. Colour limits are fixed over the whole rollout."""
+    opts = cfg.figures.animation
+    frames = frame_indices(n, int(opts.max_frames))
+
+    def layer(states: np.ndarray) -> np.ndarray:
+        values = np.sqrt((states[frames, :, level] ** 2).sum(axis=1))
+        return np.where(fluid, values, np.nan)
+
+    reference = layer(truth[:n])
+    bound = 1.5 * float(np.nanmax(reference))
+    models = {name: np.clip(layer(pred[:n]), 0, bound) for name, pred in preds.items()}
+    vmax = float(np.nanpercentile(reference, 99.5))
+    errors = {name: field - reference for name, field in models.items()}
+    spread = max(
+        (float(np.nanpercentile(np.abs(e), 99.5)) for e in errors.values()),
+        default=1.0,
+    )
+    row = [Panel("truth", reference, "viridis", 0.0, vmax, "value")]
+    row += [Panel(name, f, "viridis", 0.0, vmax, "value") for name, f in models.items()]
+    row += [
+        Panel(f"{name} - truth", e, "RdBu_r", -spread, spread, "error")
+        for name, e in errors.items()
+    ]
+    path: pathlib.Path = animate_slices(
+        [row],
+        times[1:][frames] - times[0],
+        run_dir / "animation_speed.mp4",
+        title=f"|U| [m/s] at z index {level}, lead",
+        fps=int(opts.fps),
+        dpi=int(opts.dpi),
+        labels=("x index", "y index"),
+    )
+    return path
 
 
 def _statistics(fields: np.ndarray, level: int) -> tuple[np.ndarray, np.ndarray]:

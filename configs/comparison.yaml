@@ -32,3 +32,9 @@ figures:
   level: 2                    # z index of the horizontal slices
   lead_steps: [1, 10, 50, -1] # columns of slices.png (-1: last)
   spectra_levels: [2, 8]      # z indices of the spectra
+  # animation_speed.mp4 (.gif without ffmpeg): |U| at `level` over the rollout
+  # of `sample`; null skips it.
+  animation:
+    max_frames: 150           # lead steps are thinned evenly to at most this many
+    fps: 10
+    dpi: 100

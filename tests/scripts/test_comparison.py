@@ -238,10 +238,14 @@ def test_compute_metrics_schema(comparison_run: pathlib.Path) -> None:
 
     assert list(ds.source.values) == [*sources, "truth"]
     assert ds.sizes["lead"] == 8 and ds.lead_time.dims == ("lead",)
-    for var in ("rmse", "rmse_u", "acc", "std_ratio_w", "divergence_rms"):
+    for var in ("rmse", "rmse_u", "acc", "std_ratio_w", "divergence_rms", "tke"):
         assert ds[var].dims == ("source", "lead")
     assert np.isnan(ds.rmse.sel(source="truth")).all()
-    assert np.isfinite(ds.divergence_rms.sel(source="truth")).all()
+    for var in ("divergence_rms", "tke", "tke_w"):
+        assert np.isfinite(ds[var].sel(source="truth")).all()
+    assert (ds.tke.sel(source="truth") > 0).all()
+    assert (ds.tke.sel(source="persistence") == 0).all()
+    np.testing.assert_allclose(ds.tke, ds.tke_u + ds.tke_v + ds.tke_w, rtol=1e-6)
     assert ds.profile_tke.dims == ("source", "z")
     assert ds.pdf.dims == ("source", "var", "bin")
     assert list(ds["var"].values) == ["u", "v", "w"]
@@ -276,6 +280,7 @@ def test_compute_metrics_exact_cases(
     np.testing.assert_allclose(
         nc.divergence_rms.sel(source="dft"), nc.divergence_rms.sel(source="truth")
     )
+    np.testing.assert_allclose(nc.tke.sel(source="dft"), nc.tke.sel(source="truth"))
     np.testing.assert_allclose(
         nc.profile_uw.sel(source="dft"), nc.profile_uw.sel(source="truth")
     )
@@ -284,6 +289,7 @@ def test_compute_metrics_exact_cases(
     assert fno["stable"]["mean"] is False
     assert np.isnan(fno["final_rmse"]["mean"]) and np.isnan(fno["tke_rmse"]["mean"])
     assert np.isfinite(nc.rmse.sel(source="local_fno")[:-1]).all()
+    assert np.isfinite(nc.tke.sel(source="local_fno")[:-1]).all()  # finite frames' mean
     assert np.isnan(nc.profile_tke.sel(source="local_fno")).all()
 
 
@@ -298,7 +304,7 @@ def test_compute_metrics_and_visualize_write_every_output(
         comparison_run, overrides
     )
     figures = ["rmse", "acc", "energy", "divergence", "profiles", "spectra", "pdfs"]
-    for name in [*figures, "slices", "statistics_slices"]:
+    for name in [*figures, "tke", "slices", "tke_slices", "statistics_slices"]:
         assert (comparison_run / f"{name}.png").stat().st_size > 0, name
     summary = (comparison_run / "summary.csv").read_text().splitlines()
     assert summary[0].startswith("source,rmse,rmse_vs_persistence")
