@@ -29,6 +29,11 @@ forward_model:
   outflow_damping:
     factor: 1.0            # 1/s; outflow_damping_factor
     width: 4.0             # m from the outflow edge; outflow_damping_width
+  # inflow_outflow only: extend PALM's grid downstream by this many metres of
+  # flat ground (whole cells; ncpu must divide the extended nx), so the outflow
+  # and its damping layer sit in an empty buffer, not in the wake of the last
+  # building. The output is cropped back to domain.bounds. null -> no buffer.
+  outflow_buffer: null
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
   # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #

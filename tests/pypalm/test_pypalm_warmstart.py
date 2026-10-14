@@ -153,35 +153,30 @@ def test_drops_time_and_ensemble_dims(tmp_path):
     assert ds["init_atmosphere_u"].shape == (NZ, NY, NX - 1)
 
 
-def test_staggered_u_v_land_on_their_palm_index(tmp_path):
-    """File element i of xu/yv is PALM's u(i+1)/v(j+1), at (i+1)*dx.
+def test_staggered_fields_land_on_their_palm_index(tmp_path):
+    """File element n of u/v is read into u(i=n+1)/v(j=n+1), so sample there.
 
-    PALM's LOD=2 reader starts u at nxlu = 1 and v at nysv = 1
-    (netcdf_data_input_mod.f90:2132-2133), so sampling element i at i*dx would
-    shift the injected u one cell along x and v one cell along y. The state
-    is shaped like PALM's own output: u on all NX faces xmin + i*dx.
+    PALM reads init_atmosphere_u from nxlu=1 and init_atmosphere_v from nysv=1
+    (netcdf_data_input_mod.f90:2339,2388). A state linear in x (u) and y (v),
+    laid out like PALM's output (xu/yv from the domain edge, one per point),
+    must come back as the values at xmin+(n+1)*dx and ymin+(n+1)*dy, not
+    shifted one cell.
     """
     (xmin, _), (ymin, _), (zmin, _) = BOUNDS
-    x = (np.arange(NX) + 0.5) * DX + xmin
-    xu = np.arange(NX) * DX + xmin
-    y = (np.arange(NY) + 0.5) * DY + ymin
+    xu = np.arange(NX) * DX + xmin  # PALM output: u at i*dx, i=0..nx
     yv = np.arange(NY) * DY + ymin
-    z = (np.arange(NZ) + 0.5) * DZ + zmin
-    u = np.broadcast_to(xu, (1, NZ, NY, NX)).astype(np.float32)
-    v = np.broadcast_to(yv[:, None], (1, NZ, NY, NX)).astype(np.float32)
-    state = xarray.Dataset(
-        data_vars={
-            "u": (("time", "z", "y", "xu"), u),
-            "v": (("time", "z", "yv", "x"), v),
-            "w": (("time", "z", "y", "x"), np.zeros((1, NZ, NY, NX), np.float32)),
-        },
-        coords={"time": [0], "z": z, "y": y, "yv": yv, "x": x, "xu": xu},
+    state = _make_state().drop_vars(["u", "v", "xu", "yv"])
+    state["u"] = (("time", "z", "y", "xu"), np.broadcast_to(xu, (1, NZ, NY, NX)))
+    state["v"] = (
+        ("time", "z", "yv", "x"),
+        np.broadcast_to(yv[:, None], (1, NZ, NY, NX)),
     )
+    state = state.assign_coords(xu=xu, yv=yv)
     driver = tmp_path / "urban_run_dynamic"
     write_warmstart_driver(driver, state, BOUNDS, NX, NY, NZ, pt_surface=300.0)
     ds = xarray.open_dataset(driver)
 
     expected_u = xmin + np.arange(1, NX) * DX
     expected_v = ymin + np.arange(1, NY) * DY
-    assert np.allclose(ds["init_atmosphere_u"].values[0, 0], expected_u)
+    assert np.allclose(ds["init_atmosphere_u"].values[0, 0, :], expected_u)
     assert np.allclose(ds["init_atmosphere_v"].values[0, :, 0], expected_v)

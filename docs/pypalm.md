@@ -110,7 +110,10 @@ The single-run entry point called by `BaseForwardModel.__call__`.
   The initial velocity-perturbation kick is suppressed (`create_disturbances =
   .false.`) to avoid shocking the injected field — mirroring what PALM's own
   restart path does. **No SGS-TKE is carried** across windows; PALM re-derives
-  it from the mean field.
+  it from the mean field. **Nor is `w`**: the `read_from_file` init sets
+  `w = 0` after reading (`init_3d_model.f90:593`) and the initial pressure
+  solve then projects (u, v), so each window boundary carries a small jump
+  (§8 "Warm starts under inflow_outflow").
 - Calls `_apply_inflow_settings(params)`, then `_clean_output()`, then `run()`,
   then `_load_and_postprocess_state()`.
 - `disable_spinup()` zeroes `spinup_time` and rewrites `end_time`; called
@@ -126,23 +129,24 @@ then by whether the params carry a `time` dim:
 | `boundary_condition` | params | driver |
 |---|---|---|
 | `periodic` | static **or** time-varying | **nudging** — `_nudge` (NUDGING_DATA) + inert `_lsf` (LSF_DATA), see §8 |
-| `inflow_outflow` | static | static path |
-| `inflow_outflow` | time-varying | dynamic driver / `turbulent_inflow` |
+| `inflow_outflow` | static **or** time-varying | dynamic driver / `turbulent_inflow` (static params as a constant schedule) |
+| `periodic` + `nudging_config.enabled: false` | static | static path |
 
 - **Nudging path** (periodic, default): calls `apply_nudging_driver` from
   [`utils/nudging_utils.py`](../libs/pypalm/src/pypalm/utils/nudging_utils.py),
   turns on the four `&initialization_parameters` switches PALM's nudging
   requires, and clears the inflow_outflow apparatus. `nudging_config.enabled:
   false` restores the old un-driven periodic staging.
-- **Static path**: calls `disable_turbulent_inflow` (idempotent — prevents a
-  stale `&turbulent_inflow_parameters` block from leaking across runs) and
-  removes any leftover `_dynamic` file.
-- **Time-varying path**: calls `apply_time_varying_inflow` from
+- **Static path** (un-nudged periodic only): calls `disable_turbulent_inflow`
+  (idempotent — prevents a stale `&turbulent_inflow_parameters` block from
+  leaking across runs) and removes any leftover `_dynamic` file.
+- **Dynamic-driver path** (every `inflow_outflow` run): static params become a
+  two-knot constant schedule (`as_inflow_schedule`); then `apply_time_varying_inflow` from
   [`utils/dynamic_driver_utils.py`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py),
   which writes `inflow_plane_u/v/w/e/pt(time_inflow, z, y)` into the
   `_dynamic` NetCDF and flips `&turbulent_inflow_parameters
   switch_off_module=.false.` in `_p3d`.
-- The two `inflow_outflow` paths also run symmetric hygiene — remove stale
+- The `inflow_outflow` path also runs symmetric hygiene — remove stale
   `_nudge`/`_lsf` files and force the nudging switches off *if the template
   has them* — so a prior periodic run in the same experiment dir cannot leak
   the LSF apparatus into an inflow run. On a clean template the switches are
@@ -221,8 +225,9 @@ arrays (`z=0` no-slip anchor prepended) shaped by
 [`utils/vertical_profile.build_profile_shape`](../libs/pypalm/src/pypalm/utils/vertical_profile.py)
 (`uniform` or `power_law`).
 
-For **time-varying inflow** (`inflow_angle`/`velocity_magnitude` have a `time`
-dim), `apply_time_varying_inflow` builds a `_dynamic` NetCDF with
+For **every inflow_outflow run** (time-varying `inflow_angle`/
+`velocity_magnitude`, or static ones as a constant `[0, simulation_time]`
+schedule), `apply_time_varying_inflow` builds a `_dynamic` NetCDF with
 `inflow_plane_u/v/w/e/pt(time_inflow, z, y)`. The profile shape is evaluated
 once and broadcast across time; the spinup plateau is prepended by
 `_prepend_spinup_plateau` (t=0 values held constant for `[0, spinup_time]`).
@@ -387,6 +392,14 @@ Key field notes:
   `outflow_damping: null` writes nothing. Staging raises on `factor < 0`,
   `width <= 0` or a width longer than the domain, and warns on a width under
   two cells. See §8 "inflow_outflow diverges at the outflow without damping".
+- `outflow_buffer: null` — `inflow_outflow` only: metres of flat ground PALM
+  adds downstream of `domain.bounds` (rounded up to whole cells; `ncpu` must
+  divide the extended `nx`). The topography beyond `xmax` is zeroed, the
+  damping layer then sits inside the buffer, and the returned state is cropped
+  back to `domain.bounds`; a warm start fills the buffer by repeating the
+  state's last column. `null` changes nothing. Staging raises on `<= 0` or
+  under `periodic`, and warns when the damping width exceeds the buffer. See
+  §8.
 - `nudging_config:` — `enabled` (default `true`; `false` restores un-driven
   periodic staging), `tnudge` (relaxation timescale, s), `nnudge_meters` (no
   nudging below this height), `profile_config` (vertical shear shape). Only
@@ -717,7 +730,7 @@ in `&runtime_parameters` (`parin.f90:348-369`). All of them default sensibly:
 (`:2690-2738`) — so only `dt_disturb` is really required.
 
 **Rejected combination — `turbulent_inflow` is not a turbulence switch.** On the
-`inflow_outflow` + time-varying-params path pypalm already sets
+`inflow_outflow` path (static params included) pypalm already sets
 `turbulent_inflow_method = 'read_from_file'`. In that mode the module is the
 *reader* for the `_dynamic` NetCDF carrying `inflow_plane_u/v`
 (`turbulent_inflow_mod.f90:456-459`), i.e. it is the only thing connecting the
@@ -797,6 +810,52 @@ Evidence (2026-10 diagnosis): factor 1.0, width 4 m is stable for 600 s on
 disturbances on and off. The flow stays unsteady: temporal std of u ~0.22 m/s,
 the same as the undamped run before it blows up. Factor 0.1 still diverges.
 
+**The damping layer distorts the flow of interest on the case domain.** It
+relaxes u, v, w toward `u_init`, i.e. the inflow profile, in the last two
+columns (x = 36-40 m), which is the near wake of the second cube column
+(x = 25-35 m). `outflow_buffer` moves the outflow and the layer into empty
+ground behind `domain.bounds` (the case array is cropped at x = 40, inside
+the gap before the next column at x = 45, so the geometry inside the bounds is
+unchanged). Laminar runs (10°, 5 m/s, power law 0.25 with `z_ref` = the
+32 m domain top, no inlet disturbances,
+30 s spin-up, 540 s, `ncpu=1`), 540-s mean at the case sensors, buffered
+40 m with the default damping inside the buffer as reference:
+
+| sensor (x, y, z) | buffer 40 m u, v | case domain Δu, Δv | buffer 80 m Δu, Δv | buffer 40 m, no damping Δu, Δv |
+|---|---|---|---|---|
+| (10, 20, 2) | 3.45, 0.37 | +0.32, +0.02 | -0.03, -0.04 | -0.02, -0.02 |
+| (10, 60, 2) | 3.17, 0.57 | +0.43, +0.13 | +0.07, -0.00 | -0.01, -0.05 |
+| (20, 10, 2) | 0.17, 1.55 | -0.17, -0.01 | -0.03, -0.00 | -0.04, +0.03 |
+| (20, 50, 2) | -0.83, -0.53 | -0.06, -0.89 | -0.02, -0.21 | -0.02, -0.20 |
+| (30, 30, 2) | 2.66, 0.38 | **+1.21**, -0.20 | -0.05, +0.01 | -0.04, -0.09 |
+| (30, 70, 2) | 3.26, -0.25 | **+1.27**, +0.05 | -0.01, -0.01 | +0.02, +0.01 |
+| (2, 30, 2) | -0.14, 0.22 | +0.05, +0.01 | -0.02, -0.06 | -0.04, -0.01 |
+| (20, 55, 2) | -0.06, -1.93 | -0.19, -0.23 | +0.02, -0.09 | +0.02, -0.14 |
+| (17, 30, 2) | -0.48, 1.03 | +0.17, -1.29 | +0.01, -0.06 | +0.02, -0.10 |
+| (10, 30, 20) | 5.46, 0.82 | -0.05, +0.02 | -0.01, -0.01 | -0.01, -0.00 |
+
+Realisation noise, as the rms change of 180-s window means within one run, is
+0.17-0.20 m/s. Buffers of 40 and 80 m agree within it (rms of window-mean
+differences 0.11 / 0.20 m/s for u / v), and so does dropping the damping
+inside a 40 m buffer, but then the outflow column still sees u down to
+-3.3 m/s (1.06 m/s with damping), so keep the damping. The case domain is far
+outside the noise at both x = 30 sensors (+1.2 m/s) and biased at x = 10
+(+0.3-0.4 m/s): it is not a trustworthy truth. The time-mean wake at
+x = 30-38, z = 1 m is 0.8 m/s with the buffer and 1.3-1.9 m/s on the case
+domain. A 20 m longer upstream fetch (`xmin = -40`) slows the approach flow
+at z = 1 m by 0.2-0.4 m/s at x = -20..-4 (the power-law profile is not in
+equilibrium with the z0 = 0.05 m wall and keeps decelerating near the
+ground), and shifts the sensors by an rms 0.31 m/s, about its own window
+noise (0.32). The upstream sensor (2, 30) moves most (u -0.14 -> +0.54);
+fetch matters when that sensor is used.
+
+Recommended laminar truth for cross-model work on xie_and_castro:
+`outflow_buffer: 40` with the default damping (factor 1.0, width 4 m, now
+inside the buffer), `ncpu` dividing the extended nx (50 at 2 m), 30 s spin-up,
+and the inflow profile's `z_ref` pinned explicitly (these numbers use the
+32 m domain top).
+Not the default: `outflow_buffer: null` keeps existing runs unchanged.
+
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
 across runs) is very likely the same outflow instability; not yet confirmed by
 a rerun with damping.
@@ -838,14 +897,64 @@ ratio uDALES/PALM of the y-mean time-mean |U|:
 | −19 m | 1.01 | 1.02 | 1.01 | 0.97 | 0.98 | 1.01 |
 | −5 m | 1.10 | 0.98 | 0.97 | 0.96 | 0.98 | 1.03 |
 
-**Open: inflow_outflow warm starts have the same failure, at every height.**
-The LOD=2 reader fills `u` from `nxlu` (= 1) and copies it to `nxlu-1`
-(`netcdf_data_input_mod.f90:2339-2351`), which is `nxl`, so the ghost column
-`nxl-1` keeps the `u = 0` it was reset to. `dynamics_mod.f90:1287-1288` then
-copies that zero onto the inflow face. In a 2-window xie_and_castro run
-(`forward.rollout_steps=1`) the inflow-face u is 0 at all heights for the whole
-warm window and the domain-mean u falls from 4.0 to 0.36 m/s. Before the LOD=1
-fix the same warm window diverged after ~21 s. Not fixed yet.
+**Laminar inflow check** (2026-10, empty flat domain and the case domain,
+inlet disturbances off, `initial_seed: false`): the inflow-face u equals the
+prescribed cell-centre profile at every level z = 1-31 m, every y and every
+output frame, to < 1e-6 m/s, through spin-up and for 180-540 s; v at the
+first interior column is within 0.02 m/s of it. The `_p3d` carries
+`create_disturbances = .false.`, so neither the kick nor the in-run
+disturbances fire, and the empty domain stays steady (temporal std of u
+< 0.004 m/s). With `initial_seed: true` the t=0 kick perturbs u by up to
+0.34 m/s, mostly gone after 20 s; the face is restored after the first step.
+In the empty domain the near-wall flow still decelerates downstream (z = 1 m:
+2.07 m/s at the inflow, 1.70 m/s at x = 30): the power-law profile is not in
+equilibrium with the rough wall. Static and time-varying params impose the
+same face values; since static params now use the inflow planes too, the
+paths are identical (before, the static path kept PALM's Neumann SGS-TKE at
+the inflow instead of `inflow_plane_e = 0`, which moved u at z = 1 m by up to
+0.06 m/s).
+
+### Warm starts under inflow_outflow
+
+Three bugs made warm starts unusable as truth; all fixed 2026-10:
+
+- **Inflow face zeroed.** The LOD=2 reader fills `u` from `nxlu` (= 1) and
+  copies it to `nxlu-1` = `nxl` (`netcdf_data_input_mod.f90:2339-2351`), so the
+  ghost column `nxl-1` keeps the `u = 0` it was reset to, and
+  `dynamics_mod.f90:1287-1288` copies that onto the inflow face every step
+  (domain-mean u fell from 4.0 to 0.35 m/s in the warm window). No driver
+  field reaches the ghost column, so every inflow_outflow run now imposes the
+  face through the `turbulent_inflow` inflow planes, static params as a
+  constant schedule (`turbulent_inflow_rff_bc` sets `u(nxl)` and `u(nxl-1)`
+  every step).
+- **One-cell shift.** The staggered fields were sampled one cell off (see
+  "Warm-start grid contract"): each window boundary moved u one cell
+  downstream and v one cell in y.
+- **Initial kick re-enabled.** With `inlet_turbulence.enabled: false` and
+  `initial_seed: true`, the knob rewrote `create_disturbances = .true.` after
+  the warm start had turned it off.
+
+Verification (laminar, 3 x 180 s windows vs one 540 s run, same config; `ncpu=1`
+runs are bit-reproducible, so window 0 is identical): the inflow face stays
+on the profile in every warm window. At the 10 sensors, warm-vs-continuous
+window means differ by a mean |Δ| of 0.11 m/s on the case domain and 0.09 m/s
+with `outflow_buffer: 40`, against 0.06 / 0.14 m/s between consecutive
+windows of the continuous run (max 0.67 vs 0.83 m/s, at the wake sensor
+(17, 30)). Plane-mean u profiles below z = 31 m agree within 0.012 m/s and there is
+no drift across windows. What remains:
+
+- The window boundary is a jump: the first warm frame differs from the last
+  frame by 0.16 m/s (mean |Δu|, z <= 15 m), three times a normal 1 s change
+  (0.29 before the shift fix), because PALM resets `w = 0` and re-projects.
+- The top ghost level (z = 33 m, above the lid) reads 5.6 instead of 4.9 m/s
+  in warm windows, which raises the domain mean u (including that level) by
+  0.02-0.04 m/s; interior levels are unaffected.
+- In warm windows `u_init`, the damping target and the top boundary value,
+  is the horizontal mean of the injected field (`init_3d_model.f90:493-509`),
+  not the inflow profile. With the damping in an empty buffer this did not
+  show at the sensors.
+- The last output frame is often a padded copy (PALM writes 179 of 180), so
+  a window starts from the state 1 s before its predecessor ended.
 
 ### Member divergence in ensembles (~15%)
 
@@ -891,6 +1000,13 @@ the physical-bounds offset that `_load_and_postprocess_state` adds to the
 returned state. `write_warmstart_driver` handles this by sampling the
 (offset) state at the matching physical heights but labelling the file axis
 0-based. Violating this causes PALM's DRV0005 check to abort.
+
+The horizontal axes are only length-checked, but the staggered fields are read
+from index 1: file element `n` of `init_atmosphere_u` lands in `u(i=n+1)`
+(start `nxlu`) and of `init_atmosphere_v` in `v(j=n+1)` (start `nysv`,
+`netcdf_data_input_mod.f90:2339,2388`), so the writer samples u at
+`xmin + (n+1)*dx` and v at `ymin + (n+1)*dy`. PALM copies `u(1)` into `u(0)`
+and `v(1)` into `v(0)`. `init_atmosphere_w` is read but discarded (`w = 0`).
 
 ### `PYPALM_FAST_IO_CATALOG` for cluster runs
 
@@ -940,6 +1056,7 @@ bundle (`configs/case/{xie_and_castro,barcelona}.yaml`) sets
 | Namelist key editing | [`utils/p3d_utils.P3DFile`](../libs/pypalm/src/pypalm/utils/p3d_utils.py) |
 | Time-varying inflow driver | [`utils/dynamic_driver_utils.apply_time_varying_inflow`](../libs/pypalm/src/pypalm/utils/dynamic_driver_utils.py) |
 | Inlet turbulence on/off | `inlet_turbulence` in `pypalm.yaml`; [`utils/inlet_turbulence_utils.py`](../libs/pypalm/src/pypalm/utils/inlet_turbulence_utils.py) |
+| Outflow damping / empty outflow buffer | `outflow_damping`, `outflow_buffer` in `pypalm.yaml` (§7, §8) |
 | Seed of the random disturbances | `random_seed` in `pypalm.yaml` (→ `ensemble_member_nr`, §7) |
 | Warm-start (state injection) | [`utils/warm_start_utils.write_warmstart_driver`](../libs/pypalm/src/pypalm/utils/warm_start_utils.py) |
 | Vertical stagger unification | `_load_and_postprocess_state` in [`forward_model.py`](../libs/pypalm/src/pypalm/forward_model.py) |

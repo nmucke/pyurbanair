@@ -198,7 +198,9 @@ def test_inflow_outflow_static_no_nudging_apparatus(tmp_path: pathlib.Path) -> N
     # Clean template never had the nudging switches -> staging leaves them absent
     # (byte-identical to today apart from the _nudge/_lsf cleanup).
     assert _nudging_switches_absent_or_off(fm)
-    assert not fm.dynamic_driver_path.exists()
+    # Static params ride the inflow-plane driver as a constant schedule.
+    assert fm.dynamic_driver_path.exists()
+    assert _turbulent_inflow_active(fm)
 
 
 def test_inflow_outflow_time_varying_uses_dynamic_driver(

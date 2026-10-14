@@ -43,6 +43,32 @@ def is_time_varying_params(params: Optional[xarray.Dataset]) -> bool:
     return False
 
 
+def as_inflow_schedule(
+    params: xarray.Dataset, simulation_time: Optional[float]
+) -> xarray.Dataset:
+    """Return ``params`` as an inflow schedule; static params as a constant one.
+
+    Static ``inflow_outflow`` params go through the same inflow-plane driver
+    as time-varying ones. Two knots, ``[0, simulation_time]``, cover the window
+    as PALM requires (TUI0016). Time-varying params are returned unchanged.
+    """
+    if is_time_varying_params(params):
+        return params
+    if simulation_time is None:
+        raise ValueError(
+            "Static inflow_outflow params need simulation_time to build the "
+            "constant inflow-plane schedule."
+        )
+    time = np.array([0.0, float(simulation_time)])
+    return xarray.Dataset(
+        {
+            name: ("time", np.full(2, float(params[name].item())))
+            for name in ("inflow_angle", "velocity_magnitude")
+        },
+        coords={"time": time},
+    )
+
+
 def _extract_schedule(
     params: xarray.Dataset,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -231,9 +257,7 @@ def write_dynamic_driver_file(
     fill = np.float32(9.9692099683868690e36)
     encoding = {name: {"_FillValue": fill} for name in list(ds.variables)}
     ds.to_netcdf(path, engine="netcdf4", encoding=encoding)
-    logger.info(
-        "Wrote dynamic driver with %d time points to %s", n_time, path
-    )
+    logger.info("Wrote dynamic driver with %d time points to %s", n_time, path)
 
 
 def remove_dynamic_driver_file(path: pathlib.Path) -> None:
