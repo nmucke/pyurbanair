@@ -54,10 +54,15 @@ def _models(cfg: DictConfig) -> list[str]:
         if model is None:
             continue
         fm = model.forward_model
-        if model.name == "pyudales" and fm.get("nx", 1) % fm.get("ncpu", 1):
+        nx = _solver_nx(fm)
+        slabs = model.name == "pyudales" or (
+            model.name == "pypalm" and fm.get("boundary_condition") == "inflow_outflow"
+        )
+        if slabs and nx % fm.get("ncpu", 1):
             problems.append(
-                f"{role}: forward_model.ncpu={fm.ncpu} must divide nx={fm.nx} "
-                "(uDALES splits x across its MPI ranks)."
+                f"{role}: forward_model.ncpu={fm.ncpu} must divide nx={nx} "
+                f"({model.name} splits x across its MPI ranks; nx includes any "
+                "outflow_buffer)."
             )
         if (
             model.name == "pypalm"
@@ -79,6 +84,20 @@ def _models(cfg: DictConfig) -> list[str]:
         except ValueError as error:
             problems.append(f"{role}: {error}")
     return problems
+
+
+def _solver_nx(fm: DictConfig) -> int:
+    """Grid points along x the solver runs on: ``nx`` plus any outflow buffer.
+
+    Both LES backends round the buffer up to whole cells.
+    """
+    nx = int(fm.get("nx") or 1)
+    buffer = fm.get("outflow_buffer")
+    bounds = fm.get("bounds")
+    if buffer and bounds is not None:
+        dx = (bounds[0][1] - bounds[0][0]) / nx
+        nx += math.ceil(float(buffer) / dx - 1e-9)
+    return nx
 
 
 def _assimilation(cfg: DictConfig) -> list[str]:
