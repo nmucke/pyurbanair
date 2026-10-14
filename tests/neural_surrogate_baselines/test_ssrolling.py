@@ -312,7 +312,7 @@ class _Linear(torch.nn.Module):
 
 
 def _trainer(
-    corpus: Path, model: torch.nn.Module, k: int, alpha: float = 1.0
+    corpus: Path, model: torch.nn.Module, k: int, alpha: float = 1.0, **kwargs: Any
 ) -> RolloutTrainer:
     loader = DataLoader(
         _dataset(corpus, k), batch_size=2, collate_fn=transition_collate
@@ -325,6 +325,7 @@ def _trainer(
         torch.nn.MSELoss(),
         num_epochs=1,
         alpha=alpha,
+        **kwargs,
     )
 
 
@@ -381,3 +382,10 @@ def test_rollout_trainer_fits_the_aurora_stepper(corpus: Path) -> None:
     history = trainer.fit()
     assert np.isfinite(history["train"]).all() and np.isfinite(history["val"]).all()
     assert set(trainer._train_terms) == {"mse", "spec"}
+
+
+def test_epoch_caps(corpus: Path) -> None:
+    trainer = _trainer(corpus, _Linear(), k=1, epoch_batches=3, val_batches=2)
+    assert len(trainer.train_loader) == 3 and len(trainer.val_loader) == 2
+    assert len(list(trainer.train_loader)) == 3
+    assert len(list(trainer.val_loader)) == 2

@@ -9,7 +9,8 @@
 #   MSE only:       trainer.alpha=0 name=ssrolling_roll1_mse
 # `architecture` is an interpolation, so change its keys at the source,
 # baseline_architectures.<name>.<key>=..., e.g. SSGen's `n_levels`, which must
-# equal the corpus' nz: baseline_architectures.ssrolling_512.n_levels=16
+# equal the corpus' nz (16 by default; pyudales_xie_and_castro has 24):
+# baseline_architectures.ssrolling_512.n_levels=24
 defaults:
   - /surrogate/training
   - /surrogate/baselines/architectures@baseline_architectures
@@ -29,6 +30,11 @@ trainer:
   pushforward_epochs_per_step: null
   # Weight of the spectral loss.
   alpha: 1.0
+  # Batches per training / validation epoch; null: the whole split. A full
+  # pyudales_idealized epoch is ~25k batches, so cap it to validate (and count
+  # patience) more often than every few hours.
+  epoch_batches: null
+  val_batches: null
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-5

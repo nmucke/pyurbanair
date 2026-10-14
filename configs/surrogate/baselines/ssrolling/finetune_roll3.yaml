@@ -16,12 +16,21 @@ method: full
 recompute_normalization: false
 trainer:
   _target_: neural_surrogate_baselines.RolloutTrainer
+  # On a 24 GB GPU the 512 model's three unrolled steps fit only with the Swin
+  # blocks recomputed in backward (largest pyudales_idealized grid: 14 GiB
+  # instead of out of memory, ~40% slower):
+  #   'trainer.activation_checkpoint_modules=[aurora.backbone.*.blocks.*]'
   num_epochs: 200
   patience: 50
   lr_warmup_epochs: null
   grad_clip_norm: null
   pushforward_epochs_per_step: null
   alpha: 1.0
+  # Batches per training / validation epoch; null: the whole split. A full
+  # pyudales_idealized epoch is ~25k batches, so cap it to validate (and count
+  # patience) more often than every few hours.
+  epoch_batches: null
+  val_batches: null
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-5

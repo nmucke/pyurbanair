@@ -18,6 +18,7 @@ from tests.conftest import CONFIGS, REPO, TEST_CONFIGS, compose, load_script
 ENTRY_POINTS = [
     "forward",
     "assimilation",
+    "comparison",
     *(f"surrogate/{p.stem}" for p in sorted((CONFIGS / "surrogate").glob("*.yaml"))),
 ]
 ENTRY_POINTS.remove("surrogate/architectures")  # entries, not a run config

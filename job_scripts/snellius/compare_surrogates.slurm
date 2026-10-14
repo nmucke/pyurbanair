@@ -1,6 +1,6 @@
 #!/bin/bash
-#   sbatch job_scripts/snellius/surrogate_baselines_compare.slurm 'models=[...]'
-#SBATCH --job-name=surrogate_baselines_compare
+#   sbatch job_scripts/snellius/compare_surrogates.slurm 'models=[...]'
+#SBATCH --job-name=compare_surrogates
 #SBATCH --partition=rome
 #SBATCH --account=tdsei19851
 #SBATCH --ntasks=1
@@ -10,4 +10,4 @@
 #SBATCH --output=job_scripts/snellius/out_files/%x-%j.out
 
 source job_scripts/snellius/env.sh
-run python -u scripts/surrogate/baselines/compare.py "$@"
+run bash workflows/compare_surrogates.sh "$@"

@@ -32,6 +32,7 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Generate surrogate training data | `python scripts/surrogate/generate_data.py` (§2.3) |
 | Train / fine-tune a surrogate | `python scripts/surrogate/train.py --config-name surrogate/<config>` |
 | Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` |
+| Compare several trained surrogates | `bash workflows/compare_surrogates.sh 'models=[dirA,dirB]'` (§2.4) |
 | Run the scripts with tiny test configs | `--config-dir tests/configs +test=forward` (see [`tests/README.md`](../tests/README.md)) |
 
 ---
@@ -61,6 +62,9 @@ configs/
   `assimilation_settings/`, plus the DA blocks. Each DA script reads the blocks
   it needs and appends its workflow name (`smoother`, `filtering`, `hybrid`) to
   `paths.results_dir`.
+- **`comparison.yaml`** — `common`, plus the models to compare, the split,
+  and the `metrics` and `figures` blocks of `scripts/comparison/`.
+  `paths.results_dir` is the run dir.
 - **`common.yaml`** — `paths` (per-machine scratch), the one `ensemble` budget
   and Hydra's run dir.
 
@@ -241,7 +245,7 @@ state (`window_{w}_filter_obs.nc`, and `window_{w}_filter_params.nc` in
 
 | Script | Input | Writes |
 |---|---|---|
-| `compute_metrics.py <run dir> [key=value ...]` | a DA run dir (+ config overrides) | `metrics.yaml`: the scores are the statistics (field statistics and canopy profiles, per-window sensor statistics, sensor value distributions, spanwise spectra), each per source (posterior, prior, forecast, `replica` with `assimilation.replica_dir`); plus parameter RMSE/CRPS (+ prior and reduction, per window), parameter correlations, SGS health (with model discrepancy), the instantaneous sensor RMSE, energy score and spread–skill (sanity checks), climatology baseline, observation-space fit and Desroziers per stage; `diagnostics.nc`: the arrays the figures read |
+| `compute_metrics.py <run dir> [key=value ...]` | a DA run dir (+ config overrides) | `metrics.yaml`: the scores are the statistics (field statistics and canopy profiles, per-window sensor statistics, sensor value distributions, spanwise spectra), each per source (posterior, prior, forecast, `replica` with `assimilation.replica_dir`); plus parameter RMSE/CRPS (+ prior and reduction, per window), parameter correlations, SGS health (with model discrepancy), the instantaneous sensor RMSE, energy score, ACC and spread–skill (sanity checks), climatology baseline, observation-space fit and Desroziers per stage; `diagnostics.nc`: the arrays the figures read |
 | `visualize_assimilation.py <run dir>` | a DA run dir (run `compute_metrics.py` first for the figures from `diagnostics.nc` and `metrics.yaml`) | `figures/`: parameter evolution, parameter pairs, canopy profiles, sensor distributions, spectra, animation, final state, mean/TKE slices, station profiles, sensor time series, TKE evolution, rank histogram |
 | `visualize_forward.py <run dir>` | a forward run dir | `figures/`: field snapshot, animation, parameters (with inlet-recovered angle/speed) |
 
@@ -258,8 +262,39 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
 
 `scripts/utils/eval_common.py` holds the loading and slice-figure helpers shared by the
-evaluation scripts. See [neural_surrogates.md](neural_surrogates.md) for the
+evaluation scripts and `scripts/comparison/`. See [neural_surrogates.md](neural_surrogates.md) for the
 library side.
+
+### 2.3b Surrogate comparison (`scripts/comparison/`)
+
+Compares several trained steppers (ours and the published baselines) on the
+same trajectories, the same start frame and fluid cells only, against
+persistence. Run them through `workflows/compare_surrogates.sh`. Each module
+docstring lists every metric and figure.
+
+| Script | Input | Output |
+|---|---|---|
+| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps` | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
+| `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
+| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy and divergence against lead time, profiles, spectra, velocity PDFs, \|U\| and statistics slices; `summary.csv` / `summary.tex` |
+
+The metrics, all in m/s on fluid cells:
+- **accuracy against lead time:** RMSE (total and per component), RMSE at
+  `metrics.report_leads` and relative to persistence, and the anomaly
+  correlation (ACC) with its horizon (first lead below `metrics.acc_threshold`);
+- **physical consistency:** each component's spatial std relative to the truth
+  (smoothing), the RMS divergence (with the truth's own as the reference: the
+  cell-centred stencil is not the solver's), and whether the rollout stays finite;
+- **statistics over the rollout:** RMSE of the time-mean u and resolved-TKE
+  fields, profiles of mean u, TKE and -<u'w'>, spanwise-spectrum band energy in
+  dB (the bands of `scripts/compute_metrics.py`), and the Wasserstein distance
+  of the velocity distributions;
+- **cost:** inference seconds per step and parameter count.
+
+**Caveats.** The ACC's reference mean is the truth's mean over the rollout
+window, so it depends on the window's length. `truth_halves` (first half of the
+truth's window against its second half) is a rough noise floor for the
+statistics, meaningful only for long rollouts.
 
 ### 2.4 Workflows
 
@@ -271,10 +306,12 @@ wrote.
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
+| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
 
 ```bash
 bash workflows/forward_workflow.sh model=pylbm params=static_truth
 bash workflows/assimilation_workflow.sh filtering 'filtering.analysis=${analysis.letkf}'
+bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno,model_weights/dft_s]' max_steps=50
 ```
 
 Each resolves the run dir first from the same overrides
