@@ -206,8 +206,9 @@ def apply_inlet_turbulence(
         #     previous `initial_seed: false` run in the same experiment dir
         #     cannot leak its .false. into this one.
         # dt_disturb is left at PALM's huge default by _restore_defaults, so the
-        # in-run loop never fires either way.
-        if not seed:
+        # in-run loop never fires either way. A warm start never gets the kick:
+        # _apply_warmstart wrote .false., which this must not undo.
+        if not seed or warm_start:
             p3d.set_value(_RUNTIME, "create_disturbances", False)
         elif "create_disturbances" in p3d.sections.get(_RUNTIME, {}):
             p3d.set_value(_RUNTIME, "create_disturbances", True)
@@ -215,7 +216,7 @@ def apply_inlet_turbulence(
         logger.info(
             "PALM inlet turbulence OFF (initial_seed=%s -> create_disturbances=%s)",
             seed,
-            ".true." if seed else ".false.",
+            ".true." if seed and not warm_start else ".false.",
         )
         return False
 
