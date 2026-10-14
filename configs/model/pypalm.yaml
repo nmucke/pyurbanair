@@ -19,7 +19,9 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: periodic # inflow_outflow #
+  # Shared with pyudales (configs/common.yaml `flow`), like the outflow buffer,
+  # profile, nudging and digital-filter values below.
+  boundary_condition: ${flow.boundary_condition}
   # inflow_outflow only: PALM's outflow damping layer relaxes u/v/w toward the
   # initial profile over the last `width` m before the radiation outflow, at up
   # to `factor` 1/s. Without it the reversed flow behind the last obstacle meets
@@ -33,7 +35,7 @@ forward_model:
   # flat ground (whole cells; ncpu must divide the extended nx), so the outflow
   # and its damping layer sit in an empty buffer, not in the wake of the last
   # building. The output is cropped back to domain.bounds. null -> no buffer.
-  outflow_buffer: null
+  outflow_buffer: ${flow.outflow_buffer}
   # Per-backend SGS knob. This is the DEFAULT: a `sgs_constant` in the params
   # sampler (configs/params/*.yaml) overrides it, so ESMDA can still estimate it.
   #
@@ -52,19 +54,18 @@ forward_model:
   # docs/pypalm.md §"Nudging driver for periodic runs".
   nudging_config:
     enabled: true          # false -> today's un-driven periodic staging
-    tnudge: 15.0           # s; relaxation timescale, matches pyudales
+    tnudge: ${flow.nudging.tnudge}  # s; relaxation timescale
     # No nudging below this height (via huge tnudge). Same value as pyudales:
     # above the canopy, so the canopy is driven by the shear layer, not held to
     # the target by the nudging. 4 m nudged the canopy too, which made the
     # canopy-level wind ~3x uDALES's (docs/pypalm.md §8).
-    nnudge_meters: 16.0
+    nnudge_meters: ${flow.nudging.nnudge_meters}
+    # Inflow / nudging profile. z_ref is the height at which velocity_magnitude
+    # is the speed (unset it would default to the domain top).
     profile_config:
-      type: power_law
-      alpha: 0.25
-      # Height at which velocity_magnitude is the speed; same as pyudales, so
-      # the parameter means the same wind in both backends (unset it would
-      # default to the domain top).
-      z_ref: 64.0
+      type: ${flow.profile.type}
+      alpha: ${flow.profile.alpha}
+      z_ref: ${flow.profile.z_ref}
   # Switchable inlet turbulence (inflow_outflow only; staging raises under
   # periodic). Two methods, see docs/pypalm.md §8:
   #   digital_filter       turbulent inflow planes (mean profile + Xie & Castro
@@ -82,20 +83,20 @@ forward_model:
   # `enabled: false` never switches PALM's turbulent_inflow module off: with
   # time-varying params it is the reader of the mean inflow planes.
   inlet_turbulence:
-    enabled: false
+    enabled: ${flow.inlet_turbulence.enabled}
     method: digital_filter
     # One-off random kick on u/v at cold-start init (init_3d_model.f90:1488),
     # independent of `enabled`/`method`. With false and `random_disturbances`,
     # create_disturbances stays on and disturbance_energy_limit=0.0 suppresses
     # only the kick. A warm start always suppresses it.
     initial_seed: false
-    # --- digital_filter: same keys and values as pyudales.yaml's block -------
-    intensity: 0.15        # u'_rms / |U_mean(z)|, constant in z; v', w' get 0.7x
-    length_scale_y: 12.0   # m, spanwise integral length scale
-    length_scale_z: 12.0   # m, vertical
-    length_scale_x: 24.0   # m, streamwise -> AR(1) time scale via Taylor
-    time_step: 0.5         # s between inflow planes; must divide the window
-    seed: null             # null -> derived from the member name (+ random_seed)
+    # --- digital_filter: shared with pyudales.yaml's block ---------------------
+    intensity: ${flow.inlet_turbulence.intensity}  # u'_rms / |U_mean(z)|; v', w' 0.7x
+    length_scale_y: ${flow.inlet_turbulence.length_scale_y}  # m, spanwise
+    length_scale_z: ${flow.inlet_turbulence.length_scale_z}  # m, vertical
+    length_scale_x: ${flow.inlet_turbulence.length_scale_x}  # m, streamwise (Taylor)
+    time_step: ${flow.inlet_turbulence.time_step}  # s between planes; divides the window
+    seed: ${flow.inlet_turbulence.seed}  # null -> from the member name (+ random_seed)
     # --- random_disturbances --------------------------------------------------
     dt_disturb: 5.0        # s; interval between perturbation injections
     amplitude: 0.25        # m/s; PALM's disturbance_amplitude

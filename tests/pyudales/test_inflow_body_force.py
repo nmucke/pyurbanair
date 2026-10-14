@@ -151,3 +151,19 @@ class TestInteriorNudgingSwitch:
         assert nf.get_value("PHYSICS", "ltimedepnudge") == ".true."
         assert nf.get_value_as_int("PHYSICS", "ntimedepnudge") == 2
         assert (tmp_path / "timedepnudge.inp.999").exists()
+
+    def test_periodic_always_nudges_the_interior(self, tmp_path: pathlib.Path) -> None:
+        # Under periodic BCs the interior nudging is the only momentum source,
+        # so the shared `interior_nudging: false` default must not switch it off.
+        dirs = _make_experiment(tmp_path)
+        apply_time_varying_inflow(
+            _scalar_params(),
+            dirs,
+            boundary_condition="periodic",
+            tnudge=10.0,
+            nnudge=0,
+            interior_nudging=False,
+        )
+
+        nf = NamoptionsFile(tmp_path / "namoptions.999")
+        assert nf.get_value("PHYSICS", "lnudge") == ".true."

@@ -386,9 +386,12 @@ Key field notes:
 - `ncpu: 14` — default for the Barcelona grid (`nx=225`; valid divisors include
   1, 3, 5, 9, 15, 25, 45, 75, 225; 14 is not listed as Barcelona's 225 is not
   divisible by 14, so check per-case).
-- `boundary_condition: inflow_outflow` — triggers the multigrid solver +
-  npex/npey slab decomposition. `periodic` instead selects the nudging driver
-  (§8).
+- `boundary_condition: ${flow.boundary_condition}` — `inflow_outflow` (the
+  `configs/common.yaml` default; until 2026-10 pypalm defaulted to `periodic`)
+  triggers the multigrid solver + npex/npey slab decomposition. `periodic`
+  (set by `case=xie_and_castro_periodic`) selects the nudging driver (§8).
+  Every `${flow.*}` value is shared with pyudales; see §8 "Cross-model parity
+  with pyudales".
 - `outflow_damping:` — `factor` (default `1.0`, 1/s) and `width` (default
   `4.0`, metres from the outflow edge), written as `&initialization_parameters
   outflow_damping_factor` / `outflow_damping_width` on `inflow_outflow` runs
@@ -396,9 +399,10 @@ Key field notes:
   `outflow_damping: null` writes nothing. Staging raises on `factor < 0`,
   `width <= 0` or a width longer than the domain, and warns on a width under
   two cells. See §8 "inflow_outflow diverges at the outflow without damping".
-- `outflow_buffer: null` — `inflow_outflow` only: metres of flat ground PALM
-  adds downstream of `domain.bounds` (rounded up to whole cells; `ncpu` must
-  divide the extended `nx`). The topography beyond `xmax` is zeroed, the
+- `outflow_buffer: ${flow.outflow_buffer}` — `inflow_outflow` only: metres of
+  flat ground PALM adds downstream of `domain.bounds` (rounded up to whole
+  cells; `ncpu` must divide the extended `nx`). `xie_and_castro` sets 20 m,
+  and pyudales adds the same buffer. The topography beyond `xmax` is zeroed, the
   damping layer then sits inside the buffer, and the returned state is cropped
   back to `domain.bounds`; a warm start fills the buffer by repeating the
   state's last column. `null` changes nothing. Staging raises on `<= 0` or
@@ -406,14 +410,17 @@ Key field notes:
   §8.
 - `nudging_config:` — `enabled` (default `true`; `false` restores un-driven
   periodic staging), `tnudge` (relaxation timescale, s), `nnudge_meters` (no
-  nudging below this height), `profile_config` (vertical shear shape). Only
+  nudging below this height), `profile_config` (vertical shear shape); all but
+  `enabled` from `flow.nudging` / `flow.profile`. Only
   `profile_config` applies under `inflow_outflow`; the rest drive the periodic
   nudging path. See §8.
-- `inlet_turbulence:` — `enabled` (default `false`), `method`
+- `inlet_turbulence:` — `enabled` (`flow.inlet_turbulence.enabled`, default
+  `true` since 2026-10; the periodic case sets `false`), `method`
   (`digital_filter`, the default, or `random_disturbances`), `initial_seed`.
-  `digital_filter` takes pyudales' keys and values: `intensity` (0.15),
-  `length_scale_x/y/z` (24/12/12 m), `time_step` (0.5 s, must divide the
-  window), `seed` (`null` → derived from the member name and `random_seed`).
+  `digital_filter` takes pyudales' keys and values, both read from
+  `flow.inlet_turbulence`: `intensity` (0.15), `length_scale_x/y/z`
+  (24/12/12 m), `time_step` (0.5 s, must divide the window), `seed` (`null` →
+  derived from the member name and `random_seed`).
   `random_disturbances` takes `dt_disturb` (5.0 s), `amplitude` (0.25 m/s), and
   the optional `begin`/`end` (grid points) and `level_b`/`level_t` (m) bounds
   of the perturbed region (`null` → PALM's own auto-derivation). Requires
@@ -631,11 +638,11 @@ configs) and the same parameter interpretation: `inflow_angle`/
 `velocity_magnitude` are "the mean wind the domain is held to". Both accept
 time-varying params under periodic BCs; both interpolate the u/v components,
 not angle and speed, linearly between knots. Remaining differences: PALM's lid
-is a Dirichlet wall at the nudging target (`bc_uv_t = 'dirichlet'`), uDALES's
-is free-slip (`BCtopm = 1`); switching PALM to `'neumann'` changed the
-300-600 s mean u by ≤ 0.07 m/s at every level, so it is left at PALM's
-default. A pyudales cold start begins from rest, a pypalm one from the target
-profile.
+was a Dirichlet wall at the nudging target (`bc_uv_t = 'dirichlet'`),
+uDALES's is free-slip (`BCtopm = 1`); switching PALM to `'neumann'` changed the
+300-600 s mean u by ≤ 0.07 m/s at every level. Since 2026-10 the xie_and_castro
+`_p3d` sets `bc_uv_t = 'neumann'` (§ "Cross-model parity with pyudales"). A
+pyudales cold start begins from rest, a pypalm one from the target profile.
 
 ### Periodic runs: domain, spin-up and verification
 
@@ -655,8 +662,8 @@ periodic case for cyclic runs.
 - **Spin-up.** A cold start begins at the target profile everywhere, so the
   canopy decelerates: the canopy slab-mean u reaches its stationary value
   (1.3-1.4 m/s) within ~40 s, the canopy kinetic energy within ~120 s.
-  `xie_and_castro_periodic` therefore sets `spinup_time: 150` (the default
-  case's 30 s is for inflow_outflow). The first-level zeroing of
+  `xie_and_castro_periodic` sets `spinup_time: 180`, which pyudales needs
+  from rest (§ "Cross-model parity with pyudales"). The first-level zeroing of
   `set_constant_profiles` (below) also hits periodic cold starts, but under
   cyclic BCs it is gone in ~20 s.
 - **Turbulence.** The cube array trips the flow without any disturbance:
@@ -690,6 +697,94 @@ periodic case for cyclic runs.
   difference is 3-4 realisation std (e.g. u −0.71 vs −0.36..−0.44 m/s), a
   real model difference near the walls (wall model, SGS closure).
   uDALES needs ~120 s from rest; it runs ~1.5x faster on one rank.
+
+### Cross-model parity with pyudales
+
+Since 2026-10 a uDALES and a PALM run of the same case are configured to
+simulate the same flow wherever the two solvers allow it. The shared values
+live once, in `flow` (`configs/common.yaml`; the cases override it), and both
+`configs/model/pyudales.yaml` and `pypalm.yaml` interpolate them. Three
+setups, all on xie_and_castro with `params=static_truth` (10°, 5 m/s,
+α 0.25):
+
+```bash
+# 1. inflow_outflow, laminar inflow
+python scripts/run_forward.py model=pyudales params=static_truth flow.inlet_turbulence.enabled=false
+# 2. inflow_outflow, turbulent inflow (the default); the same seed shares the realisation
+python scripts/run_forward.py model=pypalm params=static_truth flow.inlet_turbulence.seed=7
+# 3. periodic, nudged
+python scripts/run_forward.py model=pypalm params=static_truth case=xie_and_castro_periodic
+```
+
+(the same overrides with the other `model=`; `model.forward_model.ncpu=5` for
+both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
+
+| item | uDALES | PALM | status |
+|---|---|---|---|
+| boundary condition | `flow.boundary_condition` | same | aligned (pypalm defaulted to periodic before) |
+| mean inflow | power law α 0.25, z_ref 64 m, at cell centres; u on the inflow face, v so its face mean is the profile | same profile through the `turbulent_inflow` planes; LOD=1 cold start | aligned: face time-mean u identical to < 0.001 m/s |
+| inlet turbulence | shared digital filter, driver planes | same planes, `turbulent_inflow` reader | aligned; face u correlation 0.99 for the same seed, see below for what happens behind the face |
+| seeds | `seed`, else hash of the member name | `seed`, else hash of the member name and `random_seed` | members `000`, `001`, … match; single runs differ (`999` vs `urban_run`), so set `flow.inlet_turbulence.seed` |
+| interior forcing, inflow_outflow | none (`interior_nudging: false` since 2026-10) | none | aligned |
+| periodic forcing | slab-mean nudging, tnudge 15 s, none below 16 m | same (huge tnudge below 16 m) | aligned |
+| pressure gradient, Coriolis | dpdx = dpdy = 0, `lcoriol` off | `omega = 0` | aligned |
+| top | free-slip u, v; w open (`BCtopm = 3`, forced by uDALES under inflow-outflow; 1 periodic) | free-slip u, v (`bc_uv_t = 'neumann'` since 2026-10); w = 0 | u, v aligned; w cannot be (PALM has no open lid outside nesting) |
+| lateral | cyclic y | cyclic y | aligned |
+| outflow | convective, 20 m flat buffer (since 2026-10) | radiation + damping (1/s, 4 m), 20 m buffer | different schemes, both outside the bounds |
+| upstream ground | wall (STL ground extended over the fetch since 2026-10; before it was free-slip) | wall | aligned |
+| walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0; first point 1 m (dz/2) in both |
+| SGS | Vreman, c = 0.24 | Deardorff 1.5-order TKE | cannot be aligned, see below |
+| advection, time | CD2, RK3, CFL 0.7, dt_max 1 s | pw-scheme (2nd order), RK3, CFL 0.7, dt_max 1 s | aligned up to the scheme |
+| pressure solver | FFT (cosine in x under inflow-outflow) | multigrid (inflow_outflow), FFT (periodic) | both converged; not a parity issue |
+| initial state | rest (+0.01 m/s noise) | the profile (no kick, `initial_seed: false`) | different, covered by the spin-up |
+| output | instantaneous u, v, w (+p) every `output_frequency`, labelled dt, 2dt, … | instantaneous u, v, w, same labels (uDALES used actual dump times before 2026-10) | aligned; uDALES u, v on faces (`xm`, `ym`), w on `zm`; PALM `xu`, `yv`, w interpolated to `z`, plus a ghost level at 33 m |
+| solids | 0 | NaN, filled with 0 | aligned; voxelisation identical (0 of 2000 columns differ at 2 m on x = [-20, 80]) |
+
+**Evidence** (`ncpu` 5 / 3, 420 s from a cold start, statistics over
+120-420 s, i.e. the case's 120 s spin-up and 300 s window):
+
+- *Inflow face*: identical time-mean u at every level in all setups; with
+  turbulent inflow and the same seed the face TKE agrees to 2 %.
+- *Upstream ground*: extending uDALES's ground over x < 0 lowered its
+  time-mean u at z = 1 m by 0.10 m/s at x = -10 and 0.18 m/s at x = 0, from
+  0.07 m/s above PALM to 0.03-0.05 m/s below it at x = -10.
+- *Interior nudging off* (laminar): above-canopy array-mean u at 21 m went from
+  0.22 to 0.03 m/s below PALM (25-31 m: from +0.08..+0.12 to -0.13..-0.07);
+  the domain rms of the time-mean u difference is unchanged (0.54 m/s), being
+  dominated by the canopy (below).
+- *Free-slip lid in PALM*: time-mean u changes ≤ 0.03 m/s (laminar).
+- *Outflow buffer*: see § "inflow_outflow diverges at the outflow"; domain rms
+  difference 0.547 → 0.496 m/s (laminar).
+- *What remains* (turbulent, seeds 7 and 8): domain rms of the time-mean u
+  difference 0.44-0.45 m/s against 0.09 (uDALES) and 0.11 m/s (PALM) between
+  seeds. It sits in the canopy: the array-mean u at z = 1 m is 0.82 (uDALES)
+  vs 0.37 m/s (PALM), and the resolved TKE in the array is 0.02-0.04 vs
+  0.25 m²/s² near the ground. The injected turbulence decays faster in uDALES
+  right behind the face (TKE at 9 m, x = -19: 0.17 vs 0.28 m²/s²; x = -1:
+  0.12 vs 0.25). Above the canopy the array-mean u agrees within 0.23 m/s.
+  With laminar inflow uDALES reaches a steady state (TKE < 0.001 m²/s²
+  everywhere) while PALM's wakes shed (array TKE 0.16 m²/s² at 1 m).
+  Periodic: slab-mean u within 0.17 m/s below 13 m and 0.08 m/s above; TKE
+  agrees near the ground and PALM has 20-60 % less above 13 m.
+
+**SGS closure.** uDALES runs Vreman with c = 0.24, the lowest value that
+stays stable on this grid (0.07 and 0.15 collapse dt, 0.10 collapsed dt to
+1.7e-4 s at t ≈ 130 s with turbulent inflow); a typical Vreman constant is
+0.07, so this is roughly 3x the eddy viscosity. PALM runs its prognostic
+SGS-TKE closure; its only SGS knob, `km_constant`, would replace it by a
+constant viscosity. The expected, and observed, effect: uDALES damps resolved
+fluctuations at 2 m resolution much more, so canopy turbulence, wake mixing
+and the near-ground mean differ by more than any other item above. This is a
+model difference to be measured, not tuned away.
+
+**Spin-up** (20-s blocks of the canopy-mean u and kinetic energy, cold
+start): PALM starts from the profile and is stationary within 20-40 s in
+every setup, ~60 s periodic. uDALES starts from rest: laminar inflow_outflow
+2 % low at 120-140 s, 1 % at 140-160 s; turbulent ~3 % low at 120-140 s,
+within the block noise from ~140-160 s; periodic 9 % low at 120-140 s,
+stationary from ~140 s. Recommended `time.spinup_time`: 150 s for
+inflow_outflow (the case's 120 s leaves uDALES's canopy u ~3 % low in the
+first frames), 180 s periodic (`xie_and_castro_periodic` sets 180).
 
 ### Switchable inlet turbulence: digital-filter inflow planes
 
@@ -837,14 +932,12 @@ ESMDA-estimated `inflow_angle`/`velocity_magnitude` to the solver.
    (`turbulent_inflow_mod.f90:316-319`, `TUI0004`; `check_parameters.f90:2754`,
    `time_integration.f90:976-978`).
 
-**Recommended setup for a PALM truth in cross-model tests:**
-`boundary_condition: inflow_outflow`, `inlet_turbulence: {enabled: true,
-method: digital_filter}` with the same `intensity`/`length_scale_*`/`time_step`
-as the uDALES model, `initial_seed: false`, outflow damping on, and at least
-~25 m (two `length_scale_y`) of empty fetch before the first building; vary
-`random_seed` for replicas. Give uDALES the same `inlet_turbulence.seed` (or the
-same member name) to share the realisation, or different seeds to keep it as
-noise.
+**Setup for a PALM truth in cross-model tests** — the defaults since 2026-10:
+`inflow_outflow`, `digital_filter` inflow with the shared `flow.inlet_turbulence`
+values, `initial_seed: false`, outflow damping inside the outflow buffer, and
+at least ~25 m (two `length_scale_y`) of empty fetch before the first
+building; vary `random_seed` for replicas. Set `flow.inlet_turbulence.seed` to
+give uDALES the same realisation, or leave it null to keep it as noise.
 
 ### STL topography and the height-map limitation
 
@@ -928,12 +1021,13 @@ ground), and shifts the sensors by an rms 0.31 m/s, about its own window
 noise (0.32). The upstream sensor (2, 30) moves most (u -0.14 -> +0.54);
 fetch matters when that sensor is used.
 
-Recommended laminar truth for cross-model work on xie_and_castro:
-`outflow_buffer: 40` with the default damping (factor 1.0, width 4 m, now
-inside the buffer), `ncpu` dividing the extended nx (50 at 2 m), 30 s spin-up,
-and the inflow profile's `z_ref` pinned explicitly (these numbers use the
-32 m domain top).
-Not the default: `outflow_buffer: null` keeps existing runs unchanged.
+On the x = [-20, 80] case domain (2026-10) the bounds again end 5 m behind a
+cube column. Without a buffer PALM's time-mean u at x = 78 m, z = 1-9 m was
+1.0-1.5 m/s above uDALES's (the damping layer pulls the wake toward the inflow
+profile); with 20 m of buffer in both models the difference is -0.2 m/s, and
+20 vs 40 m changes uDALES by ≤ 0.06 m/s and PALM by its realisation noise
+(array rms 0.10 m/s). `xie_and_castro` therefore sets `flow.outflow_buffer: 20`
+for both backends.
 
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
 across runs) is very likely the same outflow instability; not yet confirmed by

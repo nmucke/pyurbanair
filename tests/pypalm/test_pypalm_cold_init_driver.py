@@ -42,7 +42,7 @@ _INFLOW_OUTFLOW = [
     "model.forward_model.boundary_condition=inflow_outflow",
     "model.forward_model.ncpu=4",
 ]
-_PERIODIC = ["model.forward_model.boundary_condition=periodic"]
+_PERIODIC = ["flow.boundary_condition=periodic", "flow.inlet_turbulence.enabled=false"]
 
 _INIT_VARS = ("u", "v", "w", "pt", "qv")
 

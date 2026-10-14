@@ -1,11 +1,11 @@
 # @package _global_
 #
 # Case: one periodic repeat unit of the Xie & Castro 2008 staggered cube array,
-# for boundary_condition: periodic runs (select with `case=xie_and_castro_periodic`
-# plus `model.forward_model.boundary_condition=periodic`).
+# for periodic runs (`case=xie_and_castro_periodic` sets `flow` to periodic,
+# nudging-driven, without inlet turbulence, for every backend).
 #
-# The default `xie_and_castro` domain (x in [-20, 40]) has a 25 m empty fetch and
-# ends after two cube columns, so under cyclic boundaries it is a gap plus a
+# The default `xie_and_castro` domain (x in [-20, 80]) has a 25 m empty fetch and
+# a cut array, so under cyclic boundaries it is a gap plus a
 # truncated array wrapping onto itself. The STL's heights repeat every 80 m in
 # x and y (8 cube columns of 10 m cubes on a 20 m pitch, alternate columns offset
 # by 10 m, 4 heights), so this case is exactly one 80 m x 80 m unit: it wraps
@@ -19,6 +19,13 @@ defaults:
 
 case_name: xie_and_castro_periodic
 
+flow:
+  boundary_condition: periodic
+  # Neither exists without an inflow face; both backends raise if set.
+  outflow_buffer: null
+  inlet_turbulence:
+    enabled: false
+
 domain:
   # 2 m grid. Keep nx and ny even (PALM's poisfft, PAC0071/PAC0072). Any multiple
   # of 80 m in x and y starting on x, y = 5 + 20k stays a whole number of units.
@@ -31,9 +38,10 @@ domain:
     - [0.0, 32.0]
 
 time:
-  # A cold start needs ~120 s before the canopy kinetic energy is stationary
-  # (pypalm from the target profile, pyudales from rest; docs/pypalm.md §8).
-  spinup_time: 150.0
+  # pyudales starts from rest: at 5 m/s its canopy-mean u is still ~9 % low at
+  # 120-140 s and stationary from ~140 s (180 s leaves a margin); pypalm starts
+  # from the target profile and settles within ~60 s (docs/pypalm.md §8 "Cross-model parity").
+  spinup_time: 180.0
 
 obs:
   # Assimilation sensors at street level (z = 2 m) in the open N-S lanes

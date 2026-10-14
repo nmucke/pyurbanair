@@ -27,6 +27,14 @@ domain:
     - [0.0, 80.0]
     - [0.0, 32.0]
 
+flow:
+  # The bounds end 5 m behind the fourth cube column, in its wake. Both LES
+  # backends add 20 m of flat ground there (x = 80-100 m, nx 50 -> 60, so
+  # ncpu must divide 60, and for PALM leave an even slab: 1, 2, 3, 5 or 6), so
+  # neither uDALES' convective outflow nor PALM's radiation outflow and damping
+  # layer sit in the wake that is compared (docs/pypalm.md §8).
+  outflow_buffer: 20.0
+
 geometry:
   # One folder per case (see geometries/README.md): the STL every backend
   # reads, the uDALES namoptions (its `stl_file` names the STL next to it) and
