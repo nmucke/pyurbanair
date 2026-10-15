@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 from types import ModuleType
@@ -160,6 +161,41 @@ def training_data(session_root: pathlib.Path) -> pathlib.Path:
             state.to_netcdf(out / "state" / split / f"sample_{i:04d}.nc")
             params.to_netcdf(out / "param" / split / f"sample_{i:04d}.nc")
     return out
+
+
+def inlet_turbulence_corpus(
+    training_data: pathlib.Path, dest: pathlib.Path
+) -> pathlib.Path:
+    """A copy of the synthetic corpus as if uDALES had generated it with inlet
+    turbulence: the generator settings in config.yaml and `spinup_time_s` on
+    every state file. Keeps the folder name, so the trained models accept it."""
+    corpus = dest / training_data.name
+    shutil.copytree(training_data, corpus)
+    data_cfg = OmegaConf.load(corpus / "config.yaml")
+    data_cfg.model = {
+        "forward_model": {
+            "experiment_name": 999,
+            "inlet_turbulence": {
+                "enabled": True,
+                "intensity": 0.15,
+                "length_scale_y": 2.0,
+                "length_scale_z": 5.0,
+                "length_scale_x": 4.0,
+                "time_step": 0.5,
+                "seed": None,
+            },
+            "nudging_config": {
+                "profile_config": {"type": "power_law", "alpha": 0.25, "z_ref": 15.0}
+            },
+        }
+    }
+    data_cfg.training_data = {"output_frequency": data_cfg.time.output_frequency}
+    OmegaConf.save(data_cfg, corpus / "config.yaml")
+    for path in corpus.glob("state/*/sample_*.nc"):
+        state = xarray.load_dataset(path)
+        state.attrs["spinup_time_s"] = 1.0
+        state.to_netcdf(path)
+    return corpus
 
 
 TRAIN_ORDER = (

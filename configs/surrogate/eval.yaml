@@ -17,6 +17,13 @@ seed: 0
 # Training-data root to evaluate on; null -> each model's own training data.
 data_dir: null
 
+# Inference-time uDALES inlet turbulence added to every frame `stepper`
+# predicts (neural_surrogates.inlet_turbulence.InletTurbulence); needs a corpus
+# generated with it.
+inlet_turbulence:
+  enabled: false
+  seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+
 stepper:
   # One model, or several compared side by side on the same trajectories.
   models:

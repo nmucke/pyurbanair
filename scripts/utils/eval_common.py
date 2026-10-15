@@ -70,6 +70,17 @@ def load_states(
         )
 
 
+def inlet_turbulence(settings: Any, dataset: Any, traj: int) -> Any:
+    """The inlet-turbulence forcing of one trajectory (an `InletTurbulence`,
+    called as `forcing(pred, frame)`), or None when `settings.enabled` is off."""
+    if not settings.enabled:
+        return None
+    from neural_surrogates.inlet_turbulence import InletTurbulence
+
+    seed = None if settings.seed is None else int(settings.seed)
+    return InletTurbulence.from_dataset(dataset, traj, seed=seed)
+
+
 def grid_spacing(dataset: Any, traj: int) -> tuple[float, float, float]:
     """(dz, dy, dx) of one trajectory's grid, from its cell-centre coordinates."""
     with xarray.open_dataset(dataset._state_files[traj]) as ds:

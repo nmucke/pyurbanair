@@ -267,7 +267,7 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 |---|---|---|
 | `generate_data.py` | `surrogate/generate_data` | one simulation per sample on the case geometry or random STL layouts; resumable, shardable; writes `state/` and `param/` `{train,val,test}/sample_XXXX.nc` |
 | `train.py` | `--config-name surrogate/<train_*\|finetune_stepper>` | builds datasets + model for the config's `task` (`scripts/utils/tasks.py`: `stepper`, `autoencoder`, `latent_generator`, `dft`, `finetune_stepper`), then fits |
-| `evaluate_stepper.py` | `surrogate/eval` block `stepper` | rolls one or several steppers out on test trajectories; metrics + figures |
+| `evaluate_stepper.py` | `surrogate/eval` block `stepper` (+ top-level `inlet_turbulence`) | rolls one or several steppers out on test trajectories; metrics + figures |
 | `evaluate_autoencoder.py` | `surrogate/eval` block `autoencoder` | reconstruction metrics + figures |
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
 
@@ -284,7 +284,7 @@ docstring lists every metric and figure.
 
 | Script | Input | Output |
 |---|---|---|
-| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps` | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
+| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, off by default; [neural_surrogates.md](neural_surrogates.md) §11) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
 | `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
 | `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy, divergence and TKE against lead time, profiles, spectra, velocity PDFs, \|U\|, TKE and statistics slices; `summary.csv` / `summary.tex` |
 
