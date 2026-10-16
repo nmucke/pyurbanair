@@ -45,6 +45,9 @@ _MANAGED: dict[str, dict[str, str]] = {
         "initialization_parameters.ug_surface": "params",
         "initialization_parameters.vg_surface": "params",
         "initialization_parameters.km_constant": "model.forward_model.sgs_constant",
+        "initialization_parameters.roughness_length": (
+            "model.forward_model.roughness_length"
+        ),
         "initialization_parameters.bc_lr": "model.forward_model.boundary_condition",
         "initialization_parameters.bc_ns": "model.forward_model.boundary_condition",
     },

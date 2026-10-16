@@ -2,6 +2,7 @@
 
 import logging
 import pathlib
+import re
 from typing import Callable, Optional
 
 import numpy as np
@@ -225,3 +226,68 @@ def update_lscale_file_profile(
     ColumnBasedFileUpdater(file_path, column_formats).update_columns_per_row(
         updates, log_message=log_message
     )
+
+
+# Column of the momentum roughness z0 in factypes.inp (wallid, lGR, z0, z0h, ...),
+# and a pattern matching the line up to and including that field.
+_FACTYPES_Z0_COLUMN = 2
+_Z0_FIELD = re.compile(r"^(\s*\S+\s+\S+\s+)(\S+)")
+
+
+def set_facet_roughness(experiment_dir: pathlib.Path, expnr: str, z0: float) -> bool:
+    """Write ``z0`` into the factypes.inp z0 column of every facet type in use.
+
+    A type is in use when facets.inp names it; types with z0 = 0 (free slip,
+    e.g. the bounding walls) are left alone, as is z0h (neutral runs never read
+    it). Only the z0 field is replaced, as ``%10.6f`` (the preprocessing's
+    ``%6.2f`` rounds 0.004 to free slip), so the rest of each line is kept.
+
+    Returns False, writing nothing, when every in-use type already has ``z0``
+    (the default 0.05 on a preprocessed case), so default runs stay
+    byte-identical.
+    """
+    factypes = experiment_dir / f"factypes.inp.{expnr}"
+    facets = experiment_dir / f"facets.inp.{expnr}"
+    for path in (factypes, facets):
+        if not path.exists():
+            raise FileNotFoundError(
+                f"{path} not found: roughness_length is written after "
+                "preprocessing (write_inputs) has created it."
+            )
+    in_use = set(np.loadtxt(facets, skiprows=1, usecols=0, ndmin=1).astype(int))
+
+    lines = factypes.read_text().splitlines(keepends=True)
+    changed = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#") or not line.strip():
+            continue
+        fields = line.split()
+        current = float(fields[_FACTYPES_Z0_COLUMN])
+        if int(float(fields[0])) not in in_use or current <= 0.0:
+            continue
+        if abs(current - z0) <= 1e-12:
+            continue
+        lines[i] = _Z0_FIELD.sub(lambda m: f"{m[1]}{z0:10.6f}", line, count=1)
+        changed = True
+    if changed:
+        factypes.write_text("".join(lines))
+    return changed
+
+
+def wall_function_fallback_share(experiment_dir: pathlib.Path, z0: float) -> float:
+    """Share of facet sections closer to their wall than ``e * z0``.
+
+    uDALES evaluates the log law ``u* = kappa U / ln(d / z0)`` at the true
+    distance ``d`` of each section's fluid point (facet_sections_*.txt, column
+    4). Where ``ln(d / z0) <= 1`` it reconstructs the velocity further out, and
+    if that point is still too close it skips the section (no wall stress;
+    ``modibm.f90`` ``ibmwallfun``). Returns 0 when no section files exist.
+    """
+    distances = [
+        np.loadtxt(path, skiprows=1, usecols=3, ndmin=1)
+        for path in sorted(experiment_dir.glob("facet_sections_[uvw].txt"))
+    ]
+    if not distances:
+        return 0.0
+    d = np.concatenate(distances)
+    return float(np.mean(d <= np.e * z0)) if d.size else 0.0

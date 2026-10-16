@@ -29,6 +29,7 @@ from .utils.discrepancy_utils import (
     validate_model_discrepancy,
     write_model_discrepancy,
 )
+from .utils.file_update_utils import set_facet_roughness, wall_function_fallback_share
 from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
@@ -109,6 +110,23 @@ UNSUPPORTED_CLOSURES = {
         "sgs_constant would have no target"
     ),
 }
+
+
+# Share of IBM wall sections within e*z0 of their facet above which
+# `_apply_roughness` warns.
+ROUGHNESS_FALLBACK_WARN_SHARE = 0.25
+
+
+def validate_roughness_length(z0: float) -> float:
+    """Return ``z0`` as a float, raising unless it is a finite length > 0 m.
+
+    uDALES treats z0 = 0 as free slip (the wall function skips the facet), and
+    ``%6.2f`` files round anything below 0.005 m to that.
+    """
+    z0 = float(z0)
+    if not np.isfinite(z0) or z0 <= 0.0:
+        raise ValueError(f"roughness_length must be a finite z0 > 0 m, got {z0}")
+    return z0
 
 
 def validate_closure(closure: Optional[str]) -> None:
@@ -304,6 +322,7 @@ class ForwardModel(BaseForwardModel):
         boundary_condition: str = "periodic",
         closure: Optional[str] = None,
         sgs_constant: Optional[float] = None,
+        roughness_length: Optional[float] = None,
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
@@ -344,6 +363,10 @@ class ForwardModel(BaseForwardModel):
                 :meth:`_apply_sgs_setting`). ``"oneeqn"`` is recognised but
                 rejected — see :data:`UNSUPPORTED_CLOSURES`. Default ``None``
                 leaves the template's switches untouched.
+            roughness_length: Momentum roughness length z0 (m) of every facet
+                type in use, written to ``factypes.inp`` before each run (see
+                :meth:`_apply_roughness`). A ``roughness_length`` in the params
+                Dataset overrides it. None leaves the preprocessed value.
             results_dir: The directory where the results will be saved.
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
@@ -524,6 +547,13 @@ class ForwardModel(BaseForwardModel):
         # template's value alone. Applied in `_apply_sgs_setting`, not here, so it
         # follows the same per-call path as an estimated value.
         self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
+        # Per-backend default z0, overridden by a `roughness_length` in params;
+        # applied per call in `_apply_roughness`, like the SGS constant.
+        self.roughness_length = (
+            validate_roughness_length(roughness_length)
+            if roughness_length is not None
+            else None
+        )
 
         # Optionally reuse precomputed IBM geometry instead of re-running the
         # (expensive) STL->IBM preprocessing. Runs after the domain overrides so
@@ -813,6 +843,7 @@ class ForwardModel(BaseForwardModel):
         # byte-identical.
         nudging_config = self._resolve_nudging_config(self.params)
         self._apply_sgs_setting(self.params)
+        self._apply_roughness(self.params)
 
         if is_inlet_turbulence_enabled(self.inlet_turbulence):
             # Synthetic driver planes replace BOTH the nudged inlet face and the
@@ -950,6 +981,47 @@ class ForwardModel(BaseForwardModel):
             closure_name,
             key,
             float(sgs),
+            source,
+        )
+
+    def _apply_roughness(self, params: xarray.Dataset) -> None:
+        """Write the momentum roughness length z0 into this member's factypes.inp.
+
+        uDALES reads ``factypes.inp`` at every launch, so z0 can change per
+        member and window without redoing the IBM preprocessing. Precedence as
+        for ``sgs_constant``: params, then the model config; absent in both, or
+        equal to the file's value (the default 0.05), nothing is written.
+
+        The wall function evaluates the log law at each section's true wall
+        distance d; sections with d <= e*z0 fall back to a reconstruction point
+        further out and are skipped (no wall stress) if that is still too close
+        (docs/pyudales.md "Roughness"). A warning flags z0 values for which
+        over a quarter of the sections are that close.
+        """
+        z0 = get_param_value(params, "roughness_length")
+        source = "params"
+        if z0 is None:
+            z0 = self.roughness_length
+            source = "model config"
+        if z0 is None:
+            return
+        z0 = validate_roughness_length(z0)
+        expnr = self.dirs.experiment_name
+        if not set_facet_roughness(self.dirs.experiment_dir, expnr, z0):
+            return
+        share = wall_function_fallback_share(self.dirs.experiment_dir, z0)
+        if share > ROUGHNESS_FALLBACK_WARN_SHARE:
+            logger.warning(
+                "roughness_length=%.4g m: %.0f%% of the IBM wall sections lie "
+                "within e*z0 = %.3f m of their facet, where uDALES reconstructs "
+                "the velocity further out or drops the wall stress.",
+                z0,
+                100.0 * share,
+                np.e * z0,
+            )
+        logger.info(
+            "Set uDALES facet roughness z0 = %.6f m (roughness_length from %s)",
+            z0,
             source,
         )
 
