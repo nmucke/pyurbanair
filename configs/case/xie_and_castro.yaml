@@ -46,51 +46,75 @@ geometry:
 
 obs:
   # Observation operator. Canonical sensor layout for the rollout ESMDA;
-  # forward-only scripts ignore the assimilation-specific fields. The `size/`
-  # overlays supply size-appropriate sensor coordinates (and `interval_seconds`).
-  # Sensors must fall inside `domain.bounds` and outside the buildings; the N-S
-  # lanes between the Xie & Castro cube columns stay open for every y. `mode: grid`
-  # (with `x_min`/`x_max`/`n_per_axis`/`z`) is the alternative to explicit
-  # `*_points`.
+  # forward-only scripts ignore the assimilation-specific fields. Sensors must
+  # fall inside `domain.bounds` and outside the buildings. `mode: grid` (with
+  # `x_min`/`x_max`/`n_per_axis`/`z`) is the alternative to explicit `*_points`.
   mode: points
 
-  # Assimilation sensors, placed in the open N-S lanes between the cube columns
-  # at street level (z=2 m, below the 2.8 m minimum cube height) — true in-canyon
-  # measurements, inside domain.bounds and clear of every building footprint.
-  x_points: [10.0, 10.0, 20.0, 20.0, 30.0, 30.0]
-  y_points: [20.0, 60.0, 10.0, 50.0, 30.0, 70.0]
-  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+  # The array, for reading the coordinates below: cube columns A-D at
+  # x = 5-15, 25-35, 45-55, 65-75; open N-S lanes between them at x = 15-25,
+  # 35-45, 55-65 and 75-80. In A and C the cubes span y = 5-15, 25-35, 45-55,
+  # 65-75, in B and D they are offset by 10 m (y = 15-25, ..., 75-85 = 0-5), so
+  # the 10 m gaps between the cubes of a column are short E-W streets and a
+  # lane point behind a cube sits in its wake, behind a gap in a channel jet.
+  # Roofs 2.8, 6.4, 10, 13.6 and 17.2 m (C at y = 45-55; 18 m voxelized at 2 m).
+  #
+  # Assimilation sensors: 18 points (as the SGS study's "L2" layout) spread
+  # over the whole array, x = -5..70, for estimating the inflow angle and speed
+  # and a roughness length together. Three heights:
+  #   z = 2   street level, where the flow feels the ground roughness and the
+  #           channelling by the cubes (below the 2.8 m lowest roof);
+  #   z = 8   mid-canopy: above the 2.8 and 6.4 m cubes, below the 10 m ones;
+  #   z = 20  above every roof (not L2's 14 m, which sits on the 13.6 m roofs
+  #           and under the 17.2 m one): the roughness sublayer, which carries
+  #           the inflow speed and direction most directly.
+  # Two of them, at x = -5, see the approach flow 10 m upstream of the array.
+  #   z=2:  (-5, 40) approach; (20, 30) wake of A's 13.6 m cube; (30, 50) B
+  #         street; (40, 70) lane-2 channel; (50, 60) C street; (60, 10) wake
+  #         of C's 13.6 m cube; (70, 70) D street
+  #   z=8:  (10, 60) A street; (30, 30) B street; (40, 50) lane 2; (50, 20) C
+  #         street; (60, 70) wake of C's 10 m cube; (70, 10) D street
+  #   z=20: (-5, 20) approach; over the cubes (10, 30), (50, 10), (70, 60);
+  #         over B's (30, 70) street
+  # Each point reads only fluid cells that touch no wall or roof (a trilinear
+  # stencil 1.5 cells clear of them) at the 2 m case grid and at 1 m, in the
+  # STL voxelization pylbm and PALM use (evaluation.turbulence.fluid_mask).
+  # The layout also avoids the places where uDALES and PALM disagree most in
+  # the 2026-10 parity runs: street level at x = 37-41, y = 7-11 (opposite
+  # signs of the mean u) and z = 20 in the wake of the 17.2 m cube (y = 45-52,
+  # x > 57; 1.3 m/s), where structural error would dominate the innovations.
+  x_points: [-5.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             10.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             -5.0, 10.0, 30.0, 50.0, 70.0]
+  y_points: [40.0, 30.0, 50.0, 70.0, 60.0, 10.0, 70.0,
+             60.0, 30.0, 50.0, 20.0, 70.0, 10.0,
+             20.0, 30.0, 70.0, 10.0, 60.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+             8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+             20.0, 20.0, 20.0, 20.0, 20.0]
 
   # Validation sensors (held out from assimilation): a separate set the Kalman
   # update never sees, used only to score the posterior at unseen locations
   # (`sensor_statistics.validation`, the S5 validation columns and the D1
-  # held-out rank histograms). Every one sits in open space, and the set spans
-  # flow regimes the street-level assimilation sensors above do NOT cover, so
-  # the held-out score is a genuine generalization test rather than a
-  # near-duplicate of the assimilated one:
-  #   (2, 30)   z=2   undisturbed approach flow, upstream of the array
-  #   (20, 55)  z=2   open lane between the two block rows
-  #   (17, 30)  z=2   wake / recirculation, ~2.3 m behind the block at
-  #                   x=[5.3, 14.7] (13-14 m tall, depending on grid)
-  #   (10, 30)  z=20  the only sensor above the canopy, over that same block.
-  #                   z=20 is chosen against the TALLEST roof in the array
-  #                   (17.2 m in the STL, 18 m voxelized on the full x=[-20,80]
-  #                   domain) rather than against its own column's roof, so it
-  #                   stays above-canopy at every grid and domain crop. Note the
-  #                   margin is thin at the coarsest grid — one cell at nz=16
-  #                   (cell centre 19 m over an 18 m roof) — so it sits in the
-  #                   roughness sublayer, not in free-stream flow.
-  # The two additions stay >=10 m from every assimilation sensor: the wake one
-  # 12.2 m, the above-canopy one exactly 10.0 m horizontally from (10, 20) but
-  # 18 m above it. (The closest pair in the whole set is the pre-existing lane
-  # sensor, exactly 5 m from the assimilation sensor at (20, 50).)
-  # Held-out placement is grid-independent: all four are fluid cells at the case
-  # resolution and at the 50x40x16 / 60x80x16 sweep grids. Guarded by
-  # tests/test_case_sensor_placement.py, which checks the voxelized geometry
-  # rather than restating these coordinates.
-  validation_x_points: [2.0, 20.0, 17.0, 10.0]
-  validation_y_points: [30.0, 55.0, 30.0, 30.0]
-  validation_z_points: [2.0, 2.0, 2.0, 20.0]
+  # held-out rank histograms). 10 points, interleaved with the assimilated ones
+  # over the array but at least 10 m from each (the test requires 4 m, two
+  # cells), and covering lanes and heights the assimilated set does not:
+  #   (-5, 70)  z=8   approach flow at mid-canopy height
+  #   (10, 40)  z=2   A street (no assimilated street-level point in A)
+  #   (20, 10)  z=2   wake of A's 10 m cube
+  #   (78, 30)  z=2   the fourth lane, behind the last column
+  #   (30, 70)  z=5   lower canopy, B street
+  #   (30, 10)  z=14  roof level (the shear layer over the 10-13.6 m roofs),
+  #   (50, 40)  z=14    over B's and C's streets,
+  #   (70, 30)  z=14    over D's street,
+  #   (60, 50)  z=14    and in the lee of the tallest (17.2 m) cube
+  #   (20, 60)  z=26  well above the canopy (1.5 H)
+  # The same fluid / wall-clearance rule holds. Guarded, with the spacing, by
+  # tests/scripts/test_configs.py::test_case_sensors_are_clear_of_the_buildings,
+  # which checks the voxelized geometry rather than restating these coordinates.
+  validation_x_points: [-5.0, 10.0, 20.0, 78.0, 30.0, 30.0, 50.0, 70.0, 60.0, 20.0]
+  validation_y_points: [70.0, 40.0, 10.0, 30.0, 70.0, 10.0, 40.0, 30.0, 50.0, 60.0]
+  validation_z_points: [8.0, 2.0, 2.0, 2.0, 5.0, 14.0, 14.0, 14.0, 14.0, 26.0]
 
   states: [u, v]
   temporal_mode: full
