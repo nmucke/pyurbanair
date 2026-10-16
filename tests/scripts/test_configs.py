@@ -72,6 +72,50 @@ def test_case_geometry_paths_exist(case: str, tmp_path: pathlib.Path) -> None:
         ).is_file()
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "case", ["xie_and_castro", "xie_and_castro_periodic"]
+)
+def test_case_sensors_are_clear_of_the_buildings(
+    case: str, tmp_path: pathlib.Path
+) -> None:
+    """Every sensor, assimilated or held out, reads only fluid cells that do not
+    touch a wall or roof (the comparison's `fluid_mask` of the case STL), at the
+    case grid and at 1 m; the held-out ones stay 2 case cells (4 m) from the
+    assimilated ones."""
+    from evaluation.turbulence import fluid_mask
+
+    cfg = compose("forward", f"case={case}", root=tmp_path)
+    obs = cfg.obs
+    sensors = {
+        "assimilation": np.array([obs.x_points, obs.y_points, obs.z_points]).T,
+        "validation": np.array(
+            [obs.validation_x_points, obs.validation_y_points, obs.validation_z_points]
+        ).T,
+    }
+    bounds = np.array(cfg.domain.bounds, dtype=float)
+    case_cells = [cfg.domain.nx, cfg.domain.ny, cfg.domain.nz]
+    for cells in (case_cells, (bounds[:, 1] - bounds[:, 0]).astype(int)):
+        x, y, z = (
+            lo + (np.arange(n) + 0.5) * (hi - lo) / n
+            for n, (lo, hi) in zip(cells, bounds)
+        )
+        fluid = fluid_mask(REPO / cfg.geometry.stl_path, z, y, x)
+        for name, points in sensors.items():
+            for point in points:
+                # The cell centres a trilinear interpolation at the point reads:
+                # the one it sits on, or the two that bracket it, per axis.
+                stencil = [
+                    np.flatnonzero(np.abs(c - p) < c[1] - c[0] - 1e-9)
+                    for c, p in zip((z, y, x), point[::-1])
+                ]
+                assert all(len(s) for s in stencil), (name, point, "outside")
+                assert fluid[np.ix_(*stencil)].all(), (name, point, cells)
+    distance = np.linalg.norm(
+        sensors["validation"][:, None] - sensors["assimilation"][None], axis=-1
+    )
+    assert distance.min() >= 4.0
+
+
 @pytest.mark.parametrize("source", ["idealized", "realistic"])  # type: ignore[misc]
 def test_random_geometry_templates_exist(source: str, tmp_path: pathlib.Path) -> None:
     cfg = compose(
