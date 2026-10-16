@@ -30,6 +30,7 @@ from neural_surrogates.decomposition import DomainDecomposition
 from neural_surrogates.ensemble_forward_model import NeuralSurrogateEnsembleForwardModel
 from neural_surrogates.forward_model import NeuralSurrogateForwardModel
 from neural_surrogates.generative_spinup import GenerativeSpinup
+from neural_surrogates.inlet_turbulence import InletTurbulence
 from neural_surrogates.sdf import (
     n_sdf_feature_channels,
     normalize_sdf_mode,
@@ -77,6 +78,7 @@ __all__ = [
     "NeuralSurrogateForwardModel",
     "NeuralSurrogateEnsembleForwardModel",
     "GenerativeSpinup",
+    "InletTurbulence",
     "sdf_features",
     "n_sdf_feature_channels",
     "normalize_sdf_mode",

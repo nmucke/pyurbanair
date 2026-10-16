@@ -766,6 +766,45 @@ TKE, the per-cell time variance), `params.png` (the trajectory's parameters
 with the inflow angle and speed recovered at the inlet) and `rollout.mp4`
 (`animate: true`).
 
+#### Inference-time inlet turbulence
+
+A stepper's predictions are smooth at the inlet: the digital-filter turbulence
+uDALES injects at the west face every `time_step` is lost. The top-level block
+`inlet_turbulence` (in `eval.yaml` and in `comparison.yaml` for
+`scripts/surrogate_comparison/run_models.py`, both off by default) adds that
+forcing back at inference only, without retraining:
+
+```yaml
+inlet_turbulence:
+  enabled: false
+  seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+```
+
+When enabled, one `neural_surrogates.inlet_turbulence.InletTurbulence` is built
+per trajectory (`InletTurbulence.from_dataset(data, sample, seed)`) and called
+on every predicted frame right after the model step, before the frame is stored
+and fed back. It adds the fluctuations that entered through the inlet during
+that frame's interval, laid out downstream by Taylor's hypothesis, to the
+building-free columns upstream of the first building; obstacle cells are never
+touched. The corpus must have been generated with inlet turbulence: the
+generator settings are read from its `config.yaml`
+(`model.forward_model.inlet_turbulence`, `nudging_config.profile_config`,
+`experiment_name`, `training_data.output_frequency`) and the spin-up from each
+state file's `spinup_time_s`; anything missing raises. `run_models.py` keeps the
+forcing out of `seconds_per_step` and records it in `models.yaml` and each
+rollout's `inlet_turbulence_seed` attr (`truth` or the seed);
+`evaluate_stepper.py`'s `rollout_seconds` includes it.
+
+Known limitations: `seed: null` places frame `t` at solver time
+`spinup + output_frequency * (t + 1)` on the truth's driver-record timeline.
+That holds for test/val samples and single-sample train geometries; the second
+sample of a repeated train geometry continued the solver clock, so its forcing
+does not match its truth (it is still a valid realization). Only corpora of the
+archived generator (`training_data.output_frequency` in their config.yaml, as
+`pyudales_idealized`/`_realistic`) are supported: `scripts/surrogate/generate_data.py`
+seeds per sample and runs samples back to back on one model without storing
+the seed or record offset, so `from_dataset` raises on its corpora.
+
 ---
 
 ## Part D — Running the surrogate as a forward model
