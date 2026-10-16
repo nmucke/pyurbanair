@@ -6,11 +6,12 @@ import json
 import pathlib
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from tests.conftest import TRAIN_ORDER, compose, load_script
+from tests.conftest import TRAIN_ORDER, compose, inlet_turbulence_corpus, load_script
 
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
@@ -213,6 +214,46 @@ def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -
         "params.png",
     ):
         assert (out / name).exists(), name
+
+
+def test_evaluate_stepper_inlet_turbulence(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """The forcing changes the first predicted frame only upstream of the
+    building (x < 7)."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={inlet_turbulence_corpus(training_data, tmp_path / str(enabled))}",
+            f"stepper.output_dir={tmp_path / str(enabled) / 'eval'}",
+            "stepper.max_steps=3",
+            f"inlet_turbulence.enabled={str(enabled).lower()}",
+            root=session_root,
+        )
+        script.run(cfg)
+        assert (pathlib.Path(cfg.stepper.output_dir) / "metrics.csv").exists()
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    forced, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(forced).all()
+    np.testing.assert_array_equal(forced[:first], plain[:first])  # the truth
+    for c in range(forced.shape[1]):
+        assert not np.allclose(forced[first, c, ..., 0], plain[first, c, ..., 0]), c
+    np.testing.assert_array_equal(forced[first, ..., 7:], plain[first, ..., 7:])
 
 
 def test_evaluate_autoencoder(

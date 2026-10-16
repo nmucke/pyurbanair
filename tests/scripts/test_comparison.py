@@ -17,7 +17,7 @@ import torch
 import xarray
 from omegaconf import OmegaConf
 
-from tests.conftest import compose, load_script
+from tests.conftest import compose, inlet_turbulence_corpus, load_script
 
 MODELS = ("local_fno", "dft")
 
@@ -195,6 +195,42 @@ def test_run_models_rerun_replaces_the_rollouts(
     assert not (run_dir / "rollouts" / "dft").exists()
     assert list(OmegaConf.load(run_dir / "models.yaml")) == ["local_fno"]
     assert list(OmegaConf.load(run_dir / "config.yaml").sample_indices) == [0]
+
+
+def test_run_models_inlet_turbulence(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """The forcing changes the first predicted frame only upstream of the
+    building (x < 7) and is recorded; the default run records nothing."""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{models[1]}]",
+        f"data_dir={corpus}",
+        "max_steps=2",
+        "inlet_turbulence.enabled=true",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    default = OmegaConf.load(comparison_run / "models.yaml")
+    for label in MODELS:
+        assert recorded[label].inlet_turbulence == {"enabled": True, "seed": None}
+        assert "inlet_turbulence" not in default[label]
+        name = pathlib.Path(label) / "sample_0000.nc"
+        forced = xarray.load_dataset(run_dir / "rollouts" / name)
+        plain = xarray.load_dataset(comparison_run / "rollouts" / name)
+        assert forced.attrs["inlet_turbulence_seed"] == "truth"
+        assert "inlet_turbulence_seed" not in plain.attrs
+        for var in ("u", "v", "w"):
+            first, ref = forced[var].values[0], plain[var].values[0]
+            assert np.isfinite(forced[var].values).all()
+            assert not np.allclose(first[..., 0], ref[..., 0]), (label, var)
+            np.testing.assert_array_equal(first[..., 7:], ref[..., 7:])
 
 
 # ---------------------------------------------------------------------------
