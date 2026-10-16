@@ -207,6 +207,10 @@ differences. They make pylbm a deliberately "far" truth.
 
 ## 6. Directions for real-world cross-model DA
 
+*Results of the first overnight runs on these directions (Round-2 rerun,
+resolution, inflow-turbulence sensitivity, pylbm) are in
+`overnight_runs_2026-10-15.md`.*
+
 Ordered by priority. Each applies with real observations, where no truth field
 is available.
 
