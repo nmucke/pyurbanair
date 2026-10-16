@@ -35,7 +35,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-26]
+        # macos-15, not macos-26: the macos-26 image of 2026-10-13 breaks the
+        # solver links (docs/plans/ci_macos27_sdk_linker.md).
+        os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
