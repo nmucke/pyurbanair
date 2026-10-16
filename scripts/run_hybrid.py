@@ -115,7 +115,7 @@ def run(cfg: DictConfig) -> None:
     prior_sampler = instantiate(cfg.prior_params)
     params = prior_sampler.sample(ensemble_size)
     is_dynamic = "time" in params.dims
-    selected, global_names = parameter_names(cfg, params)
+    selected, global_names, log_names = parameter_names(cfg, params, prior_sampler)
     operator = make_observation_operator(cfg, cfg.assim_model.solver_name)
     if stride > 1:
         operator = StridedOperator(operator, stride)
@@ -156,6 +156,7 @@ def run(cfg: DictConfig) -> None:
         aggregate_observations=aggregation,
         parameter_names_to_estimate=selected,
         global_parameter_names=global_names,
+        log_parameter_names=log_names,
         likelihood_weight=policy.smoother_weight,
         **({"num_time_points": int(params.sizes["time"])} if is_dynamic else {}),
     )
@@ -171,6 +172,7 @@ def run(cfg: DictConfig) -> None:
         rng_key=filter_key,
         parameter_names_to_estimate=selected,
         global_parameter_names=global_names,
+        log_parameter_names=log_names,
     )
     enkf.collect_pred_obs = True
     enkf.collect_forecast_frames = bool(da.save_forecast_history)

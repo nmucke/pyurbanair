@@ -131,7 +131,11 @@ Time-varying samplers take a value every `time.seconds_per_knot` seconds.
 `static.yaml` and `static_truth.yaml` carry a commented-out `roughness_length`
 (wall z0, m; uDALES and PALM only). Uncomment it to sample or prescribe z0, and
 add it to `assimilation.params_to_estimate` to estimate it; otherwise the model
-configs apply `flow.roughness_length`. With PALM, drop `sgs_constant` from the
+configs apply `flow.roughness_length`. The prior is a `LogNormal` (`median` in
+m, dimensionless `log_std`, optional `min`/`max` clamps on the draws), so the
+DA updates log(z0) and members always get z0 > 0
+([data_assimilation.md §1](data_assimilation.md)); override e.g.
+`prior_params.parameters.roughness_length.log_std=0.5`. With PALM, drop `sgs_constant` from the
 prior (the two raise together, [pypalm.md](pypalm.md) "Roughness").
 
 ### 1.5 `assimilation_settings/`

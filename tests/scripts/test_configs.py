@@ -347,3 +347,55 @@ def test_check_config_checks_the_replica_horizon(tmp_path: pathlib.Path) -> None
         else:
             with pytest.raises(ValueError, match="before the horizon's end"):
                 check(cfg, "smoother")
+
+
+# The log-space z0 prior, set here so the test doesn't depend on static.yaml.
+LOG_Z0 = [
+    "params@truth_params=static_truth",
+    "params@prior_params=static",
+    "smoothing.smoother=${smoother.static}",
+    "assim_model.forward_model.model_discrepancy.enabled=false",
+    "+prior_params.parameters.roughness_length={_target_:pyurbanair."
+    "static_parameters.LogNormal,median:0.05,log_std:0.7}",
+    "assimilation.params_to_estimate=[inflow_angle,roughness_length]",
+]
+
+
+@pytest.mark.parametrize("workflow", ["smoother", "filtering"])  # type: ignore[misc]
+def test_log_space_prior_composes(workflow: str, tmp_path: pathlib.Path) -> None:
+    from hydra.utils import instantiate
+
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *LOG_Z0,
+        "filtering.mode=joint",
+        "filtering.parameter_evolution={_target_:data_assimilation.filtering."
+        "parameter_evolution.RandomWalkEvolution,std:{roughness_length:0.05}}",
+        root=tmp_path,
+    )
+    load_script("scripts/utils/inconsistency_check.py").check_config(cfg, workflow)
+    sampler = instantiate(cfg.prior_params)
+    params = sampler.sample(4)
+    assert bool((params.roughness_length > 0).all())
+    helpers = load_script("scripts/utils/helper_functions.py")
+    selected, _, log_names = helpers.parameter_names(cfg, params, sampler)
+    assert selected == ["inflow_angle", "roughness_length"]
+    assert log_names == ["roughness_length"]
+
+
+def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
+    """The commented-out roughness_length prior instantiates once uncommented."""
+    from hydra.utils import instantiate
+
+    from pyurbanair.static_parameters import LogNormal
+
+    lines = (CONFIGS / "params" / "static.yaml").read_text().splitlines()
+    start = lines.index("  # roughness_length:")
+    block = []
+    for line in lines[start:]:
+        if not line.startswith("  #"):
+            break
+        block.append(line.replace("# ", "", 1))
+    prior = instantiate(OmegaConf.create("\n".join(block)).roughness_length)
+    assert isinstance(prior, LogNormal)

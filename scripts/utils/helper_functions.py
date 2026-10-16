@@ -28,6 +28,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES
 from pyurbanair.config.hydra_helpers import clean_outputs
+from pyurbanair.static_parameters import log_space_parameter_names
 
 
 def save_yaml(data: dict, path: pathlib.Path) -> None:
@@ -290,19 +291,22 @@ def save_obs(
 
 
 def parameter_names(
-    cfg: DictConfig, params: xarray.Dataset
-) -> tuple[list[str] | None, list[str]]:
-    """The parameters to estimate (None for all) and the global ones.
+    cfg: DictConfig, params: xarray.Dataset, sampler: Any
+) -> tuple[list[str] | None, list[str], list[str]]:
+    """The parameters to estimate (None for all), the global ones and the
+    log-space ones.
 
     SGS-discrepancy coefficients are global (never localized) when the
-    assimilation model's discrepancy is enabled.
+    assimilation model's discrepancy is enabled. Parameters with a `LogNormal`
+    prior in `sampler` are analysed as log(value).
     """
     selected = cfg.assimilation.params_to_estimate
     discrepancy = OmegaConf.select(
         cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
     )
     global_names = [n for n in SGS_BIAS_PARAMETER_NAMES if discrepancy and n in params]
-    return (None if selected is None else list(selected)), global_names
+    log_names = log_space_parameter_names(sampler)
+    return (None if selected is None else list(selected)), global_names, log_names
 
 
 def next_window_params(

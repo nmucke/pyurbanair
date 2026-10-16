@@ -74,6 +74,8 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
     global_parameter_names: tuple[str, ...] = ()
     #: None estimates every supplied field; () keeps all forecast fields fixed.
     parameter_names_to_estimate: Optional[tuple[str, ...]] = None
+    #: Static parameters analysed as log(value) (strictly positive ones).
+    log_parameter_names: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -88,6 +90,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -173,6 +176,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         self.parameter_names_to_estimate = validate_parameter_names(
             parameter_names_to_estimate
         )
+        self.log_parameter_names = validate_parameter_names(log_parameter_names) or ()
 
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
@@ -499,7 +503,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
 
     def _validate_global_parameters(self, params: xarray.Dataset) -> None:
         """Check explicit static/global metadata before any solver forecast."""
-        selected = select_parameters(params, self.parameter_names_to_estimate)
+        selected = select_parameters(
+            params, self.parameter_names_to_estimate, self.log_parameter_names
+        )
         missing = [name for name in self.global_parameter_names if name not in params]
         if missing:
             raise ValueError(
@@ -858,14 +864,16 @@ class ParameterESMDA(_BaseESMDA):
             The updated parameter Dataset, on ``params``' own coordinates.
         """
         self._validate_global_parameters(params)
-        selected = select_parameters(params, self.parameter_names_to_estimate)
+        selected = select_parameters(
+            params, self.parameter_names_to_estimate, self.log_parameter_names
+        )
         if group_ids is not None and len(selected.data_vars) != len(params.data_vars):
             indices = [i for i, name in enumerate(params.data_vars) if name in selected]
             group_ids = group_ids[jnp.asarray(indices, dtype=int)]
         updated = self._update_flat_params_from_pred_obs(
             selected, pred_obs, obs, group_ids=group_ids
         )
-        return merge_parameters(params, updated)
+        return merge_parameters(params, updated, self.log_parameter_names)
 
     def _update_flat_params_from_pred_obs(
         self,
@@ -966,6 +974,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -979,6 +988,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
             likelihood_weight=likelihood_weight,
             global_parameter_names=global_parameter_names,
             parameter_names_to_estimate=parameter_names_to_estimate,
+            log_parameter_names=log_parameter_names,
         )
         self.num_time_points = num_time_points
         # When True, ``t=0`` of every time-varying parameter is excluded
@@ -1053,7 +1063,9 @@ ParamAugmentation` for the flattening semantics.
         """
         self._validate_global_parameters(params)
         original_params = params
-        params = select_parameters(params, self.parameter_names_to_estimate)
+        params = select_parameters(
+            params, self.parameter_names_to_estimate, self.log_parameter_names
+        )
         self._check_num_time_points(params)
         flat_params = self._flatten_time_varying_params(params)
         if group_ids is not None and len(params.data_vars) != len(
@@ -1074,7 +1086,9 @@ ParamAugmentation` for the flattening semantics.
             flat_params, pred_obs, obs, group_ids=group_ids
         )
         return merge_parameters(
-            original_params, self._unflatten_params(updated_flat, params)
+            original_params,
+            self._unflatten_params(updated_flat, params),
+            self.log_parameter_names,
         )
 
 
@@ -1401,7 +1415,9 @@ OnlineStateReduction` and ``docs/archive/reduced_state_da.md``), and an optional
         N_e = params.sizes["ensemble"]
 
         self._validate_global_parameters(params)
-        selected = select_parameters(params, self.parameter_names_to_estimate)
+        selected = select_parameters(
+            params, self.parameter_names_to_estimate, self.log_parameter_names
+        )
         # Static params are already scalar (ensemble,) vars: no flatten needed.
         updated_states, updated_flat = self._augmented_state_update(
             states_array,
@@ -1411,7 +1427,9 @@ OnlineStateReduction` and ``docs/archive/reduced_state_da.md``), and an optional
             N_e,
             snapshots_flat=self._basis_snapshots(state, results_dir),
         )
-        return updated_states, merge_parameters(params, updated_flat)
+        return updated_states, merge_parameters(
+            params, updated_flat, self.log_parameter_names
+        )
 
     def _final_time_smoothing_step(
         self,
@@ -1581,7 +1599,9 @@ class StateAndTimeVaryingParameterESMDA(
         states_array = self._get_states(state=state, results_dir=results_dir)
         self._validate_global_parameters(params)
         original_params = params
-        params = select_parameters(params, self.parameter_names_to_estimate)
+        params = select_parameters(
+            params, self.parameter_names_to_estimate, self.log_parameter_names
+        )
         flat_params = self._flatten_time_varying_params(params)
         N_e = flat_params.sizes["ensemble"]
 
@@ -1595,4 +1615,6 @@ class StateAndTimeVaryingParameterESMDA(
             param_group_ids=self._time_varying_group_ids(params),
         )
         updated_params = self._unflatten_params(updated_flat, params)
-        return updated_states, merge_parameters(original_params, updated_params)
+        return updated_states, merge_parameters(
+            original_params, updated_params, self.log_parameter_names
+        )
