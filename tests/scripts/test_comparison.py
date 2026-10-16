@@ -233,6 +233,51 @@ def test_run_models_inlet_turbulence(
             np.testing.assert_array_equal(first[..., 7:], ref[..., 7:])
 
 
+def test_run_models_periodic_y(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: dict[str, Any],
+    model_dirs: list[pathlib.Path],
+) -> None:
+    """periodic_y changes the tiny UNet's predictions at the y edges and is
+    recorded; the default run records nothing. The tiny DFT (global mode)
+    refuses it: its ny (20) is not a multiple of 16."""
+    stepper = session_root / "weights" / trained["train_stepper"].name
+    runs = {}
+    for enabled in (False, True):
+        runs[enabled] = tmp_path / str(enabled)
+        run_models(
+            session_root,
+            runs[enabled],
+            f"models=[{stepper}]",
+            "max_steps=2",
+            f"periodic_y={str(enabled).lower()}",
+        )
+    label = stepper.name
+    recorded = OmegaConf.load(runs[True] / "models.yaml")[label]
+    assert recorded.periodic_y is True
+    assert "periodic_y" not in OmegaConf.load(runs[False] / "models.yaml")[label]
+    name = pathlib.Path("rollouts") / label / "sample_0000.nc"
+    periodic = xarray.load_dataset(runs[True] / name)
+    plain = xarray.load_dataset(runs[False] / name)
+    assert periodic.attrs["periodic_y"] == 1
+    assert "periodic_y" not in plain.attrs
+    for var in ("u", "v", "w"):
+        first, ref = periodic[var].values[0], plain[var].values[0]
+        assert np.isfinite(periodic[var].values).all()
+        for edge in (0, -1):
+            assert not np.allclose(first[:, edge], ref[:, edge]), (var, edge)
+
+    with pytest.raises(ValueError, match="periodic_y: ny"):
+        run_models(
+            session_root,
+            tmp_path / "dft",
+            f"models=[{model_dirs[1]}]",
+            "max_steps=2",
+            "periodic_y=true",
+        )
+
+
 # ---------------------------------------------------------------------------
 # compute_metrics
 # ---------------------------------------------------------------------------

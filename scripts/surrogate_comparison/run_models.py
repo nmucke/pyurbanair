@@ -34,6 +34,11 @@ frame (neural_surrogates.inlet_turbulence.InletTurbulence; the corpus must
 have been generated with it), outside the timed inference. The setting is
 then recorded in models.yaml and the rollouts' `inlet_turbulence_seed` attr
 (`truth`: the truth run's own realization, else the seed).
+
+`periodic_y` makes every model y-periodic at inference (circular y padding in
+its convolutions, y-periodic SDF features:
+neural_surrogates.periodic.make_periodic_y), for uDALES' y-periodic domains.
+It is then recorded in models.yaml and the rollouts' `periodic_y` attr (1).
 """
 
 from __future__ import annotations
@@ -81,7 +86,10 @@ def run(cfg: DictConfig) -> None:
             for label, d in labels.items()
         }
     )
-    models = {label: load_model(d, dev) for label, d in labels.items()}
+    models = {
+        label: load_model(d, dev, periodic_y=cfg.periodic_y)
+        for label, d in labels.items()
+    }
     first_cfg = next(iter(models.values()))[1]
     data = open_dataset(first_cfg, cfg.data_dir, cfg.split, sdf_features="none")
     histories = {
@@ -138,6 +146,8 @@ def run(cfg: DictConfig) -> None:
                 ds.attrs["inlet_turbulence_seed"] = (
                     "truth" if seed is None else str(seed)
                 )
+            if cfg.periodic_y:
+                ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
             path.parent.mkdir(parents=True, exist_ok=True)
             ds.to_netcdf(path)
@@ -159,6 +169,7 @@ def run(cfg: DictConfig) -> None:
                     if cfg.inlet_turbulence.enabled
                     else {}
                 )
+                | ({"periodic_y": True} if cfg.periodic_y else {})
                 for label, (model, _) in models.items()
             }
         ),

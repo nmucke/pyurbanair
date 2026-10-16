@@ -31,6 +31,7 @@ from neural_surrogates.ensemble_forward_model import NeuralSurrogateEnsembleForw
 from neural_surrogates.forward_model import NeuralSurrogateForwardModel
 from neural_surrogates.generative_spinup import GenerativeSpinup
 from neural_surrogates.inlet_turbulence import InletTurbulence
+from neural_surrogates.periodic import make_periodic_y
 from neural_surrogates.sdf import (
     n_sdf_feature_channels,
     normalize_sdf_mode,
@@ -79,6 +80,7 @@ __all__ = [
     "NeuralSurrogateEnsembleForwardModel",
     "GenerativeSpinup",
     "InletTurbulence",
+    "make_periodic_y",
     "sdf_features",
     "n_sdf_feature_channels",
     "normalize_sdf_mode",

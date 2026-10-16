@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import pathlib
 from typing import Any
@@ -254,6 +255,50 @@ def test_evaluate_stepper_inlet_turbulence(
     for c in range(forced.shape[1]):
         assert not np.allclose(forced[first, c, ..., 0], plain[first, c, ..., 0]), c
     np.testing.assert_array_equal(forced[first, ..., 7:], plain[first, ..., 7:])
+
+
+def test_evaluate_stepper_periodic_y(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """periodic_y changes the predictions at the y edges and adds a
+    `periodic_y` column to metrics.csv; the default run has none."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"stepper.output_dir={tmp_path / str(enabled)}",
+            "stepper.max_steps=3",
+            f"periodic_y={str(enabled).lower()}",
+            root=session_root,
+        )
+        script.run(cfg)
+        with open(pathlib.Path(cfg.stepper.output_dir) / "metrics.csv") as f:
+            rows = list(csv.DictReader(f))
+        if enabled:
+            assert all(float(r["periodic_y"]) == 1 for r in rows)
+        else:
+            assert "periodic_y" not in rows[0]
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    periodic, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(periodic).all()
+    np.testing.assert_array_equal(periodic[:first], plain[:first])  # the truth
+    for edge in (0, -1):
+        assert not np.allclose(
+            periodic[first, ..., edge, :], plain[first, ..., edge, :]
+        )
 
 
 def test_evaluate_autoencoder(

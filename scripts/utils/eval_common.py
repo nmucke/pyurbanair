@@ -33,9 +33,15 @@ def device(name: str) -> torch.device:
 
 
 def load_model(
-    model_dir: str | pathlib.Path, dev: torch.device, **arch_kwargs: Any
+    model_dir: str | pathlib.Path,
+    dev: torch.device,
+    periodic_y: bool = False,
+    **arch_kwargs: Any,
 ) -> tuple[Any, DictConfig]:
-    """A trained model rebuilt from `config.yaml` + `weights.pt`, in eval mode."""
+    """A trained model rebuilt from `config.yaml` + `weights.pt`, in eval mode.
+
+    `periodic_y` makes it y-periodic at inference
+    (neural_surrogates.periodic.make_periodic_y)."""
     model_dir = pathlib.Path(model_dir)
     cfg = OmegaConf.load(model_dir / "config.yaml")
     assert isinstance(cfg, DictConfig)
@@ -45,6 +51,10 @@ def load_model(
         cfg.architecture, n_state_channels=len(cfg.dataset.state_vars), **arch_kwargs
     )
     model.load_state_dict(torch.load(model_dir / "weights.pt", map_location="cpu"))
+    if periodic_y:
+        from neural_surrogates.periodic import make_periodic_y
+
+        model = make_periodic_y(model)
     return model.to(dev).eval(), cfg
 
 

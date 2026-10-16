@@ -805,6 +805,52 @@ archived generator (`training_data.output_frequency` in their config.yaml, as
 seeds per sample and runs samples back to back on one model without storing
 the seed or record offset, so `from_dataset` raises on its corpora.
 
+#### Inference-time y-periodicity
+
+uDALES domains are periodic in y, but the trained steppers zero-pad y in every
+convolution, so a rollout grows a seam at the y edges: on `dft_b` the jump
+across the y boundary is 3.6-5x the truth's and the edge bands are
+over-smoothed. The top-level `periodic_y` (in `eval.yaml` for the `stepper`
+block and in `comparison.yaml` for `scripts/surrogate_comparison/run_models.py`,
+both `false` by default) fixes this at inference only, without retraining:
+`load_model(..., periodic_y=True)` in `scripts/utils/eval_common.py` calls
+`neural_surrogates.periodic.make_periodic_y(model)`, which pads y circularly in
+every 3-D convolution (z and x stay zero-padded) and computes the SDF geometry
+features on a y-periodic mask.
+
+Measured on the full 10-sample, 119-step `dft_b` rollout on
+`pyudales_realistic`: the seam excess drops from 3.64/4.98/3.42 to
+0.79/0.87/0.92 (truth 0.77/1.04/0.87), the edge-to-interior fluctuation ratio
+goes 0.84 -> 0.98, the edge-band RMSE at lead 10 drops 8 %, the interior is
+unchanged, and the TKE RMSE goes 0.433 -> 0.415. The patched model is
+shift-equivariant in y (relative error under a 16/64-cell y-roll 2-4 % -> <0.1 %).
+Padding the input periodically once, or rolling and blending predictions, were
+tried and dropped.
+
+`run_models.py` records the setting as `periodic_y: true` per label in
+`models.yaml` and as a `periodic_y` attr (1) on each rollout;
+`evaluate_stepper.py` adds a `periodic_y` column (1) to `metrics.csv`. Both
+write nothing extra when it is off.
+
+Supported: `TadpoleTimeStepper` and `TadpoleAE` (global `spatial_mode`, or
+local with one crop spanning y), `P3D` without shifted windows on y,
+`UNetConvNeXt`, `SimpleConv`, and LoRA-wrapped convs. The `local_fno` and
+`ssrolling` baselines built with `y` in `periodic_axes` are already periodic
+and come back unchanged; built without it, they raise. `UPT`, the latent
+generator and `DomainDecomposed` raise: `make_periodic_y` refuses any model it
+cannot make periodic rather than half-patching it. For the Tadpole models
+`ny` must be a multiple of 16 in global mode, and in local mode one crop must
+span y (`ny` equal to the crop's y size); halo mode raises. Window attention (the Tadpole AE's and `P3D`'s) still
+zero-pads its token grid and the Tadpole latent transformer keeps its absolute
+positions; both were measured harmless on `dft_b`. SDF features passed in by a
+caller are used as given, so compute them with the patched model (its
+`_sdf_features`) or `sdf_features(..., periodic_y=True)`, not from a dataset. The patch costs about 5 %
+per step on `dft_b` (0.238 -> 0.251 s/step on an RTX 3090, 10 warm steps). It
+is applied by these two evaluation scripts only: not in training, not in
+`evaluate_autoencoder.py` / `evaluate_latent_generator.py` (single-frame
+reconstructions and generated fields, where the rollout seam does not arise;
+the latent generator raises anyway), and not in `NeuralSurrogateForwardModel`.
+
 ---
 
 ## Part D — Running the surrogate as a forward model
