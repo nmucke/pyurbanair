@@ -899,6 +899,7 @@ INFLOW_PARAM_NAMES = (
     "pressure_gradient_magnitude",
     "vertical_inflow_exponent",
     "sgs_constant",
+    "roughness_length",
 )
 ```
 
@@ -908,6 +909,7 @@ INFLOW_PARAM_NAMES = (
 | `velocity_magnitude` | `u0`/`v0` in namoptions + nudging profiles | m/s reference speed |
 | `pressure_gradient_magnitude` | `dpdx`/`dpdy` in namoptions | Pa/m; decomposed by angle. uDALES-only parameter. |
 | `vertical_inflow_exponent` (α) | Overrides `profile_config["alpha"]` in `_resolve_nudging_config` | Estimated by ESMDA; per-member shear |
+| `roughness_length` | z0 column of `factypes.inp.<expnr>` via `_apply_roughness` | m; see "Roughness" below |
 | `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). The two constants are on different scales (`c_vreman ≈ 2.5 cs²`: 0.217 ↔ 0.12). |
 
 **`pressure_gradient_magnitude`** is the third parameter unique to pyudales.
@@ -919,6 +921,32 @@ unconditionally (outside the static/time-varying branch), so they affect every
 run where they are present. Each is a no-op when absent, keeping default runs
 byte-identical. See [codebase_guide.md §7](codebase_guide.md) "Model-error
 compensation knobs".
+
+### Roughness (`roughness_length`)
+
+z0 for momentum (m), one value for every wall, shared with pypalm. It comes
+from the params Dataset, else from `forward_model.roughness_length`
+(`flow.roughness_length`, 0.05). `_apply_roughness` writes it, as `%10.6f`,
+into the z0 column (3) of the member's `factypes.inp.<expnr>` for every facet
+type that `facets.inp` uses and whose z0 is > 0 (type 1 today; the free-slip
+bounding walls, z0 = 0, are left alone; z0h is unused in neutral runs). uDALES
+reads the file at every launch (`initfac.f90`), so z0 changes per member and
+window without redoing the IBM preprocessing. The write runs in
+`_apply_inflow_settings`, so every member and window gets it, also after a
+window-checkpoint restore. When the file already holds the value (the default
+0.05 against the preprocessing's `%6.2f` 0.05) nothing is written. z0 must be
+> 0: uDALES treats z0 = 0 as free slip.
+
+The wall function is the neutral log law evaluated at the **true distance d**
+of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),
+not at a half cell as in PALM. If `ln(d/z0) <= 1` (d <= e·z0) the velocity is
+taken from a reconstruction point further out, and if that is still too close
+the section gets **no wall stress at all** (`modibm.f90` `ibmwallfun`,
+silently). On the 2 m xie_and_castro grid most sections have d = 1 m (w: 2 m),
+the closest 0.2 m: only 0.5% fall back for z0 up to 0.2 m, 41% from z0 =
+0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
+sections lie within e·z0. In the tiny test case (1 m cells) a z0 of 0.01 -> 0.1
+lowers the time-mean first-cell u by ~4% (1.00 -> 0.97 m/s).
 
 ---
 

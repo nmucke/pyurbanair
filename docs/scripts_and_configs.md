@@ -101,8 +101,8 @@ genuine model error.
 | File | Backend | Notable fields |
 |---|---|---|
 | `pylbm.yaml` | Lattice Boltzmann | `cuda`, `ncpu` (OpenMP threads; CPU build only), `verbose`, `profile_config`, `boundary_condition`, `inlet_turbulence` |
-| `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
-| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
+| `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
+| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
 | `neural_surrogate.yaml` | learned stepper | `model_dir` (a `scripts/surrogate/train.py` output), `spinup_source` (`forward_model \| training_data \| generative`), `spinup_forward_model`, `generative_spinup`, `default_params`; `solver_name: pylbm` |
 
 ### 1.4 `params/`
@@ -121,6 +121,12 @@ so truth and prior stay separate (no inverse crime).
 | `surrogate_training_data.yaml` | `UniformExternalAR2Sampler` | inflow trajectories for `generate_data.py` |
 
 Time-varying samplers take a value every `time.seconds_per_knot` seconds.
+
+`static.yaml` and `static_truth.yaml` carry a commented-out `roughness_length`
+(wall z0, m; uDALES and PALM only). Uncomment it to sample or prescribe z0, and
+add it to `assimilation.params_to_estimate` to estimate it; otherwise the model
+configs apply `flow.roughness_length`. With PALM, drop `sgs_constant` from the
+prior (the two raise together, [pypalm.md](pypalm.md) "Roughness").
 
 ### 1.5 `assimilation_settings/`
 

@@ -40,7 +40,7 @@ hydra:
 
 # Flow setup shared by the LES backends, so that a uDALES and a PALM run of the
 # same case simulate the same flow: configs/model/pyudales.yaml and pypalm.yaml
-# read every key below, pylbm.yaml all but `nudging`. Override here (or
+# read every key below, pylbm.yaml all but `nudging` and `roughness_length`. Override here (or
 # with `flow.*` on the CLI) to change both at once. The parity audit behind
 # these values is in docs/pypalm.md §8 "Cross-model parity with pyudales".
 # Cases override what depends on the geometry (xie_and_castro: the outflow
@@ -75,6 +75,13 @@ flow:
   # from its name ("999" for a uDALES run, "urban_run" for PALM, "000", ... for
   # ensemble members), so set it to share one realisation between a uDALES and
   # a PALM run. false: the laminar mean profile.
+  # Momentum roughness length z0 (m) of every wall: uDALES writes it into
+  # factypes.inp for every facet type in use, PALM into `roughness_length`.
+  # A `roughness_length` in the params sampler overrides it, so ESMDA can
+  # estimate it. 0.05 is the value both cases ship (barcelona's PALM _p3d has
+  # 0.1, now overridden). null leaves the case files alone. Limits and the
+  # PALM sgs_constant conflict: docs/pyudales.md, docs/pypalm.md "Roughness".
+  roughness_length: 0.05
   inlet_turbulence:
     enabled: true
     intensity: 0.15
