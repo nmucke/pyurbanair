@@ -26,6 +26,10 @@ Outputs, in `stepper.output_dir`:
 Top-level `inlet_turbulence.enabled` adds uDALES' inlet turbulence to every
 predicted frame (neural_surrogates.inlet_turbulence.InletTurbulence; the
 corpus must have been generated with it); `rollout_seconds` includes it.
+Top-level `periodic_y` makes every model y-periodic at inference (circular y
+padding in its convolutions, y-periodic SDF features:
+neural_surrogates.periodic.make_periodic_y) and adds a `periodic_y` column
+(1) to metrics.csv.
 """
 
 from __future__ import annotations
@@ -64,7 +68,7 @@ def run(cfg: DictConfig) -> None:
 
     models = {}
     for model_dir in ev.models:
-        model, train_cfg = load_model(model_dir, dev)
+        model, train_cfg = load_model(model_dir, dev, periodic_y=cfg.periodic_y)
         # Steppers that take geometry features compute them from the mask.
         data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
         history = int(train_cfg.dataset.get("num_history_steps") or 1)
@@ -97,6 +101,7 @@ def run(cfg: DictConfig) -> None:
                     "final_rmse": float(per_step[-1]),
                     "rollout_seconds": seconds,
                 }
+                | ({"periodic_y": 1} if cfg.periodic_y else {})
             )
             if sample == ev.sample_indices[0]:
                 first.setdefault("truth", truth)
