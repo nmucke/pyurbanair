@@ -334,21 +334,25 @@ Write site: `_apply_sgs_setting` in `ForwardModel` →
 ### Roughness (`roughness_length`)
 
 z0 for momentum (m), shared with pyudales: from the params Dataset, else
-`forward_model.roughness_length` (`flow.roughness_length`, 0.05).
+`forward_model.roughness_length` (`flow.roughness_length`: null in
+`common.yaml`, which leaves the `_p3d` alone; xie_and_castro sets 0.05).
 `_apply_roughness` writes it to `&initialization_parameters roughness_length`
 on every `_apply_inflow_settings`, so on every member and window. Without the
 land/urban surface models every surface (ground, roofs, walls) is the default
 surface type, so this one scalar is the roughness of all of them. A
-model-config value equal to the `_p3d`'s is not written (xie_and_castro ships
-0.05; barcelona and urbantales ship 0.1, which the 0.05 default now replaces).
+model-config value equal to the `_p3d`'s is not written. Default runs are
+unchanged: xie_and_castro's 0.05 equals its template, and barcelona and the
+urbantales templates (0.1, while uDALES generates 0.05) keep their own values
+through the null default (`generate_data.yaml` sets null too).
 
 PALM applies z0 through Monin-Obukhov similarity between the surface and the
 **first grid level, zu(1) = dz/2** (a half cell, unlike uDALES' true facet
 distance). It needs `0 < z0 < 0.5·dz` (PAC0366, PAC0173); `_apply_roughness`
-raises outside that. It also raises when `sgs_constant` is set as well:
-`km_constant` forces `constant_flux_layer = .false.` (PAC0149), which switches
-off the wall model and so z0. The default z0 is not written and does not
-raise, so a `sgs_constant` run with defaults keeps working. On a flat 2 m grid
+raises outside that. `sgs_constant` (`km_constant`) forces
+`constant_flux_layer = .false.` (PAC0149), which switches off the wall model
+and so z0: a z0 from params together with `sgs_constant` raises, while the
+model-config z0 is then skipped with a log line, so a `sgs_constant` run keeps
+working on any template. On a flat 2 m grid
 (laminar inflow, 40 m fetch) z0 0.01 -> 0.2 lowers the first-level u from
 1.72 to 1.45 m/s.
 

@@ -117,15 +117,23 @@ UNSUPPORTED_CLOSURES = {
 ROUGHNESS_FALLBACK_WARN_SHARE = 0.25
 
 
-def validate_roughness_length(z0: float) -> float:
-    """Return ``z0`` as a float, raising unless it is a finite length > 0 m.
+# Smallest z0 that survives the ``%10.6f`` write in ``set_facet_roughness``.
+MIN_ROUGHNESS_LENGTH = 1e-6
 
-    uDALES treats z0 = 0 as free slip (the wall function skips the facet), and
-    ``%6.2f`` files round anything below 0.005 m to that.
+
+def validate_roughness_length(z0: float) -> float:
+    """Return ``z0`` as a float, raising unless it is a finite length >= 1e-6 m.
+
+    uDALES treats z0 = 0 as free slip (the wall function skips the facet). A
+    smaller positive z0 would be written as 0.000000, and the facet type would
+    then stay free slip for every later window of that member.
     """
     z0 = float(z0)
-    if not np.isfinite(z0) or z0 <= 0.0:
-        raise ValueError(f"roughness_length must be a finite z0 > 0 m, got {z0}")
+    if not np.isfinite(z0) or z0 < MIN_ROUGHNESS_LENGTH:
+        raise ValueError(
+            f"roughness_length must be a finite z0 >= {MIN_ROUGHNESS_LENGTH} m, "
+            f"got {z0}"
+        )
     return z0
 
 

@@ -926,7 +926,8 @@ compensation knobs".
 
 z0 for momentum (m), one value for every wall, shared with pypalm. It comes
 from the params Dataset, else from `forward_model.roughness_length`
-(`flow.roughness_length`, 0.05). `_apply_roughness` writes it, as `%10.6f`,
+(`flow.roughness_length`: null in `common.yaml`, which leaves `factypes.inp`
+alone; xie_and_castro sets 0.05). `_apply_roughness` writes it, as `%10.6f`,
 into the z0 column (3) of the member's `factypes.inp.<expnr>` for every facet
 type that `facets.inp` uses and whose z0 is > 0 (type 1 today; the free-slip
 bounding walls, z0 = 0, are left alone; z0h is unused in neutral runs). uDALES
@@ -935,7 +936,8 @@ window without redoing the IBM preprocessing. The write runs in
 `_apply_inflow_settings`, so every member and window gets it, also after a
 window-checkpoint restore. When the file already holds the value (the default
 0.05 against the preprocessing's `%6.2f` 0.05) nothing is written. z0 must be
-> 0: uDALES treats z0 = 0 as free slip.
+at least 1e-6 m: uDALES treats z0 = 0 as free slip, and anything smaller would
+be written as 0.000000 and stay free slip in every later window.
 
 The wall function is the neutral log law evaluated at the **true distance d**
 of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),

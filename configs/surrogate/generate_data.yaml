@@ -24,6 +24,11 @@ ensemble:
   failure:
     policy: raise
 
+# Keep each template's own wall z0 (the urbantales PALM _p3d ship 0.1): the
+# case's 0.05 belongs to the xie_and_castro templates.
+flow:
+  roughness_length: null
+
 data:
   num_train: 500
   num_val: 10

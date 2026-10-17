@@ -131,8 +131,9 @@ Time-varying samplers take a value every `time.seconds_per_knot` seconds.
 `static.yaml` and `static_truth.yaml` carry a commented-out `roughness_length`
 (wall z0, m; uDALES and PALM only). Uncomment it to sample or prescribe z0, and
 add it to `assimilation.params_to_estimate` to estimate it; otherwise the model
-configs apply `flow.roughness_length`. With PALM, drop `sgs_constant` from the
-prior (the two raise together, [pypalm.md](pypalm.md) "Roughness").
+configs apply `flow.roughness_length` (null keeps the case templates' own z0).
+With PALM, drop `sgs_constant` from the prior when estimating z0 (the two raise
+together, [pypalm.md](pypalm.md) "Roughness").
 
 ### 1.5 `assimilation_settings/`
 

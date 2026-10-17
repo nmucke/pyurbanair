@@ -78,10 +78,12 @@ flow:
   # Momentum roughness length z0 (m) of every wall: uDALES writes it into
   # factypes.inp for every facet type in use, PALM into `roughness_length`.
   # A `roughness_length` in the params sampler overrides it, so ESMDA can
-  # estimate it. 0.05 is the value both cases ship (barcelona's PALM _p3d has
-  # 0.1, now overridden). null leaves the case files alone. Limits and the
-  # PALM sgs_constant conflict: docs/pyudales.md, docs/pypalm.md "Roughness".
-  roughness_length: 0.05
+  # estimate it. null leaves each backend's case files alone (their templates
+  # differ: uDALES generates 0.05, the barcelona and urbantales PALM _p3d
+  # ship 0.1); a case sets one value for both (xie_and_castro: 0.05). Limits
+  # and the PALM sgs_constant conflict: docs/pyudales.md, docs/pypalm.md
+  # "Roughness".
+  roughness_length: null
   inlet_turbulence:
     enabled: true
     intensity: 0.15

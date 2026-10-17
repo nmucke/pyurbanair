@@ -135,6 +135,16 @@ def test_sgs_constant_with_the_default_z0_still_runs(tmp_path: pathlib.Path) -> 
     assert _z0(fm) == "0.05"
 
 
+def test_sgs_constant_skips_a_config_z0_unlike_the_template(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A template with another z0 (barcelona, urbantales ship 0.1) must not make
+    a km_constant run raise: the config value is inert there, so it is skipped."""
+    fm = _make_model(tmp_path, "flow.roughness_length=0.3")
+    _stage(fm, sgs_constant=0.5)
+    assert _z0(fm) == "0.05"
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_rougher_surface_slows_the_near_wall_flow(tmp_path: pathlib.Path) -> None:
     """A flat-floor laminar run at two z0: higher z0, lower first-level speed."""
