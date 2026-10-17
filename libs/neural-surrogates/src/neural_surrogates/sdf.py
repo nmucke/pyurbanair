@@ -78,14 +78,25 @@ def _sdf_features_single(
     spacing: tuple[float, float, float] | None,
     eps: float,
     indices: tuple[int, ...],
+    periodic_y: bool = False,
 ) -> np.ndarray:
     """Compute the feature stack for one 3-D mask (numpy).
 
     The full ``[sdf_n, g_z, g_y, g_x]`` stack is always computed (the gradient
     needs the unclamped SDF regardless), then sliced down to ``indices`` -- so
-    the returned shape is ``(len(indices), *grid)``.
+    the returned shape is ``(len(indices), *grid)``. With ``periodic_y`` the
+    mask is wrapped by half its y extent on both sides (the farthest a periodic
+    image can be, so distances and gradients are exact), the stack computed on
+    that, and cropped back.
     """
     from scipy.ndimage import distance_transform_edt
+
+    if periodic_y:
+        ny = mask.shape[1]
+        k = (ny + 1) // 2
+        wrapped = np.concatenate([mask[:, -k:], mask, mask[:, :k]], axis=1)
+        full = _sdf_features_single(wrapped, clamp_cells, spacing, eps, indices)
+        return np.ascontiguousarray(full[:, :, k : k + ny])
 
     fluid = mask.astype(bool)
     # distance_transform_edt returns, per non-zero cell, the distance to the
@@ -127,6 +138,7 @@ def sdf_features(
     mode: bool | str = "both",
     spacing: tuple[float, float, float] | None = None,
     eps: float = 1e-6,
+    periodic_y: bool = False,
 ) -> torch.Tensor:
     """Signed-distance-field feature channels for a fluid mask.
 
@@ -150,6 +162,10 @@ def sdf_features(
             in cell units -- the trained/deployed convention.
         eps: gradient-norm floor so plateau cells give a zero (not NaN) unit
             gradient.
+        periodic_y: treat the domain as periodic in y (distances and gradients
+            wrap across the y edges); see
+            :func:`neural_surrogates.periodic.make_periodic_y`. ``False``
+            (default) keeps the bounded-domain features.
 
     Returns:
         ``(C, *grid)`` for an unbatched mask, or ``(B, C, *grid)`` for a
@@ -173,11 +189,15 @@ def sdf_features(
     if batched:
         feats = np.stack(
             [
-                _sdf_features_single(arr[b], clamp_cells, spacing, eps, indices)
+                _sdf_features_single(
+                    arr[b], clamp_cells, spacing, eps, indices, periodic_y
+                )
                 for b in range(arr.shape[0])
             ],
             axis=0,
         )
     else:
-        feats = _sdf_features_single(arr, clamp_cells, spacing, eps, indices)
+        feats = _sdf_features_single(
+            arr, clamp_cells, spacing, eps, indices, periodic_y
+        )
     return torch.from_numpy(feats).to(device=mask.device, dtype=mask.dtype)

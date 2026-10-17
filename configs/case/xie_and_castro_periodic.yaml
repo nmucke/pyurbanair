@@ -20,6 +20,8 @@ defaults:
 case_name: xie_and_castro_periodic
 
 flow:
+  # Wall z0 (m) of both backends; the value both templates ship.
+  roughness_length: 0.05
   boundary_condition: periodic
   # Neither exists without an inflow face; both backends raise if set.
   outflow_buffer: null

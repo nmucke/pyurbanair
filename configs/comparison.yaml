@@ -21,6 +21,15 @@ models: []
 sample_indices: null
 # Lead steps after the start frame; null: to the trajectory's end.
 max_steps: null
+# Inference-time uDALES inlet turbulence added to every predicted frame
+# (neural_surrogates.inlet_turbulence.InletTurbulence); needs a corpus generated with it.
+inlet_turbulence:
+  enabled: false
+  seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+# Inference-time y-periodicity (uDALES domains are periodic in y): circular y
+# padding in every conv and y-periodic SDF features
+# (neural_surrogates.periodic.make_periodic_y); no retraining.
+periodic_y: false
 
 metrics:
   report_leads: [1, 10, 50]   # headline RMSE at these lead steps (skipped if beyond the rollout)

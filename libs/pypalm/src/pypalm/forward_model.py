@@ -924,7 +924,10 @@ class ForwardModel(BaseForwardModel):
         template's is not written, so default runs are byte-identical.
 
         ``sgs_constant`` switches ``constant_flux_layer`` off (PAC0149), and with
-        it the only place PALM uses z0, so the two together raise.
+        it the only place PALM uses z0. A z0 from params (estimated or
+        prescribed) together with ``sgs_constant`` raises; the model-config
+        default is then skipped with a log line, as it would be inert, so an
+        ``sgs_constant`` run on a template with another z0 keeps working.
         """
         z0 = self._param_value(params, "roughness_length")
         source = "params"
@@ -940,6 +943,14 @@ class ForwardModel(BaseForwardModel):
         if self._param_value(params, "sgs_constant") is not None or (
             self.sgs_constant is not None
         ):
+            if source == "model config":
+                logger.info(
+                    "Not writing roughness_length=%.6f (model config): "
+                    "sgs_constant disables PALM's constant-flux layer, so z0 "
+                    "would have no effect",
+                    z0,
+                )
+                return
             raise ValueError(
                 f"roughness_length={z0} (from {source}) has no effect with "
                 "sgs_constant set: PALM's km_constant forces "

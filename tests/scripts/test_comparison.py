@@ -17,7 +17,7 @@ import torch
 import xarray
 from omegaconf import OmegaConf
 
-from tests.conftest import compose, load_script
+from tests.conftest import compose, inlet_turbulence_corpus, load_script
 
 MODELS = ("local_fno", "dft")
 
@@ -195,6 +195,87 @@ def test_run_models_rerun_replaces_the_rollouts(
     assert not (run_dir / "rollouts" / "dft").exists()
     assert list(OmegaConf.load(run_dir / "models.yaml")) == ["local_fno"]
     assert list(OmegaConf.load(run_dir / "config.yaml").sample_indices) == [0]
+
+
+def test_run_models_inlet_turbulence(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """The forcing changes the first predicted frame only upstream of the
+    building (x < 7) and is recorded; the default run records nothing."""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{models[1]}]",
+        f"data_dir={corpus}",
+        "max_steps=2",
+        "inlet_turbulence.enabled=true",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    default = OmegaConf.load(comparison_run / "models.yaml")
+    for label in MODELS:
+        assert recorded[label].inlet_turbulence == {"enabled": True, "seed": None}
+        assert "inlet_turbulence" not in default[label]
+        name = pathlib.Path(label) / "sample_0000.nc"
+        forced = xarray.load_dataset(run_dir / "rollouts" / name)
+        plain = xarray.load_dataset(comparison_run / "rollouts" / name)
+        assert forced.attrs["inlet_turbulence_seed"] == "truth"
+        assert "inlet_turbulence_seed" not in plain.attrs
+        for var in ("u", "v", "w"):
+            first, ref = forced[var].values[0], plain[var].values[0]
+            assert np.isfinite(forced[var].values).all()
+            assert not np.allclose(first[..., 0], ref[..., 0]), (label, var)
+            np.testing.assert_array_equal(first[..., 7:], ref[..., 7:])
+
+
+def test_run_models_periodic_y(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: dict[str, Any],
+    model_dirs: list[pathlib.Path],
+) -> None:
+    """periodic_y changes the tiny UNet's predictions at the y edges and is
+    recorded; the default run records nothing. The tiny DFT (global mode)
+    refuses it: its ny (20) is not a multiple of 16."""
+    stepper = session_root / "weights" / trained["train_stepper"].name
+    runs = {}
+    for enabled in (False, True):
+        runs[enabled] = tmp_path / str(enabled)
+        run_models(
+            session_root,
+            runs[enabled],
+            f"models=[{stepper}]",
+            "max_steps=2",
+            f"periodic_y={str(enabled).lower()}",
+        )
+    label = stepper.name
+    recorded = OmegaConf.load(runs[True] / "models.yaml")[label]
+    assert recorded.periodic_y is True
+    assert "periodic_y" not in OmegaConf.load(runs[False] / "models.yaml")[label]
+    name = pathlib.Path("rollouts") / label / "sample_0000.nc"
+    periodic = xarray.load_dataset(runs[True] / name)
+    plain = xarray.load_dataset(runs[False] / name)
+    assert periodic.attrs["periodic_y"] == 1
+    assert "periodic_y" not in plain.attrs
+    for var in ("u", "v", "w"):
+        first, ref = periodic[var].values[0], plain[var].values[0]
+        assert np.isfinite(periodic[var].values).all()
+        for edge in (0, -1):
+            assert not np.allclose(first[:, edge], ref[:, edge]), (var, edge)
+
+    with pytest.raises(ValueError, match="periodic_y: ny"):
+        run_models(
+            session_root,
+            tmp_path / "dft",
+            f"models=[{model_dirs[1]}]",
+            "max_steps=2",
+            "periodic_y=true",
+        )
 
 
 # ---------------------------------------------------------------------------

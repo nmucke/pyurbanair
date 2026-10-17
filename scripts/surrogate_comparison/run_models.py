@@ -28,6 +28,17 @@ Outputs, in `paths.results_dir` (the run dir):
                                      trajectory NNNN of the split
 Persistence is not written: compute_metrics.py derives it from the truth.
 A rerun into the same run dir first removes the earlier rollouts and models.yaml.
+
+`inlet_turbulence.enabled` adds uDALES' inlet turbulence to every predicted
+frame (neural_surrogates.inlet_turbulence.InletTurbulence; the corpus must
+have been generated with it), outside the timed inference. The setting is
+then recorded in models.yaml and the rollouts' `inlet_turbulence_seed` attr
+(`truth`: the truth run's own realization, else the seed).
+
+`periodic_y` makes every model y-periodic at inference (circular y padding in
+its convolutions, y-periodic SDF features:
+neural_surrogates.periodic.make_periodic_y), for uDALES' y-periodic domains.
+It is then recorded in models.yaml and the rollouts' `periodic_y` attr (1).
 """
 
 from __future__ import annotations
@@ -46,7 +57,13 @@ from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
-from eval_common import device, load_model, load_states, open_dataset  # noqa: E402
+from eval_common import (  # noqa: E402
+    device,
+    inlet_turbulence,
+    load_model,
+    load_states,
+    open_dataset,
+)
 
 RESERVED = ("truth", "persistence", "truth_halves")
 
@@ -69,7 +86,10 @@ def run(cfg: DictConfig) -> None:
             for label, d in labels.items()
         }
     )
-    models = {label: load_model(d, dev) for label, d in labels.items()}
+    models = {
+        label: load_model(d, dev, periodic_y=cfg.periodic_y)
+        for label, d in labels.items()
+    }
     first_cfg = next(iter(models.values()))[1]
     data = open_dataset(first_cfg, cfg.data_dir, cfg.split, sdf_features="none")
     histories = {
@@ -100,9 +120,10 @@ def run(cfg: DictConfig) -> None:
         params = data._params[sample]
         geometry = data.geometry_for(sample)
         frames = _frame_coords(data, sample, start, steps)
+        inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
         for label, (model, _) in models.items():
             pred, seconds = _rollout(
-                model, window, params, geometry, histories[label], steps, dev
+                model, window, params, geometry, histories[label], steps, dev, inlet
             )
             timings[label][0] += seconds
             timings[label][1] += max(steps - 1, 1)
@@ -120,6 +141,13 @@ def run(cfg: DictConfig) -> None:
                     "data_dir": str(pathlib.Path(data.root).resolve()),
                 },
             )
+            if inlet is not None:  # "truth": the truth run's own realization
+                seed = cfg.inlet_turbulence.seed
+                ds.attrs["inlet_turbulence_seed"] = (
+                    "truth" if seed is None else str(seed)
+                )
+            if cfg.periodic_y:
+                ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
             path.parent.mkdir(parents=True, exist_ok=True)
             ds.to_netcdf(path)
@@ -136,6 +164,12 @@ def run(cfg: DictConfig) -> None:
                     "device": str(dev),
                     "data": signatures[label],
                 }
+                | (
+                    {"inlet_turbulence": cfg.inlet_turbulence}
+                    if cfg.inlet_turbulence.enabled
+                    else {}
+                )
+                | ({"periodic_y": True} if cfg.periodic_y else {})
                 for label, (model, _) in models.items()
             }
         ),
@@ -230,9 +264,14 @@ def _rollout(
     history: int,
     steps: int,
     dev: torch.device,
+    inlet: Any = None,
 ) -> tuple[np.ndarray, float]:
     """`steps` predicted frames after the last of `window` (its last `history`
-    frames as input), and the inference time of all steps but the first."""
+    frames as input), and the inference time of all steps but the first.
+
+    `inlet` (if given) adds the inlet turbulence to every predicted frame
+    before it is stored and fed back; its time is not counted.
+    """
     start = len(window) - 1
     channels, grid = window.shape[1], window.shape[2:]
     state = torch.from_numpy(window[start - history + 1 :])
@@ -240,15 +279,23 @@ def _rollout(
     geom = geometry.unsqueeze(0).to(dev)
     pred = np.empty((steps, *window.shape[1:]), dtype=np.float32)
     tic = time.perf_counter()
+    excluded = 0.0
     for k in range(steps):
         if k == 1:  # the first step pays the warm-up
             _sync(dev)
             tic = time.perf_counter()
         step = model(state, params[start + k].unsqueeze(0).to(dev), geom)
+        if inlet is not None:
+            _sync(dev)
+            injected = time.perf_counter()
+            step = inlet(step, start + k + 1)
+            _sync(dev)
+            if k > 0:
+                excluded += time.perf_counter() - injected
         pred[k] = step[0].float().cpu().numpy()
         state = step if history == 1 else torch.cat([state[:, channels:], step], dim=1)
     _sync(dev)
-    return pred, time.perf_counter() - tic
+    return pred, time.perf_counter() - tic - excluded
 
 
 def _sync(dev: torch.device) -> None:

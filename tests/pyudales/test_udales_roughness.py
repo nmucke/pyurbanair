@@ -142,7 +142,7 @@ def test_warm_start_reapplies_after_a_window_restore(tmp_path: pathlib.Path) -> 
     assert _z0(model)[1] == pytest.approx(0.08)
 
 
-@pytest.mark.parametrize("value", [0.0, -0.01, np.nan, np.inf])  # type: ignore[misc]
+@pytest.mark.parametrize("value", [0.0, -0.01, 4e-7, np.nan, np.inf])  # type: ignore[misc]
 def test_invalid_values_raise(tmp_path: pathlib.Path, value: float) -> None:
     model = _model(tmp_path)
     before = _factypes(model).read_bytes()
