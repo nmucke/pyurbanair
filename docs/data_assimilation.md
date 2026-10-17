@@ -51,11 +51,26 @@ in physical units, so a member can never receive a value `<= 0`. A filter's
 random walk and inflation act in log space too (a `RandomWalkEvolution` std for
 such a parameter is in log units: 0.05 ≈ 5 % per cycle). The hybrid inherits it
 from its smoother and filter. A name must be in the params, static (`ensemble`
-dim only) and positive, or the run raises before its first forecast. Bounds are
-not enforced after an update: `log` keeps `z0 > 0`, not `z0 < dz/2`. The run
-scripts pass every parameter whose prior is a `LogNormal`
+dim only) and positive, or the run raises before its first forecast.
+
+*Bounded.* `log_parameter_names` may instead map each name to `None` (the plain
+log above, bit for bit) or to `(min, max)`. Such a parameter is analysed as
+`y = logit((log(value) - log(min)) / (log(max) - log(min)))` and written back
+by the inverse, so every updated value lies strictly inside `(min, max)` — `log`
+alone keeps `z0 > 0` but not, e.g., `z0` below a grid's wall-distance limit.
+Values at or beyond a bound (an initial ensemble's tails) are clamped a hair
+(`BOUND_MARGIN` = 1e-6 of the log range) inside first, since `logit` is infinite
+there; the first forecast still sees them as supplied. Random-walk stds and
+inflation then act on `y` (logit units: near the middle, `std` × `log(max/min)`
+/ 4 in log units). Same coverage as the plain log: every ESMDA variant, the
+EnKF in parameter and joint modes, the hybrid.
+
+The run scripts pass every parameter whose prior is a `LogNormal`
 (`log_space_parameter_names` in `pyurbanair.static_parameters`; e.g. the
-`roughness_length` block in `configs/params/static.yaml`).
+`roughness_length` block in `configs/params/static.yaml`), bounded when the
+prior sets both `min` and `max`. Those then truncate the prior draws (a
+truncated log-normal with the given `median` and `log_std`) *and* bound every
+update; with only one or neither, the update is the plain log.
 
 Source tree:
 

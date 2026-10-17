@@ -39,16 +39,21 @@ parameters:
   # default: the model configs then apply flow.roughness_length (0.05).
   # Uncomment to sample (and add to assimilation.params_to_estimate to estimate)
   # it. LogNormal: log(z0) ~ Normal(log(median), log_std), so log_std 0.7 is a
-  # factor ~2 per std (68% in 0.025-0.10 m); min/max clamp the draws only. The
-  # DA updates log(z0), so every member gets z0 > 0; the upper bound is NOT
-  # enforced after an update. PALM needs z0 < dz/2 and no sgs_constant (delete it
-  # above). On the 2 m xie_and_castro grid most uDALES wall sections sit 1 m from
-  # their facet, so z0 above ~0.37 m (1 m / e) leaves the log law's range there
-  # (docs/pyudales.md, docs/pypalm.md "Roughness"). pylbm ignores it.
+  # factor ~2 per std (68% in 0.025-0.10 m), truncated to (min, max). With both
+  # min and max the DA updates a bounded transform of log(z0), so every member
+  # keeps min < z0 < max after every update (without them: only z0 > 0). Keep
+  # max below the grid's wall-distance limit: uDALES reconstructs the wall
+  # velocity at e*z0 from the facet, and on the 2 m xie_and_castro grid most
+  # wall sections sit 1 m from it, so z0 <~ 0.3 m (above 1 m / e = 0.37 m uDALES
+  # aborts with "x out of bounds"). PALM needs z0 < dz/2 and no sgs_constant
+  # (delete it above) (docs/pyudales.md, docs/pypalm.md "Roughness"). pylbm
+  # ignores it.
   # roughness_length:
   #   _target_: pyurbanair.static_parameters.LogNormal
   #   median: 0.05
   #   log_std: 0.7
+  #   min: 0.005
+  #   max: 0.3
 
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant

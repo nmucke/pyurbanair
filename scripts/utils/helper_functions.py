@@ -292,13 +292,14 @@ def save_obs(
 
 def parameter_names(
     cfg: DictConfig, params: xarray.Dataset, sampler: Any
-) -> tuple[list[str] | None, list[str], list[str]]:
+) -> tuple[list[str] | None, list[str], dict[str, tuple[float, float] | None]]:
     """The parameters to estimate (None for all), the global ones and the
-    log-space ones.
+    log-space ones (name -> None or (min, max) bounds).
 
     SGS-discrepancy coefficients are global (never localized) when the
     assimilation model's discrepancy is enabled. Parameters with a `LogNormal`
-    prior in `sampler` are analysed as log(value).
+    prior in `sampler` are analysed as log(value), bounded to (min, max) when
+    the prior sets both.
     """
     selected = cfg.assimilation.params_to_estimate
     discrepancy = OmegaConf.select(

@@ -25,8 +25,10 @@ from data_assimilation.observation_operator import (
     sensor_observation_coords,
 )
 from data_assimilation.parameter_selection import (
+    LogParameters,
     merge_parameters,
     select_parameters,
+    validate_log_parameters,
     validate_parameter_names,
 )
 from data_assimilation.reduction import OnlineStateReduction
@@ -74,8 +76,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
     global_parameter_names: tuple[str, ...] = ()
     #: None estimates every supplied field; () keeps all forecast fields fixed.
     parameter_names_to_estimate: Optional[tuple[str, ...]] = None
-    #: Static parameters analysed as log(value) (strictly positive ones).
-    log_parameter_names: tuple[str, ...] = ()
+    #: Static parameters analysed as log(value): name -> None, or name ->
+    #: (min, max) for the bounded transform (parameter_selection).
+    log_parameter_names: dict[str, Optional[tuple[float, float]]] = {}
 
     def __init__(
         self,
@@ -90,7 +93,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
-        log_parameter_names: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         super().__init__(
             observation_operator,
@@ -176,7 +179,7 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         self.parameter_names_to_estimate = validate_parameter_names(
             parameter_names_to_estimate
         )
-        self.log_parameter_names = validate_parameter_names(log_parameter_names) or ()
+        self.log_parameter_names = validate_log_parameters(log_parameter_names)
 
         # Reject a coordinate-based localization on a smoother that cannot supply
         # row coordinates (parameter-only variants). Deferring this to the first
@@ -974,7 +977,7 @@ class TimeVaryingParameterESMDA(ParameterESMDA):
         likelihood_weight: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
-        log_parameter_names: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,

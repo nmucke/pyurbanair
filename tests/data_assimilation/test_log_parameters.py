@@ -1,5 +1,6 @@
-"""Log-space parameters: the Kalman update works on log(value), every forecast
-and returned Dataset holds the physical (positive) value."""
+"""Log-space parameters: the Kalman update works on log(value) (or, with
+bounds, on the logit of the log-scaled position), every forecast and returned
+Dataset holds the physical value: positive, and inside (min, max) if bounded."""
 
 from typing import Any, cast
 
@@ -9,7 +10,12 @@ import numpy as np
 import pytest
 import xarray
 from data_assimilation.filtering import EnsembleKalmanFilter, RandomWalkEvolution
-from data_assimilation.parameter_selection import merge_parameters, select_parameters
+from data_assimilation.inflation import MultiplicativeInflation
+from data_assimilation.parameter_selection import (
+    merge_parameters,
+    select_parameters,
+    validate_log_parameters,
+)
 from data_assimilation.smoothing.esmda import (
     ParameterESMDA,
     StateAndParameterESMDA,
@@ -210,3 +216,139 @@ def test_filter_keeps_log_parameters_positive() -> None:
     assert all(bool((p.z0 > 0).all()) for p in model.inputs)
     assert bool((result.params_history.z0 > 0).all())
     assert float(np.median(result.params.z0)) == pytest.approx(TRUE_Z0, rel=0.1)
+
+
+# The configs/params/static.yaml z0 bounds: the prior's tails reach past both.
+BOUNDS = (0.005, 0.3)
+BOUNDED = {"z0": BOUNDS}
+
+
+def _bounded_params(dynamic: bool = False) -> xarray.Dataset:
+    """`_params` with z0 drawn from the bounded prior, as the run scripts do."""
+    from pyurbanair.static_parameters import LogNormal
+
+    z0 = LogNormal(0.05, 0.7, *BOUNDS).sample(jax.random.PRNGKey(0), N_E)
+    params = _params(dynamic)
+    params["z0"] = ("ensemble", np.asarray(z0, dtype=float), params.z0.attrs)
+    return params
+
+
+def _first(output: Any) -> Any:
+    return output[0] if isinstance(output, tuple) else output
+
+
+def _inside(values: Any) -> bool:
+    values = np.asarray(values)
+    return bool(np.all((values > BOUNDS[0]) & (values < BOUNDS[1])))
+
+
+def test_bounded_round_trip_and_clamping() -> None:
+    params = _params()
+    z0 = params.z0.values
+    assert z0.max() > BOUNDS[1]  # the prior's tail starts outside
+    selected = select_parameters(params, ["z0"], BOUNDED)
+    assert np.all(np.isfinite(selected.z0.values))
+    merged = merge_parameters(params, selected, BOUNDED)
+    assert _inside(merged.z0) and merged.z0.attrs == {"units": "m"}
+    interior = (z0 > BOUNDS[0]) & (z0 < BOUNDS[1])
+    np.testing.assert_allclose(merged.z0.values[interior], z0[interior], rtol=1e-5)
+    # Values at or beyond a bound come back a hair inside it.
+    edges = params.assign(z0=("ensemble", np.resize([0.005, 0.3, 1e-4, 5.0], N_E)))
+    back = merge_parameters(edges, select_parameters(edges, None, BOUNDED), BOUNDED)
+    assert _inside(back.z0)
+    np.testing.assert_allclose(back.z0.values[:4], [0.005, 0.3, 0.005, 0.3], rtol=1e-4)
+    # An update to +-infinity still maps strictly inside.
+    extreme = selected.assign(z0=selected.z0 * 0.0 + np.resize([1e6, -1e6], N_E))
+    assert _inside(merge_parameters(params, extreme, BOUNDED).z0)
+
+
+def test_bounded_update_cannot_overshoot_the_max() -> None:
+    """A truth of z0 = 1 m: the log update overshoots 0.3, the bounded one not."""
+    far = jnp.array([np.log(1.0), 0.5])
+    unbounded = _first(
+        _smoother(ParameterESMDA, _Forecast(), ["z0"])(
+            params=_params(), observations=far
+        )
+    )
+    assert float(np.median(unbounded.z0)) > BOUNDS[1]
+    # The prior's tails start outside (min, max); every update is inside.
+    model = _Forecast()
+    history = _first(
+        _smoother(ParameterESMDA, model, BOUNDED)(
+            params=_params(), observations=far, return_params_history=True
+        )
+    )
+    assert not _inside(model.inputs[0].z0)
+    assert all(_inside(p.z0) for p in model.inputs[1:])
+    assert _inside(history.isel(esmda_step=slice(1, None)).z0)
+    assert float(np.median(history.isel(esmda_step=-1).z0)) > 0.9 * BOUNDS[1]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "cls",
+    [
+        ParameterESMDA,
+        StateAndParameterESMDA,
+        TimeVaryingParameterESMDA,
+        StateAndTimeVaryingParameterESMDA,
+    ],
+)
+def test_esmda_recovers_an_interior_truth_with_bounds(cls: Any) -> None:
+    model = _Forecast()
+    output = _smoother(cls, model, BOUNDED)(
+        params=_bounded_params(dynamic=issubclass(cls, TimeVaryingParameterESMDA)),
+        observations=OBS,
+        return_params_history=True,
+    )
+    history = _first(output)
+    assert all(_inside(p.z0) for p in model.inputs)
+    assert _inside(history.z0)
+    posterior = history.isel(esmda_step=-1)
+    assert float(np.median(posterior.z0)) == pytest.approx(TRUE_Z0, rel=0.1)
+
+
+def test_unbounded_spec_is_identical_to_log_names() -> None:
+    """name -> None is the plain log transform, bit for bit."""
+    runs = [
+        _first(
+            _smoother(ParameterESMDA, _Forecast(), names)(
+                params=_params(), observations=OBS, return_params_history=True
+            )
+        )
+        for names in (["z0"], {"z0": None})
+    ]
+    xarray.testing.assert_identical(runs[0], runs[1])
+
+
+@pytest.mark.parametrize("mode", ["parameter", "joint"])  # type: ignore[misc]
+def test_filter_keeps_bounded_parameters_inside(mode: Any) -> None:
+    model = _Forecast()
+    enkf = EnsembleKalmanFilter(
+        observation_operator=_Observation(),
+        forward_model=cast(Any, model),
+        C_D=jnp.array([0.01, 0.01]),
+        mode=mode,
+        rng_key=jax.random.PRNGKey(1),
+        log_parameter_names=BOUNDED,
+        inflation=MultiplicativeInflation(1.5),
+        # In the bounded space for z0: a random walk that can't leave (min, max).
+        parameter_evolution=RandomWalkEvolution(std={"z0": 2.0, "a": 0.05}),
+    )
+    far = jnp.array([np.log(1.0), 0.5])
+    result = enkf.run(
+        params=_bounded_params(),
+        observations=jnp.stack([far, far, far]),
+        return_history=True,
+    )
+    assert result.params is not None and result.params_history is not None
+    assert all(_inside(p.z0) for p in model.inputs)
+    assert _inside(result.params_history.z0)
+    assert float(np.median(result.params.z0)) > 0.9 * BOUNDS[1]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "bounds", [(0.3, 0.005), (0.1, 0.1), (0.0, 0.3), (-1.0, 0.3)]
+)
+def test_invalid_bounds_are_rejected(bounds: Any) -> None:
+    with pytest.raises(ValueError, match="0 < min < max"):
+        validate_log_parameters({"z0": bounds})

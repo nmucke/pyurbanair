@@ -64,8 +64,10 @@ from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
 from data_assimilation.parameter_selection import (
+    LogParameters,
     merge_parameters,
     select_parameters,
+    validate_log_parameters,
     validate_parameter_names,
 )
 from data_assimilation.reduction import OnlineStateReduction
@@ -352,8 +354,9 @@ class BaseFilter:
     #: These names persist across cycles; they do not assign a grid location.
     global_parameter_names: tuple[str, ...] = ()
     parameter_names_to_estimate: Optional[tuple[str, ...]] = None
-    #: Static parameters analysed (and random-walked) as log(value).
-    log_parameter_names: tuple[str, ...] = ()
+    #: Static parameters analysed (and random-walked) as log(value): name -> None,
+    #: or name -> (min, max) for the bounded transform (parameter_selection).
+    log_parameter_names: dict[str, Optional[tuple[float, float]]] = {}
 
     def __init__(
         self,
@@ -370,7 +373,7 @@ class BaseFilter:
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
-        log_parameter_names: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -391,7 +394,7 @@ class BaseFilter:
         self.parameter_names_to_estimate = validate_parameter_names(
             parameter_names_to_estimate
         )
-        self.log_parameter_names = validate_parameter_names(log_parameter_names) or ()
+        self.log_parameter_names = validate_log_parameters(log_parameter_names)
 
         # One FRAME's error covariance, not one cycle's: the serial sweep hands
         # the analysis one frame's (num_sensors x num_states) vector at a time,
@@ -1907,7 +1910,7 @@ class EnsembleKalmanFilter(BaseFilter):
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
-        log_parameter_names: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,

@@ -357,8 +357,8 @@ unselected dynamic trajectories still extrapolate between windows. Use a
   `ParameterSampler` holds a `name -> Distribution` mapping (`Normal`,
   `LogNormal`, `Uniform`, `Constant`); `static.yaml` is a prior,
   `static_truth.yaml` all `Constant`s. Output has an `ensemble` dim only. A
-  `LogNormal` parameter is estimated in log space
-  ([data_assimilation.md §1](data_assimilation.md)).
+  `LogNormal` parameter is estimated in log space, kept inside (min, max) when
+  it sets both ([data_assimilation.md §1](data_assimilation.md)).
 - **Dynamic** ([src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/)) —
   `AR2RelaxationModel` (critically-damped AR(2) relaxing toward an external
   prior; `dynamic.yaml`, `dynamic_truth.yaml`) and `HarmonicParameterModel`

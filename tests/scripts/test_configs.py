@@ -381,7 +381,7 @@ def test_log_space_prior_composes(workflow: str, tmp_path: pathlib.Path) -> None
     helpers = load_script("scripts/utils/helper_functions.py")
     selected, _, log_names = helpers.parameter_names(cfg, params, sampler)
     assert selected == ["inflow_angle", "roughness_length"]
-    assert log_names == ["roughness_length"]
+    assert log_names == {"roughness_length": None}
 
 
 def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
@@ -399,3 +399,5 @@ def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
         block.append(line.replace("# ", "", 1))
     prior = instantiate(OmegaConf.create("\n".join(block)).roughness_length)
     assert isinstance(prior, LogNormal)
+    # Bounded: the DA keeps z0 inside (min, max) through every update.
+    assert prior.bounds == (0.005, 0.3)
