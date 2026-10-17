@@ -89,6 +89,12 @@ A case is self-contained (`# @package _global_`): `case_name`, `domain`
 `output_frequency`, `spinup_time`, `seconds_per_knot`). Keep `nx`/`ny` even
 (PALM's FFT pressure solver rejects odd cyclic dimensions). Add a case by
 copying one and adjusting.
+Every sensor must read fluid cells that touch no wall or roof, at the case grid
+and at 1 m, with the held-out ones at least 4 m from the assimilated ones;
+`test_case_sensors_are_clear_of_the_buildings` in `tests/scripts/test_configs.py`
+checks this for the Xie & Castro cases. Their layout (18 assimilated points at
+z = 2, 8 and 20 m over the whole array plus the approach flow, 10 held out at
+2-26 m) and its reasoning are in the comments of `configs/case/xie_and_castro.yaml`.
 
 ### 1.3 `model/`
 
@@ -101,8 +107,8 @@ genuine model error.
 | File | Backend | Notable fields |
 |---|---|---|
 | `pylbm.yaml` | Lattice Boltzmann | `cuda`, `ncpu` (OpenMP threads; CPU build only), `verbose`, `profile_config`, `boundary_condition`, `inlet_turbulence` |
-| `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
-| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging and inlet turbulence from `flow` |
+| `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
+| `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
 | `neural_surrogate.yaml` | learned stepper | `model_dir` (a `scripts/surrogate/train.py` output), `spinup_source` (`forward_model \| training_data \| generative`), `spinup_forward_model`, `generative_spinup`, `default_params`; `solver_name: pylbm` |
 
 ### 1.4 `params/`
@@ -121,6 +127,13 @@ so truth and prior stay separate (no inverse crime).
 | `surrogate_training_data.yaml` | `UniformExternalAR2Sampler` | inflow trajectories for `generate_data.py` |
 
 Time-varying samplers take a value every `time.seconds_per_knot` seconds.
+
+`static.yaml` and `static_truth.yaml` carry a commented-out `roughness_length`
+(wall z0, m; uDALES and PALM only). Uncomment it to sample or prescribe z0, and
+add it to `assimilation.params_to_estimate` to estimate it; otherwise the model
+configs apply `flow.roughness_length` (null keeps the case templates' own z0).
+With PALM, drop `sgs_constant` from the prior when estimating z0 (the two raise
+together, [pypalm.md](pypalm.md) "Roughness").
 
 ### 1.5 `assimilation_settings/`
 

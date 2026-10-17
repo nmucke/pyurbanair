@@ -20,6 +20,8 @@ defaults:
 case_name: xie_and_castro_periodic
 
 flow:
+  # Wall z0 (m) of both backends; the value both templates ship.
+  roughness_length: 0.05
   boundary_condition: periodic
   # Neither exists without an inflow face; both backends raise if set.
   outflow_buffer: null
@@ -44,14 +46,22 @@ time:
   spinup_time: 180.0
 
 obs:
-  # Assimilation sensors at street level (z = 2 m) in the open N-S lanes
-  # x = 15-25, 35-45, 55-65 m, which no cube blocks at any y.
-  x_points: [20.0, 20.0, 40.0, 40.0, 60.0, 60.0]
-  y_points: [20.0, 60.0, 10.0, 50.0, 30.0, 70.0]
-  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
-  # Validation sensors: a fourth lane (80, 30), the wake 15 m behind the
-  # 13.6 m cube at x = 5-15, y = 25-35 (30, 30), an E-W street between two
-  # cubes (10, 40), and one above the tallest (17.2 m, 18 m voxelized) cube.
-  validation_x_points: [80.0, 30.0, 10.0, 50.0]
-  validation_y_points: [30.0, 30.0, 40.0, 50.0]
-  validation_z_points: [2.0, 2.0, 2.0, 24.0]
+  # The xie_and_castro layout (see its comments: 18 assimilated points at
+  # z = 2, 8 and 20 m over all four columns, 10 held-out ones at 2-26 m), with
+  # its points upstream of the array, at x = -5, moved into the fourth lane
+  # (x = 75-85), the periodic unit's only stretch not in that case's domain:
+  # (80, 40, 2) and (80, 20, 20) assimilated, (80, 70, 8) held out. Every other
+  # point is in the same place relative to the cubes, so the two cases' sensors
+  # read the same streets, wakes and heights.
+  x_points: [80.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             10.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             80.0, 10.0, 30.0, 50.0, 70.0]
+  y_points: [40.0, 30.0, 50.0, 70.0, 60.0, 10.0, 70.0,
+             60.0, 30.0, 50.0, 20.0, 70.0, 10.0,
+             20.0, 30.0, 70.0, 10.0, 60.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+             8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+             20.0, 20.0, 20.0, 20.0, 20.0]
+  validation_x_points: [80.0, 10.0, 20.0, 78.0, 30.0, 30.0, 50.0, 70.0, 60.0, 20.0]
+  validation_y_points: [70.0, 40.0, 10.0, 30.0, 70.0, 10.0, 40.0, 30.0, 50.0, 60.0]
+  validation_z_points: [8.0, 2.0, 2.0, 2.0, 5.0, 14.0, 14.0, 14.0, 14.0, 26.0]

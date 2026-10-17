@@ -215,7 +215,8 @@ Variables are `u, v, w[, pres]`. Ensembles add an `ensemble` dim.
 
 **Parameters** = `xarray.Dataset` of scalar variables: `inflow_angle`
 (degrees), `velocity_magnitude` (m/s), optionally the model-error knobs
-`vertical_inflow_exponent` and `sgs_constant` (§7), and uDALES-only
+`vertical_inflow_exponent` and `sgs_constant` (§7), the uDALES/PALM wall
+roughness `roughness_length` (m), and uDALES-only
 `pressure_gradient_magnitude` and `sgs_bias_b0/b1/b2`
 (`resolve_parameter_schema` in `hydra_helpers.py` lists them per backend).
 
@@ -420,6 +421,9 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   - pypalm: α → `profile_config`; SGS → `km_constant` (a constant eddy
     diffusivity in m²/s that replaces the SGS-TKE closure and forces
     `constant_flux_layer = .false.`), so it needs PALM-appropriate prior ranges.
+- `roughness_length` (wall z0, m) is a third knob for the two LES backends:
+  uDALES `factypes.inp`, PALM `roughness_length` (raises with `sgs_constant`).
+  pylbm ignores it. Default `flow.roughness_length` in `common.yaml`.
 
 ### pypalm
 - Lazy-imported. All `pypalm.*` `_target_` blocks live only in

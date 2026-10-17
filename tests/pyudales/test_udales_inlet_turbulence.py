@@ -649,6 +649,7 @@ def _apply_inflow_settings_for(
     model.inlet_turbulence = {}
     model.boundary_condition = "inflow_outflow"
     model.spinup_time = 0.0
+    model.roughness_length = None
     model._simulation_time = 10.0
     model.per_member_irandom = per_member_irandom
     monkeypatch.setattr(model, "_apply_sgs_setting", lambda params: None)

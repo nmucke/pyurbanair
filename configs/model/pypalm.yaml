@@ -49,6 +49,11 @@ forward_model:
   # too little dissipation as m^2/s and diverges. null keeps PALM's own closure.
   # Only set this to a PALM-appropriate m^2/s value chosen for PALM.
   sgs_constant: null
+  # Surface roughness z0 (m) of all surfaces, shared with pyudales; a
+  # `roughness_length` in the params overrides it. Needs 0 < z0 < dz/2, and
+  # raises together with sgs_constant (which disables the wall model that reads
+  # it). null -> leave the _p3d value.
+  roughness_length: ${flow.roughness_length}
   # Periodic runs are driven by PALM's nudging scheme (NUDGING_DATA + an inert
   # LSF_DATA), relaxing the domain toward the inflow_angle/velocity_magnitude
   # wind — the counterpart of pyudales's periodic nudging path. See

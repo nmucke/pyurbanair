@@ -193,6 +193,7 @@ class ForwardModel(BaseForwardModel):
         spinup_time: float = 0.0,
         boundary_condition: str = "periodic",
         sgs_constant: Optional[float] = None,
+        roughness_length: Optional[float] = None,
         nudging_config: Optional[dict] = None,
         inlet_turbulence: Optional[dict] = None,
         random_seed: Optional[int] = None,
@@ -218,6 +219,11 @@ class ForwardModel(BaseForwardModel):
         # right default here, since PALM's proxy is `km_constant` in m^2/s, not a
         # dimensionless Smagorinsky constant. See `_apply_sgs_setting`.
         self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
+        # Per-backend default z0 (m), overridden by a `roughness_length` in
+        # params; written per call in `_apply_roughness`.
+        self.roughness_length = (
+            float(roughness_length) if roughness_length is not None else None
+        )
 
         self.verbose = verbose
         self.stdout = None if verbose else subprocess.DEVNULL
@@ -729,6 +735,7 @@ class ForwardModel(BaseForwardModel):
         p3d.set_value("initialization_parameters", "ug_surface", float(u0))
         p3d.set_value("initialization_parameters", "vg_surface", float(v0))
         self._apply_sgs_setting(p3d, self.params)
+        self._apply_roughness(p3d, self.params)
 
         self._init_uv_profile = None
         if self.bounds is not None and self.nz:
@@ -905,6 +912,63 @@ class ForwardModel(BaseForwardModel):
             float(sgs),
             source,
         )
+
+    def _apply_roughness(self, p3d: P3DFile, params: Optional[xarray.Dataset]) -> None:
+        """Write the momentum roughness length z0 as ``roughness_length``.
+
+        One scalar for every surface (no land/urban surface model, so all walls
+        are the default surface type). PALM applies it through Monin-Obukhov
+        similarity at the first grid level, zu(1) = dz/2, and requires
+        0 < z0 < 0.5 dz (PAC0366, PAC0173). Precedence as for ``sgs_constant``:
+        params, then the model config. A model-config value equal to the
+        template's is not written, so default runs are byte-identical.
+
+        ``sgs_constant`` switches ``constant_flux_layer`` off (PAC0149), and with
+        it the only place PALM uses z0. A z0 from params (estimated or
+        prescribed) together with ``sgs_constant`` raises; the model-config
+        default is then skipped with a log line, as it would be inert, so an
+        ``sgs_constant`` run on a template with another z0 keeps working.
+        """
+        z0 = self._param_value(params, "roughness_length")
+        source = "params"
+        if z0 is None:
+            z0 = self.roughness_length
+            source = "model config"
+        if z0 is None:
+            return
+        current = p3d.get_value("initialization_parameters", "roughness_length")
+        if source == "model config" and current is not None:
+            if abs(float(current) - z0) <= 1e-12:
+                return
+        if self._param_value(params, "sgs_constant") is not None or (
+            self.sgs_constant is not None
+        ):
+            if source == "model config":
+                logger.info(
+                    "Not writing roughness_length=%.6f (model config): "
+                    "sgs_constant disables PALM's constant-flux layer, so z0 "
+                    "would have no effect",
+                    z0,
+                )
+                return
+            raise ValueError(
+                f"roughness_length={z0} (from {source}) has no effect with "
+                "sgs_constant set: PALM's km_constant forces "
+                "constant_flux_layer=.false. (PAC0149), which disables the "
+                "Monin-Obukhov wall model that reads z0. Drop one of the two "
+                "(model.forward_model.roughness_length=null, or remove "
+                "roughness_length / sgs_constant from the params)."
+            )
+        dz_text = p3d.get_value("initialization_parameters", "dz")
+        dz = float(dz_text.split(",")[0]) if dz_text is not None else None
+        if not np.isfinite(z0) or z0 <= 0.0 or (dz is not None and z0 >= 0.5 * dz):
+            raise ValueError(
+                f"roughness_length must satisfy 0 < z0 < 0.5*dz = "
+                f"{0.5 * dz if dz is not None else float('nan')} m "
+                f"(PALM PAC0366/PAC0173), got {z0} (from {source})"
+            )
+        p3d.set_value("initialization_parameters", "roughness_length", float(z0))
+        logger.info("Set PALM roughness_length = %.6f m (from %s)", z0, source)
 
     def save_results(self, state: xarray.Dataset, sim_name: str = "state") -> None:
         self._save_results(state, sim_name)

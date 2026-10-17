@@ -52,6 +52,9 @@ forward_model:
   # outflow instability, now removed by the 20 m `flow.outflow_buffer` of
   # xie_and_castro (docs/pyudales.md §7).
   sgs_constant: 0.12
+  # Facet roughness z0 (m), shared with pypalm; a `roughness_length` in the
+  # params overrides it. null -> leave factypes.inp as preprocessed.
+  roughness_length: ${flow.roughness_length}
   # Opt-in native Vreman correction. Calibrate all feature settings explicitly.
   # Coefficients are static Dataset fields sgs_bias_b0/b1/b2 (default zero).
   model_discrepancy:
