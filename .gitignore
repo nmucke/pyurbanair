@@ -90,6 +90,8 @@ outputs/
 # latex (manuscripts)
 latex/
 local_files/
+manuscripts/
+papers/
 
 # Ground truth simulations
 ground_truth/*

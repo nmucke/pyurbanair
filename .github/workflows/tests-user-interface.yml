@@ -2,12 +2,12 @@
 # tests fake every Tools action except config composition: no network, no solver,
 # so the checkout skips the solver submodules.
 # Pull requests run it when the package or something it depends on changes;
-# every push to main and a manual run (Actions tab) run it unconditionally.
+# every push to main or dev and a manual run (Actions tab) run it unconditionally.
 name: "Tests: user-interface"
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     paths:
       - "libs/user-interface/**"
