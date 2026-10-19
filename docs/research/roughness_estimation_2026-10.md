@@ -2,7 +2,7 @@
 
 October 2026 · Follows `sgs_correction_assessment_2026-10.md` §6 (directions 3
 and 4). Code: PR #208 (`roughness_length` for uDALES and PALM, new sensor
-layout) and branch `feat/bounded-param-transform` (log and bounded parameter
+layout) and PR #211 (log and bounded parameter
 transforms). Runs: `/export/scratch2/ntm/z0_experiments/` (local, not in git).
 
 **Result.** Both twins recover z0 and are calibrated. Cross-model (PALM truth,
