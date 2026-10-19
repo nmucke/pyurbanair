@@ -92,7 +92,7 @@ libs/        pylbm, pyudales, pypalm, neural-surrogates, neural-surrogate-baseli
              data-assimilation, evaluation, visualization, mcp-server
 tests/       one folder per package, plus tests of scripts/ and configs/
 docs/        reference documentation
-archive/     the previous configs, scripts and tests (not maintained)
+archive/     the previous configs, scripts and tests (not maintained; dev only)
 ```
 
 ## Documentation
@@ -113,7 +113,8 @@ archive/     the previous configs, scripts and tests (not maintained)
 | HTML forward-run viewer | [docs/visualization.md](docs/visualization.md) |
 
 Plans, research notes and the archive live in `docs/plans/`, `docs/research/`
-and `docs/archive/`; they are working notes, not maintained references.
+and `docs/archive/` on the `dev` branch; they are working notes, not
+maintained references.
 
 ## Development
 
@@ -123,8 +124,13 @@ pixi run -e dev test-integration   # tiny real-solver runs
 pixi run -e dev pre-commit         # black, isort, mypy on staged files
 ```
 
-Work on a branch and open a pull request. CI runs each package's tests when
-that package changes.
+Development happens on `dev`: branch from it and open pull requests into it.
+CI runs each package's tests when that package changes, and all of them on
+every push to `dev` or `main`. From time to time `dev` is released into `main`
+with `bash scripts/tools/release_to_main.sh`, which merges it, drops the
+dev-only paths listed in [.devonly](.devonly) (the archive, working notes,
+agent instructions) and pushes a `release/<date>` branch to open a pull request
+from. Merge that one with "Create a merge commit", never squash or rebase.
 
 ## License
 

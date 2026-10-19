@@ -4,12 +4,12 @@
 # cached, so it recompiles only when the cache key (pixi.lock, the manifests)
 # changes. The `integration` tests that run it are included.
 # Pull requests run it when the package or something it depends on changes;
-# every push to main and a manual run (Actions tab) run it unconditionally.
+# every push to main or dev and a manual run (Actions tab) run it unconditionally.
 name: "Tests: pycity4cfd"
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     paths:
       - "libs/pycity4cfd/**"

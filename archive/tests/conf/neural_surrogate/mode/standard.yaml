@@ -1,9 +1,0 @@
-# @package _global_
-# Independent frozen test configuration.
-defaults:
-- /neural_surrogate/architectures@architecture: p3d/tiny
-model_name: p3d_idealized
-trainer:
-  _target_: neural_surrogates.Trainer
-loss:
-  _target_: torch.nn.MSELoss
