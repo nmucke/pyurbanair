@@ -1,0 +1,12 @@
+# Paths that live on the dev branch only: scripts/tools/release_to_main.sh
+# deletes them from main on every release, and tests/scripts/test_docs.py
+# tolerates links into them where they are absent. One path per line.
+archive/
+docs/plans/
+docs/research/
+docs/archive/
+AGENTS.md
+.agents/
+.codex/
+manuscripts/
+papers/

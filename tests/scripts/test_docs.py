@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 
@@ -25,6 +26,16 @@ DOCS = sorted(
     if not p.relative_to(REPO).as_posix().startswith(SKIP)
 )
 LINK = re.compile(r"\]\(([^)\s]+)\)")
+# Paths that main lacks (.devonly): links into them may dangle there.
+DEV_ONLY = tuple(
+    line
+    for line in (REPO / ".devonly").read_text().splitlines()
+    if line and not line.startswith("#")
+)
+
+
+def _is_dev_only(path: pathlib.Path) -> bool:
+    return os.path.relpath(path.resolve(), REPO).startswith(DEV_ONLY)
 
 
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.relative_to(REPO).as_posix())  # type: ignore[misc]
@@ -34,6 +45,6 @@ def test_relative_links_resolve(doc: pathlib.Path) -> None:
         t
         for t in targets
         if t and "://" not in t and not t.startswith("mailto:")
-        if not (doc.parent / t).exists()
+        if not (doc.parent / t).exists() and not _is_dev_only(doc.parent / t)
     ]
     assert not missing, f"{doc.relative_to(REPO)} links to missing {missing}"

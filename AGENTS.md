@@ -99,8 +99,10 @@ Each script's module docstring lists its options and outputs.
 
 ## Rules
 
-- **Branch first.** Never commit to `main`; branch, commit, open a PR.
-  `main` is unprotected, so be deliberate.
+- **Branch first, from `dev`.** Never commit to `main` or `dev`; branch from
+  `dev`, commit, open a PR into `dev`. `main` only receives releases from
+  `scripts/tools/release_to_main.sh` (README, Development). This file and the
+  other `.devonly` paths exist only on `dev`.
 - **Run `pixi run -e dev pre-commit` before committing.** Use
   `# type: ignore[...]` only for checks you deliberately don't satisfy.
 - **Scripts:** `def run(cfg)` plus a thin `@hydra.main` wrapper (so tests can
