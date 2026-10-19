@@ -1,7 +1,0 @@
-# @package _global_
-# Independent frozen test configuration.
-finetune_mode: lora_nextstep
-trainer:
-  _target_: neural_surrogates.Trainer
-loss:
-  _target_: torch.nn.MSELoss

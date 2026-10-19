@@ -1,8 +1,0 @@
-# Independent frozen test configuration.
-_target_: data_assimilation.smoothing.esmda.StateAndTimeVaryingParameterESMDA
-num_steps: ${esmda.num_steps}
-alpha: ${esmda.alpha}
-pin_initial_time_point: true
-localization: ${esmda.localization}
-state_reduction: ${esmda.state_reduction}
-final_time_smoothing: ${esmda.final_time_smoothing}

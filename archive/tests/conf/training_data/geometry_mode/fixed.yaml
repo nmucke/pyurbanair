@@ -1,5 +1,0 @@
-# @package _global_
-training_data:
-  geometry:
-    mode: fixed
-    output_name: ${case_name}
