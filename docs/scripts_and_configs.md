@@ -132,8 +132,16 @@ Time-varying samplers take a value every `time.seconds_per_knot` seconds.
 (wall z0, m; uDALES and PALM only). Uncomment it to sample or prescribe z0, and
 add it to `assimilation.params_to_estimate` to estimate it; otherwise the model
 configs apply `flow.roughness_length` (null keeps the case templates' own z0).
-With PALM, drop `sgs_constant` from the prior when estimating z0 (the two raise
-together, [pypalm.md](pypalm.md) "Roughness").
+The prior is a `LogNormal` (`median` in m, dimensionless `log_std`, optional
+`min`/`max` that truncate the draws), so the DA updates log(z0) and members
+always get z0 > 0. With both `min` and `max` (the block sets 0.005 and 0.3 m) the
+update is also bounded: no member ever leaves (min, max)
+([data_assimilation.md §1](data_assimilation.md)). Keep `max` below the grid's
+wall-distance limit (uDALES reconstructs at e·z0 from the wall: ≲ 0.3 m on the
+2 m xie_and_castro grid). Override e.g.
+`prior_params.parameters.roughness_length.max=0.2`. With PALM, drop
+`sgs_constant` from the prior when estimating z0 (the two raise together,
+[pypalm.md](pypalm.md) "Roughness").
 
 ### 1.5 `assimilation_settings/`
 

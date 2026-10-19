@@ -70,7 +70,7 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   base_forward_model.py            # BaseForwardModel
   base_ensemble_forward_model.py   # BaseEnsembleForwardModel (parallel/seq, failure policy)
   quiet_jax.py                     # Import before `jax` to suppress CPU-fallback noise
-  static_parameters/               # ParameterSampler + Normal/Uniform/Constant distributions
+  static_parameters/               # ParameterSampler + Normal/LogNormal/Uniform/Constant distributions
   dynamic_parameters/              # AR2RelaxationModel (time-varying prior),
                                    #   HarmonicParameterModel (smooth truths)
   training_data/                   # UniformExternalAR2Sampler for surrogate training data
@@ -355,8 +355,10 @@ unselected dynamic trajectories still extrapolate between windows. Use a
 
 - **Static** ([src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/)) —
   `ParameterSampler` holds a `name -> Distribution` mapping (`Normal`,
-  `Uniform`, `Constant`); `static.yaml` is a prior, `static_truth.yaml` all
-  `Constant`s. Output has an `ensemble` dim only.
+  `LogNormal`, `Uniform`, `Constant`); `static.yaml` is a prior,
+  `static_truth.yaml` all `Constant`s. Output has an `ensemble` dim only. A
+  `LogNormal` parameter is estimated in log space, kept inside (min, max) when
+  it sets both ([data_assimilation.md §1](data_assimilation.md)).
 - **Dynamic** ([src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/)) —
   `AR2RelaxationModel` (critically-damped AR(2) relaxing toward an external
   prior; `dynamic.yaml`, `dynamic_truth.yaml`) and `HarmonicParameterModel`

@@ -42,6 +42,36 @@ retain their supplied values, including ensemble spread. State-only modes keep
 every supplied parameter fixed. The run scripts map
 `assimilation.params_to_estimate` to this argument.
 
+**Log-space parameters.** `log_parameter_names` (smoothers and filters, default
+none) names strictly positive static parameters that are analysed as
+`log(value)`: `select_parameters` hands the update `log(value)` and
+`merge_parameters` writes back `exp` of the analysed value. Everything outside
+the update — forecasts, returned and saved parameter Datasets, metrics — stays
+in physical units, so a member can never receive a value `<= 0`. A filter's
+random walk and inflation act in log space too (a `RandomWalkEvolution` std for
+such a parameter is in log units: 0.05 ≈ 5 % per cycle). The hybrid inherits it
+from its smoother and filter. A name must be in the params, static (`ensemble`
+dim only) and positive, or the run raises before its first forecast.
+
+*Bounded.* `log_parameter_names` may instead map each name to `None` (the plain
+log above, bit for bit) or to `(min, max)`. Such a parameter is analysed as
+`y = logit((log(value) - log(min)) / (log(max) - log(min)))` and written back
+by the inverse, so every updated value lies strictly inside `(min, max)` — `log`
+alone keeps `z0 > 0` but not, e.g., `z0` below a grid's wall-distance limit.
+Values at or beyond a bound (an initial ensemble's tails) are clamped a hair
+(`BOUND_MARGIN` = 1e-6 of the log range) inside first, since `logit` is infinite
+there; the first forecast still sees them as supplied. Random-walk stds and
+inflation then act on `y` (logit units: near the middle, `std` × `log(max/min)`
+/ 4 in log units). Same coverage as the plain log: every ESMDA variant, the
+EnKF in parameter and joint modes, the hybrid.
+
+The run scripts pass every parameter whose prior is a `LogNormal`
+(`log_space_parameter_names` in `pyurbanair.static_parameters`; e.g. the
+`roughness_length` block in `configs/params/static.yaml`), bounded when the
+prior sets both `min` and `max`. Those then truncate the prior draws (a
+truncated log-normal with the given `median` and `log_std`) *and* bound every
+update; with only one or neither, the update is the plain log.
+
 Source tree:
 
 ```
@@ -913,7 +943,8 @@ reduced or localized runs on it; score the analyzed state against the truth.
   ([filtering/parameter_evolution.py](../libs/data-assimilation/src/data_assimilation/filtering/parameter_evolution.py)):
   the parameters' forecast model between cycles,
   `RandomWalkEvolution(std={name: std})`. The std is per parameter, in its own
-  units (e.g. `{inflow_angle: 2.0, velocity_magnitude: 0.05}`); a scalar is
+  units (e.g. `{inflow_angle: 2.0, velocity_magnitude: 0.05}`; log units for a
+  log-space parameter, §1); a scalar is
   refused, and names left out get no noise. Without an evolution or inflation,
   an un-inflated parameter ensemble collapses after a few cycles and stops
   learning.

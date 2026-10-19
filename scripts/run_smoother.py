@@ -93,7 +93,7 @@ def run(cfg: DictConfig) -> None:
     params = prior_sampler.sample(ensemble_size)
     is_dynamic = "time" in params.dims
 
-    selected, global_names = parameter_names(cfg, params)
+    selected, global_names, log_names = parameter_names(cfg, params, prior_sampler)
     extra = {"num_time_points": int(params.sizes["time"])} if is_dynamic else {}
     rng_key, key = jax.random.split(rng_key)
     smoother = instantiate(
@@ -107,6 +107,7 @@ def run(cfg: DictConfig) -> None:
         aggregate_observations=aggregation,
         parameter_names_to_estimate=selected,
         global_parameter_names=global_names,
+        log_parameter_names=log_names,
         **extra,
     )
     smoother.collect_obs_diagnostics = True

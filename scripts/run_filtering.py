@@ -86,10 +86,11 @@ def run(cfg: DictConfig) -> None:
     ensemble_model = make_ensemble_model(
         cfg, states_dir if on_disk else None, simulation_time=cycle_seconds
     )
-    params = instantiate(cfg.prior_params).sample(ensemble_size)
+    prior_sampler = instantiate(cfg.prior_params)
+    params = prior_sampler.sample(ensemble_size)
 
     operator = make_observation_operator(cfg, cfg.assim_model.solver_name)
-    selected, global_names = parameter_names(cfg, params)
+    selected, global_names, log_names = parameter_names(cfg, params, prior_sampler)
     rng_key, key = jax.random.split(rng_key)
     enkf = instantiate(
         cfg.filtering,
@@ -101,6 +102,7 @@ def run(cfg: DictConfig) -> None:
         rng_key=key,
         parameter_names_to_estimate=selected,
         global_parameter_names=global_names,
+        log_parameter_names=log_names,
     )
     enkf.collect_pred_obs = True
     enkf.collect_forecast_frames = bool(da.save_forecast_history)
