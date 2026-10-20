@@ -55,9 +55,55 @@ window-mean u and v against the noise-free truth, mean over seeds, m/s):
 | 8 m (mid-canopy) | 0.48 | 0.43 | −10 % |
 | 20 m (above the roofs) | 0.21 | 0.20 | −3 % |
 
-In both twins the posterior error is 0.06–0.09 m/s at every height. The
-held-out sensors can't be broken down by height: the window states of the
-z0 arm's runs were deleted after scoring.
+In both twins the posterior error is 0.06–0.09 m/s at every height.
+
+**Error at the held-out sensors, by height** (seed 1, whose states were kept;
+CRPS of the window-mean |U|, m/s; the "Replica" column is the noise floor):
+
+| Height | Inflow only | Inflow + z0 | Replica |
+|---|---|---|---|
+| 2 m | 0.31 | 0.085 | 0.056 |
+| 5 m | 0.20 | 0.071 | 0.046 |
+| 8 m | 0.069 | 0.090 | 0.19 |
+| 14 m | 0.098 | 0.11 | 0.11 |
+| 26 m | 0.088 | 0.076 | 0.099 |
+
+The held-out gain is almost entirely below 5 m. Seed 1, rerun with failed
+members replaced, matches seeds 2 and 3: z0 0.166 ± 0.035, Desroziers 0.88,
+validation CRPS 0.095, and field u and TKE errors unchanged.
+
+## Transfer to another inflow angle
+
+Forward runs only. uDALES runs at the true inflow (6.0 m/s) with z0 = 0.05
+(prior median), 0.1 (the truth) and 0.17 (the cross-model estimate), 2
+replicas each. Each is scored against a PALM truth (z0 0.1) at 10°, where z0
+was estimated, and at 40°. Ensemble-mean RMSE in m/s:
+
+| Score | 10°: z0 0.05 / 0.1 / 0.17 | 40°: z0 0.05 / 0.1 / 0.17 | PALM noise (10° / 40°) |
+|---|---|---|---|
+| Assimilation sensors | 0.42 / 0.40 / **0.37** | 0.75 / 0.77 / 0.74 | 0.11 / 0.18 |
+| … at 2 m | 0.47 / 0.45 / **0.41** | 0.53 / 0.58 / 0.54 | 0.10 / 0.19 |
+| Validation sensors | 0.35 / 0.31 / **0.27** | 0.36 / 0.33 / 0.34 | 0.11 / 0.13 |
+| … at 2 m | 0.33 / 0.29 / **0.18** | 0.41 / 0.35 / 0.38 | 0.09 / 0.11 |
+| Old layout, at 2 m | 0.41 / 0.33 / **0.24** | 0.59 / 0.63 / 0.68 | 0.15 / 0.29 |
+| Field u | 0.43 / 0.41 / 0.43 | 0.46 / 0.47 / 0.47 | 0.09 / 0.13 |
+
+- **At 10°** z0 = 0.17 is best at the sensors, most of all at street level.
+  The true z0 of 0.1 is not.
+- **At 40° the advantage is gone.** The three values are within about 0.03 m/s
+  of each other overall, and at street level 0.17 is no better and sometimes
+  the worst (old layout, 2 m).
+- **Field u doesn't depend on z0 at either angle.**
+- At 40° every uDALES run is about twice as far from PALM as at 10°.
+
+So the 0.17 estimate is a 10°-specific fit, not a transferable correction.
+
+**TKE outliers are an outflow artefact.** Two transfer runs had high field-TKE
+errors (10°, z0 0.1, replica 0: 0.31; 40°, z0 0.05: 0.15–0.20 m²/s²). Both are
+concentrated at x = 73–79 m, just upstream of the 20 m outflow buffer, near
+the ground. The worst one has |U| bursts up to 29 m/s over 43 frames, i.e.
+backflow instabilities that get through uDALES' 20 m buffer at c_vreman 0.12.
+They are not a z0 effect; excluding them, field TKE is the same for all z0.
 
 ## What this shows
 
@@ -69,11 +115,14 @@ z0 arm's runs were deleted after scoring.
    realisation noise in the observation error (Desroziers ≈ 5.2), the first
    update pushed z0 to 1–3 m and uDALES crashed. With the data-derived inflated
    error, the run is calibrated (≈ 0.9–1.0) and stable.
-3. **Cross-model, z0 compensates, mostly at street level.**
+3. **Cross-model, z0 compensates, mostly at street level, and doesn't
+   transfer.**
    - It doubles the inflow-only run's skill at the held-out sensors, down to
      the noise floor.
-   - Its gain at the assimilated sensors is largest at 2 m and vanishes above
-     the roofs.
+   - Both at the assimilated and the held-out sensors, the gain is almost all
+     below 5 m.
+   - The fitted 0.17 helps at the inflow angle it was estimated at (10°), but
+     not at 40°.
    - But the field-wide wind and TKE errors don't change, and the angle drifts
      slightly further from the truth.
    - z0 at 1.7× the truth is consistent with the earlier finding that uDALES
@@ -86,9 +135,11 @@ z0 arm's runs were deleted after scoring.
 
 ## Caveats
 
-- The cross-model z0 arm has only 2 seeds. Seed 1 failed in window 1, when one
-  member's time step collapsed (diffusion-limited) under
-  `failure.policy=raise`.
+- Cross-model seed 1 first failed when one member diverged in window 1 under
+  `failure.policy=raise`. It was rerun with `resample_from_successes`.
+- The 20 m outflow buffer doesn't always stop uDALES' outflow backflow at
+  c_vreman 0.12 (transfer TKE outliers). A 40 m buffer, which stabilised a case
+  the 20 m one didn't in the SGS study, is worth checking as the default.
 - The inflated error comes from the same experiment's inflow-only run.
   With real data it would come from earlier windows or a separate period.
 - One truth realisation per model, so seed spread understates truth
@@ -96,11 +147,7 @@ z0 arm's runs were deleted after scoring.
 
 ## Next steps
 
-- **Rerun the failed seed** with `failure.policy=resample_from_successes` and
-  keep its states, so the held-out sensors can be broken down by height.
-- **Test transfer.** Estimate z0 at 10°, then forecast another inflow angle
-  with that z0. A physical z0 should transfer; a compensator may not.
-- **The 1 m test** (§6 direction 3 of the assessment note): uDALES at 1 m as
+- **The 1 m test** (running) (§6 direction 3 of the assessment note): uDALES at 1 m as
   truth, uDALES at 2 m as the DA model. This isolates how much of z0's 1.7× is
   pure resolution error.
 - **Per-surface z0** (ground vs walls vs roofs) only if a single z0 proves
