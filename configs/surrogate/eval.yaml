@@ -23,6 +23,9 @@ data_dir: null
 inlet_turbulence:
   enabled: false
   seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+  # output: added to every predicted frame (stored and fed back);
+  # input: added only to the frame fed back, u_t = F(u_{t-1} + forcing).
+  apply: output
 # Inference-time y-periodicity of the `stepper` models (uDALES domains are
 # periodic in y): circular y padding in every conv and y-periodic SDF features
 # (neural_surrogates.periodic.make_periodic_y); no retraining.
@@ -62,6 +65,9 @@ latent_generator:
   max_snapshots: 64
   num_noise_seeds: 4
   batch_size: 4
+  # Cap on the crops the frozen AE encodes/decodes at once (null: the model's
+  # own), to fit large grids in GPU memory; the global decode is the largest.
+  max_internal_batchsize: null
   # ODE sampler of the main samples: euler (NFE = steps) | heun (NFE = 2 x steps).
   sampler: euler
   # Sampling steps tried in the step sweep, once per entry of `samplers`

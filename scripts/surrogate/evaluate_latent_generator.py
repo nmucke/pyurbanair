@@ -98,6 +98,8 @@ def run(cfg: DictConfig) -> None:
     rng = np.random.default_rng(int(cfg.seed))
 
     model, train_cfg = load_model(ev.model_dir, dev)
+    if ev.max_internal_batchsize is not None:
+        model.ae.ae.max_internal_batchsize = int(ev.max_internal_batchsize)
     schema = train_cfg.generator.physical_schema
     model.set_conditioning_schema(
         list(schema.param_vars), float(schema.history_dt_seconds)
