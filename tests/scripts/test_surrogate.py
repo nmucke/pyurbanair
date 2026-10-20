@@ -257,6 +257,44 @@ def test_evaluate_stepper_inlet_turbulence(
     np.testing.assert_array_equal(forced[first, ..., 7:], plain[first, ..., 7:])
 
 
+def test_evaluate_stepper_inlet_turbulence_input(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """`apply: input` stores the model's own output: the first predicted frame
+    (from the truth) is unforced, the next one sees the forced input."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={inlet_turbulence_corpus(training_data, tmp_path / str(enabled))}",
+            f"stepper.output_dir={tmp_path / str(enabled) / 'eval'}",
+            "stepper.max_steps=3",
+            f"inlet_turbulence.enabled={str(enabled).lower()}",
+            "inlet_turbulence.apply=input",
+            root=session_root,
+        )
+        script.run(cfg)
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    forced, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(forced).all()
+    np.testing.assert_array_equal(forced[: first + 1], plain[: first + 1])
+    assert not np.allclose(forced[first + 1], plain[first + 1])
+
+
 def test_evaluate_stepper_periodic_y(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -342,6 +380,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         "latent_generator.decode_modes=[local,halo,global]",
         "latent_generator.samplers=[euler,heun]",
         "latent_generator.max_snapshots=6",
+        "latent_generator.max_internal_batchsize=2",
         root=session_root,
     )
     trained_mode = trained["train_autoencoder"].architecture.spatial_mode

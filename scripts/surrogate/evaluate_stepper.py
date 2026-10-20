@@ -26,6 +26,8 @@ Outputs, in `stepper.output_dir`:
 Top-level `inlet_turbulence.enabled` adds uDALES' inlet turbulence to every
 predicted frame (neural_surrogates.inlet_turbulence.InletTurbulence; the
 corpus must have been generated with it); `rollout_seconds` includes it.
+`inlet_turbulence.apply: input` adds it only to the frame fed back to the
+model, u_t = F(u_{t-1} + forcing), and stores the model's own output.
 Top-level `periodic_y` makes every model y-periodic at inference (circular y
 padding in its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y) and adds a `periodic_y` column
@@ -85,7 +87,14 @@ def run(cfg: DictConfig) -> None:
             inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
             start = time.perf_counter()
             pred = _rollout(
-                model, truth, params, data.geometry_for(sample), history, dev, inlet
+                model,
+                truth,
+                params,
+                data.geometry_for(sample),
+                history,
+                dev,
+                inlet,
+                cfg.inlet_turbulence.apply == "input",
             )
             seconds = time.perf_counter() - start
             error = pred - truth
@@ -145,12 +154,14 @@ def _rollout(
     history: int,
     dev: torch.device,
     inlet: Any = None,
+    inlet_input: bool = False,
 ) -> np.ndarray:
     """Step from the first `history` true frames to the trajectory's end.
 
     The first `history` frames of the result are the truth itself. `inlet` (if
     given) adds the inlet turbulence to every predicted frame before it is
-    stored and fed back.
+    stored and fed back; with `inlet_input` only to the frame fed back, so the
+    stored frame is the model's own output.
     """
     channels, grid = truth.shape[1], truth.shape[2:]
     pred = truth.copy()
@@ -160,10 +171,11 @@ def _rollout(
     geom = geometry.unsqueeze(0).to(dev)
     for t in range(history - 1, len(truth) - 1):
         step = model(state, params[t].unsqueeze(0).to(dev), geom)
-        if inlet is not None:
-            step = inlet(step, t + 1)
-        pred[t + 1] = step[0].float().cpu().numpy()
-        state = step if history == 1 else torch.cat([state[:, channels:], step], dim=1)
+        forced = step if inlet is None else inlet(step, t + 1)
+        pred[t + 1] = (step if inlet_input else forced)[0].float().cpu().numpy()
+        state = (
+            forced if history == 1 else torch.cat([state[:, channels:], forced], dim=1)
+        )
     return pred
 
 
