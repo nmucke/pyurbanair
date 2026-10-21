@@ -944,9 +944,20 @@ of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),
 not at a half cell as in PALM. If `ln(d/z0) <= 1` (d <= e·z0) the velocity is
 taken from a reconstruction point further out, and if that is still too close
 the section gets **no wall stress at all** (`modibm.f90` `ibmwallfun`,
-silently). On the 2 m xie_and_castro grid most sections have d = 1 m (w: 2 m),
-the closest 0.2 m: only 0.5% fall back for z0 up to 0.2 m, 41% from z0 =
-0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
+silently). On the 2 m xie_and_castro grid the ground sections have d = 1 m,
+but **every wall section has d = 2 m** (u, v and w) and the roofs 0.2-1.8 m
+(2.8 m roof: 0.2, 6.4: 0.6, 10: 1.0, 13.6: 1.4, 17.2: 1.8). The cube faces
+(x, y = 5 + 10n) and those roofs lie off the grid faces, while the IBM blocks
+the flow at the voxel faces, 1 m from the first fluid point, exactly as PALM's
+topography does (same 12 m blocks, same roofs 2/6/10/14/18 m). So uDALES
+applies the wall law 1 m further out than the wall it actually resolves, and
+over the true facet areas (10 m faces), not the blocked ones. On the same flow
+that is ~0.5x PALM's wall friction and ~0.65x its roof friction at the same
+z0; ground is the same. It is what makes uDALES' canopy faster than PALM's and
+what a cross-model z0 estimate absorbs (`docs/pypalm.md` § "Cross-model
+parity", wall treatment). For a wall, ln(2/z0') = ln(1/z0) at z0' = 2 z0. The
+reconstruction fallback hits the 0.2 m roof sections from z0 = 0.074 m (6% of
+the roof area), and 41% of all sections from z0 = 0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
 sections lie within e·z0. In the tiny test case (1 m cells) a z0 of 0.01 -> 0.1
 lowers the time-mean first-cell u by ~4% (1.00 -> 0.97 m/s).
 
