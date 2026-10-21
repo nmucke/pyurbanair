@@ -771,7 +771,7 @@ default, so default runs are unchanged.
 
 The boundary condition, outflow buffer, inflow profile, nudging and inlet
 turbulence values are shared with pypalm through `flow` in
-`configs/common.yaml` (cases override it: `xie_and_castro` sets a 20 m buffer,
+`configs/common.yaml` (cases override it: `xie_and_castro` sets a 40 m buffer,
 `xie_and_castro_periodic` periodic without inlet turbulence). The item-by-item
 audit, the residual differences (SGS closure above all, the open lid, the
 initial state) and the recommended spin-up per setup are in
@@ -856,6 +856,15 @@ xie_and_castro. That collapse is the outflow, not the closure:
   face (z = 1 m) after ~380 s; a 40 m buffer makes that run stable. A case
   without a buffer, or with buildings close to `xmax`, needs one before its
   SGS constant is lowered.
+- 20 m is not enough at c = 0.12 (2026-10-21; 6 m/s, z0 0.1, 120 s spin-up +
+  600 s, 4 seeds per arm). Backflow bursts still got through in 3 of 40 runs:
+  u at the face fell to about -25 m/s, |U| reached 21 m/s at x = 73-79 m, and
+  the run recovered by itself in ~50 s without tripping the dt watchdog. With
+  40 or 60 m there were none in 36 runs. Without bursts, 20 m also inflated
+  street-level TKE at x = 65-79 m 2-5x at 40° (+10-40 % at 10°); 40 m and 60 m
+  agree within the replica noise there, and upstream of x ≈ 55 m the buffer
+  changes nothing. The case default is therefore 40 m (+18 % wall time;
+  60 m costs +45 %).
 - Why not the literature 0.07 (`Cs ≈ 0.17`, Lilly's value for a sharp
   spectral cut-off)? CD2 does not dissipate at the grid scale, and at 0.07
   energy piles up there. Spanwise spectra of u' at z = 9 m (inflow_outflow,
