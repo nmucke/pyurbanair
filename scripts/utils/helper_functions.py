@@ -265,12 +265,13 @@ def save_obs(
     obs_clean: np.ndarray,
     obs_std: np.ndarray,
     pred_obs: list[np.ndarray],
+    extra: dict[str, np.ndarray] | None = None,
 ) -> None:
     """One window's observations and predicted observations per update step.
 
     `pred_obs` holds one (observation, ensemble) array per step: the ESMDA
     iterations for a smoother (prior first, posterior last), forecast and
-    analysis for a filter.
+    analysis for a filter. `extra` adds more per-observation variables.
     """
     xarray.Dataset(
         {
@@ -281,6 +282,10 @@ def save_obs(
                 ("esmda_step", "observation", "ensemble"),
                 np.stack([np.asarray(p) for p in pred_obs]),
             ),
+            **{
+                name: ("observation", np.asarray(value).ravel())
+                for name, value in (extra or {}).items()
+            },
         }
     ).to_netcdf(path)
 

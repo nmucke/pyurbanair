@@ -200,6 +200,94 @@ def test_saved_reference_states(
         )
 
 
+ADAPTIVE = "observation.adaptive_error=${adaptive_error.desroziers}"
+
+
+def test_adaptive_error_config(tmp_path: pathlib.Path) -> None:
+    """Off by default; the desroziers option instantiates; smoother only."""
+    from data_assimilation import AdaptiveObservationError
+    from hydra.utils import instantiate
+
+    cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
+    assert cfg.observation.adaptive_error is None
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        ADAPTIVE,
+        "adaptive_error.desroziers.initial_inflation=3.0",
+        "adaptive_error.desroziers.height_bands=[{min_z:0,max_z:10},{min_z:10,max_z:40}]",
+        root=tmp_path,
+    )
+    adaptive = instantiate(cfg.observation.adaptive_error)
+    assert isinstance(adaptive, AdaptiveObservationError)
+    assert adaptive.initial_inflation == 3.0
+    assert adaptive.bands == [(0.0, 10.0), (10.0, 40.0)]
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    check_config(cfg, "smoother")
+    for workflow in ("filtering", "hybrid"):
+        with pytest.raises(ValueError, match="adaptive_error is for the smoother"):
+            check_config(cfg, workflow)
+
+
+def test_adaptive_error_run(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """The default run is unchanged; the adaptive one inflates window 0 by the
+    initial inflation and saves the std it used, per window."""
+    runs: dict[str, list[str]] = {
+        "default": [],
+        "unit": [ADAPTIVE],  # window 0 at the configured error
+        "inflated": [ADAPTIVE, "adaptive_error.desroziers.initial_inflation=2.0"],
+    }
+    run_dirs = {}
+    for name, extra in runs.items():
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *SURROGATE,
+            *surrogate(session_root),
+            *extra,
+            root=tmp_path / name,
+        )
+        load_script("scripts/run_smoother.py").run(cfg)
+        run_dirs[name] = pathlib.Path(cfg.paths.results_dir) / "smoother"
+
+    def window(name: str, w: int, kind: str) -> xarray.Dataset:
+        return xarray.load_dataset(run_dirs[name] / "windows" / f"window_{w}_{kind}.nc")
+
+    default = window("default", 0, "obs")
+    assert set(default.data_vars) == {"obs", "obs_clean", "obs_std", "pred_obs"}
+    # Window 0 at the configured error is the default run's window 0, bit for bit.
+    xarray.testing.assert_identical(
+        window("default", 0, "posterior_params"), window("unit", 0, "posterior_params")
+    )
+    unit = window("unit", 0, "obs")
+    xarray.testing.assert_identical(
+        unit.drop_vars(["obs_std_configured", "obs_error_group"]), default
+    )
+    np.testing.assert_array_equal(unit.obs_std_configured, default.obs_std)
+
+    inflated = window("inflated", 0, "obs")
+    np.testing.assert_allclose(inflated.obs_std, 2.0 * inflated.obs_std_configured)
+    assert not np.array_equal(
+        window("inflated", 0, "posterior_params").to_array(),
+        window("default", 0, "posterior_params").to_array(),
+    )
+    info = yaml.safe_load((run_dirs["inflated"] / "run_info.yaml").read_text())
+    history = info["adaptive_observation_error"]
+    assert [h["window"] for h in history] == [0, 1]
+    assert history[0]["inflation"] == pytest.approx([2.0] * len(history[0]["groups"]))
+    assert all(len(h["window_estimate"]) == len(h["groups"]) for h in history)
+    # Window 1 assimilates with the inflation estimated from window 0.
+    later = window("inflated", 1, "obs")
+    ratio = later.obs_std / later.obs_std_configured
+    for g, factor in enumerate(history[1]["inflation"]):
+        np.testing.assert_allclose(ratio[later.obs_error_group == g], factor)
+    assert "adaptive_observation_error" not in yaml.safe_load(
+        (run_dirs["default"] / "run_info.yaml").read_text()
+    )
+
+
 def test_truth_from_a_forward_run(
     tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
 ) -> None:

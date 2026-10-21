@@ -1,0 +1,28 @@
+# @package adaptive_error
+# Online adaptive observation error (smoother only). Pick one with
+# `observation.adaptive_error=${adaptive_error.<name>}`; `none` keeps the
+# configured `observation.error` in every window. See docs/data_assimilation.md
+# §2 "Adaptive observation error".
+
+none: null
+
+# Before each window k > 0, the Desroziers estimate E[d_a d_f] = R of the
+# previous windows' innovations, per sensor height, sets an inflation of the
+# configured variance (`observation.error`, which is then the floor at
+# min_inflation 1). From innovations only, so it applies to real observations.
+desroziers:
+  _target_: data_assimilation.adaptive_observation_error.AdaptiveObservationError
+  _convert_: all
+  # Pool per band [min_z, max_z); null -> per distinct sensor height.
+  height_bands: null
+  # Pool the last `memory` windows; null -> all previous windows.
+  memory: null
+  # Estimate from the first N windows only, then freeze; null -> keep adapting.
+  calibration_windows: null
+  # Std inflation of window 0 (and the shrinkage target).
+  initial_inflation: 1.0
+  # Pseudo-observations of the shrinkage toward initial_inflation (0: none).
+  prior_weight: 0.0
+  # Bounds on the std inflation.
+  min_inflation: 1.0
+  max_inflation: 10.0

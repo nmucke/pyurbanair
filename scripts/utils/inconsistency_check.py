@@ -233,6 +233,8 @@ def _filtering(cfg: DictConfig, workflow: str) -> list[str]:
     localized = f.localization is not None
     if workflow == "filtering" and _dynamic(cfg.prior_params):
         problems.append("Filtering needs a static prior_params.")
+    if OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+        problems.append("observation.adaptive_error is for the smoother only.")
     modes = (
         ("state", "joint") if workflow == "hybrid" else ("state", "parameter", "joint")
     )
