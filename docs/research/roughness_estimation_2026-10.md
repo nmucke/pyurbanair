@@ -5,12 +5,17 @@ and 4). Code: PR #208 (`roughness_length` for uDALES and PALM, new sensor
 layout) and PR #211 (log and bounded parameter
 transforms). Runs: `/export/scratch2/ntm/z0_experiments/` (local, not in git).
 
-**Result.** Both twins recover z0 and are calibrated. Cross-model (PALM truth,
-uDALES DA model), z0 settles at about 1.7× the truth. It halves the
-validation-sensor error of the window-mean wind, but leaves the field-wide wind
-and turbulence errors unchanged. At 2 m resolution z0 acts as a sensor-level
-compensator for structural error, mostly at street level, not as a physical
-estimate.
+**Result.**
+- Both twins recover z0 and are calibrated.
+- Against a uDALES truth at 1 m, the 2 m uDALES DA model also recovers z0
+  (0.09–0.11 m for a true 0.1): pure resolution error doesn't bias it.
+- Cross-model (PALM truth, uDALES DA model), z0 settles at about 1.7× the
+  truth. It halves the validation-sensor error of the window-mean wind, mostly
+  below 5 m, but leaves the field-wide wind and turbulence errors unchanged,
+  and the fit doesn't transfer to another inflow angle.
+
+So the cross-model z0 compensates for the uDALES–PALM model difference (most
+likely their wall treatments), not for resolution.
 
 ## Setup
 
@@ -105,6 +110,41 @@ the ground. The worst one has |U| bursts up to 29 m/s over 43 frames, i.e.
 backflow instabilities that get through uDALES' 20 m buffer at c_vreman 0.12.
 They are not a z0 effect; excluding them, field TKE is the same for all z0.
 
+## Resolution only: uDALES truth at 1 m, uDALES DA model at 2 m
+
+- **Truth:** uDALES at 1 m (10°, 6.0 m/s, z0 0.1), one continuous run plus a
+  replica.
+- **DA:** the 2 m model with the same settings as above. The observation error
+  was inflated per height band from an inflow-only calibration run's
+  Desroziers statistics: 0.27 / 0.26 / 0.10 m/s at 2 / 8 / 20 m. The pure
+  resolution error is therefore about half the uDALES–PALM error
+  (0.53 / 0.43 / 0.33).
+- **Arms:** inflow only and inflow + z0, 3 seeds each.
+
+| Arm | z0 (m) | Angle (°) | Speed (m/s) | Desroziers | Validation CRPS, mean \|U\| (replica) | Field RMSE u (replica) | Field TKE RMSE (replica) |
+|---|---|---|---|---|---|---|---|
+| Inflow only | — | 9.7–10.1 | 6.09–6.11 | 0.95–0.99 | 0.18 (0.11) | 0.32 (0.16) | 0.21 (0.065) |
+| Inflow + z0 | **0.091–0.113** | 9.7–10.3 | 6.02–6.09 | 0.92–0.96 | 0.13–0.14 (0.11) | 0.31 (0.16) | 0.22 (0.065) |
+
+Validation spread/skill is 0.59–0.60 in both arms.
+
+**By height:**
+- Assimilated sensors: z0 lowers the 2 m error (RMSE 0.29 → 0.25 m/s) and
+  leaves 8 and 20 m unchanged.
+- Held-out sensors (seed 1): z0 helps at 2 m (CRPS 0.21 → 0.08) and 14 m
+  (0.24 → 0.19) and is worse at 5 m (0.16 → 0.26). A single seed, so noisy.
+
+**What it shows:**
+- **z0 stays physical when the only error is resolution.** The posterior
+  brackets the true 0.1 m, and estimating it still lowers the validation
+  error by about 25 %.
+- **So resolution doesn't explain the cross-model 1.7×.** The cross-model
+  inflation of z0 has to come from the model difference itself, most likely
+  the wall treatments: uDALES' log law at the true facet distance against
+  PALM's surface layer at the half cell.
+- **The 2 m model's resolved TKE is far from the 1 m truth's** (3× the
+  replica level) whatever z0 is: a resolution limit that no parameter fixes.
+
 ## What this shows
 
 1. **z0 is identifiable when the model is right.** Both twins recover it to
@@ -125,10 +165,9 @@ They are not a z0 effect; excluding them, field TKE is the same for all z0.
      not at 40°.
    - But the field-wide wind and TKE errors don't change, and the angle drifts
      slightly further from the truth.
-   - z0 at 1.7× the truth is consistent with the earlier finding that uDALES
-     at 2 m runs too fast at street level against PALM, a resolution effect
-     (`overnight_runs_2026-10-15.md`): extra roughness buys the missing drag
-     near the sensors.
+   - z0 at 1.7× the truth buys extra drag near the sensors. It isn't driven
+     by resolution: against a 1 m uDALES truth, z0 comes out at about the true
+     value. It has to come from the uDALES–PALM model difference.
 4. **Turbulence is not helped.** Field TKE error stays at about 1.7× the
    replica level with or without z0, and the validation variance error gets
    slightly worse with z0.
@@ -147,8 +186,14 @@ They are not a z0 effect; excluding them, field TKE is the same for all z0.
 
 ## Next steps
 
-- **The 1 m test** (running) (§6 direction 3 of the assessment note): uDALES at 1 m as
-  truth, uDALES at 2 m as the DA model. This isolates how much of z0's 1.7× is
-  pure resolution error.
+- **Locate the uDALES–PALM wall-treatment difference** that z0 absorbs, for
+  example by aligning the first-cell distance or comparing the wall stress
+  directly. Only a solver change would remove it, which is out of scope, so
+  in practice it belongs in the observation-error model.
+- **Use z0 as a sensor-level correction only within the conditions it was
+  estimated for,** and re-estimate it per inflow regime. Don't treat it as a
+  site property.
+- **Outflow buffer:** test 40 m against 20 m for uDALES at c_vreman 0.12 (the
+  transfer TKE outliers).
 - **Per-surface z0** (ground vs walls vs roofs) only if a single z0 proves
   physical. uDALES supports it; PALM would need its urban surface model.
