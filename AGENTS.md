@@ -46,8 +46,8 @@ EnKF, hybrid) is in JAX and never depends on a specific solver: backends plug
 in through `BaseForwardModel` / `BaseEnsembleForwardModel`.
 
 Vendored code (`libs/pyudales/u-dales/`, `libs/pypalm/palm_model_system/`,
-`libs/pylbm/LBM/`, `neural_surrogates/architectures/_tadpole/` and `_upt/`) is
-upstream: don't edit it.
+`libs/pylbm/LBM/`, `neural_surrogates/architectures/_tadpole/` and `_upt/`,
+`libs/visualization/src/visualization/web/vendor/`) is upstream: don't edit it.
 
 ## Read the right doc first
 
