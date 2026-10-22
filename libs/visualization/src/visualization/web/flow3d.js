@@ -218,9 +218,13 @@ export function createFlow3D(host, sceneUrl, {onReady = () => {}, onError = () =
   const levelLabel = node("label", "flow3d-level"), levelText = node("span", "", "z"), level = node("input");
   level.type = "range"; level.min = "0"; level.step = "1"; level.setAttribute("aria-label", "Slice height");
   levelLabel.append(level, levelText);
+  const cross = node("button", "flow3d-cross", "Vertical slice"); cross.type = "button"; cross.setAttribute("aria-pressed", "false");
+  const rowLabel = node("label", "flow3d-row"), rowText = node("span", "", "y"), row = node("input");
+  row.type = "range"; row.min = "0"; row.step = "1"; row.setAttribute("aria-label", "Vertical slice position");
+  rowLabel.append(row, rowText); rowLabel.hidden = true;
   const save = node("button", "flow3d-save", "Save image"); save.type = "button";
   const hint = node("p", "flow3d-hint", "drag to rotate · scroll to zoom · right-drag to pan · double-click to reset");
-  controls.append(toggle, levelLabel, save);
+  controls.append(toggle, levelLabel, cross, rowLabel, save);
   overlay.append(clock, notice, subtitle, bar, controls, hint);
   host.append(overlay);
 
@@ -255,6 +259,7 @@ export function createFlow3D(host, sceneUrl, {onReady = () => {}, onError = () =
   function refreshLabels(render = true) {
     const z = ctx.grid.z[Number(level.value)];
     levelText.textContent = `z = ${z.toFixed(1)} m`;
+    rowText.textContent = `y = ${ctx.grid.y[Number(row.value)].toFixed(1)} m`;
     subtitle.textContent = `${modes[modeName].label} · flow left to right`;
     catcher.visible = modeName === "slice"; catcher.position.z = z + .02 * (ctx.grid.bounds[5] - ctx.grid.bounds[4]) / ctx.grid.nz;
     setRange(); if (render) requestRender();
@@ -264,12 +269,19 @@ export function createFlow3D(host, sceneUrl, {onReady = () => {}, onError = () =
     Object.entries(modes).forEach(([key, mode]) => mode.setVisible(key === name));
     sliceButton.setAttribute("aria-pressed", String(name === "slice")); volumeButton.setAttribute("aria-pressed", String(name === "volume"));
     sliceButton.classList.toggle("active", name === "slice"); volumeButton.classList.toggle("active", name === "volume");
-    levelLabel.hidden = name !== "slice";
+    levelLabel.hidden = cross.hidden = name !== "slice";
+    rowLabel.hidden = row.disabled = name !== "slice" || !modes.slice.vertical;
     host.dataset.mode = name; lastSim = null; refreshLabels();
   }
   sliceButton.onclick = () => selectMode("slice");
   volumeButton.onclick = () => selectMode("volume");
   level.oninput = () => { modes.slice.setLevel(Number(level.value)); refreshLabels(); };
+  cross.onclick = () => {
+    const on = !modes.slice.vertical;
+    modes.slice.setVertical(on); cross.setAttribute("aria-pressed", String(on)); cross.classList.toggle("active", on);
+    rowLabel.hidden = row.disabled = !on; refreshLabels();
+  };
+  row.oninput = () => { modes.slice.setRow(Number(row.value)); refreshLabels(); };
   save.onclick = () => {
     renderer.render(scene, camera);
     const out = document.createElement("canvas"), g = out.getContext("2d"), ratio = canvas.width / Math.max(1, host.clientWidth);
@@ -385,6 +397,7 @@ export function createFlow3D(host, sceneUrl, {onReady = () => {}, onError = () =
     level.max = String(z.length - 1);
     modes = {slice: createSliceMode(ctx), volume: createVolumeMode(ctx)};
     level.value = String(modes.slice.level);
+    row.max = String(y.length - 1); row.value = String(modes.slice.row);
     store.frame(simTime);
     message.remove();
     selectMode("slice");

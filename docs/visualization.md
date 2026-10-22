@@ -209,7 +209,16 @@ The 3D panel has two displays, both coloured by full speed on one palette
   solid cells, with short additive tracer streaks drifting over it and lit grey
   buildings casting shadows. The height slider picks the level (`z = … m`); it
   starts about 9 m above the ground, or at the first level that is at least 60%
-  fluid when that is higher.
+  fluid when that is higher. The **Vertical slice** toggle (off by default) adds
+  the same kind of sheet in the x–z plane at one y row, over the full x range
+  and height, with fewer streaks moving in (u, w); its slider (`y = … m`, shown
+  only while the slice is on) starts at the row nearest the middle of the
+  domain. While it is on, both sheets share one colour range, from the lowest
+  to the highest bound of all non-null `level_speed_limits` (exact, no
+  rounding); off, the horizontal sheet keeps its per-level range. The vertical
+  sheet is drawn in two halves split at the slice height, in painter's order,
+  so the two translucent sheets overlap cleanly from any side. Full 3D hides it
+  and its controls; switching back restores them.
 - **Full 3D**: a raymarched soft glow of the Q criterion (Q > 0, vortices) coloured
   by speed, with sparse streaks seeded mostly in those vortices and in the canopy.
   Its colour range is the largest exported `level_speed_limits` entry below
@@ -227,8 +236,9 @@ and the 2D slices remain.
 Scientific caveats. The display blends linearly between the two saved states
 around the current time; it shows no solver output between them. Streaks are
 display tracers integrated (RK2) through that blended field, restarted on seeks
-and when a display is switched on; in the height slice they move in the plane
-and are capped in wall-clock speed at fast playback. They show direction and
+and when a display or the vertical slice is switched on or moved; in the height
+slice they move in the plane of their sheet and are capped in wall-clock speed
+at fast playback. They show direction and
 relative speed, not exact particle paths. Seeking, restarting and view changes
 snap to saved states; only playback passes between them. The Q glow is computed
 in the browser from the quantized field, damped next to walls and zeroed at the

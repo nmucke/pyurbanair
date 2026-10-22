@@ -194,11 +194,33 @@ def test_browser_3d_panel_renders_rotates_and_switches(tmp_path: Path) -> None:
         top = slider.get_attribute("max")
         slider.fill("0" if slider.input_value() != "0" else str(top))
         assert label.inner_text() != first
+
+        # The vertical slice: off by default, its y slider shown only while it is on.
+        cross = host.get_by_role("button", name="Vertical slice")
+        row = host.locator(".flow3d-row")
+        assert cross.get_attribute("aria-pressed") == "false" and row.is_hidden()
+        flat = settled()
+        cross.click()
+        assert cross.get_attribute("aria-pressed") == "true" and row.is_visible()
+        assert "and at y = " in host.locator(".flow3d-subtitle").inner_text()
+        crossed = settled()
+        assert not np.array_equal(crossed, flat)
+        at = row.locator("span").inner_text()
+        assert at.startswith("y = ") and at.endswith(" m")
+        y_slider = row.locator("input")
+        y_slider.fill(
+            "0" if y_slider.input_value() != "0" else str(y_slider.get_attribute("max"))
+        )
+        assert row.locator("span").inner_text() != at
+        assert not np.array_equal(settled(), crossed)
         host.get_by_role("button", name="Full 3D").click()
         assert host.get_attribute("data-mode") == "volume"
-        assert level.is_hidden()
+        assert level.is_hidden() and cross.is_hidden() and row.is_hidden()
         host.get_by_role("button", name="Height slice").click()
         assert host.get_attribute("data-mode") == "slice"
-        assert level.is_visible()
+        assert level.is_visible() and row.is_visible()
+        cross.click()
+        assert cross.get_attribute("aria-pressed") == "false" and row.is_hidden()
+        assert "and at y" not in host.locator(".flow3d-subtitle").inner_text()
         assert not errors, errors
         browser.close()
