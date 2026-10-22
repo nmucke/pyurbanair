@@ -29,10 +29,11 @@ print(url)
 
 From the command line, `python -m visualization <run dir> <bundle dir>`
 renders with the default options, the ensemble mean velocity for an ensemble
-and the smallest stride that fits `max_frames`, plus the 3D view when a child
-process can render offscreen with PyVista/VTK (2D only otherwise, e.g. in
-`dev`); `workflows/forward_workflow.sh` runs it in the `rendering` environment
-into `<run dir>/viewer`.
+and the smallest stride that fits both `max_frames` and the 3D scene's size
+limit, plus the interactive 3D view whenever every axis has at least two cells
+(otherwise it renders 2D only);
+`workflows/forward_workflow.sh` runs it in the `rendering` environment (for
+ffmpeg) into `<run dir>/viewer`.
 `python -m visualization --serve <bundle dir>` serves a bundle through
 `BundleAssetServer` and prints its URL. Don't use `python -m http.server`: it
 ignores HTTP byte ranges, so the viewer cannot seek in the movies and every
@@ -118,7 +119,8 @@ field. Signed velocity components use symmetric diverging colors; the side
 section shows rising air in red and sinking air in blue. `color_limits` applies
 to `variable`, while other slice fields retain their own scales. Limits clip
 displayed colors only, not stored probe values. Products include PNG snapshots,
-probe JSON/CSV and plots, optional H.264 MP4, and the HTML/CSS/JavaScript viewer.
+probe JSON/CSV and plots, optional H.264 MP4, the optional 3D scene, and the
+HTML/CSS/JavaScript viewer.
 Vertical-section images use a shorter, wide canvas within the requested image
 dimensions so the dashboard does not shrink a portrait-sized image into its
 wide lower panel. Axes retain equal physical scale without vertical stretching.
@@ -149,8 +151,8 @@ also preserve those products and become manifest warnings. The encoder uses
 fixed H.264/yuv420p/faststart arguments and a five-minute timeout.
 
 The viewer uses only local assets. Its **2D slices / 3D flow** buttons switch
-between the simultaneous slice dashboard and available 3D renders, preserving
-physical time. The 3D button is disabled with an explanation when no 3D product
+between the simultaneous slice dashboard and the interactive 3D view, preserving
+physical time. The 3D button is disabled with an explanation when no 3D view
 was requested or available. One play/pause, restart, seek and speed controller
 synchronizes every visible panel and the probe cursor through each view's own
 time mapping. Panels show their actual held sample times. Downloads are offered
@@ -160,52 +162,77 @@ custom controller initializes. Serve an exported bundle with a server that
 supports HTTP byte ranges (`python -m visualization --serve`); playback seeks
 in the movies, and direct `file://` JSON fetches are not supported.
 
-## Optional 3D
+## Optional interactive 3D
 
-PyVista/VTK are not dependencies of the library; they are imported lazily, only
-for 3D. The separate `rendering` Pixi environment supplies PyVista/VTK and ffmpeg.
-MCP selects it for requested movies when installed, including 2D movies;
-otherwise standard rendering falls back to `dev` and its available encoder.
-Explicit 3D requests always select `rendering`.
-Nothing in the standard rendering or MCP startup path imports VTK. Validate an
-actual offscreen context in a child process:
+Set `render_3d: true` (the `flow_3d` preset) to add an interactive 3D panel:
+the browser draws the saved 3D velocity with WebGL, so rendering needs no 3D
+library, GPU or offscreen context; numpy writes a scene export. three.js r170
+(MIT) is vendored as `web/vendor/three.module.min.js` with its licence beside
+it; there are no other JavaScript dependencies and no CDN.
 
-```bash
-pixi run -e rendering python -c \
-  'from visualization.render_3d import probe_offscreen; print(probe_offscreen())'
-```
+The export is `media/flow-3d/`, described in `render_3d.py`: `scene.json`
+(cell-centre `x/y/z` in metres, saved `times`, limits, camera), `fluid.bin`
+(Uint8 mask, 1 = fluid: `blanking == 0` and finite velocity in the first frame),
+one `velocity/NNNNN.bin` per saved time and `buildings.bin`. Velocity is Int16
+little-endian, planar u, v, w each (nz, ny, nx) with x fastest, with a per-frame
+scale of max |component| / 32767: the quantization error is at most half that
+scale. Solid and invalid cells are stored as 0. The selected saved times and
+their pacing are those of the 2D movies (a saved time starts where its 2D frames
+start). Before anything is written, the scene (mask plus 6 bytes per cell per
+frame) must fit in 512 MiB; a larger request fails with a message to increase
+stride or shorten the interval. A grid with fewer than two cells on an axis is
+also an error.
 
-Set `render_3d: true` for a speed-colored slice with instantaneous streamlines,
-showing the buildings' STL (`geometry`, or the run config's). Geometry uses the same
-metre coordinates, unit scale and no vertical exaggeration. Nonoverlapping STL
-bounds are rejected; overlapping bounds alone cannot establish precise alignment,
-so the STL must match the run. With STL geometry a mask (saved or derived from
-that STL) is required to prevent lines crossing buildings. The regular 2D products
-remain available if the optional 3D render raises a recoverable error. If 3D
-frames were completed before encoding fails or times out, the viewer retains
-their PNG sequence and records the movie failure in its warnings. A partial 3D
-MP4 is removed where possible and never listed in the manifest; cleanup failure
-is also recorded as a warning.
-Displayed STL surfaces are clipped to the saved field's cell-face bounds; a
-larger source city cannot force the camera to frame an area without flow data.
-The original geometry hash and displayed bounds are retained in provenance.
+`speed_limits` are [0, 99.5th percentile] of the full speed `sqrt(u²+v²+w²)`
+over the fluid cells of all exported frames. `level_speed_limits` give each z
+level [0, 99th percentile] over its fluid cells (null for a level without
+fluid), so the height-slice colorbar stays fixed per level. Explicit
+`color_limits` with `variable: speed` replace both: `speed_limits` and every
+non-null level entry; the browser uses them exactly as exported (no rounding,
+lower bound kept). Both percentiles come from a 4,096-bin histogram over the
+written frames: at most one bin (peak speed / 4096) above the exact value.
 
-Physical cell centres become rectilinear VTK sampling points, with x fastest
-in flattened data. Nonuniform axes are supported. Every interpolation cell
-touching a masked or invalid point is removed, so streamline integration stops
-at the conservative fluid mesh boundary. Seeds are deterministic; explicit
-seeds outside fluid interpolation cells are rejected. The default inlet grid
-(12 across, at 0, 10, 25 and 50% of the height) filters invalid seeds. The
-default camera looks from upstream-left and above, so +x flow runs left to
-right. Limits are 128 seeds and 2,000 integration steps.
-`camera` is `[position, focal_point, up_vector]`. These are instantaneous
-streamlines, not particle trajectories. Contexts close in `finally` blocks.
+Buildings come from the STL (`geometry`, or the run config's), in the same metre
+coordinates without scaling or vertical exaggeration. Triangles are cut to the
+saved field's cell-face bounds, so a larger source city cannot pull the camera
+away from the flow data; the source hash, displayed bounds and triangle count
+are kept in provenance. An STL that does not overlap the domain, a non-STL
+geometry or an unreadable file drops only the 3D view: the 2D bundle is published
+with a `3D view unavailable` warning and no partial scene. Overlapping bounds
+cannot prove precise alignment, so the STL must match the run.
+`mean_speed` is rejected for 3D (it needs velocity components).
 
-The 3D movie currently uses one video frame per selected saved time; the 2D
-snapshot-hold pacing option does not alter 3D pacing. Each view's independent
-mapping keeps browser synchronization correct. 3D color limits describe full
-speed; 2D limits describe its selected variable. Optional 3D is verified locally
-with PyVista 0.46.5 / VTK 9.5.2; offscreen support remains machine-dependent.
+The 3D panel has two displays, both coloured by full speed on one palette
+(dark, indigo/violet, orange, yellow):
+
+- **Height slice**: a glowing horizontal speed sheet at one z level, faded over
+  solid cells, with short additive tracer streaks drifting over it and lit grey
+  buildings casting shadows. The height slider picks the level (`z = … m`); it
+  starts about 9 m above the ground, or at the first level that is at least 60%
+  fluid when that is higher.
+- **Full 3D**: a raymarched soft glow of the Q criterion (Q > 0, vortices) coloured
+  by speed, with sparse streaks seeded mostly in those vortices and in the canopy.
+  Its colour range is the largest exported `level_speed_limits` entry below
+  twice the canopy height, used as exported, so the faster air above saturates
+  (only a scene without level limits falls back to the 99th percentile of that
+  speed in the first decoded state). Grids over 1.5 million cells are averaged over columns first.
+
+Drag to rotate, scroll or pinch to zoom, right- or shift-drag (or two fingers)
+to pan, double-click to reset the camera. `camera` (`[position, focal_point,
+up_vector]`) sets the start view; by default it looks from upstream-left and
+above, so +x flow runs left to right. **Save image** downloads the current view
+as a PNG with its time, subtitle and colorbar. Without WebGL the panel says so
+and the 2D slices remain.
+
+Scientific caveats. The display blends linearly between the two saved states
+around the current time; it shows no solver output between them. Streaks are
+display tracers integrated (RK2) through that blended field, restarted on seeks
+and when a display is switched on; in the height slice they move in the plane
+and are capped in wall-clock speed at fast playback. They show direction and
+relative speed, not exact particle paths. Seeking, restarting and view changes
+snap to saved states; only playback passes between them. The Q glow is computed
+in the browser from the quantized field, damped next to walls and zeroed at the
+open lateral boundaries.
 
 ## Asset serving and validation
 
@@ -226,9 +253,11 @@ Tests live in `tests/visualization/` (CI: `tests-visualization.yml`). Fast
 tests in `test_forward_visualization.py` cover normalization, masks, ensemble
 reduction order, the `state.nc` reader, probe values, PNG bundles and HTTP
 range/containment. `test_forward_visualization_optional.py` is marked
-`integration` and exercises real ffmpeg, optional Playwright/Chromium playback,
-and offscreen VTK including vector ordering and masked streamline termination;
-run it in the `rendering` env (`pixi run -e rendering python -m pytest
+`integration` and exercises real ffmpeg and optional Playwright/Chromium playback,
+including the WebGL 3D panel; `test_forward_visualization_3d.py` covers the
+scene export (round trip, mask, limits, STL clipping, size bound, 2D fallback)
+and the asset allowlist for scene files and older bundles.
+Run the integration tests in the `rendering` env (`pixi run -e rendering python -m pytest
 tests/visualization -m integration`). Install Playwright and its Chromium
 browser separately to run browser checks; those tests skip when the dependency
 is absent.

@@ -1,8 +1,7 @@
 # @package visualization
-# Explicit optional VTK render; always retains 2D previews if 3D is unavailable.
+# Adds the interactive 3D view (a WebGL scene export) to the 2D slices.
 defaults:
   - quicklook
   - _self_
 render_3d: true
 max_frames: 30
-max_steps: 500
