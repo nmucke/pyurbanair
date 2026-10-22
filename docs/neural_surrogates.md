@@ -2117,6 +2117,21 @@ gradients once it has moved (the unit test asserts exactly this order). This
 removes a structural blocker, not a guarantee of sample quality; report the
 actual `count_parameters()` (also in `extra_repr`), not the paper's figure.
 
+**Latent skip (`latent_skip: true`) — a DFT-width net.** With
+`z_tau = (1-tau) z0 + tau z1` and `z0, z1 ~ N(0, I)` the exact velocity is
+`a(tau) z_tau`, `a(tau) = (2tau-1) / (tau² + (1-tau)²)` (`_gaussian_flow_coeff`;
+`a(0) = -1`, `a(1) = 1`): the full-rank part of the velocity on z-scored
+latents. `latent_skip` adds `v += (a(tau) + Linear(t_emb)) ⊙ z_tau` per latent
+channel outside the transformer (`velocity_skip`, zero-initialised, reading the
+sinusoidal tau tail of the conditioning vector), like the DFT's
+`latent_residual_scale * z` residual, so at init the model *is* the Gaussian
+velocity and the transformer only learns the low-rank remainder. It lifts the
+`hidden_size >= D` rule: the default config runs the DFT B width (`hidden_size:
+176`, 8 heads of 22, `n_layers: 6`, `mlp_ratio: 4`, `film_hidden: 256`, adaLN:
+5.5M trainable on the B AE, versus 177M at full width). `latent_skip: false`
+(the default, and absent in older artifacts) builds no extra module, so old
+weights load strictly.
+
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
 input FiLM (but see adaLN-Zero below); `tau` is scaled by `_TAU_SCALE = 1000` before the standard
@@ -2303,7 +2318,7 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size` (`null` → `D`; below `D` needs `latent_skip: true`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `latent_skip` (§36; absent → `false`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |

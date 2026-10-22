@@ -25,6 +25,10 @@ What is locked down here:
   ``tau`` changes the velocity once trained, checkpointing leaves gradients
   unchanged, the default build is the unchanged FiLM net, and the
   self-contained reload round-trips.
+* **Latent skip** (``latent_skip=True``) -- lifts the ``hidden_size >= D``
+  check; at init the velocity is exactly the Gaussian-optimal ``a(tau) * z``;
+  ``a`` is the least-squares velocity of the linear path; the default build
+  has no new keys; a narrow net trains a step and samples with Euler and Heun.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps
 (``diffusers`` / ``timm`` / ``einops``), like the neighbouring Tadpole tests.
@@ -1044,3 +1048,119 @@ def test_adaln_self_contained_reload_reproduces_samples(tmp_path):
     fresh.load_state_dict(torch.load(tmp_path / "weights.pt"), strict=True)
     out = fresh.eval().sample(params_hist, geom, initial_noise=noise)
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# 8. Latent skip (latent_skip=True): v = net + (a(tau) + skip(t_emb)) * z.
+# --------------------------------------------------------------------------- #
+
+NARROW = 64  # hidden_size well below D = 768
+CONDITIONINGS = ("adaln", "input_film")
+
+
+@pytest.mark.parametrize("velocity_conditioning", CONDITIONINGS)
+def test_latent_skip_lifts_the_hidden_size_check(tmp_path, velocity_conditioning):
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    with pytest.raises(ValueError, match="hidden_size"):
+        _generator(
+            ae_dir, hidden_size=NARROW, velocity_conditioning=velocity_conditioning
+        )
+    m = _generator(
+        ae_dir,
+        hidden_size=NARROW,
+        velocity_conditioning=velocity_conditioning,
+        latent_skip=True,
+    )
+    assert m.latent_skip is True
+    assert m.hidden_size == NARROW < m.state_latent_dim
+    skip = m.velocity_skip
+    assert skip.in_features == m.time_embed_dim
+    assert skip.out_features == m.state_latent_dim
+    assert torch.count_nonzero(skip.weight) == 0
+    assert torch.count_nonzero(skip.bias) == 0
+
+
+@pytest.mark.parametrize("velocity_conditioning", CONDITIONINGS)
+def test_latent_skip_velocity_at_init_is_gaussian_optimal(
+    tmp_path, velocity_conditioning
+):
+    from neural_surrogates.architectures.tadpole_latent_flow import _gaussian_flow_coeff
+
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    m = _generator(
+        ae_dir,
+        hidden_size=NARROW,
+        velocity_conditioning=velocity_conditioning,
+        latent_skip=True,
+    ).eval()
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    _, geom, params_hist = _inputs(b=3)
+    cond = m.geometry_condition(geom, batch_size=3)
+    z = torch.randn(3, m.state_latent_dim, *m.latent_grid_for(GRID))
+    tau = torch.tensor([0.0, 0.3, 0.85])
+    with torch.no_grad():
+        v = m.velocity(z, tau, params_hist, cond)
+    # both velocity nets zero-initialise their output projection
+    expected = _gaussian_flow_coeff(tau)[:, None, None, None, None] * z
+    torch.testing.assert_close(v, expected)
+
+
+def test_gaussian_flow_coeff_is_the_least_squares_velocity():
+    from neural_surrogates.architectures.tadpole_latent_flow import _gaussian_flow_coeff
+
+    a = _gaussian_flow_coeff(torch.tensor([0.0, 0.5, 1.0]))
+    torch.testing.assert_close(a, torch.tensor([-1.0, 0.0, 1.0]))
+    # E[z1 - z0 | z_tau] = a(tau) z_tau for z0, z1 ~ N(0, I), z_tau the linear path
+    g = torch.Generator().manual_seed(0)
+    z0 = torch.randn(1_000_000, generator=g, dtype=torch.float64)
+    z1 = torch.randn(1_000_000, generator=g, dtype=torch.float64)
+    for t in (0.1, 0.3, 0.5, 0.7, 0.95):
+        z_tau = (1 - t) * z0 + t * z1
+        fit = (z_tau @ (z1 - z0)) / (z_tau @ z_tau)
+        coeff = _gaussian_flow_coeff(torch.tensor(t, dtype=torch.float64))
+        assert abs(float(fit) - float(coeff)) < 5e-3, t
+
+
+def test_latent_skip_off_adds_no_state_dict_keys(tmp_path):
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    default = _generator(ae_dir)
+    off = _generator(ae_dir, latent_skip=False)
+    assert off.latent_skip is False
+    assert not any("velocity_skip" in k for k in off.state_dict())
+    assert set(off.state_dict()) == set(default.state_dict())
+    on = _generator(ae_dir, latent_skip=True)
+    assert {k for k in on.state_dict() if "velocity_skip" in k} == {
+        "velocity_skip.weight",
+        "velocity_skip.bias",
+    }
+
+
+@pytest.mark.parametrize("velocity_conditioning", CONDITIONINGS)
+def test_latent_skip_narrow_net_trains_and_samples(tmp_path, velocity_conditioning):
+    ae_dir = _make_ae_export(tmp_path, "local", "fold")
+    m = _generator(
+        ae_dir,
+        hidden_size=NARROW,
+        velocity_conditioning=velocity_conditioning,
+        latent_skip=True,
+    )
+    _install_nontrivial_latent_stats(m)
+    m.set_normalization(None, None, [10.0, 10.0], [3.0, 3.0])
+    m.train()
+    state, geom, params_hist = _inputs(b=2)
+    feats = _sdf_feats(m, geom)
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=1e-3)
+    v_pred, v_target = m(state, params_hist, geom, feats)
+    loss = torch.nn.functional.mse_loss(v_pred, v_target)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert m.velocity_skip.weight.grad is not None
+    assert torch.count_nonzero(m.velocity_skip.weight.grad) > 0
+    opt.step()
+
+    m.eval()
+    for sampler in ("euler", "heun"):
+        out = m.sample(params_hist, geom, feats, num_steps=2, sampler=sampler)
+        assert out.shape == state.shape
+        assert torch.isfinite(out).all()

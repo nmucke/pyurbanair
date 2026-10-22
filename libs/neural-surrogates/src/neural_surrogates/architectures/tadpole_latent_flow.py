@@ -46,10 +46,16 @@ With a hidden width ``H < D`` the final ``Linear(H, D)`` confines every
 velocity to a fixed ``H``-dimensional subspace, so the ODE could never remove
 the initial noise in the orthogonal complement. Here ``hidden_size`` defaults
 to ``D`` (rounded up to a multiple of ``num_heads``) and an explicit value
-below ``D`` is rejected. The output projection keeps its zero initialisation:
-the hidden activations are nonzero, so it receives gradients on the very first
-step; conditioning layers (param FiLM, geometry FiLM) start receiving
-gradients once it has moved.
+below ``D`` is rejected unless ``latent_skip=True``. That adds a full-rank skip
+outside the transformer, ``v += (a(tau) + Linear(t_emb)) * z_tau`` per latent
+channel (like the DFT's ``latent_residual_scale * z`` residual), with
+``a(tau)`` the exact Gaussian velocity coefficient
+(:func:`_gaussian_flow_coeff`) and the ``Linear`` zero-initialised, so at init
+the model is the exact velocity for ``z1 ~ N(0, I)``; the transformer then
+only has to learn the low-rank remainder. The output projection keeps its
+zero initialisation: the hidden activations are nonzero, so it receives
+gradients on the very first step; conditioning layers (param FiLM, geometry
+FiLM) start receiving gradients once it has moved.
 
 Conditioning vector = ``concat(z-scored flattened params_hist (Hp*P),
 sinusoidal embedding of the flow time tau (time_embed_dim))``. With
@@ -169,6 +175,16 @@ def _sinusoidal_time_embedding(tau: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 
 
+def _gaussian_flow_coeff(tau: torch.Tensor) -> torch.Tensor:
+    """``a(tau) = (2 tau - 1) / (tau^2 + (1 - tau)^2)``, same shape as ``tau``.
+
+    With the path ``z_tau = (1 - tau) z0 + tau z1`` and ``z0, z1 ~ N(0, I)``,
+    the exact optimal velocity is ``a(tau) * z_tau``: the full-rank part of the
+    velocity on z-scored latents. ``a(0) = -1``, ``a(1/2) = 0``, ``a(1) = 1``.
+    """
+    return (2.0 * tau - 1.0) / (tau**2 + (1.0 - tau) ** 2)
+
+
 def _plain(obj: Any) -> Any:
     """Recursively turn OmegaConf containers into plain ``dict`` / ``list``."""
     try:
@@ -219,8 +235,8 @@ class TadpoleLatentGenerator(nn.Module):
         where the generator's own ``weights.pt`` carries ``ae.*``.
     hidden_size:
         Velocity-net width; ``None`` -> ``D`` rounded up to a multiple of
-        ``num_heads``. An explicit value below ``D`` is rejected (see the
-        module docstring).
+        ``num_heads``. An explicit value below ``D`` is rejected unless
+        ``latent_skip`` (see the module docstring).
     n_layers, num_heads, mlp_ratio, film_hidden:
         Velocity-net transformer / FiLM-MLP sizing (with ``"adaln"``,
         ``film_hidden`` is the width of the conditioning embedding).
@@ -230,6 +246,11 @@ class TadpoleLatentGenerator(nn.Module):
         and the geometry as a spatial FiLM. ``"adaln"``: an
         ``AdaLNVelocityNet`` with per-block adaLN-Zero conditioning and
         additive per-token geometry.
+    latent_skip:
+        Add the full-rank skip ``(a(tau) + Linear(t_emb)) * z_tau`` to the
+        velocity (``Linear`` zero-initialised), which allows ``hidden_size <
+        D``. ``False`` (default) builds no extra modules, so older artifacts
+        load strictly.
     use_checkpoint:
         Recompute velocity-transformer blocks during backward to reduce
         activation memory.
@@ -264,6 +285,7 @@ class TadpoleLatentGenerator(nn.Module):
         mlp_ratio: int = 4,
         use_checkpoint: bool = False,
         velocity_conditioning: str = "input_film",
+        latent_skip: bool = False,
         num_sampling_steps: int = 50,
         latent_eps: float = 1e-6,
         max_latent_tokens: int | None = None,
@@ -353,13 +375,15 @@ class TadpoleLatentGenerator(nn.Module):
 
         # -- velocity network ----------------------------------------------- #
         d = self.state_latent_dim
-        if hidden_size is not None and int(hidden_size) < d:
+        self.latent_skip = bool(latent_skip)
+        if hidden_size is not None and int(hidden_size) < d and not self.latent_skip:
             raise ValueError(
                 f"hidden_size={hidden_size} is below the latent width D={d}: the "
                 "final Linear(hidden_size, D) would confine every velocity to a "
                 f"{hidden_size}-dimensional subspace and the flow could never "
                 "remove the initial noise in its complement. Use hidden_size=None "
-                f"(-> D) or a value >= {d}."
+                f"(-> D) or a value >= {d}. latent_skip=True lifts this limit "
+                "with a full-rank skip on the noisy latent."
             )
         h = d if hidden_size is None else int(hidden_size)
         heads = int(num_heads)
@@ -403,6 +427,12 @@ class TadpoleLatentGenerator(nn.Module):
                 use_checkpoint=self.use_checkpoint,
                 geom_cond_dim=self.geom_cond_dim,
             )
+        if self.latent_skip:
+            # Learned per-channel correction to a(tau); zero at init, so the
+            # skip starts as the exact Gaussian velocity a(tau) * z_tau.
+            self.velocity_skip = nn.Linear(self.time_embed_dim, d)
+            nn.init.zeros_(self.velocity_skip.weight)
+            nn.init.zeros_(self.velocity_skip.bias)
 
         # -- normalisation buffers ------------------------------------------ #
         self.register_buffer("latent_mean", torch.zeros(self.working_latent_dim))
@@ -1109,6 +1139,13 @@ class TadpoleLatentGenerator(nn.Module):
             )
         cond_vec = self._conditioning_vector(tau, params_hist)
         v: torch.Tensor = self.velocity_net(z, cond_vec, geom_cond=geom_cond)
+        if self.latent_skip:
+            # The sinusoidal tau embedding is the tail of cond_vec.
+            t_emb = cond_vec[:, -self.time_embed_dim :]
+            coeff = _gaussian_flow_coeff(tau.to(torch.float32))[
+                :, None
+            ] + self.velocity_skip(t_emb)
+            v = v + coeff[:, :, None, None, None].to(v.dtype) * z.to(v.dtype)
         return v
 
     # -- training objective ------------------------------------------------- #
