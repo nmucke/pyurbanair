@@ -778,10 +778,10 @@ forcing back at inference only, without retraining:
 inlet_turbulence:
   enabled: false
   seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
-  apply: output  # eval.yaml only; input: u_t = F(u_{t-1} + forcing)
+  apply: output  # input: u_t = F(u_{t-1} + forcing)
 ```
 
-With `apply: input` (`evaluate_stepper.py` only) the forcing is added only to
+With `apply: input` (`evaluate_stepper.py` and `run_models.py`) the forcing is added only to
 the frame fed back to the model, so the network advects it from the inlet and
 the stored frames are its own outputs, without the thin forced band at the
 west edge that `output` leaves.

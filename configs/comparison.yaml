@@ -26,6 +26,9 @@ max_steps: null
 inlet_turbulence:
   enabled: false
   seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+  # output: added to every predicted frame (stored and fed back);
+  # input: added only to the frame fed back, u_t = F(u_{t-1} + forcing).
+  apply: output
 # Inference-time y-periodicity (uDALES domains are periodic in y): circular y
 # padding in every conv and y-periodic SDF features
 # (neural_surrogates.periodic.make_periodic_y); no retraining.
