@@ -315,8 +315,135 @@ byte-identical.
 - **PR #221.** Its `latent_skip` (channel) stays as a supported option. Its
   default config (`hidden_size: 176`, `latent_generator_s_h176`) should not
   land. Either drop it from the PR, or close the PR in favour of Phase 1.
+  Phase 1 is now merged into PR #221's branch, so the default config still
+  sets `latent_skip: true`. Every run that uses `gaussian_skip` must set
+  `architecture.latent_skip=false`; the two are mutually exclusive.
 
-## 5. References
+## 5. Test recipe (proof of concept, then realistic)
+
+For running on a machine with a working GPU. Run everything from the repository
+root on branch `feat/small-velocity-net`, through `pixi run -e cuda` (GPU) or
+`pixi run -e dev` (CPU). All configs below were composed and built on CPU on
+2026-10-23; nothing below has run on a GPU yet.
+
+### 5.0 Inputs
+
+- Idealized data: `training_data/pyudales_idealized` (250 train / 5 val / 5
+  test trajectories, 121 GB).
+- The S autoencoder: `model_weights/tadpole_ae_s_new` (D = 768). The config's
+  default `autoencoder_dir` (`tadpole_ae_s`) does not exist; always pass
+  `autoencoder_dir=model_weights/tadpole_ae_s_new`.
+- Any latent cache made before this branch lacks the second moments the
+  Gaussian skip needs, so build a new one (5.3).
+
+### 5.1 CPU unit and script tests (about 25 min)
+
+```bash
+CUDA_VISIBLE_DEVICES="" pixi run -e dev python -m pytest \
+  tests/neural_surrogates/test_tadpole_latent_flow.py \
+  tests/neural_surrogates/test_latent_velocity_nets.py \
+  tests/neural_surrogates/test_latent_cache.py \
+  tests/neural_surrogates/test_latent_generator_evaluation.py -q
+CUDA_VISIBLE_DEVICES="" pixi run -e dev python -m pytest \
+  tests/scripts/test_surrogate.py -k "latent or generator or spinup" -q
+```
+
+All passed on the merge commit (99 + 8 tests). The script tests include
+`test_full_reach_latent_generator_trains_samples_and_evaluates[design_a|design_b]`,
+which trains, reloads and evaluates a tiny design A and B end to end.
+
+### 5.2 GPU sanity check (5 min)
+
+The local RTX 3090 failed with `CUDA error: unspecified launch failure` after
+about 90 s of sustained autoencoder work, while plain matmul stress passed. Before
+long jobs, run the autoencoder forward in a loop for a few minutes on the target
+GPU. Any crash there is the machine, not this code.
+
+### 5.3 Latent cache (about 1 h on the 3090 at ~12 s per trajectory)
+
+```bash
+C="autoencoder_dir=model_weights/tadpole_ae_s_new \
+   latent_cache.output_root=model_weights/latent_cache_s_idealized \
+   trainer.num_epochs=15 trainer.lr_warmup_epochs=1"
+pixi run -e cuda python scripts/surrogate/train.py \
+  --config-name surrogate/train_latent_generator $C latent_cache.prepare_only=true
+```
+
+The cache is resumable: rerun the same command after an interruption. Check
+that `model_weights/latent_cache_s_idealized/latent_stats.npz` contains
+`second_moment`.
+
+### 5.4 Training runs (15 epochs each; epochs are the only budget knob)
+
+Run them one at a time, with the same `$C`:
+
+| name | overrides after `$C` | trainable (D = 768) |
+|---|---|---|
+| `lg_s_poc_full` | `architecture.hidden_size=null architecture.latent_skip=false` | 65.6M |
+| `lg_s_poc_h176` | (none: PR #221's default, H 176 + `latent_skip`) | 5.1M |
+| `lg_s_poc_a` | `architecture.hidden_size=320 architecture.latent_skip=false +architecture.gaussian_skip=true +architecture.head_hidden=768 +architecture.head_layers=2` | 21.0M |
+| `lg_s_poc_b` | `architecture.velocity_conditioning=adaln_bottleneck architecture.hidden_size=256 architecture.n_layers=4 architecture.latent_skip=false +architecture.gaussian_skip=true +architecture.mlp_hidden=768` | 15.7M |
+
+```bash
+pixi run -e cuda python scripts/surrogate/train.py \
+  --config-name surrogate/train_latent_generator $C name=<name> <overrides>
+```
+
+Every run's model `repr` in the log shows `trainable_params` and the knobs that
+are set; check they match the table.
+
+Optional, only after A or B works:
+- `+architecture.prediction=data` on the better design (needs
+  `latent_skip=false`);
+- `+architecture.time_shift=3.0`. Heun with α > 1 over-disperses the
+  low-variance directions (variance ratio 1.06 at α = 3, 1.49 at α = 10, for
+  λ = 0.01), so keep α ≤ 3 for now.
+
+### 5.5 Evaluation
+
+```bash
+for n in lg_s_poc_full lg_s_poc_h176 lg_s_poc_a lg_s_poc_b; do
+  pixi run -e cuda python scripts/surrogate/evaluate_latent_generator.py \
+    latent_generator.model_dir='${paths.weights_dir}/'$n
+done
+```
+
+Outputs go to `model_weights/<name>/eval/`. Use
+`latent_generator.batch_size=2` if it runs out of memory; the global decode is
+the largest.
+
+### 5.6 What counts as working
+
+1. **Runs.** The cache, all four trainings and all four evaluations finish.
+   The gaussian-skip runs' first validation loss is already well below the
+   full-width run's, because they start at the Gaussian.
+2. **Learning.** Val loss of A and B beats h176 clearly, and approaches the
+   full-width run. h176 plateaued within ~20 epochs on the realistic data.
+3. **Acceptance gate** (`summary.json`): compare `w1` (also `w1_w`),
+   `profile_rmse`, `divergence_rms` and `diversity_ratio` across the four.
+4. **Latent spectrum** (`latent_spectrum.png`, `latent_var_ratio_*` in
+   `metrics.csv`).
+   - Ratios near 1 in every band are the goal.
+   - h176 should be clearly off in the high bands. That is the failure this
+     work targets.
+5. **Sampler** (`step_sweep.png`). Compare Euler and Heun at 50 steps. Euler
+   under-disperses low-variance directions (§2.1); if Heun's `w1_w` is much
+   better, prefer Heun for the realistic runs.
+
+### 5.7 Then the realistic runs
+
+- Build a new cache of `pyudales_realistic` with `tadpole_ae_b_realistic`
+  under a **new** `latent_cache.output_root`; the old one has no second
+  moments.
+- Train R1–R3 of §3 with D = 1536 configs:
+  - A: `hidden_size=320`, `head_hidden=1024`, `head_layers=2` (27.6M);
+  - B: `adaln_bottleneck`, `hidden_size=256`, `n_layers=4`, `mlp_hidden=512`
+    (26.7M);
+  - each with `latent_skip=false` and `+gaussian_skip=true`.
+- Evaluate the unevaluated 232M `latent_generator_b_realistic_restart` there
+  too; it never finished here because of the GPU fault.
+
+## 6. References
 
 All arXiv IDs were checked against the arXiv API on 2026-10-23.
 
