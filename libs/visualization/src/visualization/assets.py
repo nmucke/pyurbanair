@@ -8,12 +8,33 @@ import re
 import secrets
 import threading
 import time
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from .data import contained
+
+# Module scripts need a JavaScript type; the platform's table may lack one.
+CONTENT_TYPES = {".js": "text/javascript", ".bin": "application/octet-stream"}
+
+
+def web_assets() -> list[str]:
+    """The viewer's static files, as paths relative to the bundle root."""
+
+    def walk(node: Traversable, prefix: str) -> Iterator[str]:
+        for child in node.iterdir():
+            if child.name.startswith((".", "__")) or child.name.endswith(".py"):
+                continue
+            if child.is_dir():
+                yield from walk(child, f"{prefix}{child.name}/")
+            else:
+                yield prefix + child.name
+
+    return sorted(walk(files("visualization.web"), ""))
 
 
 class BundleAssetServer:
@@ -106,7 +127,9 @@ class BundleAssetServer:
                 self.send_response(206 if range_header else 200)
                 self.send_header(
                     "Content-Type",
-                    mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                    CONTENT_TYPES.get(path.suffix)
+                    or mimetypes.guess_type(path.name)[0]
+                    or "application/octet-stream",
                 )
                 self.send_header("Content-Length", str(max(0, end - start + 1)))
                 self.send_header("Accept-Ranges", "bytes")
@@ -165,11 +188,9 @@ class BundleAssetServer:
         manifest = json.loads((root / "viewer_manifest.json").read_text())
         if manifest.get("version") != 1 or manifest.get("status") != "complete":
             raise ValueError("Only completed version-1 bundles may be served")
+        # Bundles keep the viewer files of the renderer that wrote them.
+        assets = {name for name in web_assets() if contained(root, name).is_file()}
         allowed = {
-            "index.html",
-            "viewer.css",
-            "viewer.js",
-            "probe_charts.js",
             "viewer_manifest.json",
             "provenance.json",
             "render_config.resolved.yaml",
@@ -177,16 +198,24 @@ class BundleAssetServer:
             "probes.csv",
         }
         for view in manifest["views"]:
-            allowed.add(view["poster"])
-            if view.get("media"):
-                allowed.add(view["media"])
+            for key in ("poster", "media", "scene"):
+                if view.get(key):
+                    allowed.add(view[key])
             for snapshot in view.get("snapshots", []):
                 allowed.add(snapshot["path"])
+            if view.get("scene"):
+                # The 3D scene's binaries, named relative to its scene.json.
+                folder = view["scene"].rsplit("/", 1)[0]
+                scene = json.loads(contained(root, view["scene"]).read_text())
+                for name in [scene["fluid"], scene["buildings"], *scene["velocity"]]:
+                    if name:
+                        allowed.add(f"{folder}/{name}")
         if (root / "previews" / "probes.png").exists():
             allowed.add("previews/probes.png")
         for relative in allowed:
             if not contained(root, relative).is_file():
                 raise ValueError(f"Missing bundle asset {relative}")
+        allowed |= assets
         token = secrets.token_urlsafe(24)
         with self._lock:
             self.bundles[token] = (root, allowed, frame_ancestor)

@@ -146,7 +146,8 @@ wall-distance limit (uDALES reconstructs at e·z0 from the wall: ≲ 0.3 m on th
 ### 1.5 `assimilation_settings/`
 
 Each file is mounted at the top level and holds every option of one component
-(`smoother`, `analysis`, `localization`, `state_reduction`, `inflation`); the
+(`smoother`, `analysis`, `localization`, `state_reduction`, `inflation`,
+`adaptive_error`); the
 `smoothing` / `filtering` slots point at one by interpolation. The options and
 their slots are listed in [`configs/README.md`](../configs/README.md#keys); the
 classes behind them in [data_assimilation.md](data_assimilation.md).
@@ -165,7 +166,8 @@ parameter-updating filter modes need inflation or a parameter evolution;
 `assimilate_every_n_step` divides the frames per window;
 `hybrid.likelihood_allocation=shared_budget` needs `filtering.beta > 1`, no
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
-prior parameters; and the SGS-discrepancy rules of §1.7.
+prior parameters; `observation.adaptive_error` is smoother-only; and the
+SGS-discrepancy rules of §1.7.
 
 A localized state-bearing smoother is also checked for memory. Its update
 holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as
@@ -305,7 +307,7 @@ docstring lists every metric and figure.
 
 | Script | Input | Output |
 |---|---|---|
-| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
+| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, or with `apply: input` only to the frame fed back, off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
 | `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
 | `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy, divergence and TKE against lead time, profiles, spectra, velocity PDFs, \|U\|, TKE and statistics slices; `summary.csv` / `summary.tex` |
 

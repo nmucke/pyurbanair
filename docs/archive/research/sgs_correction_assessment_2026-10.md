@@ -1,7 +1,7 @@
 # Why the SGS correction does not help, and where to go next
 
 October 2026 · Follows the SGS twin study (Rounds 1, 1b and 2; report on
-branch `exp/sgs-twin-tests`, `docs/research/sgs_twin_tests_2026-10/`).
+branch `exp/sgs-twin-tests`, `docs/archive/research/sgs_twin_tests_2026-10/`).
 Updated 14 October 2026 after the cross-model parity work (PR #201, PR #202):
 §5 says what that work changed, and §6 replaces the earlier list of directions.
 
@@ -206,6 +206,10 @@ Both residuals need changes to the solver source and are accepted as model
 differences. They make pylbm a deliberately "far" truth.
 
 ## 6. Directions for real-world cross-model DA
+
+*Results of the first overnight runs on these directions (Round-2 rerun,
+resolution, inflow-turbulence sensitivity, pylbm) are in
+`overnight_runs_2026-10-15.md`.*
 
 Ordered by priority. Each applies with real observations, where no truth field
 is available.

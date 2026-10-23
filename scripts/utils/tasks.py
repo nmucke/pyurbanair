@@ -25,6 +25,7 @@ import xarray
 from hydra.utils import instantiate
 from neural_surrogates.datasets.latent_cache import (
     LatentCacheDataset,
+    load_latent_second_moment,
     load_latent_stats,
     prepare_latent_cache,
 )
@@ -166,7 +167,12 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
 
     if root is not None:
         # Exact latent statistics of the whole train split, from the cache.
-        model.set_latent_normalization(*load_latent_stats(root))
+        model.set_latent_normalization(
+            *load_latent_stats(root),
+            second_moment=(
+                load_latent_second_moment(root) if model.gaussian_skip else None
+            ),
+        )
         cfg.dataloader.collate_fn = None  # cached items stack as they are
         return Setup(
             model,

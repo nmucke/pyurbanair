@@ -231,8 +231,8 @@ time-varying parameter's knots averaged within each window):
 | `spread_skill` | sanity check, per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
 | `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
 | `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank, per source |
-| `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N) |
-| `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation) and their `ratio` |
+| `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N); both with the configured `obs_std` |
+| `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation; `obs_std_assimilated` with an adaptive observation error, else `obs_std`) and their `ratio` |
 
 A hybrid has both stages, the smoother's from `window_{w}_obs.nc` and the
 filter's from `window_{w}_filter_obs.nc`. Its smoother stops before the
@@ -261,7 +261,7 @@ Read these with their limits:
   `desroziers` cover the assimilated sensors only.
 - **Resolved stresses only.** TKE and u′w′ are the resolved parts; the outputs
   carry no SGS stress. Fair within one solver; across solvers (Round 2 of
-  [sgs_discrepancy_twin_tests.md](plans/sgs_discrepancy_twin_tests.md)) the
+  [sgs_discrepancy_twin_tests.md](archive/plans/sgs_discrepancy_twin_tests.md)) the
   two codes resolve different fractions.
 - **The near-cutoff band partly measures numerics.** Across solvers the two
   codes' numerical dissipation differs near 2Δ, so a mismatch there is not

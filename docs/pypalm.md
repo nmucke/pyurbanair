@@ -755,9 +755,9 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
 | pressure gradient, Coriolis | dpdx = dpdy = 0, `lcoriol` off | `omega = 0` | aligned |
 | top | free-slip u, v; w open (`BCtopm = 3`, forced by uDALES under inflow-outflow; 1 periodic) | free-slip u, v (`bc_uv_t = 'neumann'` since 2026-10); w = 0 | u, v aligned; w cannot be (PALM has no open lid outside nesting) |
 | lateral | cyclic y | cyclic y | aligned |
-| outflow | convective, 20 m flat buffer (since 2026-10) | radiation + damping (1/s, 4 m), 20 m buffer | different schemes, both outside the bounds |
+| outflow | convective, 40 m flat buffer (20 m before 2026-10-21) | radiation + damping (1/s, 4 m), 40 m buffer | different schemes, both outside the bounds |
 | upstream ground | wall (STL ground extended over the fetch since 2026-10; before it was free-slip) | wall | aligned |
-| walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0; first point 1 m (dz/2) in both |
+| walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0, same blocked voxels and first fluid points, but **not the same distance**: PALM 1 m everywhere; uDALES the STL facet distance, 1 m on the ground, 2 m on every wall and 0.2-1.8 m on roofs (below) |
 | SGS | Vreman, c = 0.12 (0.24 before 2026-10-14) | Deardorff 1.5-order TKE | cannot be aligned, see below |
 | advection, time | CD2, RK3, CFL 0.7, dt_max 1 s | ws-scheme (5th order upwind, since 2026-10; pw-scheme before), RK3, CFL 0.7, dt_max 1 s | different on purpose: uDALES has only CD2, and the undamped pw-scheme left grid-scale streaks; see "Grid-scale streaks" |
 | pressure solver | FFT (cosine in x under inflow-outflow) | multigrid (inflow_outflow), FFT (periodic) | both converged; not a parity issue |
@@ -806,6 +806,28 @@ literature 0.07, and what c does to the comparison, is in docs/pyudales.md §7
 and spectra, but not the near-ground canopy mean (array-mean u at 1 m
 1.33 m/s in uDALES for c = 0.12-0.24 against 0.87-0.88 in PALM with its
 ws-scheme), so that gap is not an SGS-constant effect.
+
+**Wall treatment** (2026-10-21; 10°, 6.0 m/s, turbulent inflow, 2 m, 540 s,
+3 replicas). Both codes block the same voxels and put the first fluid point
+1 m from the blocked face, but uDALES evaluates its log law at the STL facet
+distance: 1 m on the ground, **2 m on every wall** (the cube faces sit at
+x, y = 5 + 10n, mid-cell) and 0.2-1.8 m on the roofs, over the true 10 m
+facets rather than the 12 m voxel blocks. Offline, on PALM's own flow at
+z0 = 0.1, the uDALES law gives the same ground stress, 0.65x the roof
+stress and 0.47x the wall stress (total 0.69x). Running uDALES on an STL
+snapped to PALM's voxels (all distances 1 m) removes the canopy gap: the
+array-mean u at 1 m goes from 1.41 to 0.85 m/s (PALM 0.94) and the
+above-canopy profile matches PALM (sensors at z ≥ 14 m: RMSE 0.30 -> 0.18
+m/s, noise 0.11). Snapping only the footprints (true roofs) gives the same
+(0.87), so the walls are the part that matters. What remains is at street
+level, of opposite sign: snapped uDALES is slower and more turbulent than
+PALM in the lanes at 1 m (0.16 vs 0.35 m/s, TKE 0.34 vs 0.13 m²/s²),
+which is not a wall-law term (SGS, numerics). PALM's canopy hardly responds
+to z0 (array-mean u at 1 m 0.95 at z0 0.05 and 0.94 at 0.1), whereas
+uDALES' does (1.56 -> 1.41). With the real STL, uDALES matches PALM's 2 m
+sensors best at z0 ≈ 0.13-0.17 for a PALM z0 of 0.05 or 0.1; that is the
+cross-model z0 a DA estimates. Per wall, z0_uDALES = 2 z0_PALM is exact
+(ln(2/2z0) = ln(1/z0)). Runs are local, not in git.
 
 **Spin-up** (20-s blocks of the canopy-mean u and kinetic energy, cold
 start): PALM starts from the profile and is stationary within 20-40 s in
@@ -1147,8 +1169,9 @@ cube column. Without a buffer PALM's time-mean u at x = 78 m, z = 1-9 m was
 1.0-1.5 m/s above uDALES's (the damping layer pulls the wake toward the inflow
 profile); with 20 m of buffer in both models the difference is -0.2 m/s, and
 20 vs 40 m changes uDALES by ≤ 0.06 m/s and PALM by its realisation noise
-(array rms 0.10 m/s). `xie_and_castro` therefore sets `flow.outflow_buffer: 20`
-for both backends.
+(array rms 0.10 m/s). `xie_and_castro` set `flow.outflow_buffer: 20` for both
+backends; since 2026-10-21 it is 40 m, because 20 m let rare uDALES backflow
+bursts into the bounds (docs/pyudales.md §7). PALM runs cleanly with 40 m.
 
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
 across runs) is very likely the same outflow instability; not yet confirmed by

@@ -470,7 +470,7 @@ distance to PALM 0.72 against 0.50 m/s, turbulent).
 
 ### Outflow buffer
 
-`outflow_buffer` (`${flow.outflow_buffer}`: 20 m on xie_and_castro, null in
+`outflow_buffer` (`${flow.outflow_buffer}`: 40 m on xie_and_castro, null in
 `common.yaml` and the periodic case) mirrors pyudales and pypalm (docs/pypalm.md
 §8): `_extend_for_outflow_buffer` adds `ceil(buffer / dx)` cells past
 `bounds`' xmax, so `mod_dimensions.F90`, the bathymetry and the restarts are
@@ -845,7 +845,7 @@ forward_model:
   verbose: false
   boundary_condition: inflow_outflow
   ground_boundary: no_slip     # kbnd 12; free_slip: 22 (§5)
-  outflow_buffer: ${flow.outflow_buffer}   # xie_and_castro: 20 m (§5)
+  outflow_buffer: ${flow.outflow_buffer}   # xie_and_castro: 40 m (§5)
   profile_config: {type: power_law, alpha: 0.25}
   inlet_turbulence: {enabled: false, method: random_forcing, amplitude: 5.0e-05,
                      update_interval: 100, intensity: 0.15, length_scale_x: 24.0,
@@ -1117,7 +1117,7 @@ sits 5 m behind the last block column, in its wake, and the flow there breaks
 down with either ground (420 s, 10°, 5 m/s): time-mean canopy TKE grows from
 0.4 m²/s² at x = 37 m to 10-22 m²/s² at x = 61-77 m (PALM 0.2-0.4), |u|
 reaches 25 m/s and the mean density drifts by 2-6 %. The case therefore sets
-`flow.outflow_buffer: 20.0`, which pylbm honours like the other backends
+`flow.outflow_buffer: 40.0`, which pylbm honours like the other backends
 (§5 "Outflow buffer"); set it whenever the bounds end in a wake.
 
 ### Domain-height SIGFPE

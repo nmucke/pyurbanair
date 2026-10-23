@@ -16,7 +16,9 @@ import numpy as np
 import xarray as xr
 import yaml
 
+from .assets import web_assets
 from .data import ArtifactReader, fingerprint
+from .render_3d import check_scene_size, render_3d
 
 
 @dataclass
@@ -46,8 +48,6 @@ class RenderOptions:
     render_3d: bool = False
     geometry: str | None = None
     camera: list[list[float]] | None = None
-    seeds: list[list[float]] = field(default_factory=list)
-    max_steps: int = 500
     simulation_seconds_per_video_second: float | None = None
 
 
@@ -72,7 +72,6 @@ def validate_options(
         ("fps", 1, 60),
         ("width", 128, 1920),
         ("height", 128, 1080),
-        ("max_steps", 1, 2000),
     ):
         value = getattr(opts, name)
         if (
@@ -83,12 +82,8 @@ def validate_options(
             raise ValueError(f"{name} must be an integer between {lower} and {upper}")
     if opts.width % 2 or opts.height % 2:
         raise ValueError("Image dimensions must be even for browser MP4 compatibility")
-    if (
-        not 1 <= len(opts.slices) <= 6
-        or len(opts.probes or []) > 32
-        or len(opts.seeds) > 128
-    ):
-        raise ValueError("Limits: 1–6 slices, 32 probes and 128 streamline seeds")
+    if not 1 <= len(opts.slices) <= 6 or len(opts.probes or []) > 32:
+        raise ValueError("Limits: 1–6 slices and 32 probes")
     for item in opts.slices:
         if set(item) - {"axis", "position", "fraction", "variable"} or item.get(
             "axis"
@@ -152,10 +147,8 @@ def validate_options(
         np.shape(opts.camera) != (3, 3) or not np.isfinite(opts.camera).all()
     ):
         raise ValueError("Camera must contain position, focal point and up vector")
-    if any(len(seed) != 3 or not np.isfinite(seed).all() for seed in opts.seeds):
-        raise ValueError("Streamline seeds must be finite XYZ positions")
     if opts.render_3d and opts.reduction == "mean_speed":
-        raise ValueError("3D streamlines require a member or mean_velocity reduction")
+        raise ValueError("The 3D view requires a member or mean_velocity reduction")
     return opts
 
 
@@ -314,6 +307,8 @@ def render(
         ] + [1]
         if sum(repeats) > opts.max_frames:
             raise ValueError("Requested playback rate exceeds max_frames budget")
+    if opts.render_3d:
+        check_scene_size(reader.frame(times[0]), len(times))
     output = Path(output_root).resolve()
     if output.exists():
         raise FileExistsError(f"Render output already exists: {output}")
@@ -356,7 +351,6 @@ def render(
     ]
     variables = {spec.get("variable", opts.variable) for spec in opts.slices}
     extrema = {variable: [float("inf"), float("-inf")] for variable in variables}
-    speed_extrema = [float("inf"), float("-inf")]
     reference_coords: dict[str, np.ndarray] = {}
     slice_metadata: list[dict[str, Any]] = []
     domain: dict[str, Any] = {}
@@ -387,12 +381,6 @@ def render(
             probe["values"].append(value)
         if time not in times:
             continue
-        if opts.render_3d:
-            speed_values = ds.speed.values
-            finite_speed = speed_values[np.isfinite(speed_values)]
-            if finite_speed.size:
-                speed_extrema[0] = min(speed_extrema[0], float(finite_speed.min()))
-                speed_extrema[1] = max(speed_extrema[1], float(finite_speed.max()))
         slice_metadata = []
         for spec in opts.slices:
             plane, metadata = _slice(ds, spec)
@@ -581,39 +569,13 @@ def render(
             }
         )
     if opts.render_3d:
+        limits_3d = opts.color_limits if opts.variable == "speed" else None
         try:
-            from .render_3d import render_3d
-
-            speed_limits = (
-                opts.color_limits
-                if opts.variable == "speed" and opts.color_limits
-                else speed_extrema
-            )
-            if not np.isfinite(speed_limits).all():
-                speed_limits = [0.0, 1.0]
-            elif speed_limits[0] == speed_limits[1]:
-                speed_limits = [
-                    speed_limits[0],
-                    speed_limits[1] + max(abs(speed_limits[1]) * 0.01, 1e-9),
-                ]
-            views.append(render_3d(reader, output, times, opts, speed_limits, warnings))
-        except (
-            ImportError,
-            RuntimeError,
-            ValueError,
-            OSError,
-            subprocess.SubprocessError,
-        ) as exc:
+            views.append(render_3d(reader, output, times, repeats, opts, limits_3d))
+        except (ValueError, OSError) as exc:
+            # A bad or misaligned STL costs the 3D view only, never the 2D one.
             shutil.rmtree(output / "media" / "flow-3d", ignore_errors=True)
-            for path in (
-                output / "media" / "flow-3d.mp4",
-                output / "previews" / "flow-3d.png",
-            ):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            warnings.add(f"Optional 3D rendering unavailable: {exc}")
+            warnings.add(f"3D view unavailable: {exc}")
     if probes:
         fig = Figure(
             figsize=(opts.width / 100, opts.height / 100), dpi=100, layout="constrained"
@@ -639,17 +601,18 @@ def render(
         raise ValueError("state.nc changed during rendering; bundle not published")
     backend = reader.backend
     provenance = {
-        "renderer_version": 2,
+        "renderer_version": 3,
         "viewer_version": 2,
         "source_root": str(reader.root),
         "sources": reader.sources,
         "options": effective_options,
     }
     template_hashes = {}
-    for name in ("index.html", "viewer.css", "viewer.js", "probe_charts.js"):
-        asset_text = files("visualization.web").joinpath(name).read_text()
-        (output / name).write_text(asset_text)
-        template_hashes[name] = hashlib.sha256(asset_text.encode()).hexdigest()
+    for name in web_assets():
+        content = files("visualization.web").joinpath(name).read_bytes()
+        (output / name).parent.mkdir(exist_ok=True)
+        (output / name).write_bytes(content)
+        template_hashes[name] = hashlib.sha256(content).hexdigest()
     provenance["template_hashes"] = template_hashes
     provenance["geometry"] = next(
         (view.get("geometry") for view in views if view.get("geometry")), None
@@ -676,7 +639,12 @@ def render(
         "processing": {
             "collocation": "linear interpolation at physical centre coordinates; no boundary extrapolation",
             "mask": "blanking != 0 indicates solid; no velocity-derived mask",
-            "temporal": "saved snapshots held until next output; no temporal interpolation",
+            "temporal": "saved snapshots held until next output; no temporal interpolation"
+            + (
+                "; 3D: linear blend between saved states for display"
+                if opts.render_3d
+                else ""
+            ),
             "ensemble": opts.reduction,
             "color_limits": "fixed across clip; all selected slice fluid values unless explicitly configured",
         },

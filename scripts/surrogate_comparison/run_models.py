@@ -34,6 +34,9 @@ frame (neural_surrogates.inlet_turbulence.InletTurbulence; the corpus must
 have been generated with it), outside the timed inference. The setting is
 then recorded in models.yaml and the rollouts' `inlet_turbulence_seed` attr
 (`truth`: the truth run's own realization, else the seed).
+`inlet_turbulence.apply: input` adds it only to the frame fed back to the
+model, u_t = F(u_{t-1} + forcing), and stores the model's own output; the
+rollouts then also carry `inlet_turbulence_apply: input`.
 
 `periodic_y` makes every model y-periodic at inference (circular y padding in
 its convolutions, y-periodic SDF features:
@@ -123,7 +126,15 @@ def run(cfg: DictConfig) -> None:
         inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
         for label, (model, _) in models.items():
             pred, seconds = _rollout(
-                model, window, params, geometry, histories[label], steps, dev, inlet
+                model,
+                window,
+                params,
+                geometry,
+                histories[label],
+                steps,
+                dev,
+                inlet,
+                cfg.inlet_turbulence.apply == "input",
             )
             timings[label][0] += seconds
             timings[label][1] += max(steps - 1, 1)
@@ -146,6 +157,8 @@ def run(cfg: DictConfig) -> None:
                 ds.attrs["inlet_turbulence_seed"] = (
                     "truth" if seed is None else str(seed)
                 )
+                if cfg.inlet_turbulence.apply == "input":
+                    ds.attrs["inlet_turbulence_apply"] = "input"
             if cfg.periodic_y:
                 ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
@@ -265,12 +278,15 @@ def _rollout(
     steps: int,
     dev: torch.device,
     inlet: Any = None,
+    inlet_input: bool = False,
 ) -> tuple[np.ndarray, float]:
     """`steps` predicted frames after the last of `window` (its last `history`
     frames as input), and the inference time of all steps but the first.
 
     `inlet` (if given) adds the inlet turbulence to every predicted frame
-    before it is stored and fed back; its time is not counted.
+    before it is stored and fed back; with `inlet_input` only to the frame fed
+    back, so the stored frame is the model's own output. Its time is not
+    counted.
     """
     start = len(window) - 1
     channels, grid = window.shape[1], window.shape[2:]
@@ -285,15 +301,18 @@ def _rollout(
             _sync(dev)
             tic = time.perf_counter()
         step = model(state, params[start + k].unsqueeze(0).to(dev), geom)
+        forced = step
         if inlet is not None:
             _sync(dev)
             injected = time.perf_counter()
-            step = inlet(step, start + k + 1)
+            forced = inlet(step, start + k + 1)
             _sync(dev)
             if k > 0:
                 excluded += time.perf_counter() - injected
-        pred[k] = step[0].float().cpu().numpy()
-        state = step if history == 1 else torch.cat([state[:, channels:], step], dim=1)
+        pred[k] = (step if inlet_input else forced)[0].float().cpu().numpy()
+        state = (
+            forced if history == 1 else torch.cat([state[:, channels:], forced], dim=1)
+        )
     _sync(dev)
     return pred, time.perf_counter() - tic - excluded
 

@@ -1,6 +1,6 @@
 # Handover: DA review fixes as opt-in options
 
-The September DA review (`docs/research/da_review_2026-09/summary.md`, audits
+The September DA review (`docs/archive/research/da_review_2026-09/summary.md`, audits
 A–E) lists defects behind good fits at the assimilated sensors but poor skill at
 held-out ones. This PR fixes the code defects and adds the missing options.
 **Every change is either a bug fix in a path default runs never reach, or a new

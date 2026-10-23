@@ -352,8 +352,9 @@ torchvision = { version = "==0.27.1+cpu", index = "https://download.pytorch.org/
 
 
 # Forward-run HTML viewer and PNG/MP4 renderer: numpy, xarray, matplotlib and
-# `evaluation` (solid mask); PyVista/VTK only through the optional
-# `visualization-3d` feature.
+# `evaluation` (solid mask). The 3D view is drawn in the browser (WebGL);
+# ffmpeg for the MP4 movies comes from the optional `visualization-3d` feature
+# (the `rendering` env).
 [tool.pixi.feature.visualization.pypi-dependencies]
 visualization = { path = "libs/visualization", editable = true }
 
@@ -395,8 +396,6 @@ mcp-server = { path = "libs/mcp-server", editable = true }
 start-ui = { cmd = "python -m user_interface --repo-root .", description = "Start the local browser app for city simulations" }
 
 [tool.pixi.feature.visualization-3d.dependencies]
-pyvista = ">=0.44,<0.47"
-vtk = ">=9.3,<9.6"
 ffmpeg = ">=7,<9"
 
 [tool.pixi.environments]

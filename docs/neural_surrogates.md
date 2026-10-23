@@ -778,10 +778,10 @@ forcing back at inference only, without retraining:
 inlet_turbulence:
   enabled: false
   seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
-  apply: output  # eval.yaml only; input: u_t = F(u_{t-1} + forcing)
+  apply: output  # input: u_t = F(u_{t-1} + forcing)
 ```
 
-With `apply: input` (`evaluate_stepper.py` only) the forcing is added only to
+With `apply: input` (`evaluate_stepper.py` and `run_models.py`) the forcing is added only to
 the frame fed back to the model, so the network advects it from the inlet and
 the stored frames are its own outputs, without the thin forced band at the
 west edge that `output` leaves.
@@ -2107,7 +2107,8 @@ that projection's columns, `aᵀ v = aᵀ bias` — so the ODE could only *trans
 those components of its Gaussian initialisation, never remove their noise or
 learn their conditional distribution (equal input/output widths do not resolve
 this). Here `hidden_size: null` resolves to `D`, rounded **up** to a multiple of
-`num_heads`, and an explicit value below `D` is rejected. The build is
+`num_heads`, and an explicit value below `D` is rejected (unless
+`latent_skip` or a full-reach knob is set: "Compact velocity nets" below). The build is
 `ParamConditionedSubnetwork(in_dim=D, n_params=Hp*P + time_embed_dim,
 n_layers=4, num_heads=8, hidden_size=h, param_conditioning="film",
 geom_cond_dim=G)`; the output projection keeps its zero initialisation — the
@@ -2164,6 +2165,64 @@ and the precision policy are shared. For `D = h = 1536`, 6 layers,
 236.4 M for `input_film` (`G = 1536`); the modulation costs ~1.2 M per block
 because `c` is `film_hidden` wide, not `h`. A config without the key builds
 `input_film`, so existing artifacts rebuild and load unchanged.
+
+**Compact velocity nets with full latent reach** (plan
+[latent_generator_compact_full_reach](plans/latent_generator_compact_full_reach.md)).
+The full-width rule above makes the net cost ~H² with H = D: 177–241 M
+parameters for the B AE (`D = 1536`). Why a uniformly narrower net does not
+work, measured on the `pyudales_realistic` test split (B AE):
+
+* **The latent is high-dimensional.** PCA of the z-scored per-token latents:
+  the top 176 components hold 37% of the variance, 90% needs 859 and 99%
+  needs 1140; the eigenvalues sit on a plateau near 1 from ~30 to ~1000, and
+  ~400 directions fall below 0.1 (down to ~1e-7).
+* **The decoder uses ~1100–1300 directions.** Real latents cut to their top-k
+  components and decoded: relative L2 error 7.9× the AE's at k = 176, 2.3× at
+  1024, 1.08× at 1280. `w` lives mostly in the mid- and low-variance
+  directions; filling the unreached ones with unit noise (what a confined
+  generator does) gives ~6× the real divergence.
+* **A narrow output projection caps quality, not training.** A 176-wide net
+  (5.5 M) plateaus at val loss 1.29 from epoch 20; even a perfect generator in
+  its trained output span would decode at ~6× the AE error. Width alone does
+  not pass W1 either: the 177 M adaLN model passes profile, divergence and
+  diversity but has W1 0.093 against a bound of 0.016.
+* **A Gaussian alone fails, but gets the small scales right.** Tokens drawn
+  iid from the full-covariance `N(μ, Σ)` and decoded fail profile, W1 and
+  divergence (it is unconditional), yet on `w` its W1 (0.045) beats the 177 M
+  model's (0.086): the trained net gets the low-variance directions wrong.
+
+So the output path must reach all ~1300 useful directions with context, while
+attention (the H² part) can stay narrow. The knobs below do that; each is
+absent by default, builds nothing then, and old artifacts load strictly.
+`hidden_size < D` is accepted only together with one of `head_hidden`,
+`adaln_bottleneck`, `gaussian_skip` or `latent_skip`. Only the first two let
+the conditioning reach every direction; the skips are fixed per-token flows.
+`gaussian_skip` and `latent_skip` are mutually exclusive (the default config
+sets `latent_skip: true`, so set it to `false` with `gaussian_skip`), and
+`latent_skip` requires `prediction: velocity`.
+
+| Knob | What it builds | Use |
+|---|---|---|
+| `gaussian_skip: true` (`gaussian_eig_floor`, default `1e-4`) | buffers `latent_pca_basis` (D×D), `latent_pca_eig`, `latent_pca_mean` of the z-scored state latents, filled with the latent statistics (from the raw second moment, one float64 pass: `compute_latent_normalization`, or the latent cache's per-file outer-product sums — a cache prepared before this knob lacks them and must be re-prepared); 0 trainable parameters | always with a sub-D net: the untrained model already samples `N(μ, Σ)` with the right variance in every direction |
+| `head_hidden: W`, `head_layers` (design A, `adaln` only) | a per-token head on `concat(h, z_τ)`: `Linear(H+D → W)`, `head_layers` adaLN MLP blocks at width W, LayerNorm, zero-init `Linear(W → D)`, added to the output projection | narrow trunk (e.g. H 320, 6 layers) + wide head (W 1536, 2 layers): ~19 M |
+| `velocity_conditioning: adaln_bottleneck`, `mlp_hidden: M` (design B) | `AdaLNBottleneckVelocityNet`: a D-wide residual stream; per block `LN → Linear(D→H) → attention at H → Linear(H→D)` and a per-token `D → M → D` MLP, both zero-init and gated, adaLN at width D | H 256, 4 layers, M 512: 24.1 M (6 layers: 34.4 M); every block can write any direction with spatial context |
+| `prediction: data` | the net predicts the clean sample `x̂`; `v = (x̂ − z_τ) / max(1 − τ, 0.05)`; the loss stays the v-MSE, so val losses compare | narrow nets [Li & He 2025] |
+| `time_shift: α` | training draws `σ = 1 − τ` uniformly and warps it, `σ' = ασ / (1 + (α−1)σ)`; `sample()` steps on the same warped grid | α ≈ 3–10 for ~5e5 latent values per sample [RAE; SD3] |
+
+**The Gaussian skip.** With `P`, `λ`, `μ` the buffers, `y = Pᵀ(z_τ − τμ)` and
+`m = Pᵀμ`, the exact flow-matching velocity of a per-token Gaussian
+`N(μ, P diag(λ) Pᵀ)` under `z_τ = (1−τ) z₀ + τ z₁` is
+
+`v_G = P (m + c(τ) ⊙ y)`,  `c_j(τ) = (τλ_j − (1−τ)) / (τ²λ_j + (1−τ)²)`,
+
+and the model returns `v = v_G + net(...)`. It has no `1/(1−τ)` singularity,
+`c_j` is the plain rectified-flow coefficient where `λ_j = 1`, and since the
+net's output starts at zero the untrained model *is* the Gaussian. With
+`prediction: data` the skip is `x̂_G = μ + P diag(g) y`,
+`g_j = τλ_j / (τ²λ_j + (1−τ)²)`. Cost: two D×D matmuls per token per
+evaluation. The Gaussian is iid over tokens: spatial structure and the
+conditioning still come from the net. `evaluate_latent_generator.py`'s latent
+spectrum (§39) shows per eigen-band whether a model gets the variance right.
 
 **Flow objective.** `forward(state, params_hist, geometry, geom_features=None,
 *, generator=None)` encodes the normalised target `z1`, draws `z0 ~ N(0, I)`
@@ -2318,7 +2377,7 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size` (`null` → `D`; below `D` needs `latent_skip: true`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `latent_skip` (§36; absent → `false`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size` (`null` → `D`; below `D` needs `latent_skip`, `gaussian_skip`, `head_hidden` or `adaln_bottleneck`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `latent_skip` (§36; absent → `false`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2465,10 +2524,26 @@ The real pairwise spread (so the diversity ratio) and the Reynolds stresses
 need several snapshots **per grid**: with one per grid (e.g. `max_snapshots: 8`
 over 7 test grids) they are NaN, a gate failure; the default is 64.
 
+**Latent spectrum** (`latent_spectrum: true`, the default; one extra encoder
+pass). The physical metrics cannot say *which latent directions* a generator
+gets wrong. `ge.latent_spectrum` fits the PCA basis (centred covariance) of
+the real snapshots' normalised per-token state latents (`encode_latents(...).z`,
+padding tokens included) and measures the generated latents' variance along
+the same directions. Per eigen-band (components 1–32, 33–256, 257–768,
+769–1024, 1025–D, cut at `D`) the **geometric mean** of generated / real
+variance becomes `latent_var_ratio_<lo>_<hi>` on the `generated` row of
+`metrics.csv` and in `summary.json` (`latent_spectrum`, with both full
+spectra); `latent_spectrum.png` plots them. The geometric mean keeps the
+near-empty tail (real variance down to ~1e-7) from being swamped by the band's
+largest directions. A ratio well above 1 in the tail bands is the signature of
+a velocity net that cannot reach those directions (§36, "Compact velocity
+nets"). The generated latents are the sampled ones, before decoding
+(`sample(..., return_latents=True)`; `"latents": "sampled"`).
+
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
-`divergence.png`, `step_sweep.png` and `rollout_transients.png` (with a
-rollout stepper).
+`divergence.png`, `step_sweep.png`, `latent_spectrum.png` and
+`rollout_transients.png` (with a rollout stepper).
 
 The metric functions are pure numpy over `(N, C, nz, ny, nx)` stacks and a
 fluid mask — no Hydra, no files, no model — so each is unit-tested on analytic
