@@ -233,7 +233,7 @@ def test_adaptive_error_run(
     tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
 ) -> None:
     """The default run is unchanged; the adaptive one inflates window 0 by the
-    initial inflation and saves the std it used, per window."""
+    initial inflation and saves the std it assimilated, per window."""
     runs: dict[str, list[str]] = {
         "default": [],
         "unit": [ADAPTIVE],  # window 0 at the configured error
@@ -263,12 +263,14 @@ def test_adaptive_error_run(
     )
     unit = window("unit", 0, "obs")
     xarray.testing.assert_identical(
-        unit.drop_vars(["obs_std_configured", "obs_error_group"]), default
+        unit.drop_vars(["obs_std_assimilated", "obs_error_group"]), default
     )
-    np.testing.assert_array_equal(unit.obs_std_configured, default.obs_std)
+    np.testing.assert_array_equal(unit.obs_std_assimilated, default.obs_std)
 
     inflated = window("inflated", 0, "obs")
-    np.testing.assert_allclose(inflated.obs_std, 2.0 * inflated.obs_std_configured)
+    # obs_std stays the configured std; the inflated one is saved beside it.
+    np.testing.assert_array_equal(inflated.obs_std, default.obs_std)
+    np.testing.assert_allclose(inflated.obs_std_assimilated, 2.0 * inflated.obs_std)
     assert not np.array_equal(
         window("inflated", 0, "posterior_params").to_array(),
         window("default", 0, "posterior_params").to_array(),
@@ -280,12 +282,35 @@ def test_adaptive_error_run(
     assert all(len(h["window_estimate"]) == len(h["groups"]) for h in history)
     # Window 1 assimilates with the inflation estimated from window 0.
     later = window("inflated", 1, "obs")
-    ratio = later.obs_std / later.obs_std_configured
+    ratio = later.obs_std_assimilated / later.obs_std
     for g, factor in enumerate(history[1]["inflation"]):
         np.testing.assert_allclose(ratio[later.obs_error_group == g], factor)
     assert "adaptive_observation_error" not in yaml.safe_load(
         (run_dirs["default"] / "run_info.yaml").read_text()
     )
+
+
+def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> None:
+    """The Desroziers ratio compares against obs_std_assimilated when saved,
+    the observation block against the configured obs_std."""
+    compute_metrics = load_script("scripts/compute_metrics.py")
+    pred = np.stack([np.full((4, 2), 2.0), np.full((4, 2), 1.0)])  # d_f d_a = 2
+    ds = xarray.Dataset(
+        {
+            "obs": ("observation", np.zeros(4)),
+            "obs_std": ("observation", np.ones(4)),
+            "pred_obs": (("esmda_step", "observation", "ensemble"), pred),
+        }
+    )
+    ds.to_netcdf(tmp_path / "configured.nc")
+    ds.assign(obs_std_assimilated=2.0 * ds.obs_std).to_netcdf(tmp_path / "adaptive.nc")
+    for name, used in (("configured", 1.0), ("adaptive", 2.0)):
+        observation, desroziers = compute_metrics._observation_metrics(
+            [tmp_path / f"{name}.nc"], 1
+        )
+        assert desroziers["obs_std_used"] == pytest.approx(used)
+        assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0) / used)
+        assert observation["innovation_chi2_diag"]["mean"] == pytest.approx(4.0)
 
 
 def test_truth_from_a_forward_run(

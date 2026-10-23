@@ -84,7 +84,9 @@ window-indexed ones also list `per_window` values):
                   its stage has only O_N.
   desroziers      per stage with an analysis: the observation error std
                   estimated from the forecast and analysis residuals
-                  (Desroziers), the obs_std the run used, and their ratio.
+                  (Desroziers), the std the run assimilated (obs_std_assimilated
+                  with an adaptive error, else obs_std), and their ratio. The
+                  observation block and O_N use the configured obs_std.
 
 Arrays too large for metrics.yaml go into `diagnostics.nc` next to it:
   posterior_parameter_members, prior_parameter_members  (window, ensemble, parameter)
@@ -415,7 +417,8 @@ def _observation_metrics(files: list[pathlib.Path], n_cycles: int) -> tuple[dict
             fits.append(
                 observation_fit(obs[chunk], std[chunk], pred[0, chunk], pred[-1, chunk])
             )
-        obs_std.append(std)
+        # The Desroziers ratio checks the R the update used.
+        obs_std.append(ds.get("obs_std_assimilated", ds.obs_std).values)
     series = {key: np.array([fit[key] for fit in fits]) for key in fits[0]}
 
     observation = {

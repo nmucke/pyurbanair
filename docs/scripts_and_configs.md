@@ -166,7 +166,8 @@ parameter-updating filter modes need inflation or a parameter evolution;
 `assimilate_every_n_step` divides the frames per window;
 `hybrid.likelihood_allocation=shared_budget` needs `filtering.beta > 1`, no
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
-prior parameters; `observation.adaptive_error` is smoother-only; and the SGS-discrepancy rules of §1.7.
+prior parameters; `observation.adaptive_error` is smoother-only; and the
+SGS-discrepancy rules of §1.7.
 
 A localized state-bearing smoother is also checked for memory. Its update
 holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as

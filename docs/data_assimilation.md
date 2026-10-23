@@ -284,14 +284,28 @@ ESMDA's first and last step). `AdaptiveObservationError.record` stores
 `r_i = d_a,i d_f,i / R_conf,i` per window (`R_conf` the configured, resolved
 variance); before window `k > 0`, `variance` pools the `r_i` of the previous
 windows per group (one per distinct sensor height, or per `height_bands`
-entry `{min_z, max_z}`) into a std inflation
+entry `{min_z, max_z}`, which must not overlap) into a std inflation
 
-    lambda_g**2 = (n0 * lambda_0**2 + sum r_i) / (n0 + n_g),
+    lambda_g**2 = mean of the pooled r_i,
     clipped to [min_inflation, max_inflation]**2,
 
 and the window assimilates `lambda_g**2 R_conf`. Re-estimating from windows
 that used the previous estimate is the fixed-point iteration of the
-diagnostic (Li et al. 2009). Window 0 uses `lambda_0 = initial_inflation`.
+diagnostic (Li et al. 2009). Window 0 uses `initial_inflation`. The diagnostic
+is unbiased only for an analysis that used the right `R`, which window 0 did
+not, so window 0's ratios set window 1 only: from window 2 on the pool starts
+at window 1 (otherwise a far-off `initial_inflation` would bias the estimate
+for good). Non-finite ratios (a NaN prediction) are dropped with a warning; a
+group with nothing to pool (a band without sensors, or only non-finite
+ratios) keeps its previous inflation (`initial_inflation` at first).
+
+The inflation is multiplicative on the whole configured variance of a group,
+instrument part included: it assumes the unknown error scales with `R_conf`
+within the group (there is no additive model). That holds best when the
+groups match or are finer than the `observation.error` `representation_std`
+height bands and the aggregation intervals have equal length, so `R_conf` is
+constant per group.
+
 The choices for few observations (the 18-sensor layout with 180 s means has
 10-14 per height per window):
 
@@ -300,10 +314,7 @@ The choices for few observations (the 18-sensor layout with 180 s means has
 - `min_inflation` (default 1) floors `R` at the configured noise, so a sample
   cannot make the update more confident than the known noise; `max_inflation`
   (default 10) caps it;
-- `prior_weight` `n0` (default 0) shrinks toward `lambda_0` with `n0`
-  pseudo-observations;
-- `memory` pools only the last windows (a drifting error);
-  `calibration_windows` estimates from the first N windows, then freezes.
+- `memory` pools only the last windows (a drifting error).
 
 **Window 0 matters for a parameter-only smoother.** With a too-small `R` in
 window 0 the ESMDA collapses the parameter ensemble, and nothing re-inflates
@@ -312,12 +323,15 @@ to ~1) but the posterior stays overconfident. Start conservatively,
 `initial_inflation` at or above the expected error; the toy problem in
 `tests/data_assimilation/test_adaptive_observation_error.py` shows both cases.
 
-Outputs: `window_{w}_obs.nc` `obs_std` is the std assimilated, plus
-`obs_std_configured` and `obs_error_group`; `run_info.yaml`
-`adaptive_observation_error` lists per window the groups, the inflation used,
-the std used and the window's own estimate (before pooling and bounds). The
-same is logged per window. `compute_metrics.py`'s Desroziers ratio thus
-compares against the inflated std.
+Outputs: `window_{w}_obs.nc` keeps `obs_std` as the configured std (as without
+the option) and adds `obs_std_assimilated`, the inflated std the window used,
+and `obs_error_group`; `run_info.yaml` `adaptive_observation_error` lists per
+window the groups, the inflation used, the std used and the window's own
+estimate (before pooling and bounds; `null` without a positive mean ratio).
+The same is logged per window. In `compute_metrics.py` the Desroziers block
+(`obs_std_used`, `ratio`) compares against `obs_std_assimilated`, the `R` the
+update used; the observation block (`innovation_chi2_diag`) and the data
+mismatch O_N use the configured `obs_std`.
 
 ---
 

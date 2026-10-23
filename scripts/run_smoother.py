@@ -16,8 +16,9 @@ Outputs, in `<paths.results_dir>/smoother/`:
     windows/window_{w}_prior_params.nc, _posterior_params.nc,
             _posterior_state.nc, _prior_state.nc (if assimilation.save_prior_state),
             _obs.nc (observations and predicted observations per ESMDA step;
-                     with observation.adaptive_error also the configured std and
-                     the observation's group; obs_std is the std assimilated)
+                     obs_std is the configured std; with
+                     observation.adaptive_error also obs_std_assimilated, the
+                     inflated std the window used, and obs_error_group)
     run_info.yaml also lists the adaptive error's per-window inflation.
 """
 
@@ -29,6 +30,7 @@ import pathlib
 import shutil
 import sys
 import time
+from typing import Any
 
 import hydra
 import jax
@@ -159,14 +161,14 @@ def run(cfg: DictConfig) -> None:
                 heights,
             )
             obs_extra = {
-                "obs_std_configured": resolved.std,
+                "obs_std_assimilated": np.sqrt(covariance),
                 "obs_error_group": adaptive.groups(heights)[0],
             }
         save_obs(
             windows_dir / f"window_{w}_obs.nc",
             flat_obs,
             flatten_obs(obs_clean, aggregation),
-            resolved.std if adaptive is None else np.sqrt(covariance),
+            resolved.std,
             smoother.pred_obs_history,
             obs_extra,
         )
@@ -208,7 +210,7 @@ def run(cfg: DictConfig) -> None:
             params = posterior_params
         seconds_per_window.append(time.perf_counter() - start)
 
-    info = {}
+    info: dict[str, Any] = {}
     if adaptive is not None:
         info["adaptive_observation_error"] = adaptive.history
     save_yaml(
