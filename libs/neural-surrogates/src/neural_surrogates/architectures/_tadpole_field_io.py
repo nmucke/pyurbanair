@@ -35,6 +35,7 @@ while retaining the whole spatial grid for the contextual patch runner.
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Sequence
 
 import numpy as np
@@ -100,6 +101,16 @@ class _TadpoleFieldIO:
             (multiple - size % multiple) % multiple
             for size, multiple in zip((d, h, w), multiples)
         )
+        # A y-periodic model (make_periodic_y) can neither zero-pad y nor fold
+        # it into several independent local crops.
+        if getattr(self, "periodic_y", False) and (
+            pad_h or (self.spatial_mode == "local" and h != multiples[1])
+        ):
+            need = "equal" if self.spatial_mode == "local" else "be a multiple of"
+            raise ValueError(
+                f"periodic_y: ny ({h}) must {need} {multiples[1]} "
+                f"(spatial_mode={self.spatial_mode!r})"
+            )
         if pad_d or pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
         return x, (d, h, w)
@@ -136,16 +147,15 @@ class _TadpoleFieldIO:
         """Compute ``(B, C, *grid)`` SDF features from a ``(B, *grid)`` /
         ``(*grid,)`` mask (inference/analysis convenience; training ships them)."""
         g = geometry
+        sdf = functools.partial(
+            compute_sdf_features,
+            clamp_cells=self.sdf_clamp_cells,
+            mode=self.sdf_feature_mode,
+            periodic_y=getattr(self, "periodic_y", False),
+        )
         if g.dim() == 3:  # single (z, y, x)
-            return compute_sdf_features(
-                g, clamp_cells=self.sdf_clamp_cells, mode=self.sdf_feature_mode
-            ).unsqueeze(0)
-        feats = [
-            compute_sdf_features(
-                g[i], clamp_cells=self.sdf_clamp_cells, mode=self.sdf_feature_mode
-            )
-            for i in range(g.shape[0])
-        ]
+            return sdf(g).unsqueeze(0)
+        feats = [sdf(g[i]) for i in range(g.shape[0])]
         return torch.stack(feats, dim=0)
 
     def _normalize_state(self, state: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

@@ -18,6 +18,9 @@ latent_generator:
   max_snapshots: 4
   num_noise_seeds: 2
   num_steps_sweep: [2, 5]
+  sampler: euler
+  samplers: null
+  decode_modes: null
   num_figures: 1
   bootstrap_resamples: 10
   rollout_steps: 2

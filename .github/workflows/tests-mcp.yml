@@ -1,11 +1,11 @@
 # The MCP server, in its own pixi environment.
 # Pull requests run it when the package or something it depends on changes;
-# every push to main and a manual run (Actions tab) run it unconditionally.
+# every push to main or dev and a manual run (Actions tab) run it unconditionally.
 name: "Tests: mcp"
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
     paths:
       - "libs/mcp-server/**"

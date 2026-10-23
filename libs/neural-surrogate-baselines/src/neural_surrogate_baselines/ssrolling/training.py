@@ -9,7 +9,9 @@
   spectral loss of the masked fields along the lateral axis y.
 
 Adam at a constant 1e-5, batch 2, patience 50 and no gradient clipping are set
-in the configs.
+in the configs. ``epoch_batches`` / ``val_batches`` optionally cap an epoch
+(as for Local-FNO), so that patience and validation come at a useful rate on
+corpora far larger than the paper's.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+from neural_surrogate_baselines.local_fno.training import _Batches
 from neural_surrogate_baselines.losses import spectral_loss
 from neural_surrogates.training.base import BaseTraining
 
@@ -27,11 +30,17 @@ class RolloutTrainer(BaseTraining):
         *args: Any,
         alpha: float = 1.0,
         spectral_norm: str = "backward",
+        epoch_batches: int | None = None,
+        val_batches: int | None = None,
         **kwargs: Any,
     ) -> None:
         self.alpha = float(alpha)
         self.spectral_norm = spectral_norm
         super().__init__(*args, **kwargs)
+        if epoch_batches is not None:
+            self.train_loader = _Batches(self.train_loader, epoch_batches, cycle=True)  # type: ignore[has-type]
+        if val_batches is not None:
+            self.val_loader = _Batches(self.val_loader, val_batches, cycle=False)  # type: ignore[has-type]
 
     def _forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         state, _, params, geometry = self._prepare_batch(batch)

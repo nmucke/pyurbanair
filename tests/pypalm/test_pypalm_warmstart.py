@@ -151,3 +151,32 @@ def test_drops_time_and_ensemble_dims(tmp_path):
     assert "ensemble" not in ds.dims
     assert "time" not in ds.dims
     assert ds["init_atmosphere_u"].shape == (NZ, NY, NX - 1)
+
+
+def test_staggered_fields_land_on_their_palm_index(tmp_path):
+    """File element n of u/v is read into u(i=n+1)/v(j=n+1), so sample there.
+
+    PALM reads init_atmosphere_u from nxlu=1 and init_atmosphere_v from nysv=1
+    (netcdf_data_input_mod.f90:2339,2388). A state linear in x (u) and y (v),
+    laid out like PALM's output (xu/yv from the domain edge, one per point),
+    must come back as the values at xmin+(n+1)*dx and ymin+(n+1)*dy, not
+    shifted one cell.
+    """
+    (xmin, _), (ymin, _), (zmin, _) = BOUNDS
+    xu = np.arange(NX) * DX + xmin  # PALM output: u at i*dx, i=0..nx
+    yv = np.arange(NY) * DY + ymin
+    state = _make_state().drop_vars(["u", "v", "xu", "yv"])
+    state["u"] = (("time", "z", "y", "xu"), np.broadcast_to(xu, (1, NZ, NY, NX)))
+    state["v"] = (
+        ("time", "z", "yv", "x"),
+        np.broadcast_to(yv[:, None], (1, NZ, NY, NX)),
+    )
+    state = state.assign_coords(xu=xu, yv=yv)
+    driver = tmp_path / "urban_run_dynamic"
+    write_warmstart_driver(driver, state, BOUNDS, NX, NY, NZ, pt_surface=300.0)
+    ds = xarray.open_dataset(driver)
+
+    expected_u = xmin + np.arange(1, NX) * DX
+    expected_v = ymin + np.arange(1, NY) * DY
+    assert np.allclose(ds["init_atmosphere_u"].values[0, 0, :], expected_u)
+    assert np.allclose(ds["init_atmosphere_v"].values[0, :, 0], expected_v)

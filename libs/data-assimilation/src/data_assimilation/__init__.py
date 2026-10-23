@@ -5,6 +5,7 @@ Public API re-exported here so consumers can import from the package root
 layout do not break callers. See ``docs/data_assimilation.md``.
 """
 
+from data_assimilation.adaptive_observation_error import AdaptiveObservationError
 from data_assimilation.filter_smoothing import (
     FilterSmoothing,
     FilterSmoothingResult,
@@ -50,6 +51,7 @@ from data_assimilation.smoothing.esmda import (
 )
 
 __all__ = [
+    "AdaptiveObservationError",
     "AggregateObservations",
     "AnalysisScheme",
     "BaseFilter",

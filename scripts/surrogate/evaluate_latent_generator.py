@@ -15,17 +15,32 @@ decoder can do), generated fields with the true parameter history
 (`generated_omitted_history`), and with other numbers of sampling steps
 (`generated_steps<k>`). Statistics are computed per grid and merged.
 
+`sampler` (euler | heun) integrates the main samples. With `samplers` (e.g.
+[euler, heun]) the step sweep runs once per sampler; sweeps of a sampler other
+than `sampler` are named `generated_<sampler>_steps<k>`. Each sweep entry
+records its sampler and NFE (velocity evaluations: Euler 1, Heun 2 per step).
+
+`decode_modes` (e.g. [local, halo, global]) decodes with other decoder spatial
+policies than the AE was trained in (`decode_halo_size`: the halo; null = the
+AE's). Each mode that differs from the trained policy adds
+`generated_decode_<mode>` (the same noise, so the same latents, as `generated`)
+and `ae_recon_decode_<mode>` (the real latents decoded that way), which
+separates decoder effects (e.g. seams on the tile grid) from generator
+effects. The acceptance gate always judges `generated` against `ae_recon`.
+
 Outputs, in `latent_generator.output_dir`:
   summary.json        acceptance verdict, held-out reference scales, per-source
                       scalars, diversity, conditioning probe and step sweep
   metrics.csv         the per-source scalars (profile RMSE, W1, spectra,
                       Reynolds stresses, divergence, diversity)
-  states_*.png        |U| at a few heights: real, AE, generated draws
+  states_*.png        |U| at a few heights: real, AE, generated draws (and
+                      the decode-mode variants of the first draw)
   profiles.png        mean and fluctuation-RMS vertical profiles per variable
   histograms.png      value densities per variable, with W1 to real
   spectra.png         1-D energy spectra along x
   divergence.png      divergence RMS per source
-  step_sweep.png      profile RMSE, W1 and sampling time against the step count
+  step_sweep.png      profile RMSE, W1 and sampling time against NFE, one line
+                      per sampler
   rollout_transients.png  kinetic energy of a stepper rolled out from real,
                       AE and generated fields (if `rollout_stepper_dir`)
 """
@@ -42,6 +57,7 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 from neural_surrogates import generator_evaluation as ge
+from neural_surrogates.architectures.tadpole_latent_flow import SAMPLER_NFE_PER_STEP
 from omegaconf import DictConfig
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
@@ -59,8 +75,11 @@ from eval_common import (  # noqa: E402
     write_json,
 )
 
-# Sources drawn in the profile, histogram and spectrum figures.
+# Sources drawn in the profile, histogram and spectrum figures (plus the
+# decode-mode variants, when `decode_modes` adds any).
 PLOTTED = ("real", "ae_recon", "generated", "generated_const_history")
+# Line colour per decode-mode variant (solid: generated, dotted: AE).
+DECODE_COLORS = {"local": "tab:purple", "halo": "tab:brown", "global": "tab:olive"}
 SCALARS = (
     "profile_rmse",
     "rms_profile_rmse",
@@ -79,6 +98,8 @@ def run(cfg: DictConfig) -> None:
     rng = np.random.default_rng(int(cfg.seed))
 
     model, train_cfg = load_model(ev.model_dir, dev)
+    if ev.max_internal_batchsize is not None:
+        model.ae.ae.max_internal_batchsize = int(ev.max_internal_batchsize)
     schema = train_cfg.generator.physical_schema
     model.set_conditioning_schema(
         list(schema.param_vars), float(schema.history_dt_seconds)
@@ -87,6 +108,16 @@ def run(cfg: DictConfig) -> None:
     names = list(data.state_vars)
     steps = int(train_cfg.generator.sampling.num_steps)
     seeds = int(ev.num_noise_seeds)
+    sampler = str(ev.sampler)
+    samplers = [str(x) for x in ev.samplers] if ev.samplers else [sampler]
+    halo = None if ev.decode_halo_size is None else int(ev.decode_halo_size)
+    # Decoder policies that differ from the trained one (that one is `generated`).
+    decode_modes = [
+        str(mode)
+        for mode in (ev.decode_modes or [])
+        if mode != model.spatial_mode
+        or (mode == "halo" and halo is not None and halo != model.halo_size)
+    ]
     selection = _select(data, int(ev.max_snapshots), rng)
 
     # Conditioning probes over the whole selection: histories shuffled between
@@ -99,17 +130,35 @@ def run(cfg: DictConfig) -> None:
     )
 
     def generate(
-        hist: torch.Tensor, traj: int, seed: int, num_steps: int = steps
+        hist: torch.Tensor,
+        traj: int,
+        seed: int,
+        num_steps: int = steps,
+        how: str = sampler,
+        decode: str | None = None,
     ) -> np.ndarray:
         return _generate(
-            model, hist, data, traj, seed, num_steps, int(ev.batch_size), dev
+            model,
+            hist,
+            data,
+            traj,
+            seed,
+            num_steps,
+            int(ev.batch_size),
+            dev,
+            sampler=how,
+            decode=(decode, halo if decode else None),
         )
+
+    def sweep_source(how: str, k: int) -> str:
+        return f"generated_steps{k}" if how == sampler else f"generated_{how}_steps{k}"
 
     groups: dict[str, dict[str, list[dict]]] = {}  # source -> grid -> metric groups
     values: dict[str, list[np.ndarray]] = {}  # source -> pooled value samples
     diversity: dict[str, list[np.ndarray]] = {
         "generated": [],
         "generated_const_history": [],
+        **{f"generated_decode_{mode}": [] for mode in decode_modes},
     }
     real_spread, sweep_seconds = [], {}
     rollout_inputs: list[tuple[int, dict[str, np.ndarray], torch.Tensor]] = []
@@ -151,6 +200,25 @@ def run(cfg: DictConfig) -> None:
         )
         add("generated", generated.reshape(-1, *generated.shape[2:]))
         diversity["generated"].append(ge.diversity(generated, fluid)["per_condition"])
+        variants: list[tuple[str, np.ndarray]] = []
+        for mode in decode_modes:
+            add(
+                f"ae_recon_decode_{mode}",
+                _ae_reconstruct(
+                    model, real, data, traj, int(ev.batch_size), dev, (mode, halo)
+                ),
+            )
+            decoded = np.stack(
+                [
+                    generate(hist, traj, 1000 * int(cfg.seed) + s, decode=mode)
+                    for s in range(seeds)
+                ]
+            )
+            add(f"generated_decode_{mode}", decoded.reshape(-1, *decoded.shape[2:]))
+            diversity[f"generated_decode_{mode}"].append(
+                ge.diversity(decoded, fluid)["per_condition"]
+            )
+            variants.append((f"generated, {mode} decode, seed 0", decoded[0]))
         constant = hist[:, -1:].expand_as(hist).contiguous()
         const = np.stack(
             [
@@ -171,19 +239,24 @@ def run(cfg: DictConfig) -> None:
             generate(omitted[idx], traj, 1000 * int(cfg.seed)),
         )
 
-        for k in ev.num_steps_sweep:
-            add(
-                f"generated_steps{k}",
-                (
-                    generated[0]
-                    if k == steps
-                    else generate(hist, traj, 1000 * int(cfg.seed), k)
-                ),
-            )
-            if k not in sweep_seconds:  # timed once, on the first trajectory
-                begin = time.perf_counter()
-                generate(hist[:1].expand(int(ev.batch_size), -1, -1), traj, 0, k)
-                sweep_seconds[k] = (time.perf_counter() - begin) / int(ev.batch_size)
+        for how in samplers:
+            for k in ev.num_steps_sweep:
+                add(
+                    sweep_source(how, k),
+                    (
+                        generated[0]
+                        if k == steps and how == sampler
+                        else generate(hist, traj, 1000 * int(cfg.seed), k, how)
+                    ),
+                )
+                if (how, k) not in sweep_seconds:  # timed once, on the first trajectory
+                    begin = time.perf_counter()
+                    generate(
+                        hist[:1].expand(int(ev.batch_size), -1, -1), traj, 0, k, how
+                    )
+                    sweep_seconds[how, k] = (time.perf_counter() - begin) / int(
+                        ev.batch_size
+                    )
 
         if len(rollout_inputs) < int(ev.num_figures):
             rollout_inputs.append(
@@ -200,6 +273,7 @@ def run(cfg: DictConfig) -> None:
                 const,
                 fluid,
                 out / f"states_traj{traj}_t{times[0]}.png",
+                variants,
             )
 
     # Merge per grid, then compare every source with the real fields.
@@ -256,13 +330,16 @@ def run(cfg: DictConfig) -> None:
     }
     sweep = [
         {
+            "sampler": how,
             "num_steps": k,
+            "nfe": k * SAMPLER_NFE_PER_STEP[how],
             **{
-                m: scalars[f"generated_steps{k}"][m]
+                m: scalars[sweep_source(how, k)][m]
                 for m in ("profile_rmse", "w1", "divergence_rms")
             },
-            "seconds_per_sample": sweep_seconds[k],
+            "seconds_per_sample": sweep_seconds[how, k],
         }
+        for how in samplers
         for k in ev.num_steps_sweep
     ]
     summary = {
@@ -276,6 +353,9 @@ def run(cfg: DictConfig) -> None:
         "num_snapshots": len(order),
         "num_noise_seeds": seeds,
         "num_steps": steps,
+        "sampler": sampler,
+        "decode_modes": decode_modes,
+        "decode_halo_size": halo,
     }
 
     if ev.rollout_stepper_dir is not None:
@@ -285,13 +365,19 @@ def run(cfg: DictConfig) -> None:
 
     write_json(summary, out / "summary.json")
     write_csv([{"source": s, **v} for s, v in scalars.items()], out / "metrics.csv")
-    plotted = {s: merged[s] for s in PLOTTED}
+    shown = list(PLOTTED) + [
+        f"{kind}_decode_{mode}"
+        for mode in decode_modes
+        for kind in ("ae_recon", "generated")
+    ]
+    plotted = {s: merged[s] for s in shown}
     _plot_profiles(plotted, names, out / "profiles.png")
     _plot_spectra(plotted, names, out / "spectra.png")
-    _plot_histograms(
-        {s: hists[s] for s in PLOTTED}, edges, names, out / "histograms.png"
+    _plot_histograms({s: hists[s] for s in shown}, edges, names, out / "histograms.png")
+    swept = {sweep_source(how, k) for how in samplers for k in ev.num_steps_sweep}
+    _plot_divergence(
+        {s: v for s, v in scalars.items() if s not in swept}, out / "divergence.png"
     )
-    _plot_divergence(scalars, out / "divergence.png")
     _plot_sweep(sweep, out / "step_sweep.png")
     print(
         "PASS"
@@ -329,8 +415,16 @@ def _weighted(per_grid: dict[str, float], merged: dict[str, dict]) -> float:
 
 @torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _ae_reconstruct(
-    model: Any, real: np.ndarray, data: Any, traj: int, batch: int, dev: torch.device
+    model: Any,
+    real: np.ndarray,
+    data: Any,
+    traj: int,
+    batch: int,
+    dev: torch.device,
+    decode: tuple[str | None, int | None] = (None, None),
 ) -> np.ndarray:
+    """Real fields through the frozen AE; `decode` = (spatial mode, halo size)
+    of the decoder, `None` for the trained ones."""
     out = []
     for start in range(0, len(real), batch):
         state = torch.from_numpy(real[start : start + batch]).to(dev)
@@ -340,7 +434,10 @@ def _ae_reconstruct(
             expand(data.geometry_for(traj), b, dev),
             expand(data.geom_features_for(traj), b, dev),
         )
-        out.append(model.decode_latents(enc.z, enc).float().cpu().numpy())
+        recon = model.decode_latents(
+            enc.z, enc, spatial_mode=decode[0], halo_size=decode[1]
+        )
+        out.append(recon.float().cpu().numpy())
     return np.concatenate(out)
 
 
@@ -354,8 +451,12 @@ def _generate(
     num_steps: int,
     batch: int,
     dev: torch.device,
+    sampler: str = "euler",
+    decode: tuple[str | None, int | None] = (None, None),
 ) -> np.ndarray:
-    """Generated fields for parameter histories (B, Hp, P); the noise is fixed by `seed`."""
+    """Generated fields for parameter histories (B, Hp, P); the noise is fixed by
+    `seed`. `decode` = (spatial mode, halo size) of the decoder, `None` for the
+    trained ones."""
     noise = torch.Generator(device=dev).manual_seed(int(seed))
     out = []
     for start in range(0, len(hist), batch):
@@ -369,6 +470,9 @@ def _generate(
             num_steps=int(num_steps),
             param_names=model.param_names,
             history_dt_seconds=model.history_dt_seconds,
+            sampler=sampler,
+            decode_spatial_mode=decode[0],
+            decode_halo_size=decode[1],
         )
         out.append(sample.float().cpu().numpy())
     return np.concatenate(out)
@@ -415,8 +519,18 @@ def _rollout_transients(
 
 
 def _style(source: str) -> dict[str, Any]:
-    """Line style: real dashed black, every other source solid."""
-    return {"ls": "--", "color": "k", "lw": 2} if source == "real" else {"lw": 1.4}
+    """Line style: real dashed black, decode-mode variants in their mode's
+    colour (AE dotted), every other source solid."""
+    if source == "real":
+        return {"ls": "--", "color": "k", "lw": 2}
+    kind, _, mode = source.partition("_decode_")
+    if mode:
+        return {
+            "color": DECODE_COLORS.get(mode),
+            "ls": ":" if kind == "ae_recon" else "-",
+            "lw": 1.4,
+        }
+    return {"lw": 1.4}
 
 
 def _plot_states(
@@ -426,8 +540,10 @@ def _plot_states(
     const: np.ndarray,
     fluid: np.ndarray,
     path: pathlib.Path,
+    variants: list[tuple[str, np.ndarray]],
 ) -> None:
-    """|U| of the first snapshot at three heights: real, AE and two generated draws per history."""
+    """|U| of the first snapshot at three heights: real, AE, two generated draws
+    per history and the decode-mode `variants` (name, fields)."""
     levels = np.unique(np.linspace(0, fluid.shape[0] - 1, 3).astype(int))
     rows = [("real", real[0]), ("AE reconstruction", ae[0])]
     rows += [
@@ -436,6 +552,7 @@ def _plot_states(
     rows += [
         (f"const history, seed {s}", const[s, 0]) for s in range(min(2, len(const)))
     ]
+    rows += [(name, fields[0]) for name, fields in variants]
     plot_slice_rows(
         [(name, [speed(f)[z] for z in levels], False) for name, f in rows],
         [f"z index {z}" for z in levels],
@@ -526,15 +643,20 @@ def _plot_divergence(scalars: dict, path: pathlib.Path) -> None:
 
 
 def _plot_sweep(sweep: list[dict], path: pathlib.Path) -> None:
+    """Sweep metrics against NFE (velocity evaluations), one line per sampler."""
     keys = ["profile_rmse", "w1", "divergence_rms", "seconds_per_sample"]
-    steps = [row["num_steps"] for row in sweep]
+    samplers = list(dict.fromkeys(row["sampler"] for row in sweep))
     fig, axes = plt.subplots(1, len(keys), figsize=(3.4 * len(keys), 3.2))
     for ax, key in zip(axes, keys):
-        ax.plot(steps, [row[key] for row in sweep], "o-")
+        for how in samplers:
+            rows = [row for row in sweep if row["sampler"] == how]
+            ax.plot([r["nfe"] for r in rows], [r[key] for r in rows], "o-", label=how)
         ax.set_xscale("log")
-        ax.set_xlabel("sampling steps")
+        ax.set_xlabel("velocity evaluations (NFE)")
         ax.set_title(key)
         ax.grid(alpha=0.3)
+    if len(samplers) > 1:
+        axes[0].legend(fontsize=7, frameon=False)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)

@@ -6,6 +6,8 @@ import pathlib
 import shutil
 from typing import TYPE_CHECKING
 
+from pyurbanair.utils.digital_filter import reset_elapsed_time
+
 from .dir_utils import create_dir, get_palm_directory_paths
 
 if TYPE_CHECKING:
@@ -61,6 +63,10 @@ def create_new_forward_model(
         results_dir=forward_model.dirs.results_dir,
     )
     new_model.experiment_name = experiment_name
+    # Each member starts its own digital-filter turbulence history at t=0; a
+    # clock copied from the template would be someone else's.
+    reset_elapsed_time(new_model.dirs)
+    new_model._elapsed_time = 0.0
 
     logger.info(
         "Created new PALM ForwardModel: experiment_dir=%s, experiment_name=%s",

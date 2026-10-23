@@ -6,8 +6,8 @@ build-backend = "hatchling.build"
 authors = [{name = "Nikolaj T. Mücke", email = "nmucke@gmail.com"}]
 # Reads a forward run's state.nc and renders the HTML viewer. Deliberately no
 # pyurbanair, no backend, no MCP server; `evaluation` only for the buildings'
-# solid mask. PyVista/VTK (3D) are optional and imported lazily; they come from
-# the `rendering` pixi env.
+# solid mask. The 3D view is a numpy export drawn by the browser (WebGL); the
+# `rendering` pixi env only adds ffmpeg for the 2D movies.
 dependencies = [
     "evaluation",
     "numpy>=2.3.5,<3",

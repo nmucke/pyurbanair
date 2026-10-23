@@ -359,6 +359,7 @@ _PLOTTED_PARAMS = (
     "velocity_magnitude",
     "vertical_inflow_exponent",
     "sgs_constant",
+    "roughness_length",
     "sgs_bias_b0",
     "sgs_bias_b1",
     "sgs_bias_b2",
@@ -725,13 +726,22 @@ def vector_sensor_metrics(
       * ``spread(t) = sqrt(mean_s sum_c var_ens,c)`` -- the ensemble spread on
         the same vector norm as ``rmse`` (``ddof=1``; ``nan`` for one member),
         so :func:`spread_skill` compares like with like.
+      * ``acc(t)`` -- the anomaly correlation of the ensemble mean with the
+        truth, pooled over sensors and components: both minus each sensor's
+        truth time mean over the scored period (the climatology baseline's
+        reference, in-sample). 1 when the fluctuations match in pattern,
+        whatever their amplitude; 0 when no better than that time mean.
+      * ``member_acc(t)`` -- the same ACC of each member, averaged over the
+        members: how well a single realisation, with its own turbulence,
+        follows the truth. Below ``acc`` by the members' unpredictable part,
+        which the ensemble mean averages out.
 
     Args:
         truth_comp: ``(component, time, sensor)`` truth series.
         ensemble_comp: ``(component, ensemble, time, sensor)`` ensemble series.
 
     Returns:
-        ``{"rmse": (T,), "energy_score": (T,), "spread": (T,)}``.
+        ``{"rmse", "energy_score", "spread", "acc", "member_acc"}``, each ``(T,)``.
     """
     components = [str(c) for c in np.asarray(truth_comp["component"].values)]
     # Per-component metrics reuse the shared compute_sensor_metrics, which also
@@ -750,11 +760,29 @@ def vector_sensor_metrics(
         spread = np.sqrt(members.var(axis=1, ddof=1).sum(axis=0).mean(axis=1))
     else:
         spread = np.full(rmse.shape, np.nan)
+    mean = truth.mean(axis=1, keepdims=True)  # (C,1,S) each sensor's time mean
+    true = truth - mean  # (C,T,S) anomalies
+    member_anomalies = members - mean[:, None]  # (C,E,T,S)
     return {
         "rmse": rmse,
         "energy_score": _energy_score(members, truth),
         "spread": spread,
+        "acc": _anomaly_correlation(member_anomalies.mean(axis=1), true),
+        "member_acc": _anomaly_correlation(member_anomalies, true[:, None]).mean(
+            axis=0
+        ),
     }
+
+
+def _anomaly_correlation(pred: np.ndarray, true: np.ndarray) -> np.ndarray:
+    """Correlation of ``(C, ..., T, S)`` anomalies, pooled over the components
+    and sensors: ``(..., T)``."""
+    axes = (0, -1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result: np.ndarray = (pred * true).sum(axis=axes) / np.sqrt(
+            (pred**2).sum(axis=axes) * (true**2).sum(axis=axes)
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1160,7 +1188,7 @@ def window_statistics_summary(
     The prior half is scored identically, and the posterior entries carry the
     skill against it (``crps_reduction_vs_prior``, positive when assimilation
     helped). Absent prior artifacts are a no-op, not an error: the prior state
-    is only saved under ``run.save_prior_state``.
+    is only saved under ``assimilation.save_states: prior`` (or ``all``).
 
     Args:
         truth_stats: ``window_statistics`` of the truth series.

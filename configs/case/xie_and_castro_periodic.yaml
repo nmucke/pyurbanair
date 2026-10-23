@@ -1,0 +1,67 @@
+# @package _global_
+#
+# Case: one periodic repeat unit of the Xie & Castro 2008 staggered cube array,
+# for periodic runs (`case=xie_and_castro_periodic` sets `flow` to periodic,
+# nudging-driven, without inlet turbulence, for every backend).
+#
+# The default `xie_and_castro` domain (x in [-20, 80]) has a 25 m empty fetch and
+# a cut array, so under cyclic boundaries it is a gap plus a
+# truncated array wrapping onto itself. The STL's heights repeat every 80 m in
+# x and y (8 cube columns of 10 m cubes on a 20 m pitch, alternate columns offset
+# by 10 m, 4 heights), so this case is exactly one 80 m x 80 m unit: it wraps
+# onto itself with no fetch and no cut building. Starting it at x = y = 5 puts
+# every cube face on a 2 m cell face, and no cube straddles the domain edge.
+# Everything not set here (geometry, the rest of time) comes from xie_and_castro.
+
+defaults:
+  - xie_and_castro
+  - _self_
+
+case_name: xie_and_castro_periodic
+
+flow:
+  # Wall z0 (m) of both backends; the value both templates ship.
+  roughness_length: 0.05
+  boundary_condition: periodic
+  # Neither exists without an inflow face; both backends raise if set.
+  outflow_buffer: null
+  inlet_turbulence:
+    enabled: false
+
+domain:
+  # 2 m grid. Keep nx and ny even (PALM's poisfft, PAC0071/PAC0072). Any multiple
+  # of 80 m in x and y starting on x, y = 5 + 20k stays a whole number of units.
+  nx: 40
+  ny: 40
+  nz: 16
+  bounds:
+    - [5.0, 85.0]
+    - [5.0, 85.0]
+    - [0.0, 32.0]
+
+time:
+  # pyudales starts from rest: at 5 m/s its canopy-mean u is still ~9 % low at
+  # 120-140 s and stationary from ~140 s (180 s leaves a margin); pypalm starts
+  # from the target profile and settles within ~60 s (docs/pypalm.md §8 "Cross-model parity").
+  spinup_time: 180.0
+
+obs:
+  # The xie_and_castro layout (see its comments: 18 assimilated points at
+  # z = 2, 8 and 20 m over all four columns, 10 held-out ones at 2-26 m), with
+  # its points upstream of the array, at x = -5, moved into the fourth lane
+  # (x = 75-85), the periodic unit's only stretch not in that case's domain:
+  # (80, 40, 2) and (80, 20, 20) assimilated, (80, 70, 8) held out. Every other
+  # point is in the same place relative to the cubes, so the two cases' sensors
+  # read the same streets, wakes and heights.
+  x_points: [80.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             10.0, 30.0, 40.0, 50.0, 60.0, 70.0,
+             80.0, 10.0, 30.0, 50.0, 70.0]
+  y_points: [40.0, 30.0, 50.0, 70.0, 60.0, 10.0, 70.0,
+             60.0, 30.0, 50.0, 20.0, 70.0, 10.0,
+             20.0, 30.0, 70.0, 10.0, 60.0]
+  z_points: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+             8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+             20.0, 20.0, 20.0, 20.0, 20.0]
+  validation_x_points: [80.0, 10.0, 20.0, 78.0, 30.0, 30.0, 50.0, 70.0, 60.0, 20.0]
+  validation_y_points: [70.0, 40.0, 10.0, 30.0, 70.0, 10.0, 40.0, 30.0, 50.0, 60.0]
+  validation_z_points: [8.0, 2.0, 2.0, 2.0, 5.0, 14.0, 14.0, 14.0, 14.0, 26.0]

@@ -42,9 +42,13 @@ no registries. The only class with state is
   (per-parameter RMSE and CRPS series of posterior and prior),
   `parameter_bundle` / `compute_parameter_bundles` / `parameter_metric_summary`
   (z-score, normalized error, contraction ratio per knot).
-- **Sensor metrics**: `vector_sensor_metrics` (RMSE, energy score and
-  ensemble spread of the `(u, v, w)` vector per time step; the spread uses the
-  same vector norm as the RMSE, so `spread_skill` compares like with like),
+- **Sensor metrics**: `vector_sensor_metrics` (RMSE, energy score,
+  ensemble spread and anomaly correlation (ACC) of the `(u, v, w)` vector per
+  time step; the spread uses the same vector norm as the RMSE, so
+  `spread_skill` compares like with like; the ACC's anomalies are taken about
+  each sensor's truth time mean, the climatology baseline's reference;
+  `member_acc` is each member's ACC averaged over the members, below the
+  ensemble mean's `acc` by the turbulence the averaging removes),
   `compute_sensor_metrics`, `sensor_rmse`.
 - **Window statistics**: `window_statistics_summary` scores every
   `statistic x quantity` pair (`mean_u`, `variance_magnitude`, ...) with CRPS,
@@ -207,8 +211,8 @@ at about replica · √((1 + 1/N)/2) (0.74 × replica for N = 10), below the
 replica. The `*_member_median` distances score one member at a time and are
 the like-for-like comparison with the replica.
 
-"Sources" below are the posterior, `prior` (`assimilation.save_prior_state`,
-smoother), `forecast` (`assimilation.save_forecast_history`, filter and
+"Sources" below are the posterior, `prior` (`assimilation.save_states: prior` or
+`all`, smoother), `forecast` (`assimilation.save_forecast_history`, filter and
 hybrid) and `replica`, each when present; the prior, forecast and replica are
 read on the posterior's time stamps. Each series is summarised as `{mean,
 final, max, min}`; the window-indexed ones also list `per_window` values (a
@@ -223,12 +227,12 @@ time-varying parameter's knots averaged within each window):
 | `canopy_profiles` | per profile (`u`, `tke`, `uw`, intrinsic averages over each level's fluid cells) and source: `profile_rmse`, the RMSE over z of the ensemble-mean profile against the truth's, per window |
 | `sensor_distributions` | per sensor set, quantity (`u`, `v`, `w`, `magnitude`) and source: `distribution_scores` per window of its sensor values (frames × sensors × members) against the truth's: `w2` with `location`/`scale`/`shape`, `kl`, `*_per_sensor`, `*_member_median`; `truth_halves`, the truth's first half-window against its second (assumes stationarity) |
 | `spectra` | per component, height group and source: the `large`, `mid` and `near_cutoff` band energy ratios (dB) and the `log_spectral_distance` of the members' median spanwise spectrum against the truth's, per window. A truth spectrum on another grid is interpolated onto the ensemble's wavenumbers (NaN beyond its own cutoff). A group without fully fluid lines is null, and a log line says so |
-| `sensors` | sanity check, per sensor set (`assimilation`, `validation`): RMSE and energy score of the instantaneous `(u, v, w)` vector |
+| `sensors` | sanity check, per sensor set (`assimilation`, `validation`): RMSE, energy score and anomaly correlation of the instantaneous `(u, v, w)` vector: of the ensemble mean (`velocity_vector_acc`) and averaged over the members (`velocity_vector_member_acc`) |
 | `spread_skill` | sanity check, per sensor set: the spread on the same vector norm and its `ratio` (≈ 1 when calibrated); `prior_ratio` when the prior states were saved |
 | `climatology` | per sensor set: RMSE of predicting each sensor's time mean of the clean truth, and `rmse_skill_vs_climatology` of the posterior |
 | `sensor_statistics` | per sensor set: per-window mean and variance of u/v/w/\|U\| scored with CRPS, z-score and rank, per source |
-| `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N) |
-| `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation) and their `ratio` |
+| `observation` | per stage (`smoother`: one value per window; `filter`: one per cycle): `forecast_rmse`, `analysis_rmse`, `rmse_ratio`, `innovation_chi2_diag`; the smoother's `data_mismatch` (O_N); both with the configured `obs_std` |
+| `desroziers` | per stage with an analysis: `obs_std_estimated`, the `obs_std_used` (RMS, after aggregation; `obs_std_assimilated` with an adaptive observation error, else `obs_std`) and their `ratio` |
 
 A hybrid has both stages, the smoother's from `window_{w}_obs.nc` and the
 filter's from `window_{w}_filter_obs.nc`. Its smoother stops before the
@@ -257,7 +261,7 @@ Read these with their limits:
   `desroziers` cover the assimilated sensors only.
 - **Resolved stresses only.** TKE and u′w′ are the resolved parts; the outputs
   carry no SGS stress. Fair within one solver; across solvers (Round 2 of
-  [sgs_discrepancy_twin_tests.md](plans/sgs_discrepancy_twin_tests.md)) the
+  [sgs_discrepancy_twin_tests.md](archive/plans/sgs_discrepancy_twin_tests.md)) the
   two codes resolve different fractions.
 - **The near-cutoff band partly measures numerics.** Across solvers the two
   codes' numerical dissipation differs near 2Δ, so a mismatch there is not

@@ -20,9 +20,11 @@ job_scripts/
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
-│   ├── surrogate_baselines_compare.slurm # scripts/surrogate/baselines/compare.py
+│   ├── compare_surrogates.slurm      # workflows/compare_surrogates.sh 'models=[...]'
+│   ├── compare_models.slurm          # workflows/compare_models.sh 'models=[pyudales,pypalm]'
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
+│   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
 │   ├── surrogate_evaluate_latent_generator_gpu.slurm # on latent_generator_b_realistic (GPU)
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
@@ -158,24 +160,25 @@ every train/val frame, then the training reads the latents instead of the
 states and skips the encoder:
 
 ```bash
-args=(--config-name surrogate/train_latent_generator name=latent_generator_b_realistic
+args=(name=latent_generator_b_realistic_adaln
   paths.weights_dir=/projects/urbanair/model_weights
   paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
   autoencoder_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic
   latent_cache.output_root=/scratch/$USER/training_data/pyudales_realistic_latents_ae_b
-  batch_sampler.cell_budget=null batch_sampler.batch_size=4)
+  batch_sampler.cell_budget=null batch_sampler.batch_size=40
+  architecture.max_latent_tokens=32768)
 prep=$(sbatch --parsable job_scripts/delftblue/surrogate_prepare_latents.slurm "${args[@]}")
-sbatch --dependency=afterok:$prep --partition=gpu-a100 --account=research-ceg-gse \
-  --gpus-per-task=1 --cpus-per-task=16 --mem-per-cpu=4G --time=48:00:00 \
-  job_scripts/delftblue/surrogate_train.slurm "${args[@]}"
+sbatch --dependency=afterok:$prep \
+  job_scripts/delftblue/surrogate_train_latent_generator.slurm "${args[@]}"
 ```
 
 Encode only a final autoencoder: the cache is keyed on its `weights.pt` and
 settings, so a retrained one is refused (use a new `output_root`). The cache is about 112 GB
 (float32) for the 500 train trajectories; a resubmitted job resumes it. The
-latent generator's batch is bounded by `max_latent_tokens` (`B` x latent cells
-must stay at or below 4096); the default `cell_budget` counts full grids and
-gives one frame per batch here, hence `null` and a fixed batch size.
+latent generator's batch is bounded by `max_latent_tokens` (`B` x latent cells,
+720 per frame on the largest realistic grid); the default `cell_budget` counts
+full grids and gives one frame per batch here, hence `null` and a fixed batch
+size.
 
 ## Example: the neural-surrogate baselines (GPU)
 

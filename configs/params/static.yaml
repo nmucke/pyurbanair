@@ -26,12 +26,34 @@ parameters:
   # uDALES cs / PALM km_constant proxy), so set the range to the ASSIMILATION
   # model. Keep the prior near/above the solver's stable threshold — too little
   # SGS dissipation diverges the run (docs/archive/esmda_model_error_parameters.md §8).
-  # Default range targets the uDALES xie_and_castro case (tuned at cs=0.24).
+  # Default range targets uDALES' Vreman c_vreman around its 0.12 default
+  # (configs/model/pyudales.yaml). Below ~0.10 energy piles up at the grid scale;
+  # on xie_and_castro 0.05 still runs, 0.04 can diverge at the outflow
+  # (docs/pyudales.md §7).
   sgs_constant:
     _target_: pyurbanair.static_parameters.Normal
-    mean: 0.22
-    std: 0.03
-    min: 0.18
+    mean: 0.12
+    std: 0.02
+    min: 0.07
+  # Wall roughness length z0 (m), uDALES facets / PALM roughness_length. Off by
+  # default: the model configs then apply flow.roughness_length (0.05).
+  # Uncomment to sample (and add to assimilation.params_to_estimate to estimate)
+  # it. LogNormal: log(z0) ~ Normal(log(median), log_std), so log_std 0.7 is a
+  # factor ~2 per std (68% in 0.025-0.10 m), truncated to (min, max). With both
+  # min and max the DA updates a bounded transform of log(z0), so every member
+  # keeps min < z0 < max after every update (without them: only z0 > 0). Keep
+  # max below the grid's wall-distance limit: uDALES reconstructs the wall
+  # velocity at e*z0 from the facet, and on the 2 m xie_and_castro grid most
+  # wall sections sit 1 m from it, so z0 <~ 0.3 m (above 1 m / e = 0.37 m uDALES
+  # aborts with "x out of bounds"). PALM needs z0 < dz/2 and no sgs_constant
+  # (delete it above) (docs/pyudales.md, docs/pypalm.md "Roughness"). pylbm
+  # ignores it.
+  # roughness_length:
+  #   _target_: pyurbanair.static_parameters.LogNormal
+  #   median: 0.05
+  #   log_std: 0.7
+  #   min: 0.005
+  #   max: 0.3
 
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant

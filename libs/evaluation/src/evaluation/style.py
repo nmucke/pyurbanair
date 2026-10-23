@@ -367,8 +367,10 @@ def save_png(
     page whose colour the document owns. It is the wrong one for a PNG an
     operator opens straight out of a run directory -- on a dark-mode viewer, dark
     axis labels and tick text land on a dark background and the figure is
-    unreadable. Those callers pass ``transparent=False`` and get the white
-    background the rcParams set.
+    unreadable. Those callers pass ``transparent=False`` and get a white
+    background. It is set here, not taken from the rcParams: ``apply_style``
+    sets ``savefig.facecolor`` to ``"none"`` for the paper figures, so an
+    opaque save that only dropped ``transparent`` still came out see-through.
 
     Passed explicitly rather than read from ``savefig.transparent`` because an
     explicit ``savefig`` keyword overrides the rcParam anyway, so honouring the
@@ -377,7 +379,12 @@ def save_png(
     """
     resolved = _ensure_parent(path)
     fig.savefig(
-        resolved, format="png", dpi=dpi, transparent=transparent, bbox_inches="tight"
+        resolved,
+        format="png",
+        dpi=dpi,
+        transparent=transparent,
+        bbox_inches="tight",
+        **({} if transparent else {"facecolor": "white"}),
     )
     plt.close(fig)
     print(f"  + {resolved}")

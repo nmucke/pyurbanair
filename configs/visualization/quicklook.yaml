@@ -26,6 +26,4 @@ movie: true
 render_3d: false
 geometry: null
 camera: null
-seeds: []
-max_steps: 500
 simulation_seconds_per_video_second: null

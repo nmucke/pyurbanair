@@ -51,6 +51,7 @@ The heavy ``p3d_surrogate`` dependency (it pulls in ``transformers`` /
 
 from __future__ import annotations
 
+import functools
 from typing import Sequence
 
 import numpy as np
@@ -436,17 +437,21 @@ class P3D(nn.Module):
         g = geometry
         if g.dim() == 5:  # (B, 1, z, y, x)
             g = g[:, 0]
-        clamp = self.sdf_clamp_cells
-        mode = self.sdf_feature_mode
+        sdf = functools.partial(
+            compute_sdf_features,
+            clamp_cells=self.sdf_clamp_cells,
+            mode=self.sdf_feature_mode,
+            periodic_y=getattr(self, "periodic_y", False),  # make_periodic_y
+        )
         if g.dim() == 3:  # single (z, y, x)
-            return compute_sdf_features(g, clamp_cells=clamp, mode=mode).unsqueeze(0)
-        base = compute_sdf_features(g[0], clamp_cells=clamp, mode=mode)  # (C, *grid)
+            return sdf(g).unsqueeze(0)
+        base = sdf(g[0])  # (C, *grid)
         feats = [base]
         for i in range(1, g.shape[0]):
             if torch.equal(g[i], g[0]):
                 feats.append(base)
             else:
-                feats.append(compute_sdf_features(g[i], clamp_cells=clamp, mode=mode))
+                feats.append(sdf(g[i]))
         return torch.stack(feats, dim=0)  # (B, C, *grid)
 
     # -- forward -----------------------------------------------------------

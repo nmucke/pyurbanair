@@ -19,18 +19,21 @@ forward_model:
   ncpu: 1
   save_only_last_timestep: false
   verbose: false
-  boundary_condition: inflow_outflow # periodic #
+  # Shared with pypalm (configs/common.yaml `flow`), like the profile, nudging
+  # and inlet-turbulence values below.
+  boundary_condition: ${flow.boundary_condition}
+  outflow_buffer: ${flow.outflow_buffer}
   # Sub-grid-scale closure, written to &NAMSUBGRID as a mutually exclusive switch
   # set (the chosen one .true., the others .false.), so the closure comes from
   # this config rather than from whatever the case's namoptions template ships.
   #   vreman      -> lvreman=.true.;      constant c_vreman (Fortran default 0.07)
-  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> ~0.17)
+  #   smagorinsky -> lsmagorinsky=.true.; constant cs       (default -1 -> 0.217)
   #   oneeqn      -> REJECTED: the one-equation closure needs a nonzero prof.inp
   #                  'tke' column, which the wrapper's preprocessing writes as 0,
   #                  and its constants (cm/ce1/ce2) are not in the namelist.
   # The `sgs_constant` parameter follows the closure automatically: it is written
   # to cs under smagorinsky and to c_vreman under vreman. The two are NOT on the
-  # same scale (~0.17 vs 0.07) — retune the priors in configs/params/ when switching.
+  # same scale (c_vreman ~ 2.5 cs^2: 0.217 <-> 0.12) — retune the priors in configs/params/ when switching.
   # Set to null to leave the case template's switches untouched.
   closure: vreman
   # Per-backend SGS constant, written to whichever key `closure` selects
@@ -41,10 +44,17 @@ forward_model:
   # NOTE the three backends' sgs_constant are NOT the same physical quantity, so
   # each config carries its own value: uDALES/pylbm take a dimensionless
   # Smagorinsky-family constant, PALM takes an eddy diffusivity in m^2/s.
-  # 0.24 is the verified-stable c_vreman for this domain (0.07 and 0.15 diverge;
-  # see the closure-fix commit) -- it sits near the stability floor, not at a
-  # physical central estimate.
-  sgs_constant: 0.24
+  # 0.12 is Vreman's c = 2.5 Cs^2 for Cs = 0.22, the Smagorinsky constant uDALES
+  # derives from its own Deardorff constants (cs = -1 -> (cm^3/ceps)^0.25).
+  # The literature 0.07 (Cs 0.17, a sharp spectral filter) is too little for
+  # CD2 advection, which dissipates nothing itself: energy then piles up at
+  # the grid scale. The 0.24 used before 2026-10 (Cs 0.31) only masked an
+  # outflow instability, now removed by the 40 m `flow.outflow_buffer` of
+  # xie_and_castro (docs/pyudales.md §7).
+  sgs_constant: 0.12
+  # Facet roughness z0 (m), shared with pypalm; a `roughness_length` in the
+  # params overrides it. null -> leave factypes.inp as preprocessed.
+  roughness_length: ${flow.roughness_length}
   # Opt-in native Vreman correction. Calibrate all feature settings explicitly.
   # Coefficients are static Dataset fields sgs_bias_b0/b1/b2 (default zero).
   model_discrepancy:
@@ -57,42 +67,38 @@ forward_model:
     log_multiplier_cap: 0.4054651081  # log(1.5)
     prior_std: null                  # no fallback; use explicit coefficient priors
   nudging_config:
-    tnudge: 15.0
+    tnudge: ${flow.nudging.tnudge}
     # nnudge: number of bottom grid levels NOT nudged (raw level count).
     # nnudge: 2
     # nnudge_meters: height (m above the floor) below which nudging is NOT
     # applied. When set, it is converted to a level count and OVERRIDES nnudge.
-    nnudge_meters: 16.0
+    nnudge_meters: ${flow.nudging.nnudge_meters}
     # interior_nudging: whether the domain INTERIOR is relaxed toward the
     # nudging profile (&PHYSICS lnudge -> modforces.f90::nudge, over
     # k = kb+nnudge .. ke). This is independent of the time-varying inflow
     # itself: ltimedepnudge stays on either way, and under
     # boundary_condition=inflow_outflow it is what drives the west inlet face
     # (modboundary.f90::xmi_profile reads uprof/vprof).
-    #   true  (default) -> inlet face AND interior relaxation, as today.
-    #   false           -> inflow applied at the boundary ONLY, matching pypalm,
-    #                      which disables nudging entirely under inflow_outflow.
-    # Only set false with inflow_outflow: under periodic BCs the interior
-    # nudging is the only momentum source, so disabling it leaves an un-driven
-    # domain (the dpdx/dpdy body force is written as zero).
-    interior_nudging: true
+    #   false (default) -> inflow applied at the boundary ONLY, as in pypalm,
+    #                      which has no interior forcing under inflow_outflow.
+    #   true            -> inlet face AND interior relaxation above
+    #                      nnudge_meters (the behaviour before 2026-10).
+    # Periodic runs always nudge the interior (their only momentum source).
+    interior_nudging: false
+    # Height (m) at which `velocity_magnitude` IS the speed: U(z) =
+    # velocity_magnitude * (z/z_ref)^alpha. Pinned in configs/common.yaml so the
+    # parameter means the same thing across datasets and backends (the
+    # pyudales_idealized corpus was generated at z_size 64, i.e. z_ref 64).
     profile_config:
-      type: power_law
-      alpha: 0.25
-      # Height (m) at which `velocity_magnitude` IS the speed: U(z) =
-      # velocity_magnitude * (z/z_ref)^alpha. Unset, this defaults to the
-      # domain top (vertical_profile._power_law), which silently redefines
-      # the parameter whenever z_size changes -- the same nominal 7.5 m/s is
-      # a 16% slower canopy wind at z_size 128 than at 64. Pinned to 64 m so
-      # the parameter means the same thing across datasets (the
-      # pyudales_idealized corpus was generated at z_size 64, i.e. z_ref 64).
-      z_ref: 64.0
+      type: ${flow.profile.type}
+      alpha: ${flow.profile.alpha}
+      z_ref: ${flow.profile.z_ref}
   # Kill numerically-unstable runs early: when the adaptive timestep collapses
   # toward zero the run is terminated and reported as a failure, so the ensemble
   # resamples it from a successful donor instead of waiting for the slow crash.
   instability_check:
     enabled: true
-    min_dt: 1.0e-4      # absolute timestep floor (s)
+    min_dt: 1.0e-3      # absolute timestep floor (s); a collapsed run sits near 1.6e-4
     patience: 20        # consecutive sub-floor steps before killing
     warmup_steps: 20    # ignore small startup dt for the first N steps
     poll_interval_s: 2.0
@@ -119,7 +125,7 @@ forward_model:
   # 128 m, velocity_magnitude 5-10 m/s (configs/surrogate/generate_data.yaml).
   # The pool's building heights are bimodal: z_max median 16 m, p75 48 m, p90 50 m.
   inlet_turbulence:
-    enabled: true
+    enabled: ${flow.inlet_turbulence.enabled}
     # u'_rms / |U_mean(z)|, held CONSTANT in z (sigma = intensity * |U(z)|);
     # v' and w' get 0.7x this. 0.15 is the upper end of a rough urban approach
     # flow. Do NOT raise much past this: the field is Gaussian and unclipped,
@@ -128,27 +134,27 @@ forward_model:
     # sample is written verbatim onto the west face AND into the pinned
     # pressure BC. P(u<0) = Phi(-1/intensity): ~4e-11 at 0.15, but 3e-5 at
     # 0.25, which is hundreds of backflow cells per window on this grid.
-    intensity: 0.15
+    intensity: ${flow.inlet_turbulence.intensity}
     # Spanwise/vertical integral length scales. 4 m spacing -> these are 3
     # cells; the digital filter uses a +/-2n-cell, 4n+1-tap kernel, so scales
     # under ~6 m collapse to the n=1 floor silently. Too-SHORT scales are the
     # documented failure mode (fluctuations decay before reaching the
     # buildings); the fix is longer scales, not more `intensity`. These 12 m
     # test scales should be revisited when changing the domain or grid.
-    length_scale_y: 12.0
-    length_scale_z: 12.0
+    length_scale_y: ${flow.inlet_turbulence.length_scale_y}
+    length_scale_z: ${flow.inlet_turbulence.length_scale_z}
     # Streamwise; converted to the AR(1) time scale by Taylor's hypothesis,
     # T = length_scale_x / mean(velocity_magnitude), a = exp(-pi*dt/(2T)).
     # Kept at 2x the cross-stream scales as in a real boundary layer: a = 0.782
     # at U = 7.5 m/s vs 0.61 for an isotropic 12 m. Costs only AR(1) burn-in.
-    length_scale_x: 24.0
-    time_step: 0.5        # s — &DRIVER dtdriver. Injected turbulence is
+    length_scale_x: ${flow.inlet_turbulence.length_scale_x}
+    time_step: ${flow.inlet_turbulence.time_step}  # s — &DRIVER dtdriver. Injected turbulence is
                           #     band-limited to ~1/(2*dtdriver) because the
                           #     solver interpolates linearly between records.
                           #     U*dtdriver = 3.75 m at U=7.5 ~= dx, well matched.
                           #     Memory scales 1/dtdriver: see lchunkread below.
     driverjobnr: 998      # 3-digit driver-file suffix; must differ from expnr
-    seed: null            # null -> derived from the member's experiment name
+    seed: ${flow.inlet_turbulence.seed}  # null -> derived from the member's experiment name
     # Large cases only: bound the resident driver arrays
     # ((jtot+2)*(ktot+2)*driverstore*8 B each) by reading the files in chunks.
     # lchunkread: true

@@ -22,6 +22,16 @@ Outputs, in `stepper.output_dir`:
   params.png           the trajectory's parameters, with inflow angle and speed
                        recovered at the inlet from the truth and from each model
   rollout.mp4          truth, prediction and error over time (if `animate`)
+
+Top-level `inlet_turbulence.enabled` adds uDALES' inlet turbulence to every
+predicted frame (neural_surrogates.inlet_turbulence.InletTurbulence; the
+corpus must have been generated with it); `rollout_seconds` includes it.
+`inlet_turbulence.apply: input` adds it only to the frame fed back to the
+model, u_t = F(u_{t-1} + forcing), and stores the model's own output.
+Top-level `periodic_y` makes every model y-periodic at inference (circular y
+padding in its convolutions, y-periodic SDF features:
+neural_surrogates.periodic.make_periodic_y) and adds a `periodic_y` column
+(1) to metrics.csv.
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
     device,
+    inlet_turbulence,
     load_model,
     load_states,
     open_dataset,
@@ -59,7 +70,7 @@ def run(cfg: DictConfig) -> None:
 
     models = {}
     for model_dir in ev.models:
-        model, train_cfg = load_model(model_dir, dev)
+        model, train_cfg = load_model(model_dir, dev, periodic_y=cfg.periodic_y)
         # Steppers that take geometry features compute them from the mask.
         data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
         history = int(train_cfg.dataset.get("num_history_steps") or 1)
@@ -73,9 +84,17 @@ def run(cfg: DictConfig) -> None:
         for name, (model, data, history) in models.items():
             truth = _truth(data, sample, ev.max_steps)
             params = data._params[sample][: len(truth)]
+            inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
             start = time.perf_counter()
             pred = _rollout(
-                model, truth, params, data.geometry_for(sample), history, dev
+                model,
+                truth,
+                params,
+                data.geometry_for(sample),
+                history,
+                dev,
+                inlet,
+                cfg.inlet_turbulence.apply == "input",
             )
             seconds = time.perf_counter() - start
             error = pred - truth
@@ -91,6 +110,7 @@ def run(cfg: DictConfig) -> None:
                     "final_rmse": float(per_step[-1]),
                     "rollout_seconds": seconds,
                 }
+                | ({"periodic_y": 1} if cfg.periodic_y else {})
             )
             if sample == ev.sample_indices[0]:
                 first.setdefault("truth", truth)
@@ -133,10 +153,15 @@ def _rollout(
     geometry: torch.Tensor,
     history: int,
     dev: torch.device,
+    inlet: Any = None,
+    inlet_input: bool = False,
 ) -> np.ndarray:
     """Step from the first `history` true frames to the trajectory's end.
 
-    The first `history` frames of the result are the truth itself.
+    The first `history` frames of the result are the truth itself. `inlet` (if
+    given) adds the inlet turbulence to every predicted frame before it is
+    stored and fed back; with `inlet_input` only to the frame fed back, so the
+    stored frame is the model's own output.
     """
     channels, grid = truth.shape[1], truth.shape[2:]
     pred = truth.copy()
@@ -146,8 +171,11 @@ def _rollout(
     geom = geometry.unsqueeze(0).to(dev)
     for t in range(history - 1, len(truth) - 1):
         step = model(state, params[t].unsqueeze(0).to(dev), geom)
-        pred[t + 1] = step[0].float().cpu().numpy()
-        state = step if history == 1 else torch.cat([state[:, channels:], step], dim=1)
+        forced = step if inlet is None else inlet(step, t + 1)
+        pred[t + 1] = (step if inlet_input else forced)[0].float().cpu().numpy()
+        state = (
+            forced if history == 1 else torch.cat([state[:, channels:], forced], dim=1)
+        )
     return pred
 
 

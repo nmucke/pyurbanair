@@ -42,6 +42,52 @@ def test_spread_is_nan_for_a_single_member() -> None:
     assert np.isnan(vector_sensor_metrics(truth, member)["spread"]).all()
 
 
+def test_acc_scores_the_pattern_of_the_fluctuations() -> None:
+    """ACC is 1 for the truth's fluctuations at any amplitude, -1 for their
+    opposite and about 0 for unrelated ones."""
+    rng = np.random.default_rng(0)
+    coords = {"component": ["u", "v", "w"], "time": np.arange(50, dtype=float)}
+    truth = xarray.DataArray(
+        5.0 + rng.standard_normal((3, 50, 40)),
+        dims=("component", "time", "sensor"),
+        coords=coords,
+    )
+    mean = truth.mean("time")
+
+    def acc(members: xarray.DataArray) -> np.ndarray:
+        return vector_sensor_metrics(truth, members.expand_dims(ensemble=1, axis=1))[
+            "acc"
+        ]
+
+    np.testing.assert_allclose(acc(mean + 0.3 * (truth - mean)), 1.0)
+    np.testing.assert_allclose(acc(mean - (truth - mean)), -1.0)
+    unrelated = truth.copy(data=5.0 + rng.standard_normal(truth.shape))
+    assert abs(acc(unrelated).mean()) < 0.05
+
+
+def test_member_acc_is_below_the_ensemble_means() -> None:
+    """Members = the truth's fluctuations plus their own noise: averaging the
+    members removes the noise, so the ensemble mean correlates better."""
+    rng = np.random.default_rng(0)
+    coords = {"component": ["u", "v", "w"], "time": np.arange(50, dtype=float)}
+    truth = xarray.DataArray(
+        rng.standard_normal((3, 50, 40)),
+        dims=("component", "time", "sensor"),
+        coords=coords,
+    )
+    members = truth.expand_dims(ensemble=20, axis=1) + rng.standard_normal(
+        (3, 20, 50, 40)
+    )
+    vector = vector_sensor_metrics(truth, members)
+    # Signal and noise of equal variance: corr ~ 1/sqrt(2) per member, ~ 1 for
+    # the mean of 20 (noise variance / 20).
+    np.testing.assert_allclose(vector["member_acc"].mean(), 1 / np.sqrt(2), atol=0.02)
+    np.testing.assert_allclose(vector["acc"].mean(), 1 / np.sqrt(1.05), atol=0.02)
+    # One member: the two are the same.
+    one = vector_sensor_metrics(truth, members.isel(ensemble=[0]))
+    np.testing.assert_allclose(one["acc"], one["member_acc"])
+
+
 def test_observation_fit_recovers_chi2_and_the_observation_error() -> None:
     # A calibrated forecast (truth and members from the same distribution), the
     # observations with a known error std, and the analysis mean the optimal

@@ -155,7 +155,7 @@ def test_method(
 # Per method: the flag that saves a reference ensemble and the block it adds to
 # sensor_statistics.
 SAVED: dict[str, tuple[str, str]] = {
-    "smoother": ("assimilation.save_prior_state=true", "prior"),
+    "smoother": ("assimilation.save_states=prior", "prior"),
     "filtering": ("assimilation.save_forecast_history=true", "forecast"),
     "hybrid": ("assimilation.save_forecast_history=true", "forecast"),
 }
@@ -198,6 +198,225 @@ def test_saved_reference_states(
             f"crps_reduction_vs_{reference}" in entry
             for entry in stats["posterior"].values()
         )
+
+
+# Per assimilation.save_states: the state files each window holds besides the
+# posterior, with smoothing.num_steps=3 (step 0 the prior, 1..2 intermediate).
+SAVE_STATES: dict[str, set[str]] = {
+    "posterior": set(),
+    "prior": {"prior_state"},
+    "all": {"prior_state", "step_1_state", "step_2_state"},
+}
+# What every smoother window writes whatever save_states is.
+WINDOW_FILES = {"prior_params", "posterior_params", "posterior_state", "obs"}
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def save_states_runs(
+    tmp_path_factory: pytest.TempPathFactory,
+    session_root: pathlib.Path,
+    trained: Any,
+) -> Any:
+    """Smoother runs keyed by (save_states, on_disk), each run once per module;
+    save_states None is the default run (no override)."""
+    runs: dict[tuple[str | None, bool], pathlib.Path] = {}
+
+    def run(save_states: str | None, on_disk: bool) -> pathlib.Path:
+        if (save_states, on_disk) not in runs:
+            extra = (
+                []
+                if save_states is None
+                else [f"assimilation.save_states={save_states}"]
+            )
+            cfg = compose(
+                "assimilation",
+                "+test=assimilation",
+                *SURROGATE,
+                *surrogate(session_root),
+                "assimilation.num_windows=2",
+                "smoothing.num_steps=3",
+                f"assimilation.ensemble_save_on_disk={str(on_disk).lower()}",
+                *extra,
+                root=tmp_path_factory.mktemp(f"save_states_{save_states}_{on_disk}"),
+            )
+            load_script("scripts/run_smoother.py").run(cfg)
+            runs[save_states, on_disk] = (
+                pathlib.Path(cfg.paths.results_dir) / "smoother"
+            )
+        return runs[save_states, on_disk]
+
+    return run
+
+
+def _window_files(run_dir: pathlib.Path, w: int) -> set[str]:
+    prefix = f"window_{w}_"
+    names = {p.name for p in (run_dir / "windows").glob(f"{prefix}*.nc")}
+    return {n[len(prefix) : -len(".nc")] for n in names}
+
+
+@pytest.mark.parametrize("on_disk", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("save_states", SAVE_STATES)  # type: ignore[misc]
+def test_save_states_window_files(
+    save_states: str, on_disk: bool, save_states_runs: Any
+) -> None:
+    """Each window holds exactly the requested states, the same in memory and
+    on disk; the posterior does not depend on which other states are saved."""
+    run_dir = save_states_runs(save_states, on_disk)
+    for w in range(2):
+        assert _window_files(run_dir, w) == WINDOW_FILES | SAVE_STATES[save_states]
+    assert not (run_dir / "_ensemble_states").exists()
+
+    windows = run_dir / "windows"
+    memory = save_states_runs(save_states, False) / "windows"
+    posterior = save_states_runs("posterior", on_disk) / "windows"
+    for w in range(2):
+        for kind in SAVE_STATES[save_states] | {"posterior_state"}:
+            name = f"window_{w}_{kind}.nc"
+            state = xarray.load_dataset(windows / name)
+            assert state.sizes["ensemble"] == 2, name
+            # Memory and disk mode write the same files.
+            xarray.testing.assert_identical(state, xarray.load_dataset(memory / name))
+        name = f"window_{w}_posterior_state.nc"
+        xarray.testing.assert_identical(
+            xarray.load_dataset(windows / name), xarray.load_dataset(posterior / name)
+        )
+    if save_states == "all":
+        # The saved steps are distinct forecasts, not copies of one.
+        prior = xarray.load_dataset(windows / "window_0_prior_state.nc")
+        for kind in ("step_1_state", "step_2_state", "posterior_state"):
+            other = xarray.load_dataset(windows / f"window_0_{kind}.nc")
+            assert not prior.u.equals(other.u), kind
+
+
+@pytest.mark.parametrize("on_disk", [False, True])  # type: ignore[misc]
+def test_default_saves_only_the_posterior_state(
+    on_disk: bool, save_states_runs: Any
+) -> None:
+    """The default writes the files it wrote before save_states existed: no
+    prior or intermediate states, and the same as an explicit posterior."""
+    default = save_states_runs(None, on_disk)
+    explicit = save_states_runs("posterior", on_disk)
+    assert {p.name for p in (default / "windows").iterdir()} == {
+        f"window_{w}_{kind}.nc" for w in range(2) for kind in WINDOW_FILES
+    }
+    for path in sorted((default / "windows").iterdir()):
+        xarray.testing.assert_identical(
+            xarray.load_dataset(path),
+            xarray.load_dataset(explicit / "windows" / path.name),
+        )
+
+
+ADAPTIVE = "observation.adaptive_error=${adaptive_error.desroziers}"
+
+
+def test_adaptive_error_config(tmp_path: pathlib.Path) -> None:
+    """Off by default; the desroziers option instantiates; smoother only."""
+    from data_assimilation import AdaptiveObservationError
+    from hydra.utils import instantiate
+
+    cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
+    assert cfg.observation.adaptive_error is None
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        ADAPTIVE,
+        "adaptive_error.desroziers.initial_inflation=3.0",
+        "adaptive_error.desroziers.height_bands=[{min_z:0,max_z:10},{min_z:10,max_z:40}]",
+        root=tmp_path,
+    )
+    adaptive = instantiate(cfg.observation.adaptive_error)
+    assert isinstance(adaptive, AdaptiveObservationError)
+    assert adaptive.initial_inflation == 3.0
+    assert adaptive.bands == [(0.0, 10.0), (10.0, 40.0)]
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    check_config(cfg, "smoother")
+    for workflow in ("filtering", "hybrid"):
+        with pytest.raises(ValueError, match="adaptive_error is for the smoother"):
+            check_config(cfg, workflow)
+
+
+def test_adaptive_error_run(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """The default run is unchanged; the adaptive one inflates window 0 by the
+    initial inflation and saves the std it assimilated, per window."""
+    runs: dict[str, list[str]] = {
+        "default": [],
+        "unit": [ADAPTIVE],  # window 0 at the configured error
+        "inflated": [ADAPTIVE, "adaptive_error.desroziers.initial_inflation=2.0"],
+    }
+    run_dirs = {}
+    for name, extra in runs.items():
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *SURROGATE,
+            *surrogate(session_root),
+            *extra,
+            root=tmp_path / name,
+        )
+        load_script("scripts/run_smoother.py").run(cfg)
+        run_dirs[name] = pathlib.Path(cfg.paths.results_dir) / "smoother"
+
+    def window(name: str, w: int, kind: str) -> xarray.Dataset:
+        return xarray.load_dataset(run_dirs[name] / "windows" / f"window_{w}_{kind}.nc")
+
+    default = window("default", 0, "obs")
+    assert set(default.data_vars) == {"obs", "obs_clean", "obs_std", "pred_obs"}
+    # Window 0 at the configured error is the default run's window 0, bit for bit.
+    xarray.testing.assert_identical(
+        window("default", 0, "posterior_params"), window("unit", 0, "posterior_params")
+    )
+    unit = window("unit", 0, "obs")
+    xarray.testing.assert_identical(
+        unit.drop_vars(["obs_std_assimilated", "obs_error_group"]), default
+    )
+    np.testing.assert_array_equal(unit.obs_std_assimilated, default.obs_std)
+
+    inflated = window("inflated", 0, "obs")
+    # obs_std stays the configured std; the inflated one is saved beside it.
+    np.testing.assert_array_equal(inflated.obs_std, default.obs_std)
+    np.testing.assert_allclose(inflated.obs_std_assimilated, 2.0 * inflated.obs_std)
+    assert not np.array_equal(
+        window("inflated", 0, "posterior_params").to_array(),
+        window("default", 0, "posterior_params").to_array(),
+    )
+    info = yaml.safe_load((run_dirs["inflated"] / "run_info.yaml").read_text())
+    history = info["adaptive_observation_error"]
+    assert [h["window"] for h in history] == [0, 1]
+    assert history[0]["inflation"] == pytest.approx([2.0] * len(history[0]["groups"]))
+    assert all(len(h["window_estimate"]) == len(h["groups"]) for h in history)
+    # Window 1 assimilates with the inflation estimated from window 0.
+    later = window("inflated", 1, "obs")
+    ratio = later.obs_std_assimilated / later.obs_std
+    for g, factor in enumerate(history[1]["inflation"]):
+        np.testing.assert_allclose(ratio[later.obs_error_group == g], factor)
+    assert "adaptive_observation_error" not in yaml.safe_load(
+        (run_dirs["default"] / "run_info.yaml").read_text()
+    )
+
+
+def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> None:
+    """The Desroziers ratio compares against obs_std_assimilated when saved,
+    the observation block against the configured obs_std."""
+    compute_metrics = load_script("scripts/compute_metrics.py")
+    pred = np.stack([np.full((4, 2), 2.0), np.full((4, 2), 1.0)])  # d_f d_a = 2
+    ds = xarray.Dataset(
+        {
+            "obs": ("observation", np.zeros(4)),
+            "obs_std": ("observation", np.ones(4)),
+            "pred_obs": (("esmda_step", "observation", "ensemble"), pred),
+        }
+    )
+    ds.to_netcdf(tmp_path / "configured.nc")
+    ds.assign(obs_std_assimilated=2.0 * ds.obs_std).to_netcdf(tmp_path / "adaptive.nc")
+    for name, used in (("configured", 1.0), ("adaptive", 2.0)):
+        observation, desroziers = compute_metrics._observation_metrics(
+            [tmp_path / f"{name}.nc"], 1
+        )
+        assert desroziers["obs_std_used"] == pytest.approx(used)
+        assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0) / used)
+        assert observation["innovation_chi2_diag"]["mean"] == pytest.approx(4.0)
 
 
 def test_truth_from_a_forward_run(

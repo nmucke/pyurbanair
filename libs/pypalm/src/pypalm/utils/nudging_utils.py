@@ -247,6 +247,13 @@ def apply_nudging_driver(
     (xmin, xmax), (ymin, ymax), (zmin, zmax) = bounds
     dz = (zmax - zmin) / nz
 
+    # Same guard as pyudales: a cutoff above every cell centre would leave the
+    # periodic run silently un-driven.
+    if nnudge_meters >= (nz - 0.5) * dz:
+        raise ValueError(
+            f"nnudge_meters={nnudge_meters} m leaves no nudged level: the top "
+            f"cell centre is at {(nz - 0.5) * dz} m above the domain floor."
+        )
     heights = _nudging_heights(nz, dz, nnudge_meters)
     # Height axis is 0-based (native, matching PALM's zu); the profile *shape*
     # is evaluated at physical heights so a non-zero zmin is honoured — the same

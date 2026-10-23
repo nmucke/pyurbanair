@@ -9,7 +9,7 @@ min-max scaled. We run it on the z-scored grid, where Aurora predicts, with
 the buildings zeroed before and after.
 
 SSGen folds height into its channels, so it is built for a fixed number of
-vertical levels, ``n_levels`` (default 32: our corpora's 128 m at 4 m). The
+vertical levels, ``n_levels`` (default 32; the configs set the corpus' nz). The
 model is built before it sees data and must load saved weights at once, so
 this is a constructor argument, checked against ``nz`` on every call.
 """

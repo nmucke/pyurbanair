@@ -5,8 +5,8 @@ from typing import Optional
 import xarray
 
 # Parameter names that survive extract/merge into the solver-facing Dataset.
-# Beyond the inflow trio, the model-error knobs ``vertical_inflow_exponent`` (α)
-# and ``sgs_constant`` must be whitelisted here too — otherwise they are silently
+# Beyond the inflow trio, the model-error knobs ``vertical_inflow_exponent`` (α),
+# ``sgs_constant`` and ``roughness_length`` must be whitelisted here too — otherwise they are silently
 # dropped before reaching the solver and their ESMDA estimates never take effect
 # (docs/archive/esmda_model_error_parameters.md §6.3).
 INFLOW_PARAM_NAMES = (
@@ -15,6 +15,7 @@ INFLOW_PARAM_NAMES = (
     "pressure_gradient_magnitude",
     "vertical_inflow_exponent",
     "sgs_constant",
+    "roughness_length",
 )
 
 

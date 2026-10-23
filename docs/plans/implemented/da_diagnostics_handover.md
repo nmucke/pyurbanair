@@ -1,6 +1,6 @@
 # Handover: DA diagnostics from the September review
 
-The September DA review (`docs/research/da_review_2026-09/summary.md`, audits
+The September DA review (`docs/archive/research/da_review_2026-09/summary.md`, audits
 A–E) found good fits at the assimilated sensors but poor skill at held-out ones,
 and recommends measuring before tuning. This PR adds the missing diagnostics
 to `scripts/compute_metrics.py`. **Runs don't change**: only `metrics.yaml`

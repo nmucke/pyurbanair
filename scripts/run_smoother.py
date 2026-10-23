@@ -14,8 +14,13 @@ parameters are extrapolated into the next window).
 Outputs, in `<paths.results_dir>/smoother/`:
     config.yaml, run_info.yaml, true_state.nc (inline truth), true_params.nc
     windows/window_{w}_prior_params.nc, _posterior_params.nc,
-            _posterior_state.nc, _prior_state.nc (if assimilation.save_prior_state),
-            _obs.nc (observations and predicted observations per ESMDA step)
+            _posterior_state.nc, _prior_state.nc (assimilation.save_states: prior
+            or all), _step_{i}_state.nc for ESMDA steps 1..num_steps-1 (all),
+            _obs.nc (observations and predicted observations per ESMDA step;
+                     obs_std is the configured std; with
+                     observation.adaptive_error also obs_std_assimilated, the
+                     inflated std the window used, and obs_error_group)
+    run_info.yaml also lists the adaptive error's per-window inflation.
 """
 
 from __future__ import annotations
@@ -26,10 +31,13 @@ import pathlib
 import shutil
 import sys
 import time
+from typing import Any
 
 import hydra
 import jax
 import jax.numpy as jnp
+import numpy as np
+from data_assimilation.adaptive_observation_error import observation_heights
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from tqdm import tqdm
@@ -37,16 +45,13 @@ from tqdm import tqdm
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
-    concat_member_files,
     flatten_obs,
-    last_frames,
     make_aggregation,
     make_ensemble_model,
     make_observation_error,
     make_observation_operator,
     make_run_dir,
     make_truth,
-    member_files,
     next_window_params,
     observe,
     parameter_names,
@@ -72,6 +77,7 @@ def run(cfg: DictConfig) -> None:
     truth_operator = make_observation_operator(cfg, cfg.truth_model.solver_name)
     error = make_observation_error(cfg)
     aggregation = make_aggregation(cfg)
+    adaptive = instantiate(cfg.observation.get("adaptive_error"))
     observations = []
     for w in range(num_windows):
         rng_key, key = jax.random.split(rng_key)
@@ -85,15 +91,13 @@ def run(cfg: DictConfig) -> None:
 
     # --- Prior and smoother -----------------------------------------------------
     on_disk = bool(da.ensemble_save_on_disk)
-    save_prior_state = bool(da.save_prior_state)
-    ensemble_model = make_ensemble_model(
-        cfg, out_dir / "_ensemble_states" if on_disk else None
-    )
+    states_dir = out_dir / "_ensemble_states"
+    ensemble_model = make_ensemble_model(cfg, states_dir if on_disk else None)
     prior_sampler = instantiate(cfg.prior_params)
     params = prior_sampler.sample(ensemble_size)
     is_dynamic = "time" in params.dims
 
-    selected, global_names = parameter_names(cfg, params)
+    selected, global_names, log_names = parameter_names(cfg, params, prior_sampler)
     extra = {"num_time_points": int(params.sizes["time"])} if is_dynamic else {}
     rng_key, key = jax.random.split(rng_key)
     smoother = instantiate(
@@ -107,12 +111,17 @@ def run(cfg: DictConfig) -> None:
         aggregate_observations=aggregation,
         parameter_names_to_estimate=selected,
         global_parameter_names=global_names,
+        log_parameter_names=log_names,
         **extra,
     )
     smoother.collect_obs_diagnostics = True
-    # On disk, delete each ESMDA step's forecasts once used (keep prior + posterior).
-    smoother.prune_disk_steps = True
-    smoother.keep_prior_disk_step = save_prior_state
+    # ESMDA steps saved besides the posterior (0 the prior); the others are
+    # freed as soon as their update is done.
+    num_steps = int(smoother.num_steps)
+    count = {"posterior": 0, "prior": 1, "all": num_steps}[da.save_states]
+    keep_steps = list(range(count))
+    smoother.keep_steps = keep_steps
+    state_names = {0: "prior", num_steps: "posterior"}
 
     # --- Window loop --------------------------------------------------------------
     state = None  # window 0 cold-starts
@@ -125,53 +134,52 @@ def run(cfg: DictConfig) -> None:
             # Keep time-varying parameters continuous across window boundaries.
             smoother.pin_initial_time_point = w > 0
 
+        covariance = resolved.covariance_diag
+        if adaptive is not None:
+            heights = observation_heights(resolved, truth_operator)
+            covariance = adaptive.variance(covariance, heights)
+
         output = smoother(
             state=state,
             params=params,
             observations=obs,
-            observation_covariance=jnp.asarray(resolved.covariance_diag),
+            observation_covariance=jnp.asarray(covariance),
             return_params_history=True,
-            return_state_history=save_prior_state and not on_disk,
         )
         params_history = output if on_disk else output[0]
+        del output  # the posterior state is read back with get_state
         posterior_params = params_history.isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{w}_posterior_params.nc")
+        flat_obs = flatten_obs(obs, aggregation)
+        obs_extra: dict[str, np.ndarray] | None = None
+        if adaptive is not None:
+            adaptive.record(
+                flat_obs,
+                smoother.pred_obs_history[0],
+                smoother.pred_obs_history[-1],
+                resolved.covariance_diag,
+                heights,
+            )
+            obs_extra = {
+                "obs_std_assimilated": np.sqrt(covariance),
+                "obs_error_group": adaptive.groups(heights)[0],
+            }
         save_obs(
             windows_dir / f"window_{w}_obs.nc",
-            flatten_obs(obs, aggregation),
+            flat_obs,
             flatten_obs(obs_clean, aggregation),
             resolved.std,
             smoother.pred_obs_history,
+            obs_extra,
         )
 
-        # Posterior (and prior) ensemble states; next window starts from the end.
-        if on_disk:
-            steps_dir = smoother.base_results_dir
-            if save_prior_state:
-                concat_member_files(
-                    member_files(steps_dir / "step_0", ensemble_size),
-                    windows_dir / f"window_{w}_prior_state.nc",
-                )
-            posterior_files = member_files(
-                steps_dir / f"step_{smoother.num_steps}", ensemble_size
-            )
-            concat_member_files(
-                posterior_files, windows_dir / f"window_{w}_posterior_state.nc"
-            )
-            state = last_frames(posterior_files)
-            for step in range(smoother.num_steps + 1):
-                shutil.rmtree(steps_dir / f"step_{step}", ignore_errors=True)
-        else:
-            states = output[1]
-            if save_prior_state:
-                # The stacked history drops per-step attrs; restore each step's.
-                prior_state = states.isel(esmda_step=0)
-                prior_state.attrs = smoother.state_history_attrs[0]
-                prior_state.to_netcdf(windows_dir / f"window_{w}_prior_state.nc")
-                states = states.isel(esmda_step=-1)
-                states.attrs = smoother.state_history_attrs[-1]
-            states.to_netcdf(windows_dir / f"window_{w}_posterior_state.nc")
-            state = states.isel(time=-1)
+        # Saved ensemble states, one at a time; the next window starts from the
+        # posterior's final frame (a copy, so no window state stays referenced
+        # into the next window).
+        for step in [*keep_steps, num_steps]:
+            name = state_names.get(step, f"step_{step}")
+            smoother.save_state(step, windows_dir / f"window_{w}_{name}_state.nc")
+        state = smoother.final_frame()
 
         # Next window's prior: the posterior, extrapolated if time-varying.
         if is_dynamic and w < num_windows - 1:
@@ -181,17 +189,23 @@ def run(cfg: DictConfig) -> None:
             params = posterior_params
         seconds_per_window.append(time.perf_counter() - start)
 
+    if on_disk:
+        shutil.rmtree(states_dir, ignore_errors=True)
+    info: dict[str, Any] = {}
+    if adaptive is not None:
+        info["adaptive_observation_error"] = adaptive.history
     save_yaml(
         {
             "smoother": type(smoother).__name__,
             "num_windows": num_windows,
             "window_length_seconds": sim_time,
             "ensemble_size": ensemble_size,
-            "num_esmda_steps": int(smoother.num_steps),
+            "num_esmda_steps": num_steps,
             "truth_dir": da.truth_dir,
             "truth_start_time": da.truth_start_time,
             "observation_error_model": observations[0][2].provenance,
             "seconds_per_window": [float(s) for s in seconds_per_window],
+            **info,
         },
         out_dir / "run_info.yaml",
     )

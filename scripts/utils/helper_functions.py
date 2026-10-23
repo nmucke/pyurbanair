@@ -12,7 +12,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import netCDF4
 import numpy as np
 import xarray
 import yaml
@@ -28,6 +27,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import SGS_BIAS_PARAMETER_NAMES
 from pyurbanair.config.hydra_helpers import clean_outputs
+from pyurbanair.static_parameters import log_space_parameter_names
 
 
 def save_yaml(data: dict, path: pathlib.Path) -> None:
@@ -264,12 +264,13 @@ def save_obs(
     obs_clean: np.ndarray,
     obs_std: np.ndarray,
     pred_obs: list[np.ndarray],
+    extra: dict[str, np.ndarray] | None = None,
 ) -> None:
     """One window's observations and predicted observations per update step.
 
     `pred_obs` holds one (observation, ensemble) array per step: the ESMDA
     iterations for a smoother (prior first, posterior last), forecast and
-    analysis for a filter.
+    analysis for a filter. `extra` adds more per-observation variables.
     """
     xarray.Dataset(
         {
@@ -280,6 +281,10 @@ def save_obs(
                 ("esmda_step", "observation", "ensemble"),
                 np.stack([np.asarray(p) for p in pred_obs]),
             ),
+            **{
+                name: ("observation", np.asarray(value).ravel())
+                for name, value in (extra or {}).items()
+            },
         }
     ).to_netcdf(path)
 
@@ -290,19 +295,23 @@ def save_obs(
 
 
 def parameter_names(
-    cfg: DictConfig, params: xarray.Dataset
-) -> tuple[list[str] | None, list[str]]:
-    """The parameters to estimate (None for all) and the global ones.
+    cfg: DictConfig, params: xarray.Dataset, sampler: Any
+) -> tuple[list[str] | None, list[str], dict[str, tuple[float, float] | None]]:
+    """The parameters to estimate (None for all), the global ones and the
+    log-space ones (name -> None or (min, max) bounds).
 
     SGS-discrepancy coefficients are global (never localized) when the
-    assimilation model's discrepancy is enabled.
+    assimilation model's discrepancy is enabled. Parameters with a `LogNormal`
+    prior in `sampler` are analysed as log(value), bounded to (min, max) when
+    the prior sets both.
     """
     selected = cfg.assimilation.params_to_estimate
     discrepancy = OmegaConf.select(
         cfg, "assim_model.forward_model.model_discrepancy.enabled", default=False
     )
     global_names = [n for n in SGS_BIAS_PARAMETER_NAMES if discrepancy and n in params]
-    return (None if selected is None else list(selected)), global_names
+    log_names = log_space_parameter_names(sampler)
+    return (None if selected is None else list(selected)), global_names, log_names
 
 
 def next_window_params(
@@ -342,44 +351,6 @@ def make_ensemble_model(
         forward_model=forward_model,
         results_dir=results_dir,
     )
-
-
-def member_files(step_dir: pathlib.Path, ensemble_size: int) -> list[pathlib.Path]:
-    return [step_dir / f"state_{m}.nc" for m in range(ensemble_size)]
-
-
-def concat_member_files(files: list[pathlib.Path], out_path: pathlib.Path) -> None:
-    """Stack per-member state files along a new `ensemble` dim, one at a time.
-
-    Same result as `xarray.concat(members, dim="ensemble")` without holding the
-    whole ensemble in memory.
-    """
-    with netCDF4.Dataset(files[0]) as ref, netCDF4.Dataset(out_path, "w") as out:
-        out.setncatts({k: ref.getncattr(k) for k in ref.ncattrs()})
-        out.createDimension("ensemble", len(files))
-        for name, dim in ref.dimensions.items():
-            out.createDimension(name, len(dim))
-        data_vars = [v for v in ref.variables if v not in ref.dimensions]
-        for name, var in ref.variables.items():
-            dims = (
-                var.dimensions
-                if name in ref.dimensions
-                else ("ensemble", *var.dimensions)
-            )
-            new = out.createVariable(name, var.dtype, dims)
-            new.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
-            if name in ref.dimensions:
-                new[...] = var[...]
-        for m, path in enumerate(files):
-            with netCDF4.Dataset(path) as src:
-                for name in data_vars:
-                    out.variables[name][m, ...] = src.variables[name][...]
-
-
-def last_frames(files: list[pathlib.Path]) -> xarray.Dataset:
-    """Ensemble state at the final time, reading one frame per member file."""
-    frames = [xarray.open_dataset(f).isel(time=-1).load() for f in files]
-    return xarray.concat(frames, dim="ensemble", join="override")
 
 
 # ---------------------------------------------------------------------------

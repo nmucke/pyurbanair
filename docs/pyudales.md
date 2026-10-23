@@ -71,7 +71,8 @@ Key constructor arguments (all wired from
 | `simulation_time` | Window length in seconds; written to `&RUN runtime` |
 | `spinup_time` | Prepended spin-up in seconds; effective runtime = `simulation_time + spinup_time` |
 | `nx/ny/nz`, `bounds` | Domain overrides → `itot/jtot/ktot`, `xlen/ylen/zsize` in namoptions |
-| `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`) |
+| `boundary_condition` | `"periodic"` or `"inflow_outflow"` (sets `BCxm`, `BCym`, `BCtopm`); the config reads `flow.boundary_condition` |
+| `outflow_buffer` | `inflow_outflow` only: metres of flat ground added downstream of `bounds`, the output cropped back (§5); `None` (default) no buffer |
 | `closure` | SGS closure: `"smagorinsky"` / `"vreman"` → exclusive `&NAMSUBGRID` switches; `None` (default) keeps the template's. `"oneeqn"` is rejected — see §4 |
 | `nudging_config` | Nudging tunables dict; see §6 |
 | `inlet_turbulence` | Turbulent-inlet block. `None`/`false` (default) is a strict no-op; `true` switches the inlet to synthetic driver planes (`BCxm=3`) and turns nudging off. See §6.1 |
@@ -243,10 +244,12 @@ Smagorinsky-family constant; PALM takes an eddy diffusivity in m²/s), so a sing
 value in the shared params sampler cannot be correct for all three at once.
 
 
-> **The two constants are not on the same scale.** uDALES defaults are `cs = -1.`
-> (→ the derived `(cm³/ceps)^0.25 ≈ 0.17`) for Smagorinsky and `c_vreman = 0.07`
-> for Vreman. A prior tuned for `cs` is roughly 2–3× too large for `c_vreman`;
-> retune `configs/params/*.yaml` when switching a case's closure.
+> **The two constants are not on the same scale.** Vreman (2004) relates them
+> by `c_vreman ≈ 2.5 cs²`. uDALES' Fortran defaults are `cs = -1.` (→ the
+> derived `(cm³/ceps)^0.25 = 0.217`, from `cf = 2.5`, `alpha_kolm = 1.5`) and
+> `c_vreman = 0.07` (`cs ≈ 0.17`). The config default is `c_vreman = 0.12`, the
+> Vreman equivalent of that `cs = 0.217` (§7). Retune `configs/params/*.yaml`
+> when switching a case's closure.
 
 **Initial inflow speed.** Static runs write `u0`/`v0` (and `dpdx`/`dpdy`) directly
 into namoptions `&INPS` and the `prof.inp`/`lscale.inp` files via
@@ -419,6 +422,23 @@ uDALES requires preprocessing that converts an STL geometry into IBM (Immersed
 Boundary Method) input files (`solid_*.txt`, `fluid_boundary_*.txt`,
 `facet_sections_*.txt`, `facets.inp`, `facetarea.inp`). Two paths exist:
 
+**The floor is a wall only under STL ground facets.** With an STL the
+domain bottom is not a wall: `modibm.f90::bottom` applies its wall function
+only with `lbottom`, which stays `.false.`, and the ghost `u0(:,:,kb-1)` is
+never set, so an uncovered floor carries molecular stress only (free-slip).
+`ForwardModel._fit_stl_geometry` therefore adds ground facets (two triangles
+per strip, `utils/stl_utils.fit_stl_to_domain`) where the STL's ground does
+not reach along x: xie_and_castro's upstream fetch x < 0 had a free-slip floor
+until 2026-10 (PALM's is a rough wall; extending it lowered the time-mean u at
+z = 1 m by 0.10-0.18 m/s at x = -10..0). With `outflow_buffer` the grid is
+extended by whole cells, buildings beyond `bounds` are dropped (one that
+straddles the edge raises), the ground is clipped there and the buffer gets
+flat ground, as `stl_to_palm_topography(x_max=...)` does for PALM. The state is
+cropped back to `bounds`; a warm start fills the buffer by repeating the last
+column, which makes the window-boundary jump about twice as large (mean |Δu|
+0.18 vs 0.12 m/s without the buffer, one frame). STLs that already cover the
+floor are not rewritten.
+
 **Keep the domain top 1.5 cells above the buildings.** Upstream's
 `matchFacetsCells.f90` does not clamp a facet's top cell in z, so geometry
 ending in the top cell of the w-grid makes it read past its arrays: the facet
@@ -476,8 +496,14 @@ pyudales applies inflow via **nudging** (under both boundary conditions)
 unless `inlet_turbulence.enabled` is set, which
 replaces both the nudged inlet face and the interior relaxation with synthetic
 driver planes (§6.1). The nudging generates a
-`timedepnudge.inp.<expnr>` file and enables `&PHYSICS lnudge=.true.`,
-`ltimedepnudge=.true.` in namoptions.
+`timedepnudge.inp.<expnr>` file and enables `&PHYSICS ltimedepnudge=.true.`
+(the inlet face follows it) and `lnudge` (the interior relaxation) in
+namoptions. `nudging_config.interior_nudging` decides `lnudge` under
+`inflow_outflow`: `false` since 2026-10, as PALM has no interior forcing
+there (it was `true`; see docs/pypalm.md §8 "Cross-model parity with
+pyudales"). Periodic runs always nudge the interior, their only driver.
+`tnudge`, `nnudge_meters` and `profile_config` come from `flow` in
+`configs/common.yaml`, shared with pypalm.
 
 **`apply_time_varying_inflow`**
 ([`utils/nudging_utils.py`](../libs/pyudales/src/pyudales/utils/nudging_utils.py)):
@@ -516,10 +542,7 @@ nnudge = int(np.count_nonzero(heights < nnudge_meters))
 where `heights` are cell centres `(0.5*dz, 1.5*dz, …)`. This takes precedence
 over the raw `nnudge` key.
 
-**`tnudge`**: nudging relaxation timescale in seconds (default 15.0). Xie & Castro
-"divergence" in practice is marginal dt-collapse at end-of-window, not a nudging
-failure; it was resolved by raising the Smagorinsky constant from cs 0.20 → 0.24
-(see §8).
+**`tnudge`**: nudging relaxation timescale in seconds (default 15.0).
 
 ### 6.1 Turbulent inlet — synthetic driver planes
 
@@ -546,9 +569,12 @@ is what `inlet_turbulence.enabled: true` drives, fed by driver planes
 The block is wired through the `inlet_turbulence: Optional[dict]` constructor
 arg, validated by `validate_inlet_turbulence` and implemented by
 [`utils/inlet_turbulence_utils.py`](../libs/pyudales/src/pyudales/utils/inlet_turbulence_utils.py)
-(physics + orchestration) on top of
+(plane layout + orchestration) on top of
 [`utils/driver_file_utils.py`](../libs/pyudales/src/pyudales/utils/driver_file_utils.py)
-(binary I/O). **Absent, `{}`, or `enabled: false` writes nothing at all** —
+(binary I/O). The digital filter itself, the per-member seed and the clock
+below live in
+[`pyurbanair/utils/digital_filter.py`](../src/pyurbanair/utils/digital_filter.py),
+shared with pypalm's turbulent inflow (docs/pypalm.md §8). **Absent, `{}`, or `enabled: false` writes nothing at all** —
 byte-identical namoptions and no driver files. Unknown keys are warned about and
 ignored. `enabled: true` requires `boundary_condition: inflow_outflow`; under
 `periodic` there is no inlet face and it raises.
@@ -741,6 +767,20 @@ larger seed overflows `ir*8121` and biases the perturbations. It only matters on
 run inherits its copied state, and uDALES does not re-randomize. Off by
 default, so default runs are unchanged.
 
+### 6.3 Parity with pypalm
+
+The boundary condition, outflow buffer, inflow profile, nudging and inlet
+turbulence values are shared with pypalm through `flow` in
+`configs/common.yaml` (cases override it: `xie_and_castro` sets a 40 m buffer,
+`xie_and_castro_periodic` periodic without inlet turbulence). The item-by-item
+audit, the residual differences (SGS closure above all, the open lid, the
+initial state) and the recommended spin-up per setup are in
+[docs/pypalm.md §8 "Cross-model parity with pyudales"](pypalm.md#cross-model-parity-with-pyudales).
+Output frames are labelled with their target times (dt, 2·dt, …,
+`simulation_time`) like pypalm's and pylbm's, not with uDALES' dump times
+(the first step past each target, e.g. 1.076 s); before 2026-10 they carried
+the dump times.
+
 ## 7. Instability watchdog
 
 [`utils/run_monitor.py`](../libs/pyudales/src/pyudales/utils/run_monitor.py)
@@ -764,7 +804,7 @@ and ignored.
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `True` | When False, falls back to bare `subprocess.run(check=True)` |
-| `min_dt` | `1e-4` s | Absolute timestep floor |
+| `min_dt` | `1e-3` s | Absolute timestep floor (config value; a collapsed run sits near 1.6e-4 s, normal steps are 0.05-0.3 s at 2 m) |
 | `patience` | `20` | Consecutive sub-floor steps before killing |
 | `warmup_steps` | `20` | Ignore the first N steps (legitimate ramp-up) |
 | `poll_interval_s` | `2.0` | Log re-read interval |
@@ -776,13 +816,81 @@ exception the ensemble layer already treats as a member failure. The
 from a random successful donor without waiting for the slow dt-collapse crash.
 
 **Known gotchas:**
-- Xie & Castro "divergence" is typically marginal dt-collapse near end-of-window,
-  not a genuine flow instability. It is fixed by raising the SGS constant — under
-  Smagorinsky `cs 0.20 → 0.24`; under Vreman the equivalent lever is `c_vreman`,
-  where the 0.07 default diverges and ~0.25 runs clean on this case.
+- A dt collapse under `inflow_outflow` is a real instability at the **outflow
+  face**, not a marginal time step (see "Outflow backflow and the SGS
+  constant" below). The watchdog catches it only because `min_dt` is above
+  the ~1.6e-4 s the collapsed run settles at; at the old 1e-4 floor such a
+  run crawled on for hours.
 - Stale fielddumps can give NaN-padded or duplicate z-coordinates after a failed
   worker is retried. `run_single` automatically cleans the member output directory
   before restoring/staging any warmstart files for each attempt.
+
+### Outflow backflow and the SGS constant
+
+The default `c_vreman` is **0.12**: Vreman's (2004) `c = 2.5 Cs²` for
+`Cs = 0.217`, the Smagorinsky constant uDALES derives from its own Deardorff
+constants (§4). Until 2026-10 it was 0.24 (`Cs = 0.31`, the old Smagorinsky
+`cs = 0.24` carried over to `c_vreman`), because lower values "collapsed dt" on
+xie_and_castro. That collapse is the outflow, not the closure:
+
+- The outflow (`xmo_convective` for v, w and `bcpup` for u, in
+  `modboundary.f90`) advects every variable out at one speed, the bulk mean
+  `uouttot`, with a Neumann u in the lowest cell. Reversed flow reaching the
+  outflow face turns it into an inflow the condition cannot handle. CD2
+  momentum advection (the only one built, §Quick reference) adds no
+  dissipation, so the SGS viscosity is the only damping there.
+- With the outflow at x = 80 m (5 m behind the last cube column, no buffer)
+  the wake reaches the face. At c = 0.10 with turbulent inflow, dt drops from
+  0.15 s to 0.04 s at 85 s and settles near 1.6e-4 s by 110 s. Over that time
+  u on the last interior u face (x = 78 m, z = 3-9 m) goes from -9.6 to
+  -6000 m/s, while |u| stays below 7 m/s everywhere else until the blow-up
+  spreads. The run never NaNs; the adaptive step shrinks with the velocity.
+  Without the buffer dt falls below 0.01 s at ~80 s for c = 0.07, ~110 s for
+  0.10 and 120-230 s for 0.12 (laminar and turbulent inflow); 0.24 runs clean.
+- The 20 m flat `flow.outflow_buffer` of xie_and_castro (since 2026-10)
+  removes the trigger. With it c = 0.12 is stable for 1020 s, at 10 m/s, and
+  over three warm-started `params=dynamic_truth` windows. So is c = 0.07,
+  also at 30° and periodic. Backflow still reaches the face (5 % of the
+  samples, 29 % at z = 1 m, where the mean u is 0.3 m/s), so the margin is
+  finite: c = 0.05 runs, and c = 0.04 with laminar inflow diverges at the
+  face (z = 1 m) after ~380 s; a 40 m buffer makes that run stable. A case
+  without a buffer, or with buildings close to `xmax`, needs one before its
+  SGS constant is lowered.
+- 20 m is not enough at c = 0.12 (2026-10-21; 6 m/s, z0 0.1, 120 s spin-up +
+  600 s, 4 seeds per arm). Backflow bursts still got through in 3 of 40 runs:
+  u at the face fell to about -25 m/s, |U| reached 21 m/s at x = 73-79 m, and
+  the run recovered by itself in ~50 s without tripping the dt watchdog. With
+  40 or 60 m there were none in 36 runs. Without bursts, 20 m also inflated
+  street-level TKE at x = 65-79 m 2-5x at 40° (+10-40 % at 10°); 40 m and 60 m
+  agree within the replica noise there, and upstream of x ≈ 55 m the buffer
+  changes nothing. The case default is therefore 40 m (+18 % wall time;
+  60 m costs +45 %).
+- Why not the literature 0.07 (`Cs ≈ 0.17`, Lilly's value for a sharp
+  spectral cut-off)? CD2 does not dissipate at the grid scale, and at 0.07
+  energy piles up there. Spanwise spectra of u' at z = 9 m (inflow_outflow,
+  turbulent) and in the periodic case, compensated by k^5/3: they rise toward
+  the 2Δ cut-off for c ≤ 0.10, are flat to slightly falling at 0.12, and fall
+  to a third of the inertial level at 0.24. The share of u' variance at
+  wavelengths under 2.7Δ is 7-10 % at 0.07, 3-5 % at 0.12, 1-2 % at 0.24 and
+  ~3 % for a k^-5/3 spectrum. Same criterion for any grid: the lowest c
+  whose spectrum does not rise at the cut-off.
+- Effect on the flow (2 m grid, 5 m/s, statistics over 150-420 s, against
+  PALM with its ws-scheme). Laminar inflow: uDALES' wakes are nearly steady
+  at 0.12 and 0.24 (canopy TKE 0.013 and 0.001 m²/s², PALM 0.003); they shed
+  at 0.07 (0.078). Turbulent inflow: canopy TKE 0.10 (0.24), 0.15 (0.12),
+  0.22 (0.07), PALM 0.13-0.15. The compare_models TKE-profile distance to
+  PALM is 0.041, 0.017 and 0.068 m²/s². The near-ground canopy mean is NOT an
+  SGS-constant effect: array-mean u at z = 1 m is 1.33-1.34 m/s for c =
+  0.12-0.24 and 1.20 at 0.07, against PALM's 0.87-0.88. The sensor-mean
+  distance stays 0.42-0.46 m/s for every c. Periodic runs barely depend on c.
+- The `model_discrepancy` patch at zero coefficients matches the stock
+  closure. The runs differ by 1e-3 m/s after the 120 s spin-up (the chaotic
+  growth of round-off), and their statistics agree (canopy TKE 0.2259 vs
+  0.2265 at c = 0.07).
+- The closure stays Vreman. In this build Smagorinsky has its Piomelli wall
+  damping commented out (`damp = 1` in `closure`), and the one-equation model
+  cannot be used (§4). Vreman's viscosity vanishes in pure shear, so it needs
+  no wall damping.
 
 ---
 
@@ -800,6 +908,7 @@ INFLOW_PARAM_NAMES = (
     "pressure_gradient_magnitude",
     "vertical_inflow_exponent",
     "sgs_constant",
+    "roughness_length",
 )
 ```
 
@@ -809,7 +918,8 @@ INFLOW_PARAM_NAMES = (
 | `velocity_magnitude` | `u0`/`v0` in namoptions + nudging profiles | m/s reference speed |
 | `pressure_gradient_magnitude` | `dpdx`/`dpdy` in namoptions | Pa/m; decomposed by angle. uDALES-only parameter. |
 | `vertical_inflow_exponent` (α) | Overrides `profile_config["alpha"]` in `_resolve_nudging_config` | Estimated by ESMDA; per-member shear |
-| `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). Note the two constants have different natural magnitudes (~0.17 vs 0.07). |
+| `roughness_length` | z0 column of `factypes.inp.<expnr>` via `_apply_roughness` | m; see "Roughness" below |
+| `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). The two constants are on different scales (`c_vreman ≈ 2.5 cs²`: 0.217 ↔ 0.12). |
 
 **`pressure_gradient_magnitude`** is the third parameter unique to pyudales.
 `resolve_parameter_schema` in `hydra_helpers.py` adds it to the uDALES parameter
@@ -820,6 +930,45 @@ unconditionally (outside the static/time-varying branch), so they affect every
 run where they are present. Each is a no-op when absent, keeping default runs
 byte-identical. See [codebase_guide.md §7](codebase_guide.md) "Model-error
 compensation knobs".
+
+### Roughness (`roughness_length`)
+
+z0 for momentum (m), one value for every wall, shared with pypalm. It comes
+from the params Dataset, else from `forward_model.roughness_length`
+(`flow.roughness_length`: null in `common.yaml`, which leaves `factypes.inp`
+alone; xie_and_castro sets 0.05). `_apply_roughness` writes it, as `%10.6f`,
+into the z0 column (3) of the member's `factypes.inp.<expnr>` for every facet
+type that `facets.inp` uses and whose z0 is > 0 (type 1 today; the free-slip
+bounding walls, z0 = 0, are left alone; z0h is unused in neutral runs). uDALES
+reads the file at every launch (`initfac.f90`), so z0 changes per member and
+window without redoing the IBM preprocessing. The write runs in
+`_apply_inflow_settings`, so every member and window gets it, also after a
+window-checkpoint restore. When the file already holds the value (the default
+0.05 against the preprocessing's `%6.2f` 0.05) nothing is written. z0 must be
+at least 1e-6 m: uDALES treats z0 = 0 as free slip, and anything smaller would
+be written as 0.000000 and stay free slip in every later window.
+
+The wall function is the neutral log law evaluated at the **true distance d**
+of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),
+not at a half cell as in PALM. If `ln(d/z0) <= 1` (d <= e·z0) the velocity is
+taken from a reconstruction point further out, and if that is still too close
+the section gets **no wall stress at all** (`modibm.f90` `ibmwallfun`,
+silently). On the 2 m xie_and_castro grid the ground sections have d = 1 m,
+but **every wall section has d = 2 m** (u, v and w) and the roofs 0.2-1.8 m
+(2.8 m roof: 0.2, 6.4: 0.6, 10: 1.0, 13.6: 1.4, 17.2: 1.8). The cube faces
+(x, y = 5 + 10n) and those roofs lie off the grid faces, while the IBM blocks
+the flow at the voxel faces, 1 m from the first fluid point, exactly as PALM's
+topography does (same 12 m blocks, same roofs 2/6/10/14/18 m). So uDALES
+applies the wall law 1 m further out than the wall it actually resolves, and
+over the true facet areas (10 m faces), not the blocked ones. On the same flow
+that is ~0.5x PALM's wall friction and ~0.65x its roof friction at the same
+z0; ground is the same. It is what makes uDALES' canopy faster than PALM's and
+what a cross-model z0 estimate absorbs (`docs/pypalm.md` § "Cross-model
+parity", wall treatment). For a wall, ln(2/z0') = ln(1/z0) at z0' = 2 z0. The
+reconstruction fallback hits the 0.2 m roof sections from z0 = 0.074 m (6% of
+the roof area), and 41% of all sections from z0 = 0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
+sections lie within e·z0. In the tiny test case (1 m cells) a z0 of 0.01 -> 0.1
+lowers the time-mean first-cell u by ~4% (1.00 -> 0.97 m/s).
 
 ---
 
@@ -868,24 +1017,26 @@ forward_model:
   experiment_name: "999"
   matlab_bin: null            # only python_or_matlab: matlab needs it
   ncpu: 1
-  boundary_condition: inflow_outflow
+  boundary_condition: ${flow.boundary_condition}   # shared flow setup, configs/common.yaml
+  outflow_buffer: ${flow.outflow_buffer}
   closure: vreman             # smagorinsky | vreman | null (keep template)
+  sgs_constant: 0.12          # c_vreman = 2.5 * 0.217^2; see §7
   per_member_irandom: false   # true -> one cold-start seed per run (§6.2)
   nudging_config:
     tnudge: 15.0
     nnudge_meters: 16.0         # skip nudging below this height (m)
-    interior_nudging: true      # false -> inflow at the boundary only
+    interior_nudging: false     # true -> also relax the interior (inflow_outflow)
     profile_config:
       type: power_law
       alpha: 0.25
   instability_check:
     enabled: true
-    min_dt: 1.0e-4
+    min_dt: 1.0e-3
     patience: 20
     warmup_steps: 20
     poll_interval_s: 2.0
   inlet_turbulence:
-    enabled: true             # synthetic driver planes, BCxm=3 (§6.1); false = no-op
+    enabled: ${flow.inlet_turbulence.enabled}  # synthetic driver planes, BCxm=3 (§6.1)
     intensity: 0.15           # u'_rms / |U_mean(z)|
     length_scale_x/y/z: 24/12/12   # m, digital-filter integral length scales
     time_step: 0.5            # s, &DRIVER dtdriver

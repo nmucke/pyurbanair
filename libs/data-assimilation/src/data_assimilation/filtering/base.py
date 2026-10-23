@@ -64,8 +64,10 @@ from data_assimilation.io import get_sorted_state_files, load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import sensor_observation_coords
 from data_assimilation.parameter_selection import (
+    LogParameters,
     merge_parameters,
     select_parameters,
+    validate_log_parameters,
     validate_parameter_names,
 )
 from data_assimilation.reduction import OnlineStateReduction
@@ -352,6 +354,9 @@ class BaseFilter:
     #: These names persist across cycles; they do not assign a grid location.
     global_parameter_names: tuple[str, ...] = ()
     parameter_names_to_estimate: Optional[tuple[str, ...]] = None
+    #: Static parameters analysed (and random-walked) as log(value): name -> None,
+    #: or name -> (min, max) for the bounded transform (parameter_selection).
+    log_parameter_names: dict[str, Optional[tuple[float, float]]] = {}
 
     def __init__(
         self,
@@ -368,6 +373,7 @@ class BaseFilter:
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         if mode not in ("state", "parameter", "joint"):
             raise ValueError(
@@ -388,6 +394,7 @@ class BaseFilter:
         self.parameter_names_to_estimate = validate_parameter_names(
             parameter_names_to_estimate
         )
+        self.log_parameter_names = validate_log_parameters(log_parameter_names)
 
         # One FRAME's error covariance, not one cycle's: the serial sweep hands
         # the analysis one frame's (num_sensors x num_states) vector at a time,
@@ -539,7 +546,7 @@ class BaseFilter:
         self._state_augmentation = StateAugmentation()
 
         # On-disk peak-storage control, set by the caller after construction
-        # (mirrors the smoother's prune_disk_steps / keep_prior_disk_step).
+        # (cf. the smoother's keep_steps).
         self.prune_disk_cycles = False
         self.keep_first_disk_cycle = True
 
@@ -1063,7 +1070,9 @@ class BaseFilter:
                 select_parameters(params, self.parameter_names_to_estimate)
             )
         if params is not None:
-            select_parameters(params, self.parameter_names_to_estimate)
+            select_parameters(
+                params, self.parameter_names_to_estimate, self.log_parameter_names
+            )
         elif self.parameter_names_to_estimate:
             raise ValueError(
                 "parameter_names_to_estimate requires a parameter Dataset."
@@ -1113,10 +1122,14 @@ class BaseFilter:
                 assert params is not None
                 self.rng_key, evolve_key = jax.random.split(self.rng_key)
                 evolved = self.parameter_evolution.evolve(
-                    select_parameters(params, self.parameter_names_to_estimate),
+                    select_parameters(
+                        params,
+                        self.parameter_names_to_estimate,
+                        self.log_parameter_names,
+                    ),
                     evolve_key,
                 )
-                params = merge_parameters(params, evolved)
+                params = merge_parameters(params, evolved, self.log_parameter_names)
 
             forecast = self._forecast_step(state=analysis_state, params=params)
             if params is not None:
@@ -1334,7 +1347,9 @@ class BaseFilter:
             blocks.append(states_forecast)
         if self.mode in ("parameter", "joint"):
             assert params is not None  # validated in run()
-            selected = select_parameters(params, self.parameter_names_to_estimate)
+            selected = select_parameters(
+                params, self.parameter_names_to_estimate, self.log_parameter_names
+            )
             flat_params = self._param_augmentation.flatten(selected)
             params_array = ParamAugmentation.to_array(flat_params)
             n_param = params_array.shape[0]
@@ -1500,7 +1515,7 @@ class BaseFilter:
                 coords=flat_params.coords,
                 attrs=updated_flat.attrs,
             )
-            params = merge_parameters(params, updated_params)
+            params = merge_parameters(params, updated_params, self.log_parameter_names)
             self._params_analyzed = bool(n_param)
 
         cycle_diag.analysis_time = time.perf_counter() - analysis_started
@@ -1895,6 +1910,7 @@ class EnsembleKalmanFilter(BaseFilter):
         beta: float = 1.0,
         global_parameter_names: Optional[Sequence[str]] = None,
         parameter_names_to_estimate: Optional[Sequence[str]] = None,
+        log_parameter_names: Optional[LogParameters] = None,
     ) -> None:
         super().__init__(
             observation_operator=observation_operator,
@@ -1910,4 +1926,5 @@ class EnsembleKalmanFilter(BaseFilter):
             beta=beta,
             global_parameter_names=global_parameter_names,
             parameter_names_to_estimate=parameter_names_to_estimate,
+            log_parameter_names=log_parameter_names,
         )

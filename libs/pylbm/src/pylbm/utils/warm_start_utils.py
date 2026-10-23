@@ -756,6 +756,30 @@ def _try_load_restart_distribution(
         return None
 
 
+def _hold_ground_corners_at_rest(f: np.ndarray, ibgk: int) -> None:
+    """Set the ground's inflow and outflow ghost corners to a wall at rest.
+
+    For a no-slip ground (``kbnd`` 1x) the solver bounces the k = 1 populations
+    off the ghost plane k = 0 for i = 1..nx only
+    (``m_boundary_k_closed_kernel.F90``); no kernel writes the two ghost
+    columns where that plane meets the inflow (i = 0) and outflow (i = nx + 1)
+    ghost planes, yet their populations stream into the cells (1, j, 1) and
+    (nx, j, 1) every step, frozen at whatever the restart holds. A copy of the
+    neighbouring flow there (the solver's own cold start, or zero-gradient
+    ghosts) acts as a wall moving with the inflow: it lifts the flow at the
+    inflow and drains ~4 % of the domain's mass in the first ~20 s, which
+    nothing restores (the inflow fixes the momentum flux, so every velocity
+    ends ~4 % high). The resting wall's equilibrium (rho = 1, u = 0) keeps the
+    density at 1 (docs/pylbm.md §5).
+    """
+    one = np.ones((1, 1, 1), dtype=np.float32)
+    rest = _build_equilibrium_restart_distribution(
+        rho_xyz=one, u_xyz=0 * one, v_xyz=0 * one, w_xyz=0 * one, ibgk=ibgk
+    )[:, 0, 0, 0]
+    f[:, 0, :, 0] = rest[:, None]
+    f[:, -1, :, 0] = rest[:, None]
+
+
 def write_restart_file_from_xarray(
     state: xarray.Dataset | pathlib.Path,
     dirs: DirectoryPaths,
@@ -979,6 +1003,9 @@ def write_restart_file_from_xarray(
             + feq[:, 1:-1, 1:-1, 1:-1]
         )
         feq = np.asfortranarray(f_new.astype(np.float32))
+
+    if not periodic_x and kbnd // 10 == 1:
+        _hold_ground_corners_at_rest(feq, ibgk)
 
     restart_file = restart_dir / restart_file_name(restart_iteration)
     with FortranFile(str(restart_file), "w") as f:

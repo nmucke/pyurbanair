@@ -13,7 +13,7 @@ The two rounds ask different questions:
   assimilation model.** Does the machinery work? The true coefficients are
   known, so check whether the strain/rotation SGS correction
   (`sgs_bias_b0/b1/b2`,
-  [pyudales §4.1](../pyudales.md#41-strainrotation-discrepancy)) can be
+  [pyudales §4.1](../../pyudales.md#41-strainrotation-discrepancy)) can be
   estimated together with the inflow parameters from sparse velocity sensors.
 - **Round 2 (later, outline at the end): PALM truth, uDALES assimilation
   model.** Does the correction help? This mimics the real-world case, where no
@@ -112,7 +112,7 @@ parameters and end state, made before seeing window `w`'s data. Its scores in
    If they fail, stop and report. Nothing below is meaningful without them.
 4. **Keep every run directory, including the window state files.** The
    turbulence metrics of
-   [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md) are
+   [da_turbulence_metrics.md](../../plans/implemented/da_turbulence_metrics.md) are
    computed from these files: rerun `compute_metrics.py` and
    `visualize_assimilation.py` on them.
    Budget disk accordingly. One frame is 30·40·16 cells × 4 variables ×
@@ -334,7 +334,7 @@ correction is identifiable but its effect is too small to matter.
 ## Deliverables
 
 On the branch `exp/sgs-twin-tests` (never main), commit
-`docs/research/sgs_twin_tests_2026-10/report.md` containing:
+`docs/archive/research/sgs_twin_tests_2026-10/report.md` containing:
 
 - Machine, commit, and the frozen pilot choices with the P1/P2 tables.
 - A run table: test, layout, seed, status, wall time, and the exact command.
@@ -361,7 +361,7 @@ deployment where the best coefficients for reality are unknown. Consequences:
 
 - **Judge predictions only.** Score what the DA never sees: the held-out
   validation sensors and the window-1/2 forecasts after the coefficients are
-  frozen. Use the statistics from [da_turbulence_metrics.md](implemented/da_turbulence_metrics.md),
+  frozen. Use the statistics from [da_turbulence_metrics.md](../../plans/implemented/da_turbulence_metrics.md),
   not instantaneous errors:
   - `sensor_statistics`;
   - sensor distributions (W2);
@@ -422,10 +422,10 @@ round where "no added value" matters most: it would mean inflow estimation
   with another seed, for `assimilation.replica_dir`. `pypalm` exposes no seed
   today: PALM seeds its random generator from `ensemble_member_nr`, which
   pypalm does not write, so add that key first (see
-  [scripts_and_configs.md](../scripts_and_configs.md)).
+  [scripts_and_configs.md](../../scripts_and_configs.md)).
 - **Align the solvers:** inlet turbulence differs (PALM disturbances vs the
   uDALES driver planes), and so do the spinup, the grid staggering of the
-  sensor sampling, and the time origin. Read [pypalm.md](../pypalm.md) first.
+  sensor sampling, and the time origin. Read [pypalm.md](../../pypalm.md) first.
 - **Freeze before scoring:** start from the Round 1 feature settings,
   observation errors and σ_b. Any change, such as a wider σ_b, is made on the
   calibration windows and assimilated sensors only, and is frozen before the

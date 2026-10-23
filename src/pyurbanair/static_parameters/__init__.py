@@ -10,13 +10,22 @@ samples parameters the same way for static and time-varying cases:
     params = params_sampler.sample(ensemble_size)
 """
 
-from .distributions import Constant, Distribution, Normal, Uniform
+from .distributions import (
+    Constant,
+    Distribution,
+    LogNormal,
+    Normal,
+    Uniform,
+    log_space_parameter_names,
+)
 from .sampler import ParameterSampler
 
 __all__ = [
     "Constant",
     "Distribution",
+    "LogNormal",
     "Normal",
     "ParameterSampler",
     "Uniform",
+    "log_space_parameter_names",
 ]

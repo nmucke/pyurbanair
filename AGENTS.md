@@ -27,8 +27,9 @@ docs; detail lives in `docs/`.
 ```text
 configs/    Hydra configs: forward.yaml, assimilation.yaml (entry points);
             groups case/, model/, params/, assimilation_settings/; surrogate/
-scripts/    the scripts you run (run_*, compute_metrics, visualize_*,
-            surrogate/, tools/); shared helpers only in scripts/utils/
+scripts/    the scripts you run (run_*, compute_metrics, visualize_*, comparison/,
+            surrogate/, surrogate_comparison/, tools/); shared helpers only in
+            scripts/utils/
 workflows/  shell pipelines: a run followed by its post-processing
 geometries/ case inputs: one folder per case (STL, namoptions, _p3d), urbantales/
 src/        pyurbanair: base classes every backend inherits
@@ -45,8 +46,8 @@ EnKF, hybrid) is in JAX and never depends on a specific solver: backends plug
 in through `BaseForwardModel` / `BaseEnsembleForwardModel`.
 
 Vendored code (`libs/pyudales/u-dales/`, `libs/pypalm/palm_model_system/`,
-`libs/pylbm/LBM/`, `neural_surrogates/architectures/_tadpole/` and `_upt/`) is
-upstream: don't edit it.
+`libs/pylbm/LBM/`, `neural_surrogates/architectures/_tadpole/` and `_upt/`,
+`libs/visualization/src/visualization/web/vendor/`) is upstream: don't edit it.
 
 ## Read the right doc first
 
@@ -98,8 +99,10 @@ Each script's module docstring lists its options and outputs.
 
 ## Rules
 
-- **Branch first.** Never commit to `main`; branch, commit, open a PR.
-  `main` is unprotected, so be deliberate.
+- **Branch first, from `dev`.** Never commit to `main` or `dev`; branch from
+  `dev`, commit, open a PR into `dev`. `main` only receives releases from
+  `scripts/tools/release_to_main.sh` (README, Development). This file and the
+  other `.devonly` paths exist only on `dev`.
 - **Run `pixi run -e dev pre-commit` before committing.** Use
   `# type: ignore[...]` only for checks you deliberately don't satisfy.
 - **Scripts:** `def run(cfg)` plus a thin `@hydra.main` wrapper (so tests can

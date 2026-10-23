@@ -46,7 +46,7 @@ command line. Change the key at its source,
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/train
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/train_roll1
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/finetune_roll3
-pixi run -e dev python scripts/surrogate/baselines/compare.py \
+pixi run -e dev bash workflows/compare_surrogates.sh \
     'models=[model_weights/local_fno,model_weights/ssrolling_tl_roll3,model_weights/p3d_idealized]'
 ```
 
@@ -59,7 +59,9 @@ corpus stored in large zlib time chunks that is decompression-bound (on
 DelftBlue ~1.7 s CPU for 3 frames); a whole-frame copy (`prechunk`, see
 [neural_surrogates.md](neural_surrogates.md) §29) costs ~0.1 s CPU per frame
 and mostly waits on the file system, which more workers overlap (the configs
-use `num_workers: 16`). Pass `prechunk.output_root=<copy>`; the DFT's
+use `num_workers: 16`). pyudales_idealized is stored uncompressed and
+contiguous, so it needs no copy: training there is compute-bound. Pass
+`prechunk.output_root=<copy>`; the DFT's
 whole-frame copy of the same corpus is reused as is.
 
 Both papers' models have no inflow parameters. Ours vary in time, so both
@@ -199,7 +201,8 @@ Where unpatched Aurora differs from the papers' modified one:
   period Aurora sees is the padded length.
 
 **SSGen** (paper 2 §II C, Eqs. 1–8) folds height into channels, so it is built for
-`n_levels` = the corpus' nz (default 32). It runs on the z-scored, masked
+`n_levels` = the corpus' nz (16 in `architectures.yaml`, pyudales_idealized's;
+32 on the realistic corpus). It runs on the z-scored, masked
 backbone prediction, and the model adds its output (Eq. 8). It matches the
 paper module by module:
 - 3×3 average-pool high-pass;
@@ -235,6 +238,24 @@ module has 0.21 M. Ours has 0.10 M at 3 × 32 = 96 channels.
   the rollout loss is summed with no 1/N (Eq. 13). Their MSE (Eq. 9) runs over
   every grid point; ours over fluid cells only, since our predictions are
   zero in buildings anyway.
+- `epoch_batches` / `val_batches` (default null: the whole split) cap an
+  epoch, as for Local-FNO. A full pyudales_idealized epoch is ~25k batches,
+  hours per validation.
+
+**On one 24 GB RTX 3090, pyudales_idealized** (bf16, batch 2; mixed grids up
+to 16×112×224):
+
+| Run | Peak memory | s/batch |
+|---|---|---|
+| Local-FNO (85 M) | 17 GB | 0.16 (batch 4) |
+| SSRolling 512, Roll-1 | 17 GB | 0.19 |
+| SSRolling 512, Roll-3 | out of memory on the largest grid | – |
+| SSRolling 512, Roll-3 + `'trainer.activation_checkpoint_modules=[aurora.backbone.*.blocks.*]'` | 19 GB | 0.68 |
+| SSRolling 256, Roll-1 | 5 GB | 0.11 |
+
+Local-FNO's paper recipe runs its 12 capped epochs in about 70 min. Roll-1 at
+512 with `trainer.epoch_batches=2000 trainer.val_batches=200` takes ~6 min per
+epoch, and its validation loss was still falling after 120 epochs (12 h).
 
 **Note:** Aurora zero-initialises its adaptive-LayerNorm modulation, so at
 initialisation the inflow parameters have no effect until training moves those
@@ -248,6 +269,8 @@ all three `param_vars`; (z, y, x) = 32 × 96…320 × 96…352 cells, up to
   z-score normalisation (theirs channel-wise min–max, §III C, chosen for
   stabler convergence); the inflow parameters; patches and conditioning as
   above.
+- **SSGen levels:** nz = 32, so pass
+  `baseline_architectures.ssrolling_512.n_levels=32` (the default is 16).
 - **Batch 2 everywhere:** `cell_budget: 6000000` (> 2 × 2.8 Mcell; training.yaml's
   4.19 M would give batch 1 on 51 of the 500 trajectories).
 - **Memory and speed** (H100, bf16, batch 2, 2.8 Mcell / 1.0 Mcell grid):
@@ -276,25 +299,20 @@ all three `param_vars`; (z, y, x) = 32 × 96…320 × 96…352 cells, up to
 
 ## 4. Comparing models
 
-[scripts/surrogate/baselines/compare.py](../scripts/surrogate/baselines/compare.py)
-(config [compare.yaml](../configs/surrogate/baselines/compare.yaml)) evaluates
-any steppers, ours and the baselines, on the same test trajectories:
+`workflows/compare_surrogates.sh` (scripts in
+[scripts/surrogate_comparison/](../scripts/surrogate_comparison/), config
+[comparison.yaml](../configs/comparison.yaml)) compares any steppers, ours and
+the baselines, on the same test trajectories. The metrics and figures are in
+[scripts_and_configs.md](scripts_and_configs.md) §2.3b. For the baselines:
 
 - **Same start frame.** Every model starts from the latest frame any of them
   needs as history (`max(H) - 1`), each from its own last `H` true frames.
-- **Fluid cells only.** Errors are taken on fluid cells only.
-  `evaluate_stepper.py`'s RMSE includes building cells.
-- **Persistence reference.** Repeating the start frame is scored as well, and
-  every RMSE is also reported relative to it.
+- **Fluid cells only.** `evaluate_stepper.py`'s RMSE includes building cells.
+- **Persistence reference.** Repeating the start frame is scored as well.
 - **Same data enforced.** It refuses models trained on different data: the
-  training-data folder name, `state_vars`, `param_vars` and, where the corpus'
-  `config.yaml` is readable, its output frequency must match. Models are
-  labelled by folder name, or by the given path when two names clash.
-- **Turbulence statistics** ([diagnostics.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/diagnostics.py)):
-  - each component's spatial std relative to the truth against lead time,
-    which shows smoothing or laminarisation;
-  - lateral spectra of u';
-  - profiles of mean u, resolved TKE and -<u'w'>.
+  training-data folder name, `state_vars`, `param_vars` (`null` read as the
+  corpus' names) and, where the corpus' `config.yaml` is readable, its output
+  frequency must match.
 
 ## 5. Tests
 
@@ -304,6 +322,7 @@ any steppers, ours and the baselines, on the same test trajectories:
 - the diagnostics;
 - composition of every config under `configs/surrogate/baselines/`;
 - end-to-end runs on the tests' tiny synthetic corpus through `train.py`,
-  `evaluate_stepper.py`, `run_forward.py` and `compare.py`.
+  `evaluate_stepper.py` and `run_forward.py`; the comparison scripts are
+  tested in `tests/scripts/test_comparison.py`.
 
 The tiny overlays are in `tests/configs/surrogate/baselines/<baseline>/test/`.

@@ -18,6 +18,8 @@ from tests.conftest import CONFIGS, REPO, TEST_CONFIGS, compose, load_script
 ENTRY_POINTS = [
     "forward",
     "assimilation",
+    "comparison",
+    "model_comparison",
     *(f"surrogate/{p.stem}" for p in sorted((CONFIGS / "surrogate").glob("*.yaml"))),
 ]
 ENTRY_POINTS.remove("surrogate/architectures")  # entries, not a run config
@@ -70,6 +72,50 @@ def test_case_geometry_paths_exist(case: str, tmp_path: pathlib.Path) -> None:
         ).is_file()
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "case", ["xie_and_castro", "xie_and_castro_periodic"]
+)
+def test_case_sensors_are_clear_of_the_buildings(
+    case: str, tmp_path: pathlib.Path
+) -> None:
+    """Every sensor, assimilated or held out, reads only fluid cells that do not
+    touch a wall or roof (the comparison's `fluid_mask` of the case STL), at the
+    case grid and at 1 m; the held-out ones stay 2 case cells (4 m) from the
+    assimilated ones."""
+    from evaluation.turbulence import fluid_mask
+
+    cfg = compose("forward", f"case={case}", root=tmp_path)
+    obs = cfg.obs
+    sensors = {
+        "assimilation": np.array([obs.x_points, obs.y_points, obs.z_points]).T,
+        "validation": np.array(
+            [obs.validation_x_points, obs.validation_y_points, obs.validation_z_points]
+        ).T,
+    }
+    bounds = np.array(cfg.domain.bounds, dtype=float)
+    case_cells = [cfg.domain.nx, cfg.domain.ny, cfg.domain.nz]
+    for cells in (case_cells, (bounds[:, 1] - bounds[:, 0]).astype(int)):
+        x, y, z = (
+            lo + (np.arange(n) + 0.5) * (hi - lo) / n
+            for n, (lo, hi) in zip(cells, bounds)
+        )
+        fluid = fluid_mask(REPO / cfg.geometry.stl_path, z, y, x)
+        for name, points in sensors.items():
+            for point in points:
+                # The cell centres a trilinear interpolation at the point reads:
+                # the one it sits on, or the two that bracket it, per axis.
+                stencil = [
+                    np.flatnonzero(np.abs(c - p) < c[1] - c[0] - 1e-9)
+                    for c, p in zip((z, y, x), point[::-1])
+                ]
+                assert all(len(s) for s in stencil), (name, point, "outside")
+                assert fluid[np.ix_(*stencil)].all(), (name, point, cells)
+    distance = np.linalg.norm(
+        sensors["validation"][:, None] - sensors["assimilation"][None], axis=-1
+    )
+    assert distance.min() >= 4.0
+
+
 @pytest.mark.parametrize("source", ["idealized", "realistic"])  # type: ignore[misc]
 def test_random_geometry_templates_exist(source: str, tmp_path: pathlib.Path) -> None:
     cfg = compose(
@@ -103,10 +149,28 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
         ("filtering", [], "static prior_params"),
         ("smoother", ["params@prior_params=static"], "smoothing.smoother is"),
         ("smoother", ["assimilation.params_to_estimate=[nope]"], "does not define"),
+        ("smoother", ["assimilation.save_states=every"], "save_states must be"),
         (
             "smoother",
-            ["domain.nx=30", "assim_model.forward_model.ncpu=7"],
+            [
+                "domain.nx=30",
+                "flow.outflow_buffer=null",
+                "assim_model.forward_model.ncpu=7",
+            ],
             "must divide nx",
+        ),
+        (
+            # 50 points over 100 m plus a 20 m buffer: PALM runs on 60.
+            "smoother",
+            [
+                "model@assim_model=pypalm",
+                "flow.boundary_condition=inflow_outflow",
+                "domain.nx=50",
+                "domain.bounds=[[-20.0,80.0],[0.0,80.0],[0.0,32.0]]",
+                "flow.outflow_buffer=20.0",
+                "assim_model.forward_model.ncpu=25",
+            ],
+            "must divide nx=60",
         ),
         (
             "smoother",
@@ -288,3 +352,57 @@ def test_check_config_checks_the_replica_horizon(tmp_path: pathlib.Path) -> None
         else:
             with pytest.raises(ValueError, match="before the horizon's end"):
                 check(cfg, "smoother")
+
+
+# The log-space z0 prior, set here so the test doesn't depend on static.yaml.
+LOG_Z0 = [
+    "params@truth_params=static_truth",
+    "params@prior_params=static",
+    "smoothing.smoother=${smoother.static}",
+    "assim_model.forward_model.model_discrepancy.enabled=false",
+    "+prior_params.parameters.roughness_length={_target_:pyurbanair."
+    "static_parameters.LogNormal,median:0.05,log_std:0.7}",
+    "assimilation.params_to_estimate=[inflow_angle,roughness_length]",
+]
+
+
+@pytest.mark.parametrize("workflow", ["smoother", "filtering"])  # type: ignore[misc]
+def test_log_space_prior_composes(workflow: str, tmp_path: pathlib.Path) -> None:
+    from hydra.utils import instantiate
+
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *LOG_Z0,
+        "filtering.mode=joint",
+        "filtering.parameter_evolution={_target_:data_assimilation.filtering."
+        "parameter_evolution.RandomWalkEvolution,std:{roughness_length:0.05}}",
+        root=tmp_path,
+    )
+    load_script("scripts/utils/inconsistency_check.py").check_config(cfg, workflow)
+    sampler = instantiate(cfg.prior_params)
+    params = sampler.sample(4)
+    assert bool((params.roughness_length > 0).all())
+    helpers = load_script("scripts/utils/helper_functions.py")
+    selected, _, log_names = helpers.parameter_names(cfg, params, sampler)
+    assert selected == ["inflow_angle", "roughness_length"]
+    assert log_names == {"roughness_length": None}
+
+
+def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
+    """The commented-out roughness_length prior instantiates once uncommented."""
+    from hydra.utils import instantiate
+
+    from pyurbanair.static_parameters import LogNormal
+
+    lines = (CONFIGS / "params" / "static.yaml").read_text().splitlines()
+    start = lines.index("  # roughness_length:")
+    block = []
+    for line in lines[start:]:
+        if not line.startswith("  #"):
+            break
+        block.append(line.replace("# ", "", 1))
+    prior = instantiate(OmegaConf.create("\n".join(block)).roughness_length)
+    assert isinstance(prior, LogNormal)
+    # Bounded: the DA keeps z0 inside (min, max) through every update.
+    assert prior.bounds == (0.005, 0.3)

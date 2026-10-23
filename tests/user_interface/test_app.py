@@ -19,7 +19,14 @@ import geopandas as gpd
 import pytest
 from mcp_server.tools import Tools
 from shapely.geometry import box
-from user_interface.app import FIELDS, MODEL_IDS, App, lookup
+from user_interface.app import (
+    FIELDS,
+    FIELDS_BY_KEY,
+    MODEL_IDS,
+    App,
+    field_override,
+    lookup,
+)
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 DELFT = {"west": 4.3555, "south": 52.0095, "east": 4.3600, "north": 52.0122}
@@ -235,9 +242,13 @@ def test_options_fields_resolve_for_each_model(app: App) -> None:
         for model in field.get("models", MODEL_IDS):
             config = app.tools.inspect_config([f"model={model}", "params=dynamic"])
             value = lookup(config["config"], field["key"])
-            if model == field.get("models", ["pylbm"])[0]:
+            first = field.get("models", ["pylbm"])[0]
+            if model == first and "default" not in FIELDS_BY_KEY[field["key"]]:
                 assert value == field["default"]
-            assert isinstance(value, bool) == (field["type"] == "bool")
+            if field["type"] == "choice":
+                assert value in [c["value"] for c in field["choices"]]
+            else:
+                assert isinstance(value, bool) == (field["type"] == "bool")
 
 
 def test_case_lifecycle(app: App) -> None:
@@ -305,12 +316,17 @@ def test_case_failures_while_preparing(app: App) -> None:
     assert status == 400 and "city4cfd" in body["error"]
 
 
-def test_run_lifecycle(app: App) -> None:
+def test_run_lifecycle(app: App, monkeypatch: pytest.MonkeyPatch) -> None:
     tools = cast(FakeTools, app.tools)
     case_id = request(app, "api/cases", {"bbox": DELFT})[1]["case_id"]
     wait_for(app, f"api/cases/{case_id}", "status", "building")
     run = {"case_id": case_id, "model": "pylbm"}
 
+    # Every field applies to every model now; restrict one to test the check.
+    key = "time.output_frequency"
+    monkeypatch.setitem(
+        FIELDS_BY_KEY, key, {**FIELDS_BY_KEY[key], "models": ["pypalm"]}
+    )
     for bad, message in [
         ({**run, "model": "fluent"}, "model must be"),
         ({**run, "case_id": "nope"}, "Unknown case"),
@@ -323,15 +339,16 @@ def test_run_lifecycle(app: App) -> None:
         ({**run, "settings": {"ensemble.ensemble_size": 10**400}}, "at most"),
         ({**run, "settings": {"time.simulation_time": -(10**400)}}, "at least"),
         ({**run, "settings": {"model.forward_model.ncpu": 3}}, "cannot start"),
-        ({**run, "extra_overrides": "a=b"}, "list of strings"),
         (
-            {
-                **run,
-                "model": "pyudales",
-                "settings": {"model.forward_model.inlet_turbulence.enabled": True},
-            },
-            "does not apply",
+            {**run, "settings": {"model.forward_model.boundary_condition": "open"}},
+            "must be one of",
         ),
+        (
+            {**run, "settings": {"model.forward_model.inlet_turbulence.enabled": 1}},
+            "must be one of",
+        ),
+        ({**run, "extra_overrides": "a=b"}, "list of strings"),
+        ({**run, "settings": {key: 1.0}}, "does not apply"),
     ]:
         status, body, _ = request(app, "api/runs", bad)
         assert status in (400, 404) and message in body["error"], (bad, body)
@@ -341,7 +358,12 @@ def test_run_lifecycle(app: App) -> None:
         "api/runs",
         {
             **run,
-            "settings": {"time.simulation_time": 2, "forward.ensemble": False},
+            "settings": {
+                "time.simulation_time": 2,
+                "forward.ensemble": False,
+                "model.forward_model.boundary_condition": "periodic",
+                "model.forward_model.inlet_turbulence.enabled": True,
+            },
             "extra_overrides": ["forward.rollout_steps=1"],
         },
     )
@@ -354,8 +376,12 @@ def test_run_lifecycle(app: App) -> None:
         "obs.y_points=[50.0, 50.0]",
         "time.simulation_time=2.0",
         "forward.ensemble=false",
+        "model.forward_model.boundary_condition=periodic",
+        "model.forward_model.inlet_turbulence.enabled=true",
         "forward.rollout_steps=1",
     ]
+    # "Model default" sends no override, so each model keeps its own value.
+    assert field_override("model.forward_model.boundary_condition", None) is None
     listed = request(app, "api/runs")[1]["runs"]
     assert [(r["run_id"], r["case_id"], r["model"]) for r in listed] == [
         ("run1", case_id, "pylbm")

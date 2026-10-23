@@ -37,8 +37,9 @@ managed uDALES cache; the legacy `build/release/u-dales` binary is not required.
 
 CPU workers use `dev`; GPU workers use the installed `cuda` environment. The MCP
 server runs in the separate `mcp` environment; city cases are built in
-`city4cfd` (`pixi install --locked -e city4cfd`, compiles City4CFD once). Install optional 3D support with
-`pixi install --locked -e rendering`. It includes PyVista/VTK and ffmpeg.
+`city4cfd` (`pixi install --locked -e city4cfd`, compiles City4CFD once). Install
+`pixi install --locked -e rendering` for ffmpeg, which encodes the 2D movies; the
+interactive 3D view needs no extra environment.
 The MCP SDK is mcp-server's `server` extra, installed only in `mcp`; the `ui`
 environment has mcp-server's tools and jobs without it. The root lockfile pins
 the tested MCP SDK v2 and renderer packages.
@@ -273,7 +274,9 @@ not reach this localhost URL; PNG content is delivered through MCP directly.
 Render options include `member` or `reduction` (`mean_velocity`/`mean_speed`),
 `variable` (`u`, `v`, `w`, `speed`, `horizontal_speed`), `slices`, `probes`, time
 selection, color limits, FPS, dimensions, and bounded frame counts. `render_3d`
-adds the optional offscreen renderer with explicit geometry, seeds and camera.
+adds the interactive WebGL 3D view, with optional STL `geometry` and `camera`.
+The 3D view has no poster PNG, so MCP lists no 3D image artifact; it is seen
+in the viewer.
 The default 2D dashboard displays two horizontal maps and a vertical `w` section
 at once, alongside matching A–C virtual-probe traces at both heights. Per-slice
 `variable` and physical `position` or domain `fraction` are configurable. Explicit
@@ -293,9 +296,10 @@ the same numerical artifacts.
 
 A bundle contains local HTML/CSS/JS, its versioned manifest, probes in JSON/CSV,
 PNG previews, provenance, effective settings, and available MP4s. Missing ffmpeg
-leaves stills and probes usable. Missing optional 3D prerequisites leave standard
-views usable. Serve exported bundles with a local static HTTP server; direct
-`file://` opening is not a supported JSON-fetch workflow.
+leaves stills and probes usable. A 3D view that cannot be built (e.g. a
+misaligned STL) leaves the standard views usable, with a warning. Serve exported
+bundles with `python -m visualization --serve` (it supports HTTP byte ranges);
+direct `file://` opening is not a supported JSON-fetch workflow.
 
 ## Validation and troubleshooting
 
@@ -315,7 +319,7 @@ about predictive accuracy.
 
 If a job fails, read its validation issues, then its bounded worker log. Missing
 compilers/binaries require backend setup; a valid YAML configuration alone is
-insufficient. MPI may fail in sandboxes that disallow local sockets. Offscreen
-VTK must be verified on the actual host. Supervisor startup errors are retained
+insufficient. MPI may fail in sandboxes that disallow local sockets. The 3D view
+needs WebGL in the viewing browser. Supervisor startup errors are retained
 in `<store>/supervisor.log`. Native desktop UI testing and macOS backend testing
 must be performed on those hosts; protocol tests are not a substitute.

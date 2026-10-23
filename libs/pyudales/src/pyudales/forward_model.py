@@ -8,9 +8,16 @@ import subprocess
 import time
 from typing import Optional
 
+import numpy as np
 import xarray
 
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    derive_seed,
+    read_elapsed_time,
+    reset_elapsed_time,
+    write_elapsed_time,
+)
 
 from . import LOCAL_EXECUTE_SCRIPT, UDALES_PATH, _script_dir
 from .utils.clean_up_utils import clean_output_dir, clean_temp_dir
@@ -22,16 +29,13 @@ from .utils.discrepancy_utils import (
     validate_model_discrepancy,
     write_model_discrepancy,
 )
+from .utils.file_update_utils import set_facet_roughness, wall_function_fallback_share
 from .utils.file_utils import copy_files
 from .utils.inlet_turbulence_utils import (
     INLET_TURBULENCE_KEYS,
     apply_inlet_turbulence,
-    derive_seed,
     is_inlet_turbulence_enabled,
-    read_elapsed_time,
-    reset_elapsed_time,
     validate_inlet_turbulence,
-    write_elapsed_time,
 )
 from .utils.namoptions_utils import NamoptionsFile, rename_namoptions_file
 from .utils.ncpu_utils import validate_and_sync_ncpu
@@ -44,6 +48,7 @@ from .utils.save_frequency_utils import (
     apply_save_only_last_timestep,
 )
 from .utils.solver_build import prepare_solver, solver_source_dir, validate_solver
+from .utils.stl_utils import fit_stl_to_domain
 from .utils.warm_start_utils import (
     clean_output_except_warmstart_files,
     clear_carry,
@@ -105,6 +110,31 @@ UNSUPPORTED_CLOSURES = {
         "sgs_constant would have no target"
     ),
 }
+
+
+# Share of IBM wall sections within e*z0 of their facet above which
+# `_apply_roughness` warns.
+ROUGHNESS_FALLBACK_WARN_SHARE = 0.25
+
+
+# Smallest z0 that survives the ``%10.6f`` write in ``set_facet_roughness``.
+MIN_ROUGHNESS_LENGTH = 1e-6
+
+
+def validate_roughness_length(z0: float) -> float:
+    """Return ``z0`` as a float, raising unless it is a finite length >= 1e-6 m.
+
+    uDALES treats z0 = 0 as free slip (the wall function skips the facet). A
+    smaller positive z0 would be written as 0.000000, and the facet type would
+    then stay free slip for every later window of that member.
+    """
+    z0 = float(z0)
+    if not np.isfinite(z0) or z0 < MIN_ROUGHNESS_LENGTH:
+        raise ValueError(
+            f"roughness_length must be a finite z0 >= {MIN_ROUGHNESS_LENGTH} m, "
+            f"got {z0}"
+        )
+    return z0
 
 
 def validate_closure(closure: Optional[str]) -> None:
@@ -300,6 +330,7 @@ class ForwardModel(BaseForwardModel):
         boundary_condition: str = "periodic",
         closure: Optional[str] = None,
         sgs_constant: Optional[float] = None,
+        roughness_length: Optional[float] = None,
         spinup_time: float = 0.0,
         nudging_config: Optional[dict] = None,
         precomputed_geom_dir: Optional[str] = None,
@@ -307,6 +338,7 @@ class ForwardModel(BaseForwardModel):
         inlet_turbulence: Optional[dict] = None,
         model_discrepancy: Optional[dict] = None,
         per_member_irandom: bool = False,
+        outflow_buffer: Optional[float] = None,
     ) -> None:
         """
         Initialize the ForwardModel.
@@ -339,6 +371,10 @@ class ForwardModel(BaseForwardModel):
                 :meth:`_apply_sgs_setting`). ``"oneeqn"`` is recognised but
                 rejected — see :data:`UNSUPPORTED_CLOSURES`. Default ``None``
                 leaves the template's switches untouched.
+            roughness_length: Momentum roughness length z0 (m) of every facet
+                type in use, written to ``factypes.inp`` before each run (see
+                :meth:`_apply_roughness`). A ``roughness_length`` in the params
+                Dataset overrides it. None leaves the preprocessed value.
             results_dir: The directory where the results will be saved.
             verbose: If True, print output from Fortran code execution. If False, suppress all output.
             temp_dir: The base temp directory (defaults to {cwd}/.temp).
@@ -388,6 +424,13 @@ class ForwardModel(BaseForwardModel):
                 name, so a cold-started ensemble gets realisation spread at
                 fixed parameters. Only cold starts randomize; warm starts
                 inherit the copied state. Default False writes nothing.
+            outflow_buffer: ``inflow_outflow`` only: metres of flat ground added
+                downstream of ``bounds`` (rounded up to whole cells; ``ncpu``
+                must divide the extended ``nx``), as pypalm's ``outflow_buffer``
+                does, so the convective outflow sits outside the bounds. The
+                buildings beyond ``bounds`` are removed from the STL and the
+                returned state is cropped back to ``bounds``. None (default)
+                runs on ``bounds`` as given.
         """
         self.model_discrepancy = validate_model_discrepancy(model_discrepancy)
         self._discrepancy_defaults = extract_discrepancy_coefficients(
@@ -450,9 +493,6 @@ class ForwardModel(BaseForwardModel):
         self.spinup_time = spinup_time
         self._simulation_time = simulation_time
 
-        self._apply_runtime_override(simulation_time=simulation_time)
-        self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
-
         # Apply boundary conditions (x-direction configurable, y always periodic)
         if boundary_condition not in ("periodic", "inflow_outflow"):
             raise ValueError(
@@ -460,6 +500,15 @@ class ForwardModel(BaseForwardModel):
                 f"got '{boundary_condition}'"
             )
         self.boundary_condition = boundary_condition
+
+        # Outflow buffer: the grid is extended downstream and the output cropped
+        # back to `bounds` (`_output_nx`); None leaves the grid as given.
+        self._output_nx: Optional[int] = None
+        self._output_x_length: Optional[float] = None
+        nx, bounds = self._extend_for_outflow_buffer(outflow_buffer, nx, bounds)
+
+        self._apply_runtime_override(simulation_time=simulation_time)
+        self._apply_domain_overrides(nx=nx, ny=ny, nz=nz, bounds=bounds)
         self._apply_boundary_condition()
 
         # Turbulent inlet. Validation only at construction; the planes and the
@@ -475,7 +524,7 @@ class ForwardModel(BaseForwardModel):
 
         # Seconds of synthetic turbulence history this member has consumed,
         # used to pick the slice each window gets (see
-        # utils.inlet_turbulence_utils.read_elapsed_time, which documents why
+        # pyurbanair.utils.digital_filter.read_elapsed_time, which documents why
         # this is not exactly physical time under ESMDA). It cannot be read back
         # from `state`:
         # `_prepare_warmstart` writes timee=0 into every restart, so the solver
@@ -506,6 +555,13 @@ class ForwardModel(BaseForwardModel):
         # template's value alone. Applied in `_apply_sgs_setting`, not here, so it
         # follows the same per-call path as an estimated value.
         self.sgs_constant = float(sgs_constant) if sgs_constant is not None else None
+        # Per-backend default z0, overridden by a `roughness_length` in params;
+        # applied per call in `_apply_roughness`, like the SGS constant.
+        self.roughness_length = (
+            validate_roughness_length(roughness_length)
+            if roughness_length is not None
+            else None
+        )
 
         # Optionally reuse precomputed IBM geometry instead of re-running the
         # (expensive) STL->IBM preprocessing. Runs after the domain overrides so
@@ -619,52 +675,106 @@ class ForwardModel(BaseForwardModel):
         namoptions.write()
 
         self.bounds = bounds
+        self._fit_stl_geometry(namoptions_path, bounds)
 
-        # When the domain has non-zero lower bounds, the STL geometry must be
-        # shifted so that it is correctly positioned within the [0, length]
-        # computational domain.  uDALES always starts its grid at 0, so an
-        # STL vertex originally at x=0 needs to move to x=-xmin (e.g. +100
-        # when xmin=-100) inside the enlarged domain.
-        x_offset = -bounds[0][0]
-        y_offset = -bounds[1][0]
-        z_offset = -bounds[2][0]
-        if x_offset != 0.0 or y_offset != 0.0 or z_offset != 0.0:
-            self._shift_stl_geometry(namoptions_path, (x_offset, y_offset, z_offset))
-
-    def _shift_stl_geometry(
+    def _extend_for_outflow_buffer(
         self,
-        namoptions_path: pathlib.Path,
-        offsets: tuple[float, float, float],
-    ) -> None:
-        """Shift STL geometry vertices so buildings sit correctly in the enlarged domain.
+        buffer: Optional[float],
+        nx: int | None,
+        bounds: DomainBounds | None,
+    ) -> tuple[int | None, DomainBounds | None]:
+        """Extend ``nx``/``bounds`` downstream by ``buffer`` m (whole cells).
 
-        Args:
-            namoptions_path: Path to the namoptions file (used to read the STL filename).
-            offsets: (x_offset, y_offset, z_offset) to add to every vertex.
+        The same rounding as pypalm's ``outflow_buffer``, so both backends run
+        on the same extended grid. ``_load_and_postprocess_state`` crops the
+        output back to the original ``nx``.
+        """
+        if buffer is None:
+            return nx, bounds
+        buffer = float(buffer)
+        if self.boundary_condition != "inflow_outflow":
+            raise ValueError("outflow_buffer needs boundary_condition='inflow_outflow'")
+        if buffer <= 0.0:
+            raise ValueError(f"outflow_buffer must be > 0 m, got {buffer}")
+        if not nx or bounds is None:
+            raise ValueError("outflow_buffer needs nx and bounds")
+        (xmin, xmax), y_bounds, z_bounds = bounds
+        dx = (xmax - xmin) / nx
+        cells = int(np.ceil(buffer / dx - 1e-9))
+        self._output_nx = int(nx)
+        self._output_x_length = float(xmax - xmin)
+        return int(nx) + cells, ((xmin, xmax + cells * dx), y_bounds, z_bounds)
+
+    def _fit_stl_geometry(
+        self, namoptions_path: pathlib.Path, bounds: DomainBounds
+    ) -> None:
+        """Move the STL into uDALES' frame and give the whole floor ground facets.
+
+        uDALES always starts its grid at 0, so a vertex at x=0 moves to
+        x=-xmin (e.g. +100 when xmin=-100). Then ``fit_stl_to_domain`` adds
+        ground where the STL's does not reach (the upstream fetch, an outflow
+        buffer) and drops the buildings in the buffer. The file is rewritten
+        only when one of the two changes it.
         """
         import trimesh
 
         namoptions = NamoptionsFile(namoptions_path)
         stl_filename = namoptions.get_value("INPS", "stl_file")
         if stl_filename is None:
-            logger.warning("No stl_file found in namoptions; skipping STL shift.")
+            logger.warning("No stl_file found in namoptions; skipping STL fit.")
             return
 
         stl_path = self.dirs.experiment_dir / stl_filename.strip().strip("'\"")
         if not stl_path.exists():
-            logger.warning("STL file %s not found; skipping STL shift.", stl_path)
+            logger.warning("STL file %s not found; skipping STL fit.", stl_path)
             return
 
         mesh = trimesh.load(stl_path)
-        mesh.vertices[:, 0] += offsets[0]
-        mesh.vertices[:, 1] += offsets[1]
-        mesh.vertices[:, 2] += offsets[2]
-        mesh.export(stl_path)
-
-        logger.info(
-            "Shifted STL vertices by (%.2f, %.2f, %.2f) for negative-bound domain.",
-            *offsets,
+        offsets = np.array([-axis[0] for axis in bounds], dtype=float)
+        shifted = bool(np.any(offsets != 0.0))
+        if shifted:
+            mesh.vertices += offsets
+            logger.info(
+                "Shifted STL vertices by (%.2f, %.2f, %.2f) for negative-bound domain.",
+                *offsets,
+            )
+        fitted = fit_stl_to_domain(
+            mesh,
+            x_length=bounds[0][1] - bounds[0][0],
+            y_length=bounds[1][1] - bounds[1][0],
+            x_keep=self._output_x_length,
         )
+        if fitted is not None:
+            mesh = fitted
+        if shifted or fitted is not None:
+            mesh.export(stl_path)
+
+    def _crop_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Drop the outflow buffer columns, so the state covers ``bounds``."""
+        if self._output_nx is None:
+            return state
+        keep = slice(0, self._output_nx)
+        return state.isel({d: keep for d in ("xt", "xm") if d in state.dims})
+
+    def _pad_outflow_buffer(self, state: xarray.Dataset) -> xarray.Dataset:
+        """Fill the buffer of a cropped state by repeating its last column.
+
+        A warm start needs the full extended grid; the buffer is flat ground, so
+        the outflow column is the natural guess (pypalm does the same).
+        """
+        if self._output_nx is None or self._output_x_length is None:
+            return state
+        assert self.bounds is not None  # set with the buffer
+        dx = self._output_x_length / self._output_nx
+        itot = int(round((self.bounds[0][1] - self.bounds[0][0]) / dx))
+        for dim in ("xt", "xm"):
+            if dim not in state.dims or state.sizes[dim] >= itot:
+                continue
+            extra = itot - state.sizes[dim]
+            coords = state[dim].values[-1] + dx * np.arange(1, extra + 1)
+            tail = state.isel({dim: [-1] * extra}).assign_coords({dim: coords})
+            state = xarray.concat([state, tail], dim=dim, data_vars="minimal")
+        return state
 
     def _apply_boundary_condition(self) -> None:
         """Apply x-direction boundary condition to namoptions (y is always periodic)."""
@@ -741,6 +851,7 @@ class ForwardModel(BaseForwardModel):
         # byte-identical.
         nudging_config = self._resolve_nudging_config(self.params)
         self._apply_sgs_setting(self.params)
+        self._apply_roughness(self.params)
 
         if is_inlet_turbulence_enabled(self.inlet_turbulence):
             # Synthetic driver planes replace BOTH the nudged inlet face and the
@@ -878,6 +989,47 @@ class ForwardModel(BaseForwardModel):
             closure_name,
             key,
             float(sgs),
+            source,
+        )
+
+    def _apply_roughness(self, params: xarray.Dataset) -> None:
+        """Write the momentum roughness length z0 into this member's factypes.inp.
+
+        uDALES reads ``factypes.inp`` at every launch, so z0 can change per
+        member and window without redoing the IBM preprocessing. Precedence as
+        for ``sgs_constant``: params, then the model config; absent in both, or
+        equal to the file's value (the default 0.05), nothing is written.
+
+        The wall function evaluates the log law at each section's true wall
+        distance d; sections with d <= e*z0 fall back to a reconstruction point
+        further out and are skipped (no wall stress) if that is still too close
+        (docs/pyudales.md "Roughness"). A warning flags z0 values for which
+        over a quarter of the sections are that close.
+        """
+        z0 = get_param_value(params, "roughness_length")
+        source = "params"
+        if z0 is None:
+            z0 = self.roughness_length
+            source = "model config"
+        if z0 is None:
+            return
+        z0 = validate_roughness_length(z0)
+        expnr = self.dirs.experiment_name
+        if not set_facet_roughness(self.dirs.experiment_dir, expnr, z0):
+            return
+        share = wall_function_fallback_share(self.dirs.experiment_dir, z0)
+        if share > ROUGHNESS_FALLBACK_WARN_SHARE:
+            logger.warning(
+                "roughness_length=%.4g m: %.0f%% of the IBM wall sections lie "
+                "within e*z0 = %.3f m of their facet, where uDALES reconstructs "
+                "the velocity further out or drops the wall stress.",
+                z0,
+                100.0 * share,
+                np.e * z0,
+            )
+        logger.info(
+            "Set uDALES facet roughness z0 = %.6f m (roughness_length from %s)",
+            z0,
             source,
         )
 
@@ -1387,6 +1539,7 @@ class ForwardModel(BaseForwardModel):
                     coord_updates[coord_name] = state.coords[coord_name].values + offset
             if coord_updates:
                 state = state.assign_coords(coord_updates)
+        state = self._crop_outflow_buffer(state)
 
         # uDALES emits fielddump at t ∈ {tf, 2·tf, …, k·tf} with
         # k = floor(runtime/tf); it does not emit a frame at t=0. So the
@@ -1419,6 +1572,14 @@ class ForwardModel(BaseForwardModel):
                     f"spinup_time={self.spinup_time}, "
                     f"runtime={self._simulation_time + self.spinup_time})."
                 )
+            # uDALES stamps each dump with the time of the first step past its
+            # target (e.g. 1.076 s), different in every member. Label the frames
+            # with the targets (dt, 2·dt, …, simulation_time), the axis pypalm
+            # and pylbm return, so states align across members and backends.
+            state = state.assign_coords(
+                time=(np.arange(state.sizes["time"], dtype=float) + 1)
+                * float(self.output_frequency)
+            )
 
         return state
 
@@ -1475,6 +1636,7 @@ class ForwardModel(BaseForwardModel):
             state_for_warmstart = state_for_warmstart.isel(time=-1)
         if "time" in state_for_warmstart.coords:
             state_for_warmstart = state_for_warmstart.drop_vars("time")
+        state_for_warmstart = self._pad_outflow_buffer(state_for_warmstart)
         if self.model_discrepancy.get("enabled", False):
             stage_discrepancy_warmstart(state_for_warmstart, self.dirs, template_file)
         else:

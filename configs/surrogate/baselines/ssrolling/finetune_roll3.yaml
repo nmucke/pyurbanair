@@ -30,6 +30,11 @@ trainer:
     - aurora.backbone.decoder_layers.*.blocks.*
     - aurora.encoder
     - aurora.decoder
+  # Batches per training / validation epoch; null: the whole split. A full
+  # pyudales_idealized epoch is ~25k batches, so cap it to validate (and count
+  # patience) more often than every few hours.
+  epoch_batches: null
+  val_batches: null
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-5

@@ -24,6 +24,12 @@ parameters:
   # configs/model/*.yaml, because the three solvers' SGS constants are different
   # physical quantities (uDALES/pylbm dimensionless; PALM m^2/s). Re-add it here
   # to prescribe the truth value, and only for a single-backend run.
+  # Truth wall roughness z0 (m). Off by default (the model config's
+  # flow.roughness_length applies); uncomment to prescribe a truth that differs
+  # from the prior median in configs/params/static.yaml.
+  # roughness_length:
+  #   _target_: pyurbanair.static_parameters.Constant
+  #   value: 0.1
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912

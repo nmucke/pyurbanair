@@ -22,7 +22,17 @@ forward_model:
   # DRAM-bandwidth-bound: little gain beyond the physical performance cores.
   ncpu: 1
   verbose: false
-  boundary_condition: inflow_outflow
+  boundary_condition: ${flow.boundary_condition}  # configs/common.yaml
+  # The domain bottom (z = 0, under the fetch and the streets alike): no_slip
+  # (bounce-back) or free_slip, the lid free-slip either way (infile kbnd 12 /
+  # 22). uDALES and PALM have a rough wall there (log law, z0 = 0.05 m) and a
+  # free-slip lid; the LBM has no wall model, so no_slip is the nearest match
+  # (its wall stress differs, docs/pylbm.md §5). null: the solver's kbnd 22.
+  ground_boundary: no_slip
+  # inflow_outflow only: metres of empty ground past domain.bounds' xmax (whole
+  # cells), so the outflow is not in the wake; states are cropped back to the
+  # bounds. null: the outflow is at xmax. Set per case (configs/common.yaml).
+  outflow_buffer: ${flow.outflow_buffer}
   # Per-backend SGS constant -> the `ivreman smagor` infile line, where the LBM
   # forms const = 2.5*smagorinsky**2 (m_vreman.F90). This is the DEFAULT: a
   # `sgs_constant` in the params sampler (configs/params/*.yaml) overrides it, so
@@ -34,16 +44,33 @@ forward_model:
   # 0.15 matches the LBM's own generated infile default (m_mkinfile.F90:16).
   sgs_constant: 0.15
   profile_config:
-    type: power_law
-    alpha: 0.25
-  # Pseudo-random inflow perturbations (m_inflow_turbulence_*.F90), written to
-  # the three-value `lturb` line of infile.in. Defaults mirror the solver's own
-  # infile template, so `enabled: false` leaves infile.in untouched. Requires
-  # boundary_condition: inflow_outflow.
+    type: ${flow.profile.type}
+    alpha: ${flow.profile.alpha}
+    z_ref: ${flow.profile.z_ref}
+  # Inflow turbulence through the LBM's forcing slab 10 cells downstream of the
+  # inlet (m_inflow_turbulence_*.F90). `enabled: false` leaves infile.in
+  # untouched. Requires boundary_condition: inflow_outflow. Methods:
+  #   random_forcing  the LBM's own pseudo-random perturbations (the `lturb`
+  #                   line of infile.in); `amplitude` is a lattice velocity
+  #                   increment per step: 5e-5 is ~1% TI, nearly laminar.
+  #   digital_filter  the Xie & Castro digital-filter inflow uDALES and PALM
+  #                   use (pyurbanair/utils/digital_filter.py), same keys and
+  #                   same fluctuations for the same seed; written per window as
+  #                   the forcing buffers of a restart run (docs/pylbm.md §7).
   inlet_turbulence:
     enabled: false
+    method: random_forcing
+    # --- random_forcing: defaults mirror the solver's infile template --------
     amplitude: 5.0e-05
     update_interval: 100  # timesteps between turbulence updates (nrturb)
+    # --- digital_filter: the shared flow block (configs/common.yaml), as
+    # pyudales and pypalm read it, so the same seed gives the same planes ------
+    intensity: ${flow.inlet_turbulence.intensity}
+    length_scale_y: ${flow.inlet_turbulence.length_scale_y}
+    length_scale_z: ${flow.inlet_turbulence.length_scale_z}
+    length_scale_x: ${flow.inlet_turbulence.length_scale_x}
+    time_step: ${flow.inlet_turbulence.time_step}
+    seed: ${flow.inlet_turbulence.seed}
   nx: ${domain.nx}
   ny: ${domain.ny}
   nz: ${domain.nz}

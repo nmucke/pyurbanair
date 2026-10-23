@@ -193,9 +193,12 @@ class AR2RelaxationModel(ParameterTimeSeries):
         A trailing interval shorter than ``seconds_per_knot`` marks the
         linearly-extrapolated endpoint: the AR(2) is integrated only over the
         regular knots and the final value is extrapolated onto ``end_time``.
+        The extrapolation needs two regular knots, so a two-point grid (a window
+        shorter than one spacing, see :func:`build_knot_times`) is left whole and
+        integrated as a single AR(2) step.
         """
         times = jnp.asarray(times)
-        if times.shape[0] >= 2:
+        if times.shape[0] >= 3:
             last_dt = float(times[-1] - times[-2])
             if last_dt < self.seconds_per_knot - 1e-6:
                 return times[:-1], float(times[-1])

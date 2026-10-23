@@ -5,11 +5,12 @@ import logging
 import pathlib
 import shutil
 
+from pyurbanair.utils.digital_filter import reset_elapsed_time
+
 from ..forward_model import ForwardModel
 from .config_utils import create_config_sh
 from .dir_utils import DirectoryPaths, create_dir
 from .file_utils import change_file_extensions, copy_files
-from .inlet_turbulence_utils import reset_elapsed_time
 from .namoptions_utils import rename_namoptions_file
 
 logger = logging.getLogger(__name__)

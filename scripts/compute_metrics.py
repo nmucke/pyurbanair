@@ -52,8 +52,12 @@ window-indexed ones also list `per_window` values):
                   the ensemble's median spectrum, per window. Native grids,
                   no interpolation.
   sensors         sanity check, per sensor set (assimilated and held-out
-                  validation): RMSE of the ensemble-mean (u, v, w) vector and
-                  its energy score (multivariate CRPS), per time step.
+                  validation): RMSE of the ensemble-mean (u, v, w) vector, its
+                  energy score (multivariate CRPS) and its anomaly correlation
+                  (ACC: about each sensor's truth time mean, pooled over sensors
+                  and components), per time step; `velocity_vector_member_acc`
+                  is each member's ACC averaged over the members (below the
+                  ensemble mean's by the members' unpredictable turbulence).
   spread_skill    sanity check, per sensor set: ensemble spread on the same vector norm and the
                   spread-skill ratio (~1 when calibrated); the prior's ratio when
                   the prior states were saved.
@@ -80,7 +84,9 @@ window-indexed ones also list `per_window` values):
                   its stage has only O_N.
   desroziers      per stage with an analysis: the observation error std
                   estimated from the forecast and analysis residuals
-                  (Desroziers), the obs_std the run used, and their ratio.
+                  (Desroziers), the std the run assimilated (obs_std_assimilated
+                  with an adaptive error, else obs_std), and their ratio. The
+                  observation block and O_N use the configured obs_std.
 
 Arrays too large for metrics.yaml go into `diagnostics.nc` next to it:
   posterior_parameter_members, prior_parameter_members  (window, ensemble, parameter)
@@ -283,6 +289,8 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
             "num_sensors": int(posterior_s.sizes["sensor"]),
             "velocity_vector_rmse": series_stats(vector["rmse"]),
             "velocity_vector_energy_score": series_stats(vector["energy_score"]),
+            "velocity_vector_acc": series_stats(vector["acc"]),
+            "velocity_vector_member_acc": series_stats(vector["member_acc"]),
         }
         metrics["spread_skill"][name] = {
             "ratio": _finite(spread_skill(vector["spread"], vector["rmse"], n_members)),
@@ -409,7 +417,8 @@ def _observation_metrics(files: list[pathlib.Path], n_cycles: int) -> tuple[dict
             fits.append(
                 observation_fit(obs[chunk], std[chunk], pred[0, chunk], pred[-1, chunk])
             )
-        obs_std.append(std)
+        # The Desroziers ratio checks the R the update used.
+        obs_std.append(ds.get("obs_std_assimilated", ds.obs_std).values)
     series = {key: np.array([fit[key] for fit in fits]) for key in fits[0]}
 
     observation = {

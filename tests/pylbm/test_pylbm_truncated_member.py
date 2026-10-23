@@ -93,6 +93,8 @@ def _make_model(
     model.seconds_per_timestep = OUTPUT_FREQUENCY / IOUT
     model.C_u = 75
     model._nt0_override = None
+    model.inlet_turbulence = None
+    model._output_nx = None  # no outflow buffer
     model.x_grid = np.arange(NX, dtype=float)
     model.y_grid = np.arange(NY, dtype=float)
     model.z_grid = np.arange(NZ, dtype=float)

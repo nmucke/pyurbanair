@@ -13,13 +13,13 @@ import xarray as xr
 from data_assimilation.filter_smoothing.base import FilterSmoothing
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 from pyudales.forward_model import ForwardModel
-from pyudales.utils.inlet_turbulence_utils import read_elapsed_time, write_elapsed_time
 from pyudales.utils.namoptions_utils import NamoptionsFile
 from pyudales.utils.warm_start_utils import CARRY_DIRNAME
 from pyudales.utils.window_checkpoint import validate_carry
 from scipy.io import FortranFile
 
 from pyurbanair.base_ensemble_forward_model import FailurePolicy
+from pyurbanair.utils.digital_filter import read_elapsed_time, write_elapsed_time
 from tests.pyudales.test_udales_window_replay import _carry, _model
 
 
@@ -185,7 +185,7 @@ def test_handoff_rejects_unsupported_or_corrupt_source(
     else:
         # Discover the backend's named clock file rather than relying on a
         # string literal in the assertion below.
-        from pyudales.utils.inlet_turbulence_utils import elapsed_time_path
+        from pyurbanair.utils.digital_filter import elapsed_time_path
 
         path = elapsed_time_path(source.dirs)
         path.write_text(json.dumps({"experiment_name": "wrong", "elapsed_time": 5}))

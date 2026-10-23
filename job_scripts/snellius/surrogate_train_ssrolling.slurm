@@ -11,6 +11,7 @@
 #   R=/projects/prjs2304/urbanair
 #   D="paths.weights_dir=$R/model_weights paths.data_dir=$R/training_data/pyudales_realistic"
 #   D="$D prechunk.output_root=$R/training_data/pyudales_realistic_frames"
+#   D="$D baseline_architectures.ssrolling_512.n_levels=32"  # SSGen: the corpus' nz
 #   sbatch job_scripts/snellius/surrogate_train_ssrolling.slurm train_roll1 $D \
 #       name=ssrolling_roll1_realistic trainer.num_epochs=15 trainer.patience=5
 #   # then, from its weights:

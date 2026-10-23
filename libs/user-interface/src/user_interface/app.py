@@ -69,7 +69,8 @@ MODEL_IDS = {model["id"] for model in MODELS}
 
 # Curated run settings. `key` is the Hydra override path; the default is read
 # from the composed forward config of the first model in `models` (all models
-# when absent).
+# when absent), unless the field sets one. A choice is a plain value or
+# {value, label}; the value None sends no override.
 FIELDS: list[dict[str, Any]] = [
     {
         "key": "time.simulation_time",
@@ -180,9 +181,30 @@ FIELDS: list[dict[str, Any]] = [
     {
         "key": "model.forward_model.inlet_turbulence.enabled",
         "label": "Inlet turbulence",
-        "type": "bool",
-        "models": ["pylbm", "pypalm"],
-        "help": "Perturb the inflow to trigger turbulence (on by default in uDALES).",
+        "type": "choice",
+        # None keeps each model's own config value: on in uDALES and PALM (the
+        # shared `flow.inlet_turbulence`), off in LBM.
+        "default": None,
+        "choices": [
+            {"value": None, "label": "Model default"},
+            {"value": True, "label": "On"},
+            {"value": False, "label": "Off"},
+        ],
+        "help": "Perturb the inflow to trigger turbulence. Needs inflow / outflow.",
+    },
+    {
+        "key": "model.forward_model.boundary_condition",
+        "label": "Boundary condition",
+        "type": "choice",
+        # None keeps the config value, `flow.boundary_condition` (the case's).
+        "default": None,
+        "choices": [
+            {"value": None, "label": "Model default"},
+            {"value": "inflow_outflow", "label": "Inflow / outflow"},
+            {"value": "periodic", "label": "Periodic"},
+        ],
+        "help": "Inflow at the upwind side and outflow at the other, or "
+        "periodic in x. Inlet turbulence needs inflow / outflow.",
     },
 ]
 FIELDS_BY_KEY = {field["key"]: field for field in FIELDS}
@@ -209,8 +231,8 @@ def lookup(config: Any, key: str) -> Any:
     return config
 
 
-def field_override(key: str, value: Any) -> str:
-    """Validate one settings entry and return its Hydra override."""
+def field_override(key: str, value: Any) -> str | None:
+    """Validate one settings entry and return its Hydra override, if any."""
     field = FIELDS_BY_KEY.get(key)
     if field is None:
         raise RequestError(400, f"Unknown setting: {key}")
@@ -220,10 +242,14 @@ def field_override(key: str, value: Any) -> str:
             raise RequestError(400, f"{field['label']} must be true or false")
         return f"{key}={'true' if value else 'false'}"
     if kind == "choice":
-        if value not in field["choices"]:
-            raise RequestError(
-                400, f"{field['label']} must be one of {field['choices']}"
-            )
+        values = [c["value"] if isinstance(c, dict) else c for c in field["choices"]]
+        # By type too: 1 == True, but 1 is not an inlet-turbulence choice.
+        if not any(type(value) is type(v) and value == v for v in values):
+            raise RequestError(400, f"{field['label']} must be one of {values}")
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            value = "true" if value else "false"
         return f"{key}={value}"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RequestError(400, f"{field['label']} must be a number")
@@ -319,7 +345,12 @@ class App:
         fields = []
         for field in FIELDS:
             first = field.get("models", [MODELS[0]["id"]])[0]
-            fields.append({**field, "default": lookup(configs[first], field["key"])})
+            default = (
+                field["default"]
+                if "default" in field
+                else lookup(configs[first], field["key"])
+            )
+            fields.append({**field, "default": default})
         options = {
             "models": MODELS,
             "fields": fields,
@@ -423,7 +454,11 @@ class App:
             f"model={model}",
             *BASE_OVERRIDES,
             *case["overrides"],
-            *(field_override(key, value) for key, value in settings.items()),
+            *(
+                override
+                for key, value in settings.items()
+                if (override := field_override(key, value)) is not None
+            ),
             *extra,
         ]
         plan = self.tools.prepare_forward_run(overrides)

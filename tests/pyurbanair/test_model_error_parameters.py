@@ -381,6 +381,26 @@ def test_ar2_static_parameters_have_no_time_dim() -> None:
     assert float(ds["sgs_constant"].std()) > 0.0
 
 
+def test_ar2_window_shorter_than_one_knot_spacing_is_finite() -> None:
+    """simulation_time < seconds_per_knot gives knots [0, end] -- no NaN endpoint."""
+    from pyurbanair.dynamic_parameters.ar2_relaxation import AR2RelaxationModel
+    from pyurbanair.static_parameters import Normal
+
+    model = AR2RelaxationModel(
+        external_parameters={"inflow_angle": Normal(25.0, 6.0)},
+        simulation_time=30.0,
+        seconds_per_knot=60.0,
+        correlation_length=100.0,
+    )
+    np.testing.assert_array_equal(model.time_coords, [0.0, 30.0])
+    prior = model.sample(8)
+    assert np.all(np.isfinite(prior["inflow_angle"].values))
+
+    prediction_times = jax.numpy.asarray(model.time_coords) + 30.0
+    nxt = model.extrapolate(prior, prediction_times, jax.random.PRNGKey(3))
+    assert np.all(np.isfinite(nxt["inflow_angle"].values))
+
+
 def test_ar2_statics_carried_forward_not_rerandomized() -> None:
     """extrapolate() inherits the ESMDA-updated statics from the posterior."""
     model = _mixed_model()

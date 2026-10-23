@@ -33,9 +33,15 @@ def device(name: str) -> torch.device:
 
 
 def load_model(
-    model_dir: str | pathlib.Path, dev: torch.device, **arch_kwargs: Any
+    model_dir: str | pathlib.Path,
+    dev: torch.device,
+    periodic_y: bool = False,
+    **arch_kwargs: Any,
 ) -> tuple[Any, DictConfig]:
-    """A trained model rebuilt from `config.yaml` + `weights.pt`, in eval mode."""
+    """A trained model rebuilt from `config.yaml` + `weights.pt`, in eval mode.
+
+    `periodic_y` makes it y-periodic at inference
+    (neural_surrogates.periodic.make_periodic_y)."""
     model_dir = pathlib.Path(model_dir)
     cfg = OmegaConf.load(model_dir / "config.yaml")
     assert isinstance(cfg, DictConfig)
@@ -45,6 +51,10 @@ def load_model(
         cfg.architecture, n_state_channels=len(cfg.dataset.state_vars), **arch_kwargs
     )
     model.load_state_dict(torch.load(model_dir / "weights.pt", map_location="cpu"))
+    if periodic_y:
+        from neural_surrogates.periodic import make_periodic_y
+
+        model = make_periodic_y(model)
     return model.to(dev).eval(), cfg
 
 
@@ -68,6 +78,17 @@ def load_states(
         return np.stack([ds[v].values for v in dataset.state_vars], axis=1).astype(
             np.float32
         )
+
+
+def inlet_turbulence(settings: Any, dataset: Any, traj: int) -> Any:
+    """The inlet-turbulence forcing of one trajectory (an `InletTurbulence`,
+    called as `forcing(pred, frame)`), or None when `settings.enabled` is off."""
+    if not settings.enabled:
+        return None
+    from neural_surrogates.inlet_turbulence import InletTurbulence
+
+    seed = None if settings.seed is None else int(settings.seed)
+    return InletTurbulence.from_dataset(dataset, traj, seed=seed)
 
 
 def grid_spacing(dataset: Any, traj: int) -> tuple[float, float, float]:
@@ -129,7 +150,8 @@ def plot_slice_rows(
         fig.colorbar(
             im, ax=axes[r, :].tolist(), shrink=0.8, label="error" if is_error else label
         )
-    fig.savefig(path, dpi=110, bbox_inches="tight")
+    # White, not the style's transparent background: read in a dark viewer.
+    fig.savefig(path, dpi=110, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 

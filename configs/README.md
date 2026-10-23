@@ -9,7 +9,9 @@ Groups, scripts and workflows are described in
 ```
 forward.yaml        # entry point: forward runs
 assimilation.yaml   # entry point: all three DA scripts (smoothing, filtering, hybrid)
-common.yaml         # paths (per machine), ensemble budget, Hydra run dir
+comparison.yaml     # entry point: surrogate comparison (scripts/surrogate_comparison/)
+model_comparison.yaml  # entry point: CFD backend comparison (scripts/comparison/)
+common.yaml         # paths (per machine), ensemble budget, Hydra run dir, flow setup
 model/  case/  params/
 surrogate/          # neural-surrogate configs (see below)
 assimilation_settings/   # one file per component, all options inside
@@ -33,6 +35,9 @@ bash workflows/assimilation_workflow.sh smoother <overrides>    # or filtering /
 ```bash
 # Hydra groups
 case=barcelona  model=pylbm                          # forward
+case=xie_and_castro_periodic                         # periodic, nudged (sets flow.*)
+flow.inlet_turbulence.enabled=false                  # laminar inflow in uDALES and PALM
+flow.inlet_turbulence.seed=7                         # the same inflow realisation in both
 paths.machine=snellius                                # or delftblue / local (job scripts set it)
 model@assim_model=pylbm  params@prior_params=static   # DA
 
@@ -53,15 +58,17 @@ observation.aggregation.interval_seconds=30
 
 | Key | Holds |
 |---|---|
-| `assimilation.*` | `num_windows`, `seed`, `params_to_estimate`, `truth_dir`, `truth_start_time`, `replica_dir`, `ensemble_save_on_disk`, smoothing-only `save_prior_state`, filtering-only `assimilate_every_n_step`, `save_history`, filtering and hybrid `save_forecast_history` |
-| `observation.*` | `operator`, `aggregation`, `error` (`instrument_std`, `representation_std`, `propagation`, optional `representation_time_model`) |
+| `assimilation.*` | `num_windows`, `seed`, `params_to_estimate`, `truth_dir`, `truth_start_time`, `replica_dir`, `ensemble_save_on_disk`, smoothing-only `save_states`, filtering-only `assimilate_every_n_step`, `save_history`, filtering and hybrid `save_forecast_history` |
+| `observation.*` | `operator`, `aggregation`, `error` (`instrument_std`, `representation_std`, `propagation`, optional `representation_time_model`), `adaptive_error` (smoother only; default `null`) |
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |
 | `hybrid.*` | `likelihood_allocation` (tempering is `filtering.beta`) |
+| `models`, `overrides`, `replicas`, `seed`, `replica_seed`, `discard_time`, `metrics.*`, `figures.*` | `model_comparison.yaml`: the backends to compare (`name` or `label:name` entries), per-label overrides of any key (`+overrides.<label>.<key>=...`), runs per model, the base seed and the keys that carry it per backend, extra seconds dropped, height bands (fractions of the canopy height), Welch segment, slice heights |
 | `forward.*` | `ensemble`, `rollout_steps`, `initial_state` (NetCDF path or `{path, member, time_index}`), `save_windows` |
-| `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*` | every option of each component (from `assimilation_settings/`) |
+| `smoother.*`, `analysis.*`, `localization.*`, `state_reduction.*`, `inflation.*`, `adaptive_error.*` | every option of each component (from `assimilation_settings/`) |
 | `time.*` | from the case, including `seconds_per_knot` |
 | `paths.*` | `machine`, `results_root`, `scratch`, `experiment_dir` (= `scratch.<machine>`), `weights_dir`, `training_data_dir` from `common.yaml` (`machine` and `results_root` default to `$PYURBANAIR_MACHINE` / `$PYURBANAIR_RESULTS_ROOT`, set by the job scripts); `results_dir` from the entry point |
+| `flow.*` | the flow setup pyudales and pypalm share (`common.yaml`, cases override): `boundary_condition`, `outflow_buffer`, `profile` (`type`, `alpha`, `z_ref`), `nudging` (`tnudge`, `nnudge_meters`), `inlet_turbulence` (`enabled`, `intensity`, `length_scale_x/y/z`, `time_step`, `seed`), `roughness_length` (wall z0, m); pylbm reads all but `nudging` and `roughness_length` (and enables `inlet_turbulence` with its own switch) |
 | `ensemble.*` | one budget for every workflow (`common.yaml`): `ensemble_size`, `num_parallel_processes`, `num_cpus_per_process`, `failure` (`policy: raise \| resample_from_successes`, `jitter_scale`, `seed`) |
 
 The component options in `assimilation_settings/` and the slots that select them:
@@ -73,6 +80,7 @@ The component options in `assimilation_settings/` and the slots that select them
 | `localization.yaml` (`localization.*`) | `none`, `correlation`, `distance` | `smoothing.localization`, `filtering.localization` |
 | `state_reduction.yaml` (`state_reduction.*`) | `none`, `svd`, `svd_current`, `svd_streaming` | `smoothing.state_reduction`, `filtering.state_reduction` |
 | `inflation.yaml` (`inflation.*`) | `none`, `multiplicative`, `rtps`, `rtpp` | `filtering.inflation` |
+| `adaptive_error.yaml` (`adaptive_error.*`) | `none`, `desroziers` | `observation.adaptive_error` |
 
 `filtering.parameter_evolution` is set inline (`null`, or a
 `RandomWalkEvolution` block).

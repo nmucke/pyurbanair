@@ -1,5 +1,6 @@
 "use strict";
-// Both directions select held, saved samples. No field interpolation is implied.
+// Both directions select held, saved samples. No field interpolation is implied,
+// except continuousTime, which the interactive 3D view uses to blend saved states.
 const ForwardTimeline = {
   physicalTime(frames, seconds) {
     if (!frames.length) return 0;
@@ -12,6 +13,13 @@ const ForwardTimeline = {
     let selected = frames[0].video_time;
     for (const frame of frames) { if (frame.simulation_time > simulationTime) break; selected = frame.video_time; if (frame.simulation_time === simulationTime) break; }
     return selected;
+  },
+  continuousTime(frames, seconds) {
+    if (!frames.length) return 0;
+    let i = 0;
+    while (i < frames.length - 1 && frames[i + 1].video_time <= seconds) i++;
+    const a = frames[i], b = frames[Math.min(frames.length - 1, i + 1)], span = b.video_time - a.video_time;
+    return span > 0 ? a.simulation_time + (b.simulation_time - a.simulation_time) * Math.min(1, Math.max(0, (seconds - a.video_time) / span)) : a.simulation_time;
   },
   clock(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) seconds = 0;
@@ -36,7 +44,7 @@ if (typeof document !== "undefined") (async function () {
   };
   const number = value => Number(value).toLocaleString(undefined, {maximumFractionDigits: 3});
   const visible = () => panels.filter(panel => panel.kind === mode);
-  const canAnimate = panel => panel.frames.length > 1 && panel.frames.at(-1).simulation_time > panel.frames[0].simulation_time && (panel.snapshots.filter(snapshot => !panel.failedSnapshots.has(snapshot.path)).length > 1 || panel.movieReady);
+  const canAnimate = panel => panel.frames.length > 1 && panel.frames.at(-1).simulation_time > panel.frames[0].simulation_time && (panel.snapshots.filter(snapshot => !panel.failedSnapshots.has(snapshot.path)).length > 1 || panel.movieReady || panel.liveReady);
   const duration = panel => {
     const last = panel.frames.at(-1).video_time;
     const delta = panel.frames.length > 1 ? Math.max(.001, last - panel.frames.at(-2).video_time) : 0;
@@ -54,10 +62,10 @@ if (typeof document !== "undefined") (async function () {
   }
   function updateStatus() {
     const active = visible();
-    const pending = active.filter(panel => panel.view.media && !panel.movieReady && !panel.movieFailed && !panel.snapshots.length).length;
+    const pending = active.filter(panel => (panel.view.media && !panel.movieReady && !panel.movieFailed && !panel.snapshots.length) || (panel.live && !panel.liveReady && !panel.liveFailed)).length;
     const sequences = active.filter(panel => !panel.movieReady && panel.snapshots.length > 1).length;
     const stills = active.filter(panel => !canAnimate(panel)).length;
-    el("status").textContent = pending ? `Loading ${pending} movie${pending === 1 ? "" : "s"} · previews remain available` : `Ready · ${active.length} synchronized ${mode === "2d" ? "slice" : "flow"} panel${active.length === 1 ? "" : "s"}${sequences ? ` · ${sequences} PNG sequence${sequences === 1 ? "" : "s"}` : ""}${stills ? ` · ${stills} still preview${stills === 1 ? "" : "s"}` : ""}`;
+    el("status").textContent = pending ? `Loading ${pending} ${active.some(panel => panel.live) ? "3D scene" : "movie"}${pending === 1 ? "" : "s"} · previews remain available` : `Ready · ${active.length} synchronized ${mode === "2d" ? "slice" : "flow"} panel${active.length === 1 ? "" : "s"}${sequences ? ` · ${sequences} PNG sequence${sequences === 1 ? "" : "s"}` : ""}${stills ? ` · ${stills} still preview${stills === 1 ? "" : "s"}` : ""}`;
   }
   function updateControls() {
     const animated = primary && canAnimate(primary);
@@ -132,6 +140,12 @@ if (typeof document !== "undefined") (async function () {
     panel.image.src = asset(selected.path);
   }
   function displayPanel(panel) {
+    if (panel.live) {
+      const time = panel === primary ? ForwardTimeline.continuousTime(panel.frames, presentation) : Math.max(panel.frames[0].simulation_time, Math.min(panel.frames.at(-1).simulation_time, physical));
+      panel.live.setTime(time);
+      if (panel.liveReady) sourceLabel(panel, sample(panel.frames, time).simulation_time, "Interactive 3D · blended between saved states");
+      return;
+    }
     if (!panel.movieReady) { showImage(panel); return; }
     panel.video.hidden = false; panel.image.hidden = true; panel.placeholder.hidden = true;
     panel.status.dataset.fallback = "false";
@@ -181,10 +195,10 @@ if (typeof document !== "undefined") (async function () {
     if (!panels.some(panel => panel.kind === next)) return;
     const resume = playing; stopAnimation(); mode = next;
     el("views-2d").hidden = mode !== "2d"; el("views-3d").hidden = mode !== "3d";
-    panels.forEach(panel => panel.video.pause());
+    panels.forEach(panel => { panel.video?.pause(); panel.live?.setActive(panel.kind === mode); });
     ["2d", "3d"].forEach(kind => { el(`mode-${kind}`).classList.toggle("active", kind === mode); el(`mode-${kind}`).setAttribute("aria-pressed", String(kind === mode)); });
     cinema.classList.toggle("slices-active", mode === "2d"); cinema.dataset.mode = mode;
-    el("caption").textContent = mode === "2d" ? "Compare the horizontal maps and vertical exchange together. Colored markers match the virtual-probe traces at each height." : "Follow the instantaneous flow around and above the geometry. Streamlines show flow shape, not tracked particle trajectories.";
+    el("caption").textContent = mode === "2d" ? "Compare the horizontal maps and vertical exchange together. Colored markers match the virtual-probe traces at each height." : "Drag to rotate, scroll or pinch to zoom, right- or shift-drag to pan, double-click to reset. For display the field is blended linearly between saved states.";
     primary = null; choosePrimary(); display();
     if (resume && primary && canAnimate(primary)) startAnimation();
   }
@@ -200,14 +214,31 @@ if (typeof document !== "undefined") (async function () {
     const heading = document.createElement("div"); heading.className = "panel-heading";
     const title = document.createElement("h2"); title.textContent = view.label || `${kind.toUpperCase()} view ${index + 1}`;
     const field = document.createElement("span"); field.className = "panel-field"; field.textContent = `${(view.field || "velocity").replaceAll("_", " ")} [${view.units || "m/s"}]`;
-    heading.append(title, field);
+    heading.append(title);
+    if (!view.scene) heading.append(field);
     const visual = document.createElement("div"); visual.className = "panel-visual";
+    const footer = document.createElement("div"); footer.className = "panel-footer";
+    const status = document.createElement("span"); status.className = "panel-status panel-time";
+    if (view.scene) {
+      const panel = {view, kind, frames, snapshots: [], element, status, failedSnapshots: new Set(), live: null, liveReady: false, liveFailed: false};
+      visual.classList.add("live-visual"); status.textContent = "Loading the 3D scene…";
+      const sceneUrl = asset(view.scene);
+      import("./flow3d.js").then(module => {
+        panel.live = module.createFlow3D(visual, sceneUrl, {
+          onReady: () => { panel.liveReady = true; element.dataset.ready = "true"; choosePrimary(); if (kind === mode) displayPanel(panel); },
+          onError: error => { panel.liveFailed = true; element.dataset.ready = "error"; status.textContent = `3D view unavailable: ${error.message}`; choosePrimary(); },
+        });
+        panel.live.setActive(kind === mode); updateStatus();
+      }).catch(error => { panel.liveFailed = true; element.dataset.ready = "error"; status.textContent = `3D view unavailable: ${error.message}`; updateStatus(); });
+      panel.live = {setTime() {}, setActive() {}};
+      footer.append(status); element.append(heading, visual, footer);
+      el(`views-${kind}`).append(element);
+      return panel;
+    }
     const video = document.createElement("video"); video.className = "panel-video"; video.muted = true; video.playsInline = true; video.preload = "metadata"; video.controls = true; video.hidden = true; video.poster = asset(view.poster); video.setAttribute("aria-label", title.textContent);
     const image = document.createElement("img"); image.className = "panel-poster"; image.alt = `${title.textContent} · ${field.textContent}`;
     const placeholder = document.createElement("p"); placeholder.className = "panel-empty"; placeholder.hidden = true;
     visual.append(video, image, placeholder);
-    const footer = document.createElement("div"); footer.className = "panel-footer";
-    const status = document.createElement("span"); status.className = "panel-status panel-time";
     const downloads = document.createElement("div"); downloads.className = "panel-downloads";
     const pngLink = document.createElement("a"); pngLink.href = asset(view.poster); pngLink.download = ""; pngLink.textContent = "PNG"; pngLink.setAttribute("aria-label", `Download ${title.textContent} PNG`); downloads.append(pngLink);
     const panel = {view, kind, frames, snapshots, element, video, image, placeholder, status, pngLink, movieReady: false, movieFailed: false, imagePath: null, imageToken: 0, failedSnapshots: new Set()};

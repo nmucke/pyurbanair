@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import pathlib
 from typing import Any
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import OmegaConf
 
-from tests.conftest import TRAIN_ORDER, compose, load_script
+from tests.conftest import TRAIN_ORDER, compose, inlet_turbulence_corpus, load_script
 
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
@@ -184,6 +186,23 @@ def test_latent_generator_trains_from_the_cache(
     assert bool(model.latent_stats_installed)
 
 
+def test_adaln_latent_generator_rebuilds_from_its_config(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    from neural_surrogates.architectures.latent_velocity_adaln import AdaLNVelocityNet
+
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path, trained, "architecture.velocity_conditioning=adaln"
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    assert saved.architecture.velocity_conditioning == "adaln"
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert isinstance(model.velocity_net, AdaLNVelocityNet)
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)
@@ -196,6 +215,128 @@ def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -
         "params.png",
     ):
         assert (out / name).exists(), name
+
+
+def test_evaluate_stepper_inlet_turbulence(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """The forcing changes the first predicted frame only upstream of the
+    building (x < 7)."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={inlet_turbulence_corpus(training_data, tmp_path / str(enabled))}",
+            f"stepper.output_dir={tmp_path / str(enabled) / 'eval'}",
+            "stepper.max_steps=3",
+            f"inlet_turbulence.enabled={str(enabled).lower()}",
+            root=session_root,
+        )
+        script.run(cfg)
+        assert (pathlib.Path(cfg.stepper.output_dir) / "metrics.csv").exists()
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    forced, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(forced).all()
+    np.testing.assert_array_equal(forced[:first], plain[:first])  # the truth
+    for c in range(forced.shape[1]):
+        assert not np.allclose(forced[first, c, ..., 0], plain[first, c, ..., 0]), c
+    np.testing.assert_array_equal(forced[first, ..., 7:], plain[first, ..., 7:])
+
+
+def test_evaluate_stepper_inlet_turbulence_input(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """`apply: input` stores the model's own output: the first predicted frame
+    (from the truth) is unforced, the next one sees the forced input."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={inlet_turbulence_corpus(training_data, tmp_path / str(enabled))}",
+            f"stepper.output_dir={tmp_path / str(enabled) / 'eval'}",
+            "stepper.max_steps=3",
+            f"inlet_turbulence.enabled={str(enabled).lower()}",
+            "inlet_turbulence.apply=input",
+            root=session_root,
+        )
+        script.run(cfg)
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    forced, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(forced).all()
+    np.testing.assert_array_equal(forced[: first + 1], plain[: first + 1])
+    assert not np.allclose(forced[first + 1], plain[first + 1])
+
+
+def test_evaluate_stepper_periodic_y(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """periodic_y changes the predictions at the y edges and adds a
+    `periodic_y` column to metrics.csv; the default run has none."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[bool, Any] = {}
+    rollout = script._rollout
+    for enabled in (False, True):
+
+        def capture(*args: Any, enabled: bool = enabled) -> Any:
+            rollouts[enabled] = rollout(*args)
+            return rollouts[enabled]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"stepper.output_dir={tmp_path / str(enabled)}",
+            "stepper.max_steps=3",
+            f"periodic_y={str(enabled).lower()}",
+            root=session_root,
+        )
+        script.run(cfg)
+        with open(pathlib.Path(cfg.stepper.output_dir) / "metrics.csv") as f:
+            rows = list(csv.DictReader(f))
+        if enabled:
+            assert all(float(r["periodic_y"]) == 1 for r in rows)
+        else:
+            assert "periodic_y" not in rows[0]
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    periodic, plain = rollouts[True], rollouts[False]
+    assert np.isfinite(periodic).all()
+    np.testing.assert_array_equal(periodic[:first], plain[:first])  # the truth
+    for edge in (0, -1):
+        assert not np.allclose(
+            periodic[first, ..., edge, :], plain[first, ..., edge, :]
+        )
 
 
 def test_evaluate_autoencoder(
@@ -225,6 +366,49 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+
+
+def test_evaluate_latent_generator_decode_modes_and_samplers(
+    session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """Decode-mode variants and a per-sampler step sweep add their own sources;
+    the trained mode adds none, and the gate still judges `generated`."""
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
+        "latent_generator.decode_modes=[local,halo,global]",
+        "latent_generator.samplers=[euler,heun]",
+        "latent_generator.max_snapshots=6",
+        "latent_generator.max_internal_batchsize=2",
+        root=session_root,
+    )
+    trained_mode = trained["train_autoencoder"].architecture.spatial_mode
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
+    out = pathlib.Path(cfg.latent_generator.output_dir)
+    summary = json.loads((out / "summary.json").read_text())
+    others = [m for m in ("local", "halo", "global") if m != trained_mode]
+    assert summary["decode_modes"] == others
+    expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}
+    expected |= {"generated_steps2", "generated_steps5"}
+    expected |= {"generated_heun_steps2", "generated_heun_steps5"}
+    assert expected <= set(summary["scalars"])
+    assert f"generated_decode_{trained_mode}" not in summary["scalars"]
+    for m in others:
+        assert "diversity" in summary["scalars"][f"generated_decode_{m}"]
+    assert [
+        (r["sampler"], r["num_steps"], r["nfe"]) for r in summary["step_sweep"]
+    ] == [
+        ("euler", 2, 2),
+        ("euler", 5, 5),
+        ("heun", 2, 4),
+        ("heun", 5, 10),
+    ]
+    with open(out / "metrics.csv") as f:
+        sources = {line.split(",")[0] for line in f.readlines()[1:]}
+    assert expected <= sources
+    for name in ("profiles.png", "histograms.png", "spectra.png", "step_sweep.png"):
+        assert (out / name).exists(), name
 
 
 @pytest.mark.integration  # type: ignore[misc]

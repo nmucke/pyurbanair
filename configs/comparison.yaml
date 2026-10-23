@@ -1,0 +1,52 @@
+# @package _global_
+# Surrogate comparison (workflows/compare_surrogates.sh): every trained stepper
+# rolled out on the same trajectories from the same start frame
+# (scripts/surrogate_comparison/run_models.py), scored on fluid cells against persistence
+# and the truth's turbulence statistics (compute_metrics.py) and drawn
+# (visualize_comparison.py).
+defaults:
+  - /common
+  - _self_
+
+paths:
+  results_dir: ${paths.weights_dir}/surrogate_comparison  # = the run dir
+
+device: cuda
+split: test
+# Training-data root to evaluate on; null: the first model's training data.
+data_dir: null
+# Trained model folders (config.yaml + weights.pt), all trained on the same data.
+models: []
+# Trajectories of the split to compare; null: every trajectory.
+sample_indices: null
+# Lead steps after the start frame; null: to the trajectory's end.
+max_steps: null
+# Inference-time uDALES inlet turbulence added to every predicted frame
+# (neural_surrogates.inlet_turbulence.InletTurbulence); needs a corpus generated with it.
+inlet_turbulence:
+  enabled: false
+  seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
+  # output: added to every predicted frame (stored and fed back);
+  # input: added only to the frame fed back, u_t = F(u_{t-1} + forcing).
+  apply: output
+# Inference-time y-periodicity (uDALES domains are periodic in y): circular y
+# padding in every conv and y-periodic SDF features
+# (neural_surrogates.periodic.make_periodic_y); no retraining.
+periodic_y: false
+
+metrics:
+  report_leads: [1, 10, 50]   # headline RMSE at these lead steps (skipped if beyond the rollout)
+  acc_threshold: 0.5          # ACC horizon: first lead where ACC drops below it
+  max_pdf_values: 200000      # velocity values pooled per model for the PDFs / Wasserstein
+
+figures:
+  sample: 0                   # which compared trajectory (index into sample_indices) the slices use
+  level: 2                    # z index of the horizontal slices
+  lead_steps: [1, 10, 50, -1] # columns of slices.png (-1: last)
+  spectra_levels: [2, 8]      # z indices of the spectra
+  # animation_speed.mp4 (.gif without ffmpeg): |U| at `level` over the rollout
+  # of `sample`; null skips it.
+  animation:
+    max_frames: 150           # lead steps are thinned evenly to at most this many
+    fps: 10
+    dpi: 100

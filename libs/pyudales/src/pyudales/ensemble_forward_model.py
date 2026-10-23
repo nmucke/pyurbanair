@@ -8,19 +8,19 @@ from typing import Any, Optional, cast
 import xarray
 from pyudales.forward_model import ForwardModel
 from pyudales.utils.forward_model_utils import create_new_forward_model
-from pyudales.utils.inlet_turbulence_utils import (
-    copy_elapsed_time,
-    derive_seed,
-    elapsed_time_path,
-    read_elapsed_time,
-    write_elapsed_time,
-)
 from pyudales.utils.namoptions_utils import NamoptionsFile
 from pyudales.utils.warm_start_utils import CARRY_DIRNAME, clear_carry, copy_carry
 from pyudales.utils.window_checkpoint import validate_carry
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
 from pyurbanair.base_forward_model import BaseForwardModel
+from pyurbanair.utils.digital_filter import (
+    copy_elapsed_time,
+    derive_seed,
+    elapsed_time_path,
+    read_elapsed_time,
+    write_elapsed_time,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

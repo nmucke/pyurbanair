@@ -70,7 +70,7 @@ src/pyurbanair/                    # Top-level package: base classes + glue
   base_forward_model.py            # BaseForwardModel
   base_ensemble_forward_model.py   # BaseEnsembleForwardModel (parallel/seq, failure policy)
   quiet_jax.py                     # Import before `jax` to suppress CPU-fallback noise
-  static_parameters/               # ParameterSampler + Normal/Uniform/Constant distributions
+  static_parameters/               # ParameterSampler + Normal/LogNormal/Uniform/Constant distributions
   dynamic_parameters/              # AR2RelaxationModel (time-varying prior),
                                    #   HarmonicParameterModel (smooth truths)
   training_data/                   # UniformExternalAR2Sampler for surrogate training data
@@ -88,7 +88,7 @@ src/pyurbanair/                    # Top-level package: base classes + glue
 configs/                           # Hydra config (see §5); keys in configs/README.md
   forward.yaml                     # Entry point for run_forward.py
   assimilation.yaml                # Entry point for run_smoother/run_filtering/run_hybrid.py
-  common.yaml                      # paths (per machine), ensemble budget, Hydra run dir
+  common.yaml                      # paths (per machine), ensemble budget, Hydra run dir, flow
   case/                            # One self-contained file per case (xie_and_castro, barcelona)
   params/                          # Parameter samplers (mounted twice for DA: truth + prior)
   assimilation_settings/           # Every option of each DA component, at top level
@@ -100,6 +100,7 @@ libs/data-assimilation/src/data_assimilation/   # see docs/data_assimilation.md
   observation_operator.py          # ObservationOperator, TemporalObservationOperator,
                                    #   AggregateObservations
   observation_error.py             # ObservationErrorSpec (physical R)
+  adaptive_observation_error.py    # AdaptiveObservationError (online Desroziers R)
   interpolation.py                 # Grid → sensor-point interpolation
   augmentation.py, parameter_selection.py, io.py
   smoothing/                       # BaseSmoothing, the ESMDA variants (esmda.py)
@@ -215,7 +216,8 @@ Variables are `u, v, w[, pres]`. Ensembles add an `ensemble` dim.
 
 **Parameters** = `xarray.Dataset` of scalar variables: `inflow_angle`
 (degrees), `velocity_magnitude` (m/s), optionally the model-error knobs
-`vertical_inflow_exponent` and `sgs_constant` (§7), and uDALES-only
+`vertical_inflow_exponent` and `sgs_constant` (§7), the uDALES/PALM wall
+roughness `roughness_length` (m), and uDALES-only
 `pressure_gradient_magnitude` and `sgs_bias_b0/b1/b2`
 (`resolve_parameter_schema` in `hydra_helpers.py` lists them per backend).
 
@@ -230,8 +232,9 @@ key and the common overrides; [scripts_and_configs.md](scripts_and_configs.md)
 describes the groups, scripts and workflows.
 
 - `common.yaml` owns `paths` (`paths.machine` picks the solver scratch dir per
-  machine), the single `ensemble` budget (incl. `failure` policy) and Hydra's
-  run dir.
+  machine), the single `ensemble` budget (incl. `failure` policy), Hydra's
+  run dir and `flow`, the flow setup uDALES and PALM share (pylbm reads its
+  boundary condition), which cases override.
 - `case/` bundles domain, grid, geometry, sensors and the per-window `time`
   settings (incl. `seconds_per_knot`).
 - `model/` and `params/` contain constructor targets. Forward runs mount once;
@@ -353,8 +356,10 @@ unselected dynamic trajectories still extrapolate between windows. Use a
 
 - **Static** ([src/pyurbanair/static_parameters/](../src/pyurbanair/static_parameters/)) —
   `ParameterSampler` holds a `name -> Distribution` mapping (`Normal`,
-  `Uniform`, `Constant`); `static.yaml` is a prior, `static_truth.yaml` all
-  `Constant`s. Output has an `ensemble` dim only.
+  `LogNormal`, `Uniform`, `Constant`); `static.yaml` is a prior,
+  `static_truth.yaml` all `Constant`s. Output has an `ensemble` dim only. A
+  `LogNormal` parameter is estimated in log space, kept inside (min, max) when
+  it sets both ([data_assimilation.md §1](data_assimilation.md)).
 - **Dynamic** ([src/pyurbanair/dynamic_parameters/](../src/pyurbanair/dynamic_parameters/)) —
   `AR2RelaxationModel` (critically-damped AR(2) relaxing toward an external
   prior; `dynamic.yaml`, `dynamic_truth.yaml`) and `HarmonicParameterModel`
@@ -419,6 +424,9 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
   - pypalm: α → `profile_config`; SGS → `km_constant` (a constant eddy
     diffusivity in m²/s that replaces the SGS-TKE closure and forces
     `constant_flux_layer = .false.`), so it needs PALM-appropriate prior ranges.
+- `roughness_length` (wall z0, m) is a third knob for the two LES backends:
+  uDALES `factypes.inp`, PALM `roughness_length` (raises with `sgs_constant`).
+  pylbm ignores it. Default `flow.roughness_length` in `common.yaml`.
 
 ### pypalm
 - Lazy-imported. All `pypalm.*` `_target_` blocks live only in

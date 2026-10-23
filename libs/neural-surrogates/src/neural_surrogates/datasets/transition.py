@@ -70,8 +70,8 @@ def transition_collate(batch: list[dict]) -> dict:
                 "transition_collate needs every item in a batch to share one "
                 "geometry; this batch mixes trajectories with different "
                 "geometries. Use TrajectoryBatchSampler (dataloader "
-                "batch_sampler) instead of plain shuffling for multi-geometry "
-                "datasets."
+                "batch_sampler, group_by='trajectory') instead of plain "
+                "shuffling for multi-geometry datasets."
             )
     shared = {"geometry"}
     has_features = "geom_features" in batch[0]

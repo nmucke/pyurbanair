@@ -1,6 +1,8 @@
 """ESMDA must replay hidden solver state, while accepting analyzed inputs."""
 
+import gc
 import json
+import weakref
 from pathlib import Path
 from typing import Any, cast
 
@@ -280,7 +282,7 @@ def test_posterior_donor_coefficients_match_returned_forecast(
     np.testing.assert_array_equal(state.u.values[0], state.u.values[2])
 
 
-def test_state_history_keeps_each_steps_own_attrs(
+def test_kept_states_keep_each_steps_own_attrs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per-forecast provenance (pyudales' per-member discrepancy coefficients)
@@ -297,17 +299,195 @@ def test_state_history_keeps_each_steps_own_attrs(
 
     monkeypatch.setattr(model, "run_ensemble", with_provenance)
     smoother = make_smoother(model)
-    params, states = smoother(
-        params=prior(),
-        observations=np.array([4.0]),
-        return_params_history=True,
-        return_state_history=True,
+    smoother.keep_steps = [0]
+    params, _ = smoother(
+        params=prior(), observations=np.array([4.0]), return_params_history=True
     )
-    # The stacked history keeps only what every step shares.
-    assert states.attrs == {"solver": "fake"}
-    steps = smoother.state_history_attrs
-    assert len(steps) == states.sizes["esmda_step"] == 3
-    for step, attrs in zip([0, -1], [steps[0], steps[-1]]):
+    steps = [smoother.get_state(0).attrs, smoother.get_state(smoother.num_steps).attrs]
+    for step, attrs in zip([0, -1], steps):
         expected = params.isel(esmda_step=step).a.values.tolist()
         assert json.loads(attrs["coefficients"]) == expected
     assert steps[0]["coefficients"] != steps[-1]["coefficients"]
+
+
+def run_window(
+    smoother: ParameterESMDA, state: xr.Dataset | None = None
+) -> xr.Dataset | None:
+    """One window; the posterior state (memory) or None (disk)."""
+    output = smoother(params=prior(), observations=np.array([4.0]), state=state)
+    return None if smoother.forward_model.save_on_disk else output[1]
+
+
+def step_files(smoother: ParameterESMDA) -> dict[int, list[str]]:
+    """The per-member state files left in each ESMDA step directory."""
+    return {
+        step: sorted(p.name for p in path.glob("state_*.nc"))
+        for step in range(smoother.num_steps + 1)
+        if (path := smoother.base_results_dir / f"step_{step}").exists()
+    }
+
+
+@pytest.mark.parametrize("keep_steps", [[], [0], [0, 1]])  # type: ignore[misc]
+def test_only_the_kept_steps_and_the_posterior_are_retained(
+    tmp_path: Path, keep_steps: list[int]
+) -> None:
+    """Memory and disk mode keep the same steps and serve the same states."""
+    smoothers = {}
+    for disk in (False, True):
+        smoother = make_smoother(HiddenStateEnsemble(tmp_path if disk else None))
+        smoother.keep_steps = keep_steps
+        output = smoother(
+            params=prior(), observations=np.array([4.0]), return_params_history=True
+        )
+        params = output if disk else output[0]  # the same in both modes
+        smoothers[disk] = smoother
+    memory, disk = smoothers[False], smoothers[True]
+    kept = {*keep_steps, memory.num_steps}
+    assert set(memory._kept_states) == kept
+    assert {s for s, files in step_files(disk).items() if files} == kept
+    assert not disk._kept_states
+    for step in kept:
+        state = memory.get_state(step)
+        assert state.sizes["ensemble"] == 3
+        # The toy model writes its members without their ensemble index.
+        xr.testing.assert_identical(disk.get_state(step), state.drop_vars("ensemble"))
+        # Each step's forecast ends at hidden + that step's parameters.
+        np.testing.assert_allclose(
+            state.u.values[:, -1],
+            [2.0, 4.0, 6.0] + params.a.isel(esmda_step=step).values,
+        )
+    for step in set(range(memory.num_steps)) - kept:
+        for smoother in smoothers.values():
+            with pytest.raises(ValueError, match="keep_steps"):
+                smoother.get_state(step)
+            with pytest.raises(ValueError, match="keep_steps"):
+                smoother.save_state(step, tmp_path / "unkept.nc")
+
+
+@pytest.mark.parametrize("disk", [False, True])  # type: ignore[misc]
+def test_save_state_and_final_frame_match_get_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disk: bool
+) -> None:
+    """``save_state`` writes ``get_state``'s ensemble, on disk member by member
+    (never the stacked ensemble in memory); ``final_frame`` is the posterior's
+    last frame."""
+    smoother = make_smoother(HiddenStateEnsemble(tmp_path if disk else None))
+    smoother.keep_steps = [0]
+    run_window(smoother)
+    expected = {step: smoother.get_state(step) for step in (0, smoother.num_steps)}
+    if disk:
+        monkeypatch.setattr(smoother, "get_state", None)
+        monkeypatch.setattr(xr, "concat", None)
+    for step, state in expected.items():
+        path = tmp_path / f"saved_{step}.nc"
+        smoother.save_state(step, path)
+        xr.testing.assert_identical(xr.load_dataset(path), state)
+    monkeypatch.undo()
+    xr.testing.assert_identical(
+        smoother.final_frame(), expected[smoother.num_steps].isel(time=-1)
+    )
+
+
+def test_kept_prior_is_the_post_substitution_forecast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member resampled by the failure policy is kept as the forecast the
+    update used: the donor's clone, not the failed run."""
+    model = HiddenStateEnsemble()
+    forecast = model.run_ensemble
+    forecasts: list[xr.Dataset] = []
+
+    def prior_donor(**kwargs: Any) -> xr.Dataset | None:
+        result = forecast(**kwargs)
+        assert result is not None
+        model._last_failure_substitutions = {}
+        if len(model.starts) == 1:
+            model._last_failure_substitutions = {0: 2}
+            result["u"][0] = result["u"][2]
+        forecasts.append(result.copy(deep=True))
+        return result
+
+    monkeypatch.setattr(model, "run_ensemble", prior_donor)
+    smoother = make_smoother(model)
+    smoother.keep_steps = [0]
+    run_window(smoother)
+    prior_state = smoother.get_state(0)
+    xr.testing.assert_identical(prior_state, forecasts[0])
+    np.testing.assert_array_equal(prior_state.u.values[0], prior_state.u.values[2])
+
+
+@pytest.mark.parametrize("keep_steps", [[], [0]])  # type: ignore[misc]
+def test_unkept_states_are_released_in_memory(
+    monkeypatch: pytest.MonkeyPatch, keep_steps: list[int]
+) -> None:
+    """Nothing references an unkept step's forecast once its update is done."""
+    model = HiddenStateEnsemble()
+    forecast = model.run_ensemble
+    arrays: list[weakref.ref[np.ndarray]] = []
+
+    def tracked(**kwargs: Any) -> xr.Dataset | None:
+        result = forecast(**kwargs)
+        assert result is not None
+        arrays.append(weakref.ref(result.u.values))
+        return result
+
+    monkeypatch.setattr(model, "run_ensemble", tracked)
+    smoother = make_smoother(model)
+    smoother.keep_steps = keep_steps
+    run_window(smoother)
+    gc.collect()
+    assert len(arrays) == smoother.num_steps + 1
+    alive = {step for step, ref in enumerate(arrays) if ref() is not None}
+    assert alive == {*keep_steps, smoother.num_steps}
+
+
+@pytest.mark.parametrize("disk", [False, True])  # type: ignore[misc]
+def test_kept_states_are_released_when_the_next_window_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disk: bool
+) -> None:
+    """A window's kept states (prior and posterior) are gone, in memory and on
+    disk, by the time the next window's first forecast runs."""
+    model = HiddenStateEnsemble(tmp_path if disk else None)
+    forecast = model.run_ensemble
+    arrays: list[weakref.ref[np.ndarray]] = []
+    leftovers: list[Any] = []
+    smoother = make_smoother(model)
+    smoother.keep_steps = [0]
+
+    def tracked(**kwargs: Any) -> xr.Dataset | None:
+        if len(model.starts) == smoother.num_steps + 1:  # window 1's first forecast
+            gc.collect()
+            leftovers.append(
+                (
+                    [ref() is not None for ref in arrays],
+                    dict(smoother._kept_states),
+                    step_files(smoother) if disk else {},
+                )
+            )
+        result = forecast(**kwargs)
+        if result is not None:
+            arrays.append(weakref.ref(result.u.values))
+        return result
+
+    monkeypatch.setattr(model, "run_ensemble", tracked)
+    posterior = run_window(smoother)
+    if disk:
+        assert set(step_files(smoother)) >= {0, smoother.num_steps}
+        posterior = smoother.get_state(smoother.num_steps)
+    else:
+        assert set(smoother._kept_states) == {0, smoother.num_steps}
+    assert posterior is not None
+    state = posterior.copy(deep=True)
+    del posterior
+    run_window(smoother, state=state)
+
+    (alive, kept, files), *_ = leftovers
+    assert not any(alive)
+    assert not kept
+    assert not any(files.values())
+    # The new window keeps its own prior and posterior again.
+    if disk:
+        kept = {s for s, f in step_files(smoother).items() if f}
+        assert kept == {0, smoother.num_steps}
+    else:
+        assert set(smoother._kept_states) == {0, smoother.num_steps}
