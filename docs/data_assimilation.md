@@ -80,6 +80,7 @@ libs/data-assimilation/src/data_assimilation/
                             #   AggregateObservations, flatten_observations,
                             #   sensor_observation_coords
   observation_error.py      # ObservationErrorSpec, ResolvedObservationError
+  adaptive_observation_error.py  # AdaptiveObservationError (online Desroziers R)
   interpolation.py          # trilinear grid-to-point interpolation
   reduction.py              # OnlineStateReduction, StreamingStateReduction
   augmentation.py           # ParamAugmentation, StateAugmentation — the
@@ -264,6 +265,73 @@ restores the constructor covariance afterward. The filter's optional
 `(cycles, frames, obs)` or `(cycles, obs)` for single-frame cycles. It validates
 all entries before forecasts and applies the same frame stride as the data.
 The constant constructor covariance remains the default.
+
+### Adaptive observation error
+
+[`adaptive_observation_error.py`](../libs/data-assimilation/src/data_assimilation/adaptive_observation_error.py)
+(`observation.adaptive_error=${adaptive_error.desroziers}`, smoother only;
+`check_config` refuses it for the filter and the hybrid; default `null`, which
+leaves runs byte-identical). It is for the error a configuration does not know
+of: against real observations, or a truth from another model, the innovations
+carry a structural error on top of the instrument and realisation noise in
+`observation.error`, and an update with only the latter is overconfident (the
+cross-model ESMDA of 2026-10: Desroziers ratio ~5, `z0` running away). It uses
+innovations only, so it needs no truth or second model.
+
+Desroziers et al. (2005): for a consistent analysis `E[d_a d_f] = R`, with
+`d_f = y - mean prior prediction`, `d_a = y - mean posterior prediction` (the
+ESMDA's first and last step). `AdaptiveObservationError.record` stores
+`r_i = d_a,i d_f,i / R_conf,i` per window (`R_conf` the configured, resolved
+variance); before window `k > 0`, `variance` pools the `r_i` of the previous
+windows per group (one per distinct sensor height, or per `height_bands`
+entry `{min_z, max_z}`, which must not overlap) into a std inflation
+
+    lambda_g**2 = mean of the pooled r_i,
+    clipped to [min_inflation, max_inflation]**2,
+
+and the window assimilates `lambda_g**2 R_conf`. Re-estimating from windows
+that used the previous estimate is the fixed-point iteration of the
+diagnostic (Li et al. 2009). Window 0 uses `initial_inflation`. The diagnostic
+is unbiased only for an analysis that used the right `R`, which window 0 did
+not, so window 0's ratios set window 1 only: from window 2 on the pool starts
+at window 1 (otherwise a far-off `initial_inflation` would bias the estimate
+for good). Non-finite ratios (a NaN prediction) are dropped with a warning; a
+group with nothing to pool (a band without sensors, or only non-finite
+ratios) keeps its previous inflation (`initial_inflation` at first).
+
+The inflation is multiplicative on the whole configured variance of a group,
+instrument part included: it assumes the unknown error scales with `R_conf`
+within the group (there is no additive model). That holds best when the
+groups match or are finer than the `observation.error` `representation_std`
+height bands and the aggregation intervals have equal length, so `R_conf` is
+constant per group.
+
+The choices for few observations (the 18-sensor layout with 180 s means has
+10-14 per height per window):
+
+- pooling per height: the structural error differs with height (street
+  level, canopy, above roofs) but u and v at one height share it;
+- `min_inflation` (default 1) floors `R` at the configured noise, so a sample
+  cannot make the update more confident than the known noise; `max_inflation`
+  (default 10) caps it;
+- `memory` pools only the last windows (a drifting error).
+
+**Window 0 matters for a parameter-only smoother.** With a too-small `R` in
+window 0 the ESMDA collapses the parameter ensemble, and nothing re-inflates
+it: later windows then estimate the right `R` (the Desroziers ratio returns
+to ~1) but the posterior stays overconfident. Start conservatively,
+`initial_inflation` at or above the expected error; the toy problem in
+`tests/data_assimilation/test_adaptive_observation_error.py` shows both cases.
+
+Outputs: `window_{w}_obs.nc` keeps `obs_std` as the configured std (as without
+the option) and adds `obs_std_assimilated`, the inflated std the window used,
+and `obs_error_group`; `run_info.yaml` `adaptive_observation_error` lists per
+window the groups, the inflation used, the std used and the window's own
+estimate (before pooling and bounds; `null` without a positive mean ratio).
+The same is logged per window. In `compute_metrics.py` the Desroziers block
+(`obs_std_used`, `ratio`) compares against `obs_std_assimilated`, the `R` the
+update used; the observation block (`innovation_chi2_diag`) and the data
+mismatch O_N use the configured `obs_std`.
 
 ---
 

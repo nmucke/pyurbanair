@@ -18,6 +18,7 @@ defaults:
   - assimilation_settings/localization
   - assimilation_settings/state_reduction
   - assimilation_settings/inflation
+  - assimilation_settings/adaptive_error
   - _self_
 
 paths:
@@ -104,6 +105,10 @@ observation:
     # propagate_mean reduces it with the mean-bin weights; none keeps the
     # configured std. This does not switch aggregation itself on or off.
     propagation: propagate_mean
+  # Smoother only: re-estimate the error per window from the previous windows'
+  # innovations, e.g. 'observation.adaptive_error=${adaptive_error.desroziers}'
+  # (assimilation_settings/adaptive_error.yaml). null keeps `error` throughout.
+  adaptive_error: ${adaptive_error.none}
 
 # Smoothing (ESMDA): the smoother and its components. Read by smoothing.yaml
 # and hybrid.yaml. Instantiate `smoothing.smoother`.

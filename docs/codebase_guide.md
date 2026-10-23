@@ -100,6 +100,7 @@ libs/data-assimilation/src/data_assimilation/   # see docs/data_assimilation.md
   observation_operator.py          # ObservationOperator, TemporalObservationOperator,
                                    #   AggregateObservations
   observation_error.py             # ObservationErrorSpec (physical R)
+  adaptive_observation_error.py    # AdaptiveObservationError (online Desroziers R)
   interpolation.py                 # Grid → sensor-point interpolation
   augmentation.py, parameter_selection.py, io.py
   smoothing/                       # BaseSmoothing, the ESMDA variants (esmda.py)
