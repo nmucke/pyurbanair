@@ -38,7 +38,7 @@ cleans the per-job solver scratch, sets the MPI options for PALM's nested
 
 | Machine | `paths.results_root` | Scratch (`paths.scratch.<machine>`) |
 |---|---|---|
-| snellius | `/projects/prjs2075/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
+| snellius | `/projects/prjs2304/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
 | delftblue | `/projects/urbanair` | `/scratch/$USER/urbanair_temp/$SLURM_JOB_ID` |
 
 Locally there is no job script: run the script or `workflows/*.sh` directly.
@@ -72,7 +72,7 @@ its own `paths.results_root`, or the outputs collide:
 ```bash
 for n in 32 64 96; do
   sbatch job_scripts/snellius/assimilation_workflow.slurm smoother ensemble.ensemble_size=$n \
-    paths.results_root=/projects/prjs2075/urbanair/ens$n
+    paths.results_root=/projects/prjs2304/urbanair/ens$n
 done
 for i in 0 1 2 3; do
   sbatch job_scripts/snellius/surrogate_generate_data.slurm data.sharding.num_shards=4 data.sharding.shard_index=$i
@@ -89,7 +89,7 @@ bounds and sensors:
 sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
   model@truth_model=pyudales model@assim_model=pylbm \
   params@truth_params=dynamic_truth params@prior_params=dynamic 'smoothing.smoother=${smoother.dynamic}' \
-  assimilation.truth_dir=/projects/prjs2075/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
+  assimilation.truth_dir=/projects/prjs2304/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
   assimilation.num_windows=6 assimilation.ensemble_save_on_disk=true \
   domain.nx=50 time.output_frequency=2.0 time.spinup_time=50.0 \
   ensemble.ensemble_size=96 smoothing.num_steps=3 'smoothing.localization=${localization.none}'
@@ -200,10 +200,11 @@ resubmit Roll-1 and then the fine-tuning. Further arms need their own `name`
 (e.g. `train_roll1 'architecture=${baseline_architectures.urbanaurora_512}'
 name=urbanaurora_roll1` for 3DSwinUrbanNet). On Snellius the same lines with
 `job_scripts/snellius/` train in the `cuda` env (the `snellius` env has
-CPU-only torch): run `pixi install -e cuda` once on a login node. A 40 GB A100
-may be tight for the 451 M SSRollingUrbanNet with Roll-3; pass
-`--partition=gpu_h100` (Snellius) before the job script if it runs out of
-memory.
+CPU-only torch): run `pixi install -e cuda` once on a login node. The Snellius
+SSRollingUrbanNet job runs on `gpu_h100`: on the realistic corpus a 40 GB A100
+fits Roll-1 at batch 2 only with checkpointing, at half the speed (measured
+figures and the capped launch lines are in its header and in
+[neural_surrogate_baselines.md](neural_surrogate_baselines.md) §3).
 
 ## Machine notes
 

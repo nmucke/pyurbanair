@@ -96,9 +96,36 @@ with the others below.
 - RMSE over every raw patch output, overlap included, on its real fluid cells.
 - Adam with lr 2e-3 and weight decay 1e-4; StepLR halves the learning rate
   every epoch.
-- Stop at the first validation rise (`patience: 1`), at most 12 epochs.
-- Our corpora have about 10× more samples per epoch than their record, so
-  `epoch_batches` / `val_batches` cap an epoch at about theirs.
+- Stop at the first validation rise (`patience: 1`), at most 12 epochs; the
+  best-validation weights are kept.
+- **Batch:** theirs is 42 patches of 38×38×75 = 4.6 M cells. Whole domains are
+  loaded and cut into patches on the GPU, so the batch is set in domain cells:
+  `cell_budget: 3e6`, `batch_size: 8` gives on average 24 of our 76×76×32
+  patches = 4.5 M cells on the realistic corpus (at most 6.7 M).
+- **Epoch:** theirs is ~1300 samples × 64 patches / 42 ≈ 2000 steps (~6e9
+  cells). `epoch_batches: 2000` matches both with the batch above; the
+  realistic corpus (500 × 118 samples) holds ~14× that, so 12 epochs see it
+  about once. Validation takes the whole split (`val_batches: null`, 1180
+  samples), as theirs (3 minutes of one run).
+
+**Deviations on the realistic corpus** (beyond the parameters above):
+- Time step 5 s, the corpus' frame interval and our steppers' step; their best
+  were 10–20 s. `TransitionDataset` has no frame stride.
+- Native 4 m patches (above), and our vertical extent: nz = 32 (128 m) against
+  their 75 cells over 1 km, with the same 8 z modes.
+- bf16 autocast (the FFTs stay float32); the paper does not say, likely fp32.
+- `periodic_axes: [y]`: pyudales always runs y periodic (`BCym=1`), x is
+  inflow/outflow on this corpus.
+- 85 M parameters, as theirs: the spectral weights dominate
+  (4 corners × 36² × 16·16·8 complex per layer).
+
+**Cost on the realistic corpus** (measured, bf16): ~4 GB per million patch
+cells, so the largest batch (6.7 M) peaks at ~29 GB and an A100 40 GB
+suffices; forward and backward take ~15 ms per patch on an A100 (~8 ms on an
+H100), and the loader keeps up (device 99% busy). An epoch takes ~15 min on
+an A100, 12 epochs ~3 h. The first run on a corpus streams the whole training split once for
+the normalization stats (~2 h on the realistic corpus) and caches them
+in the data folder (`normalization_stats/`).
 
 **Chosen where the paper is silent:** GELU; hidden width 2 × width in the
 MLPs; z-score normalisation; Li et al.'s `rfftn` corner-block layout for the
@@ -117,19 +144,27 @@ part.
 [datasets.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/datasets.py).
 
 **3DSwinUrbanNet is Microsoft Aurora.** Paper 1 §II B says it is
-"constructed by modifying ... Aurora". Aurora (pinned `microsoft-aurora ==
-2.0.1`, used unpatched) with `AuroraSmall`'s depths (2,6,2), heads
-(4,8,16)/(16,8,4), `embed_dim = 512` and its default LoRA has **451,432,016**
-parameters, against the papers' "451 M". Its other defaults match the papers
-too: window (2,6,12), patch size 4, two input snapshots.
+"constructed by modifying ... Aurora", with a 3D Perceiver encoder/decoder
+around a 3D Swin U-Net. Paper 2 §II B gives its size: window (2,6,12), depths
+(2,6,2), heads (4,8,16)/(16,8,4), embedding 512, LoRA on all attention
+projections, 451 M trainable parameters. Aurora (pinned `microsoft-aurora ==
+2.0.1`, used unpatched) with these values has **451,432,016** parameters, LoRA
+on every Swin block's qkv and output projections. Patch size 4 (paper 1 §III B)
+and two input snapshots (Eq. 1) match too. Neither paper gives
+`latent_levels`; we keep Aurora's 4.
 
-Two corrections to the papers' descriptions:
-- **Tokens are horizontal patches.** Aurora embeds 4×4 *horizontal* patches
-  per level, then a Perceiver aggregates all levels into `latent_levels - 1`
-  latent levels. Paper 2's "4×4×4 patches" is not what the code does.
-- **Lead time is constant.** Aurora's lead-time encoding only accepts 1 min to
-  504 h, so the papers' 12 s step cannot have been encoded as such. It is
-  constant per model and carries no information.
+Where unpatched Aurora differs from the papers' modified one:
+- **Patches.** Aurora embeds 4×4 *horizontal* patches per level, then a
+  Perceiver aggregates all levels into `latent_levels - 1` latent levels.
+  Paper 2 §II B says "4 × 4 × 4 patches" and paper 1 §III B crops all three
+  axes to multiples of 4, so their modification likely patches height too.
+  It is not described, so we keep Aurora's.
+- **Conditioning.** Paper 1 replaces Aurora's lead-time conditioning of the
+  backbone with the 2D building-height map, and feeds the 3D building geometry
+  average-pooled over patches and linearly projected to the encoder, backbone
+  and decoder (§II B, §IV B). We give Aurora the height map as surface and
+  static variable and the 3D solid mask as an input variable. The backbone's
+  conditioning slot carries the inflow parameters plus a constant lead time.
 
 **`UrbanAurora`** maps our fields onto Aurora's `Batch` and back:
 - **Atmospheric variables:** the z-scored state channels (zero in buildings)
@@ -163,11 +198,21 @@ Two corrections to the papers' descriptions:
   size, its circular padding repeats cells inside the wrapped axis, so the
   period Aurora sees is the padded length.
 
-**SSGen** (paper 2 Eqs. 1–8) folds height into channels, so it is built for
+**SSGen** (paper 2 §II C, Eqs. 1–8) folds height into channels, so it is built for
 `n_levels` = the corpus' nz (default 32). It runs on the z-scored, masked
-backbone prediction, and the model adds its output (Eq. 8). Chosen where the
-paper is silent: 8 GroupNorm groups, zero padding. The paper's 9.5 M SSGen
-parameters do not follow from its description; ours has 0.1 M at 96 channels.
+backbone prediction, and the model adds its output (Eq. 8). It matches the
+paper module by module:
+- 3×3 average-pool high-pass;
+- 3×3 conv to C = 64, GN, GELU, dropout 0.1;
+- an 8-channel per-level 1×3×3 building conv, averaged over height and
+  projected by a 1×1 conv; gate `x' = g⊙x + 0.2·g⊙f_b`;
+- three refine blocks with 8-group 3×3 convs;
+- a 1×1–GN–GELU–1×1 head.
+
+Chosen where the paper is silent: 8 GroupNorm groups, zero padding, a 1×1
+gate conv. The paper's "9.5 M" SSGen parameters (461 M in total) do not follow
+from this description: at its V·N_y = 4 × 68 = 272 channels the described
+module has 0.21 M. Ours has 0.10 M at 3 × 32 = 96 channels.
 
 **Training** (paper 2 §II E):
 - `RolloutTransitionDataset` adds the intermediate targets `state_targets`
@@ -179,11 +224,55 @@ parameters do not follow from its description; ours has 0.1 M at 96 channels.
   MSE of the other term), so it only rescales the MSE (see [losses.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/losses.py)).
 - `train_roll1.yaml` and `train_roll3.yaml` train from scratch;
   `finetune_roll3.yaml` is TL Roll-3 from a Roll-1 run.
-- Adam at a constant 1e-5, batch 2, patience 50, no gradient clipping.
+- Paper 2 §III C: Adam (lr 1e-5, β 0.9/0.999) for every model, batch 2 (on
+  16 GPUs with FSDP), early stopping with patience 50 restoring the best
+  checkpoint. Its Roll-1 stopped after 440 epochs, then TL Roll-3 ran 200 more
+  "under the same optimizer settings and early-stopping criterion" (§II E 2);
+  Roll-3 from scratch ran 499. No weight decay, clipping, schedule or precision
+  is mentioned (we use none, a constant lr and bf16).
+- `L_spec` is Eq. 10: `(1/N_s) Σ |Q̂ − Q|²` of the DFT along the spanwise
+  (lateral, periodic) axis, our `norm="backward"` mean. α = 1 (Eq. 11), and
+  the rollout loss is summed with no 1/N (Eq. 13). Their MSE (Eq. 9) runs over
+  every grid point; ours over fluid cells only, since our predictions are
+  zero in buildings anyway.
 
 **Note:** Aurora zero-initialises its adaptive-LayerNorm modulation, so at
 initialisation the inflow parameters have no effect until training moves those
 weights.
+
+**Realistic corpus** (`pyudales_realistic`, the DFT's data, splits, u v w and
+all three `param_vars`; (z, y, x) = 32 × 96…320 × 96…352 cells, up to
+2.8 Mcell):
+- **Unavoidable deviations from the papers:** u v w without p; Δt = 5 s (theirs
+  12 s); 4 m grids of 32 levels (theirs 20 × 10 × 16 m, 152 × 68 × 88);
+  z-score normalisation (theirs channel-wise min–max, §III C, chosen for
+  stabler convergence); the inflow parameters; patches and conditioning as
+  above.
+- **Batch 2 everywhere:** `cell_budget: 6000000` (> 2 × 2.8 Mcell; training.yaml's
+  4.19 M would give batch 1 on 51 of the 500 trajectories).
+- **Memory and speed** (H100, bf16, batch 2, 2.8 Mcell / 1.0 Mcell grid):
+  Roll-1 39 / 24 GB, 0.31 / 0.14 s per step. Roll-3 does not fit at 2.8 Mcell
+  without checkpointing; `finetune_roll3`/`train_roll3` checkpoint the Swin
+  blocks and Aurora's Perceiver encoder/decoder (`activation_checkpoint_modules`):
+  31 GB, 1.14 s per step (blocks only: 70 GB, 1.02 s). The Perceivers hold
+  most activations (they see all 32 levels); block-only checkpointing saves
+  little. A100 40 GB: Roll-1 batch 2 does not fit at 2.8 Mcell without
+  checkpointing, and runs ~2× slower than an H100, so the Snellius job uses `gpu_h100`.
+- **Epoch time** (H100, 15 loader workers): Roll-1 ~1.5–2 h (59,000 samples;
+  ~9 samples/s on a smoke over the largest grids, partly loader-bound), TL
+  Roll-3 ~5 h (58,000 samples). Training to patience 50 would take months,
+  so the launch lines in the job scripts cap the epochs:
+  Roll-1 15 epochs, patience 5 (~26 h); TL Roll-3 7 epochs, patience 5
+  (~33 h). Learning rate, batch, loss and schedule stay the papers'. At
+  the same batch 2 the caps match their number of updates: their ~2,040
+  training samples per epoch (7668 × 80 % of 4 s snapshots, every third)
+  give ~0.9 M Roll-1 (440 epochs) and ~0.41 M TL Roll-3 samples (200
+  epochs); ours give 0.89 M and 0.41 M.
+- **Lateral wrap.** uDALES runs y periodic (`BCym=1`), x inflow/outflow, so
+  `periodic_axes: [y]`. Per the gotcha above, the wrap is fully effective
+  only where ny is a multiple of 48 (145 of 500 train grids at stage 0).
+- The first run streams the training split once for the normalization stats
+  and caches them in the whole-frame copy (`normalization_stats/`).
 
 ## 4. Comparing models
 

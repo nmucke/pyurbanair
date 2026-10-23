@@ -179,7 +179,9 @@ How Aurora works, and what that means here:
 
 - **Tokens.** Each vertical level is embedded in 4×4 *horizontal* patches. A
   Perceiver then aggregates all levels into `latent_levels − 1` latent levels,
-  plus one surface level. Paper 2's "4×4×4 patches" doesn't match the code.
+  plus one surface level. Paper 2's "4×4×4 patches" (and paper 1's cropping
+  of all three axes to multiples of 4) suggest their modified Aurora also
+  patches height; it is not described, so we keep Aurora's.
 - **Conditioning slot.** The backbone's adaptive LayerNorm takes
   `c = backbone.time_mlp(lead-time expansion)`.
 - **Lead time.** Aurora's encoding only covers 1 min to 504 h; it is constant
@@ -187,7 +189,8 @@ How Aurora works, and what that means here:
 - **Wrap-around.** `warped = True` is hard-coded and makes Aurora's W axis
   periodic.
 
-**SSGen** (paper 2 Eqs. 1–8, fully specified, 9.5 M parameters):
+**SSGen** (paper 2 Eqs. 1–8, fully specified; its stated 9.5 M parameters do
+not follow from the description, which gives 0.21 M at its 272 channels):
 
 1. Fold height into channels.
 2. High-pass: the field minus its 3×3 horizontal average.
@@ -208,7 +211,8 @@ How Aurora works, and what that means here:
 - **Schedule.** Roll-1 to convergence, then TL Roll-3. Comparison arms: Roll-3
   from scratch, and SSGen trained on MSE only.
 - **Optimiser.** Adam, lr 1e-5 constant, batch 2, early-stopping patience 50,
-  no gradient clipping.
+  no gradient clipping (paper 2 §III C; Roll-1 stopped at 440 epochs, TL Roll-3
+  ran 200 more). Paper 2 normalises min–max per channel; we keep z-scores.
 
 **Modules:**
 

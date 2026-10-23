@@ -14,12 +14,14 @@ init_weights: null
 trainer:
   _target_: neural_surrogate_baselines.LocalFNOTrainer
   # Halve the learning rate after every epoch, stop at the first validation
-  # rise, at most 12 epochs. An epoch is capped at about the paper's length.
+  # rise, at most 12 epochs. An epoch is capped at the paper's ~2000 steps,
+  # which with the batches below is also about their cells per epoch.
+  # Validation takes the whole split, as theirs (patience 1 needs a steady loss).
   num_epochs: 12
   patience: 1
   lr_step_gamma: 0.5
   epoch_batches: 2000
-  val_batches: 200
+  val_batches: null
   lr_warmup_epochs: null
   grad_clip_norm: null
   pushforward_epochs_per_step: null
@@ -27,6 +29,12 @@ optimizer:
   _target_: torch.optim.Adam
   lr: 2.0e-3
   weight_decay: 1.0e-4
+# Their batch: 42 patches of 38x38x75 = 4.6 M cells. A budget of 3 M domain
+# cells gives on average 24 of our 76x76x32 patches = 4.5 M cells per batch on
+# the realistic corpus (at most 6.7 M, ~29 GB on an A100 in bf16).
+batch_sampler:
+  batch_size: 8
+  cell_budget: 3000000
 dataloader:
   # Whole-frame reads mostly wait on the file system: more workers overlap it.
   num_workers: 16

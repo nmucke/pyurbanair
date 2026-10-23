@@ -5,7 +5,7 @@ set -euo pipefail
 
 module purge
 
-export PYURBANAIR_MACHINE=snellius PYURBANAIR_RESULTS_ROOT=/projects/prjs2075/urbanair
+export PYURBANAIR_MACHINE=snellius PYURBANAIR_RESULTS_ROOT=/projects/prjs2304/urbanair
 
 # The ensemble workers set their own parallelism; keep BLAS single-threaded.
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1

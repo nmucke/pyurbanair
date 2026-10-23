@@ -22,15 +22,28 @@ trainer:
   grad_clip_norm: null
   pushforward_epochs_per_step: null
   alpha: 1.0
+  # Recompute the Swin blocks and Aurora's Perceiver encoder/decoder in
+  # backward: Roll-3 at batch 2 on the 2.8 Mcell grids then peaks at ~31 GB
+  # instead of not fitting an H100 94 GB (same gradient, ~12 % slower).
+  activation_checkpoint_modules:
+    - aurora.backbone.encoder_layers.*.blocks.*
+    - aurora.backbone.decoder_layers.*.blocks.*
+    - aurora.encoder
+    - aurora.decoder
 optimizer:
   _target_: torch.optim.Adam
   lr: 1.0e-5
   weight_decay: 0.0
 batch_sampler:
   batch_size: 2
+  # Above 2 x the largest realistic grid (2.8 Mcell), so every batch is the
+  # paper's 2 (training.yaml's 4.19 M would halve the batches of 51 of the
+  # 500 realistic trajectories).
+  cell_budget: 6000000
 dataloader:
-  # Whole-frame reads mostly wait on the file system: more workers overlap it.
-  num_workers: 16
+  # Whole-frame reads mostly wait on the file system: more workers overlap it
+  # (15 + the main process on the 16 cores of a Snellius H100 share).
+  num_workers: 15
   collate_fn:
     _target_: neural_surrogates.datasets.transition.transition_collate
     _partial_: true
