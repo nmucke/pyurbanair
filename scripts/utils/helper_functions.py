@@ -12,7 +12,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import netCDF4
 import numpy as np
 import xarray
 import yaml
@@ -352,44 +351,6 @@ def make_ensemble_model(
         forward_model=forward_model,
         results_dir=results_dir,
     )
-
-
-def member_files(step_dir: pathlib.Path, ensemble_size: int) -> list[pathlib.Path]:
-    return [step_dir / f"state_{m}.nc" for m in range(ensemble_size)]
-
-
-def concat_member_files(files: list[pathlib.Path], out_path: pathlib.Path) -> None:
-    """Stack per-member state files along a new `ensemble` dim, one at a time.
-
-    Same result as `xarray.concat(members, dim="ensemble")` without holding the
-    whole ensemble in memory.
-    """
-    with netCDF4.Dataset(files[0]) as ref, netCDF4.Dataset(out_path, "w") as out:
-        out.setncatts({k: ref.getncattr(k) for k in ref.ncattrs()})
-        out.createDimension("ensemble", len(files))
-        for name, dim in ref.dimensions.items():
-            out.createDimension(name, len(dim))
-        data_vars = [v for v in ref.variables if v not in ref.dimensions]
-        for name, var in ref.variables.items():
-            dims = (
-                var.dimensions
-                if name in ref.dimensions
-                else ("ensemble", *var.dimensions)
-            )
-            new = out.createVariable(name, var.dtype, dims)
-            new.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
-            if name in ref.dimensions:
-                new[...] = var[...]
-        for m, path in enumerate(files):
-            with netCDF4.Dataset(path) as src:
-                for name in data_vars:
-                    out.variables[name][m, ...] = src.variables[name][...]
-
-
-def last_frames(files: list[pathlib.Path]) -> xarray.Dataset:
-    """Ensemble state at the final time, reading one frame per member file."""
-    frames = [xarray.open_dataset(f).isel(time=-1).load() for f in files]
-    return xarray.concat(frames, dim="ensemble", join="override")
 
 
 # ---------------------------------------------------------------------------

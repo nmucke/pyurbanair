@@ -542,18 +542,6 @@ def test_final_forecast_false_returns_the_same_params_as_the_full_run() -> None:
     )
 
 
-def test_final_forecast_false_rejects_a_state_history() -> None:
-    smoother = _static_smoother(_ToyEnsembleModel(num_frames=_WINDOW_FRAMES))
-    with pytest.raises(ValueError, match="return_state_history requires"):
-        smoother(
-            state=_initial_state(),
-            params=_static_prior(),
-            observations=_window_observations(_observation_batches()),
-            return_state_history=True,
-            final_forecast=False,
-        )
-
-
 # ---------------------------------------------------------------------------
 # (f) Constructor validation
 # ---------------------------------------------------------------------------

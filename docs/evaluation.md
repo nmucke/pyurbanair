@@ -211,8 +211,8 @@ at about replica · √((1 + 1/N)/2) (0.74 × replica for N = 10), below the
 replica. The `*_member_median` distances score one member at a time and are
 the like-for-like comparison with the replica.
 
-"Sources" below are the posterior, `prior` (`assimilation.save_prior_state`,
-smoother), `forecast` (`assimilation.save_forecast_history`, filter and
+"Sources" below are the posterior, `prior` (`assimilation.save_states: prior` or
+`all`, smoother), `forecast` (`assimilation.save_forecast_history`, filter and
 hybrid) and `replica`, each when present; the prior, forecast and replica are
 read on the posterior's time stamps. Each series is summarised as `{mean,
 final, max, min}`; the window-indexed ones also list `per_window` values (a

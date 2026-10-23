@@ -159,6 +159,15 @@ def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:
             "static for the smoother (use filtering for a time-varying truth "
             "with a static prior)."
         )
+    if workflow == "smoother" and cfg.assimilation.save_states not in (
+        "posterior",
+        "prior",
+        "all",
+    ):
+        problems.append(
+            "assimilation.save_states must be posterior, prior or all, got "
+            f"{cfg.assimilation.save_states!r}."
+        )
     if workflow == "hybrid" and state_bearing:
         problems.append(
             "The hybrid's smoother must estimate parameters only: use "

@@ -406,11 +406,17 @@ RNG stream — is the untempered one, bit for bit.
 **On-disk mode.** When `forward_model.save_on_disk` is True the constructor
 creates `step_0/` through `step_{num_steps}/` under `base_results_dir` and
 clears stale `state_*.nc` files. `_set_step_results_dir(i)` redirects the
-forward model's output before each forecast. `get_state(ensemble_member,
-step)` re-opens the NetCDF for a specific member and step. Disk pruning
-(`prune_disk_steps=True`, `keep_prior_disk_step`; the run scripts set both)
-caps peak storage at ~2× ensemble size by deleting intermediate step
-directories as soon as their Kalman update is computed.
+forward model's output before each forecast.
+
+**Kept steps.** `get_state(step)` returns the last window's ensemble state at
+one ESMDA step (0 the prior forecast, `num_steps` the posterior), in both save
+modes: held in memory, or read from that step's per-member files on disk. Only
+the posterior and the steps in `keep_steps` (default none; `run_smoother.py`
+sets it from `assimilation.save_states`) are kept. Every other step's forecast
+is dropped once its Kalman update is computed (not retained in memory, its step
+directory deleted on disk), so the peak does not grow with `num_steps`. The
+kept states are released when the next `_analysis` starts. Each kept state
+keeps its own attrs (e.g. pyudales' per-member `model_discrepancy_by_member`).
 
 **`_compute_kalman_update`**. Implements the standard ESMDA perturbed-
 observation update:
@@ -497,12 +503,6 @@ multi-window caller reads one window's entries per call. With
 `final_time_smoothing=True` the last entry is pre-smoothing. Off by default.
 `run_smoother.py` and `run_hybrid.py` turn it on and persist the arrays per
 window (`window_{w}_obs.nc`).
-
-**State history attrs.** With `return_state_history=True` the
-`esmda_step`-stacked history keeps only the attrs every step shares; each
-step's own (e.g. pyudales' per-member `model_discrepancy_by_member`) are in
-`state_history_attrs`, entry 0 the prior, −1 the posterior. `run_smoother.py`
-restores them on `window_{w}_prior_state.nc` / `_posterior_state.nc`.
 
 ### Five variants
 

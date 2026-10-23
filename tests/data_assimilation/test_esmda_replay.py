@@ -280,7 +280,7 @@ def test_posterior_donor_coefficients_match_returned_forecast(
     np.testing.assert_array_equal(state.u.values[0], state.u.values[2])
 
 
-def test_state_history_keeps_each_steps_own_attrs(
+def test_kept_states_keep_each_steps_own_attrs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Per-forecast provenance (pyudales' per-member discrepancy coefficients)
@@ -297,17 +297,12 @@ def test_state_history_keeps_each_steps_own_attrs(
 
     monkeypatch.setattr(model, "run_ensemble", with_provenance)
     smoother = make_smoother(model)
-    params, states = smoother(
-        params=prior(),
-        observations=np.array([4.0]),
-        return_params_history=True,
-        return_state_history=True,
+    smoother.keep_steps = [0]
+    params, _ = smoother(
+        params=prior(), observations=np.array([4.0]), return_params_history=True
     )
-    # The stacked history keeps only what every step shares.
-    assert states.attrs == {"solver": "fake"}
-    steps = smoother.state_history_attrs
-    assert len(steps) == states.sizes["esmda_step"] == 3
-    for step, attrs in zip([0, -1], [steps[0], steps[-1]]):
+    steps = [smoother.get_state(0).attrs, smoother.get_state(smoother.num_steps).attrs]
+    for step, attrs in zip([0, -1], steps):
         expected = params.isel(esmda_step=step).a.values.tolist()
         assert json.loads(attrs["coefficients"]) == expected
     assert steps[0]["coefficients"] != steps[-1]["coefficients"]

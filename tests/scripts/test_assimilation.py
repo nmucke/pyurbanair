@@ -155,7 +155,7 @@ def test_method(
 # Per method: the flag that saves a reference ensemble and the block it adds to
 # sensor_statistics.
 SAVED: dict[str, tuple[str, str]] = {
-    "smoother": ("assimilation.save_prior_state=true", "prior"),
+    "smoother": ("assimilation.save_states=prior", "prior"),
     "filtering": ("assimilation.save_forecast_history=true", "forecast"),
     "hybrid": ("assimilation.save_forecast_history=true", "forecast"),
 }

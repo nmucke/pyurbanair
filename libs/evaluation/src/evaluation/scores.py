@@ -1188,7 +1188,7 @@ def window_statistics_summary(
     The prior half is scored identically, and the posterior entries carry the
     skill against it (``crps_reduction_vs_prior``, positive when assimilation
     helped). Absent prior artifacts are a no-op, not an error: the prior state
-    is only saved under ``run.save_prior_state``.
+    is only saved under ``assimilation.save_states: prior`` (or ``all``).
 
     Args:
         truth_stats: ``window_statistics`` of the truth series.
