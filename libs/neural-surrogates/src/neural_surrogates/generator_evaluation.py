@@ -645,6 +645,66 @@ def compare_to_real(source: dict[str, Any], real: dict[str, Any]) -> dict[str, f
     }
 
 
+# --------------------------------------------------------------------------- #
+# Latent spectrum (the one metric on latents, not physical fields)
+# --------------------------------------------------------------------------- #
+
+# Upper ends (1-based, inclusive) of the eigen-bands of :func:`latent_spectrum`;
+# the last band always ends at D. Chosen for the Tadpole latents (S: D = 768,
+# B: D = 1536): the top components, the variance plateau, and the tail.
+LATENT_BANDS: tuple[int, ...] = (32, 256, 768, 1024)
+
+
+def latent_moments(z: np.ndarray) -> dict[str, Any]:
+    """Float64 first and second moments of the tokens of latents ``(B, D, ...)``
+    (every grid position of every sample is one ``D``-vector); add them up over
+    batches with :func:`merge_latent_moments`."""
+    x = np.asarray(z, dtype=np.float64)
+    tokens = np.moveaxis(x, 1, -1).reshape(-1, x.shape[1])
+    return {"n": len(tokens), "sum": tokens.sum(0), "outer": tokens.T @ tokens}
+
+
+def merge_latent_moments(parts: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return {k: sum(p[k] for p in parts) for k in ("n", "sum", "outer")}
+
+
+def _covariance(moments: dict[str, Any]) -> np.ndarray:
+    mean = moments["sum"] / moments["n"]
+    return np.asarray(moments["outer"] / moments["n"] - np.outer(mean, mean))
+
+
+def latent_spectrum(
+    real: dict[str, Any],
+    generated: dict[str, Any],
+    bands: Sequence[int] = LATENT_BANDS,
+) -> dict[str, Any]:
+    """Variance of generated latents in the PCA basis of the real ones.
+
+    ``real`` / ``generated`` are :func:`latent_moments`. The basis is the
+    eigenvectors of the real (centred) token covariance, in descending
+    eigenvalue order; each covariance is centred on its own mean. Returns the
+    real eigenvalues ``"real"`` (D,), the generated variance along the same
+    directions ``"generated"`` (D,), and per band (components ``lo``-``hi``,
+    1-based) the geometric mean of the per-direction ratio generated / real
+    (``"bands"``: ``"lo_hi"`` -> ratio; 1 = the right variance, > 1 = too
+    noisy). The geometric mean keeps the near-empty tail directions (real
+    variance down to ~1e-7) from being swamped by the band's largest ones.
+    """
+    eig, basis = np.linalg.eigh(_covariance(real))
+    order = np.argsort(eig)[::-1]
+    eig, basis = eig[order], basis[:, order]
+    gen = np.einsum("dk,de,ek->k", basis, _covariance(generated), basis)
+    d = len(eig)
+    floor = max(float(eig[0]), 1e-30) * 1e-12  # round-off floor of the ratio
+    log_ratio = np.log(np.maximum(gen, floor)) - np.log(np.maximum(eig, floor))
+    edges = [0] + [b for b in bands if b < d] + [d]
+    ratios = {
+        f"{lo + 1}_{hi}": float(np.exp(log_ratio[lo:hi].mean()))
+        for lo, hi in zip(edges[:-1], edges[1:])
+    }
+    return {"real": eig, "generated": gen, "bands": ratios}
+
+
 def _is_within(value: float, bound: float) -> bool:
     return bool(np.isfinite(value) and np.isfinite(bound) and value <= bound)
 

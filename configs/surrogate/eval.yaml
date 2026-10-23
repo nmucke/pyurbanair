@@ -87,6 +87,10 @@ latent_generator:
   n_bins: 64
   # Resamples for the held-out variability the thresholds are relative to.
   bootstrap_resamples: 200
+  # Variance of the generated latents per eigen-band of the real ones
+  # (latent_spectrum.png, latent_var_ratio_*): one extra encoder pass over the
+  # real and `generated` fields.
+  latent_spectrum: true
   # Roll a trained stepper out from the generated fields; null -> skip.
   rollout_stepper_dir: null
   rollout_steps: 20

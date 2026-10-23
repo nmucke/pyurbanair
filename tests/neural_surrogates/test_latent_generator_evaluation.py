@@ -286,3 +286,36 @@ def test_aggregate_report_applies_declared_tolerances() -> None:
         {"ae_recon": ok["ae_recon"], "generated": {}}, reference, tol
     )
     assert len(rep["acceptance"]["failures"]) == 4
+
+
+# --------------------------------------------------------------------------- #
+# Latent spectrum
+# --------------------------------------------------------------------------- #
+
+
+def test_latent_spectrum_measures_generated_variance_in_the_real_basis() -> None:
+    rng = np.random.default_rng(3)
+    d = 40
+    basis, _ = np.linalg.qr(rng.standard_normal((d, d)))
+    eig = np.logspace(1, -6, d)  # a tail down to near-empty directions
+
+    def draw(n: int, variances: np.ndarray) -> np.ndarray:
+        coords = rng.standard_normal((n, d)) * np.sqrt(variances)
+        tokens = 0.3 + coords @ basis.T  # (n, D), mean off zero
+        return tokens.T.reshape(1, d, n, 1, 1)  # (B, D, Zl, Yl, Xl)
+
+    real = ge.merge_latent_moments([ge.latent_moments(draw(20000, eig))])
+    noisy = eig.copy()
+    noisy[20:] = 1.0  # unit noise in the bottom half, as a confined generator
+    spec = ge.latent_spectrum(real, ge.latent_moments(draw(20000, noisy)), (20,))
+    assert np.allclose(spec["real"], eig, rtol=0.05)
+    assert list(spec["bands"]) == ["1_20", "21_40"]
+    assert spec["bands"]["1_20"] == pytest.approx(1.0, rel=0.05)
+    expected_tail = np.exp(np.mean(np.log(1.0 / eig[20:])))
+    assert spec["bands"]["21_40"] == pytest.approx(expected_tail, rel=0.05)
+    # Batches merge to the pooled moments; bands past D are dropped.
+    a, b = draw(300, eig), draw(500, eig)
+    merged = ge.merge_latent_moments([ge.latent_moments(a), ge.latent_moments(b)])
+    pooled = ge.latent_moments(np.concatenate([a, b], axis=2))
+    assert merged["n"] == 800 and np.allclose(merged["outer"], pooled["outer"])
+    assert list(ge.latent_spectrum(merged, merged)["bands"]) == ["1_32", "33_40"]

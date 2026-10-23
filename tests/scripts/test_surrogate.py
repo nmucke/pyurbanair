@@ -203,6 +203,62 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
     assert isinstance(model.velocity_net, AdaLNVelocityNet)
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "design",
+    [
+        # Design A: narrow adaLN trunk + per-token head, clean-sample prediction.
+        [
+            "architecture.velocity_conditioning=adaln",
+            "+architecture.head_hidden=32",
+            "+architecture.head_layers=1",
+            "+architecture.prediction=data",
+        ],
+        # Design B: D-wide residual stream, narrow attention, shifted time grid.
+        [
+            "architecture.velocity_conditioning=adaln_bottleneck",
+            "+architecture.mlp_hidden=32",
+            "+architecture.time_shift=3.0",
+        ],
+    ],
+    ids=["design_a", "design_b"],
+)
+def test_full_reach_latent_generator_trains_samples_and_evaluates(
+    tmp_path: pathlib.Path, trained: dict[str, Any], design: list[str]
+) -> None:
+    """A sub-D net with the Gaussian skip trains from the cache (which stores
+    the second moment), rebuilds strictly, and goes through the evaluation."""
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path,
+        trained,
+        "architecture.hidden_size=16",
+        "+architecture.gaussian_skip=true",
+        *design,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert model.gaussian_skip and "gaussian_skip=True" in model.extra_repr()
+    eig = model.latent_pca_eig
+    assert torch.isfinite(eig).all() and float(eig.min()) > 0
+    assert not torch.equal(model.latent_pca_basis, torch.eye(len(eig)))
+
+    ev = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator.model_dir={model_dir}",
+        "latent_generator.max_snapshots=2",
+        "latent_generator.num_steps_sweep=[2]",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(ev)
+    summary = json.loads(
+        (pathlib.Path(ev.latent_generator.output_dir) / "summary.json").read_text()
+    )
+    assert np.isfinite(summary["scalars"]["generated"]["w1"])
+    assert all(np.isfinite(r) for r in summary["latent_spectrum"]["var_ratio"].values())
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)
@@ -366,6 +422,15 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+    spectrum = summary["latent_spectrum"]
+    assert spectrum["var_ratio"] and all(
+        np.isfinite(r) and r > 0 for r in spectrum["var_ratio"].values()
+    )
+    assert len(spectrum["real_eigenvalues"]) == len(spectrum["generated_variance"])
+    with open(out / "metrics.csv") as f:
+        generated = next(r for r in csv.DictReader(f) if r["source"] == "generated")
+    assert all(f"latent_var_ratio_{b}" in generated for b in spectrum["var_ratio"])
+    assert (out / "latent_spectrum.png").exists()
 
 
 def test_evaluate_latent_generator_decode_modes_and_samplers(
