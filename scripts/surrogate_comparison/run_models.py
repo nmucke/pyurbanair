@@ -42,6 +42,13 @@ rollouts then also carry `inlet_turbulence_apply: input`.
 its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y), for uDALES' y-periodic domains.
 It is then recorded in models.yaml and the rollouts' `periodic_y` attr (1).
+
+Both settings apply to every model. A `models` entry may instead be a mapping
+`{dir: <model dir>, inlet_turbulence: {...}, periodic_y: ...}` whose keys
+override them for that model only, e.g. inlet turbulence fed back to the DFT
+alone:
+
+    'models=[model_weights/local_fno,{dir:model_weights/dft_s,periodic_y:true,inlet_turbulence:{enabled:true,apply:input}}]'
 """
 
 from __future__ import annotations
@@ -82,7 +89,9 @@ def run(cfg: DictConfig) -> None:
     shutil.rmtree(out / "rollouts", ignore_errors=True)
     (out / "models.yaml").unlink(missing_ok=True)
 
-    labels = _labels(list(cfg.models))
+    entries = [_model_entry(entry, cfg) for entry in cfg.models]
+    labels = _labels([d for d, _ in entries])
+    settings = dict(zip(labels, (s for _, s in entries)))
     signatures = _check_same_data(
         {
             label: OmegaConf.load(pathlib.Path(d) / "config.yaml")
@@ -90,7 +99,7 @@ def run(cfg: DictConfig) -> None:
         }
     )
     models = {
-        label: load_model(d, dev, periodic_y=cfg.periodic_y)
+        label: load_model(d, dev, periodic_y=settings[label].periodic_y)
         for label, d in labels.items()
     }
     first_cfg = next(iter(models.values()))[1]
@@ -123,8 +132,13 @@ def run(cfg: DictConfig) -> None:
         params = data._params[sample]
         geometry = data.geometry_for(sample)
         frames = _frame_coords(data, sample, start, steps)
-        inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
+        forcings: dict[str, Any] = {}  # one per distinct setting
         for label, (model, _) in models.items():
+            its = settings[label]
+            key = OmegaConf.to_yaml(its.inlet_turbulence)
+            if key not in forcings:
+                forcings[key] = inlet_turbulence(its.inlet_turbulence, data, sample)
+            inlet = forcings[key]
             pred, seconds = _rollout(
                 model,
                 window,
@@ -134,7 +148,7 @@ def run(cfg: DictConfig) -> None:
                 steps,
                 dev,
                 inlet,
-                cfg.inlet_turbulence.apply == "input",
+                its.inlet_turbulence.apply == "input",
             )
             timings[label][0] += seconds
             timings[label][1] += max(steps - 1, 1)
@@ -153,13 +167,13 @@ def run(cfg: DictConfig) -> None:
                 },
             )
             if inlet is not None:  # "truth": the truth run's own realization
-                seed = cfg.inlet_turbulence.seed
+                seed = its.inlet_turbulence.seed
                 ds.attrs["inlet_turbulence_seed"] = (
                     "truth" if seed is None else str(seed)
                 )
-                if cfg.inlet_turbulence.apply == "input":
+                if its.inlet_turbulence.apply == "input":
                     ds.attrs["inlet_turbulence_apply"] = "input"
-            if cfg.periodic_y:
+            if its.periodic_y:
                 ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,17 +192,39 @@ def run(cfg: DictConfig) -> None:
                     "data": signatures[label],
                 }
                 | (
-                    {"inlet_turbulence": cfg.inlet_turbulence}
-                    if cfg.inlet_turbulence.enabled
+                    {"inlet_turbulence": settings[label].inlet_turbulence}
+                    if settings[label].inlet_turbulence.enabled
                     else {}
                 )
-                | ({"periodic_y": True} if cfg.periodic_y else {})
+                | ({"periodic_y": True} if settings[label].periodic_y else {})
                 for label, (model, _) in models.items()
             }
         ),
         out / "models.yaml",
     )
     print(f"Saved rollouts in {out}")
+
+
+def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, DictConfig]:
+    """A `models` entry's folder and its `inlet_turbulence` / `periodic_y`:
+    the run's, overridden by the entry's own keys if it is a mapping."""
+    run_settings = OmegaConf.create(
+        {"inlet_turbulence": cfg.inlet_turbulence, "periodic_y": cfg.periodic_y}
+    )
+    if not isinstance(entry, DictConfig):
+        return str(entry), run_settings
+    own = OmegaConf.to_container(entry)
+    assert isinstance(own, dict)
+    model_dir = own.pop("dir", None)
+    unknown = set(own) - set(run_settings)
+    if model_dir is None or unknown:
+        raise ValueError(
+            "a mapping in `models` needs `dir` and may only set "
+            f"{sorted(run_settings)}, got {sorted(entry)}"
+        )
+    merged = OmegaConf.merge(run_settings, own)
+    assert isinstance(merged, DictConfig)
+    return str(model_dir), merged
 
 
 def _labels(model_dirs: list[str]) -> dict[str, str]:

@@ -276,6 +276,53 @@ def test_run_models_inlet_turbulence_input(
             )
 
 
+def test_run_models_per_model_settings(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """A mapping entry overrides the run's settings for that model only: the
+    DFT gets the forcing fed back, the Local-FNO stays the default run's."""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{{dir:{models[1]},"
+        "inlet_turbulence:{enabled:true,apply:input}}]",
+        f"data_dir={corpus}",
+        "max_steps=2",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    assert recorded.dft.inlet_turbulence == {
+        "enabled": True,
+        "seed": None,
+        "apply": "input",
+    }
+    assert "inlet_turbulence" not in recorded.local_fno
+    name = pathlib.Path("sample_0000.nc")
+    forced = xarray.load_dataset(run_dir / "rollouts" / "dft" / name)
+    assert forced.attrs["inlet_turbulence_apply"] == "input"
+    plain = xarray.load_dataset(run_dir / "rollouts" / "local_fno" / name)
+    ref = xarray.load_dataset(comparison_run / "rollouts" / "local_fno" / name)
+    assert "inlet_turbulence_seed" not in plain.attrs
+    for var in ("u", "v", "w"):
+        np.testing.assert_allclose(
+            plain[var].values, ref[var].values[:2], rtol=1e-5, atol=1e-6
+        )
+        dft = xarray.load_dataset(comparison_run / "rollouts" / "dft" / name)
+        assert not np.allclose(forced[var].values[1], dft[var].values[1]), var
+
+    with pytest.raises(ValueError, match="needs `dir`"):
+        run_models(
+            session_root,
+            tmp_path / "bad",
+            f"models=[{{dir:{models[1]},max_steps:1}}]",
+        )
+
+
 def test_run_models_periodic_y(
     tmp_path: pathlib.Path,
     session_root: pathlib.Path,

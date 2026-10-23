@@ -16,6 +16,8 @@ split: test
 # Training-data root to evaluate on; null: the first model's training data.
 data_dir: null
 # Trained model folders (config.yaml + weights.pt), all trained on the same data.
+# An entry may be {dir: <folder>, inlet_turbulence: {...}, periodic_y: ...}: its
+# keys override the two settings below for that model only.
 models: []
 # Trajectories of the split to compare; null: every trajectory.
 sample_indices: null
