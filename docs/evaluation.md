@@ -261,7 +261,7 @@ Read these with their limits:
   `desroziers` cover the assimilated sensors only.
 - **Resolved stresses only.** TKE and u′w′ are the resolved parts; the outputs
   carry no SGS stress. Fair within one solver; across solvers (Round 2 of
-  [sgs_discrepancy_twin_tests.md](plans/sgs_discrepancy_twin_tests.md)) the
+  [sgs_discrepancy_twin_tests.md](archive/plans/sgs_discrepancy_twin_tests.md)) the
   two codes resolve different fractions.
 - **The near-cutoff band partly measures numerics.** Across solvers the two
   codes' numerical dissipation differs near 2Δ, so a mismatch there is not

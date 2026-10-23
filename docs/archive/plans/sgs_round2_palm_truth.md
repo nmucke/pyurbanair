@@ -6,7 +6,7 @@ and revisions" below); DA runs not started. Written 2026-10-12 against
 follows Round 1 and Round 1b
 ([sgs_discrepancy_twin_tests.md](sgs_discrepancy_twin_tests.md),
 [sgs_twin_round1b_error_model.md](sgs_twin_round1b_error_model.md); results in
-`docs/research/sgs_twin_tests_2026-10/` on `exp/sgs-twin-tests`).
+`docs/archive/research/sgs_twin_tests_2026-10/` on `exp/sgs-twin-tests`).
 
 ## Question
 

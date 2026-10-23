@@ -7,7 +7,7 @@ posterior's grid (a truth on another grid is interpolated onto its centres,
 its spectra onto its wavenumbers); the figures show the final window; the
 per-level RMSE in `metrics.yaml` is the RMS over windows; `compute_metrics.py`
 takes `assimilation.replica_dir=<dir>` on its command line for existing runs. Written 2026-10-08 against `5eba7bc`. This
-adds what [sgs_discrepancy_twin_tests.md](../sgs_discrepancy_twin_tests.md) needs
+adds what [sgs_discrepancy_twin_tests.md](../../archive/plans/sgs_discrepancy_twin_tests.md) needs
 to judge its runs. It is also needed for any assimilation run with turbulent
 inflow.
 
