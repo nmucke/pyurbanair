@@ -173,15 +173,13 @@ def run(cfg: DictConfig) -> None:
             obs_extra,
         )
 
-        # Saved ensemble states, one at a time, the posterior last; the next
-        # window starts from its final frame (a copy, so no window state stays
-        # referenced into the next window).
+        # Saved ensemble states, one at a time; the next window starts from the
+        # posterior's final frame (a copy, so no window state stays referenced
+        # into the next window).
         for step in [*keep_steps, num_steps]:
             name = state_names.get(step, f"step_{step}")
-            states = smoother.get_state(step)
-            states.to_netcdf(windows_dir / f"window_{w}_{name}_state.nc")
-        state = states.isel(time=-1).copy(deep=True)
-        del states
+            smoother.save_state(step, windows_dir / f"window_{w}_{name}_state.nc")
+        state = smoother.final_frame()
 
         # Next window's prior: the posterior, extrapolated if time-varying.
         if is_dynamic and w < num_windows - 1:

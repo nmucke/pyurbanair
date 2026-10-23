@@ -145,6 +145,8 @@ class _OnDiskToyEnsembleModel(_ToyEnsembleModel):
         self.results_dir = results_dir
 
     def set_results_dir(self, results_dir: pathlib.Path) -> None:
+        # Creates it, as the real ensemble models do.
+        results_dir.mkdir(parents=True, exist_ok=True)
         self.results_dir = results_dir
 
     def run_ensemble(
@@ -1055,6 +1057,25 @@ def test_dynamic_path_applies_the_filters_own_pruning_semantics(
     )
 
     assert sorted(p.name for p in root.iterdir()) == ["cycle_0", "cycle_2"]
+
+
+def test_on_disk_smoother_leaves_no_step_files(tmp_path: pathlib.Path) -> None:
+    """The hybrid keeps no ESMDA step (no ``keep_steps``, no final forecast):
+    each step's forecast files are deleted once its update is done."""
+    root = tmp_path / "smoother"
+    root.mkdir()
+    model = _OnDiskToyEnsembleModel(_WINDOW_FRAMES, root)
+    hybrid = FilterSmoothing(
+        smoother=_static_smoother(model),
+        filter=_filter(_ToyEnsembleModel(num_frames=_CYCLE_FRAMES), "joint"),
+    )
+    hybrid.run(
+        state=_initial_state(),
+        params=_static_prior(),
+        observations=_observation_batches(),
+    )
+    assert model.calls == 2  # both ESMDA steps forecast on disk
+    assert not list(root.rglob("state_*.nc"))
 
 
 # ---------------------------------------------------------------------------

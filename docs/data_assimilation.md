@@ -417,6 +417,13 @@ is dropped once its Kalman update is computed (not retained in memory, its step
 directory deleted on disk), so the peak does not grow with `num_steps`. The
 kept states are released when the next `_analysis` starts. Each kept state
 keeps its own attrs (e.g. pyudales' per-member `model_discrepancy_by_member`).
+`save_state(step, path)` writes one to NetCDF (on disk streamed member by
+member, so the ensemble is never in memory) and `final_frame()` returns the
+posterior's last frame (on disk read one frame per member); `run_smoother.py`
+uses only these two. On disk, unkept step directories are always deleted and
+every `step_*/` is cleared when a window starts (pruning was opt-in before), so
+a library caller that reads step directories after a window must list those
+steps in `keep_steps`. Asking for a step that was not kept raises `ValueError`.
 
 **`_compute_kalman_update`**. Implements the standard ESMDA perturbed-
 observation update:

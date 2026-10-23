@@ -17,6 +17,7 @@ from data_assimilation.filtering.analysis import (
     stochastic_enkf_update,
     validate_variances,
 )
+from data_assimilation.io import concat_member_files, last_frames
 from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import (
@@ -419,6 +420,17 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             self.forward_model.results_dir if self.forward_model.save_on_disk else None
         )
 
+    def _kept_step_files(self, step: int) -> list[pathlib.Path]:
+        """Check that ``step`` was kept; on disk its per-member files."""
+        if step != self.num_steps and step not in self.keep_steps:
+            raise ValueError(
+                f"ESMDA step {step} was not kept: only the posterior (step "
+                f"{self.num_steps}) and keep_steps {list(self.keep_steps)} are."
+            )
+        if not self.forward_model.save_on_disk:
+            return []
+        return self._get_sorted_state_files(self.base_results_dir / f"step_{step}")
+
     def get_state(self, step: int) -> xarray.Dataset:
         """The last window's ensemble state at one ESMDA step.
 
@@ -426,11 +438,28 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         posterior and the ``keep_steps`` are available: held in memory, or
         read from their per-member files in on-disk save mode.
         """
+        files = self._kept_step_files(step)
         if not self.forward_model.save_on_disk:
             return self._kept_states[step]
-        files = self._get_sorted_state_files(self.base_results_dir / f"step_{step}")
         members = [_load_dataset(f) for f in files]
         return xarray.concat(members, dim="ensemble", join="override")
+
+    def save_state(self, step: int, path: pathlib.Path) -> None:
+        """Write ``get_state(step)`` to NetCDF; on disk one member at a time,
+        so the whole ensemble is never in memory."""
+        files = self._kept_step_files(step)
+        if not self.forward_model.save_on_disk:
+            self._kept_states[step].to_netcdf(path)
+        else:
+            concat_member_files(files, path)
+
+    def final_frame(self) -> xarray.Dataset:
+        """The posterior's last time frame (a copy; on disk only that frame is
+        read per member): the next window's warm start."""
+        files = self._kept_step_files(self.num_steps)
+        if not self.forward_model.save_on_disk:
+            return self._kept_states[self.num_steps].isel(time=-1).copy(deep=True)
+        return last_frames(files)
 
     def _compute_kalman_update(
         self,
