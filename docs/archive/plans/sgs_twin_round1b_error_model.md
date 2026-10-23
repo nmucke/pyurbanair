@@ -3,7 +3,7 @@
 Status: proposed, not run. Written 2026-10-10 against `3b279f3` (main, with the
 #183 attribute fix). It follows Round 1
 ([sgs_discrepancy_twin_tests.md](sgs_discrepancy_twin_tests.md); report in
-`docs/research/sgs_twin_tests_2026-10/` on `exp/sgs-twin-tests`), and comes
+`docs/archive/research/sgs_twin_tests_2026-10/` on `exp/sgs-twin-tests`), and comes
 before Round 2 (PALM truth).
 
 ## Why

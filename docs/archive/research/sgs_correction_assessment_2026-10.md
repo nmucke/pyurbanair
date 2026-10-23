@@ -1,7 +1,7 @@
 # Why the SGS correction does not help, and where to go next
 
 October 2026 · Follows the SGS twin study (Rounds 1, 1b and 2; report on
-branch `exp/sgs-twin-tests`, `docs/research/sgs_twin_tests_2026-10/`).
+branch `exp/sgs-twin-tests`, `docs/archive/research/sgs_twin_tests_2026-10/`).
 Updated 14 October 2026 after the cross-model parity work (PR #201, PR #202):
 §5 says what that work changed, and §6 replaces the earlier list of directions.
 
