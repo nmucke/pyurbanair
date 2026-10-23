@@ -771,7 +771,7 @@ default, so default runs are unchanged.
 
 The boundary condition, outflow buffer, inflow profile, nudging and inlet
 turbulence values are shared with pypalm through `flow` in
-`configs/common.yaml` (cases override it: `xie_and_castro` sets a 20 m buffer,
+`configs/common.yaml` (cases override it: `xie_and_castro` sets a 40 m buffer,
 `xie_and_castro_periodic` periodic without inlet turbulence). The item-by-item
 audit, the residual differences (SGS closure above all, the open lid, the
 initial state) and the recommended spin-up per setup are in
@@ -856,6 +856,15 @@ xie_and_castro. That collapse is the outflow, not the closure:
   face (z = 1 m) after ~380 s; a 40 m buffer makes that run stable. A case
   without a buffer, or with buildings close to `xmax`, needs one before its
   SGS constant is lowered.
+- 20 m is not enough at c = 0.12 (2026-10-21; 6 m/s, z0 0.1, 120 s spin-up +
+  600 s, 4 seeds per arm). Backflow bursts still got through in 3 of 40 runs:
+  u at the face fell to about -25 m/s, |U| reached 21 m/s at x = 73-79 m, and
+  the run recovered by itself in ~50 s without tripping the dt watchdog. With
+  40 or 60 m there were none in 36 runs. Without bursts, 20 m also inflated
+  street-level TKE at x = 65-79 m 2-5x at 40° (+10-40 % at 10°); 40 m and 60 m
+  agree within the replica noise there, and upstream of x ≈ 55 m the buffer
+  changes nothing. The case default is therefore 40 m (+18 % wall time;
+  60 m costs +45 %).
 - Why not the literature 0.07 (`Cs ≈ 0.17`, Lilly's value for a sharp
   spectral cut-off)? CD2 does not dissipate at the grid scale, and at 0.07
   energy piles up there. Spanwise spectra of u' at z = 9 m (inflow_outflow,
@@ -944,9 +953,20 @@ of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),
 not at a half cell as in PALM. If `ln(d/z0) <= 1` (d <= e·z0) the velocity is
 taken from a reconstruction point further out, and if that is still too close
 the section gets **no wall stress at all** (`modibm.f90` `ibmwallfun`,
-silently). On the 2 m xie_and_castro grid most sections have d = 1 m (w: 2 m),
-the closest 0.2 m: only 0.5% fall back for z0 up to 0.2 m, 41% from z0 =
-0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
+silently). On the 2 m xie_and_castro grid the ground sections have d = 1 m,
+but **every wall section has d = 2 m** (u, v and w) and the roofs 0.2-1.8 m
+(2.8 m roof: 0.2, 6.4: 0.6, 10: 1.0, 13.6: 1.4, 17.2: 1.8). The cube faces
+(x, y = 5 + 10n) and those roofs lie off the grid faces, while the IBM blocks
+the flow at the voxel faces, 1 m from the first fluid point, exactly as PALM's
+topography does (same 12 m blocks, same roofs 2/6/10/14/18 m). So uDALES
+applies the wall law 1 m further out than the wall it actually resolves, and
+over the true facet areas (10 m faces), not the blocked ones. On the same flow
+that is ~0.5x PALM's wall friction and ~0.65x its roof friction at the same
+z0; ground is the same. It is what makes uDALES' canopy faster than PALM's and
+what a cross-model z0 estimate absorbs (`docs/pypalm.md` § "Cross-model
+parity", wall treatment). For a wall, ln(2/z0') = ln(1/z0) at z0' = 2 z0. The
+reconstruction fallback hits the 0.2 m roof sections from z0 = 0.074 m (6% of
+the roof area), and 41% of all sections from z0 = 0.37 m (1 m/e). `_apply_roughness` warns when more than a quarter of the
 sections lie within e·z0. In the tiny test case (1 m cells) a z0 of 0.01 -> 0.1
 lowers the time-mean first-cell u by ~4% (1.00 -> 0.97 m/s).
 
