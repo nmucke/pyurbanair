@@ -149,6 +149,7 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
         ("filtering", [], "static prior_params"),
         ("smoother", ["params@prior_params=static"], "smoothing.smoother is"),
         ("smoother", ["assimilation.params_to_estimate=[nope]"], "does not define"),
+        ("smoother", ["assimilation.save_states=every"], "save_states must be"),
         (
             "smoother",
             [

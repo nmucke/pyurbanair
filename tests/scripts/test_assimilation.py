@@ -200,6 +200,112 @@ def test_saved_reference_states(
         )
 
 
+# Per assimilation.save_states: the state files each window holds besides the
+# posterior, with smoothing.num_steps=3 (step 0 the prior, 1..2 intermediate).
+SAVE_STATES: dict[str, set[str]] = {
+    "posterior": set(),
+    "prior": {"prior_state"},
+    "all": {"prior_state", "step_1_state", "step_2_state"},
+}
+# What every smoother window writes whatever save_states is.
+WINDOW_FILES = {"prior_params", "posterior_params", "posterior_state", "obs"}
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def save_states_runs(
+    tmp_path_factory: pytest.TempPathFactory,
+    session_root: pathlib.Path,
+    trained: Any,
+) -> Any:
+    """Smoother runs keyed by (save_states, on_disk), each run once per module;
+    save_states None is the default run (no override)."""
+    runs: dict[tuple[str | None, bool], pathlib.Path] = {}
+
+    def run(save_states: str | None, on_disk: bool) -> pathlib.Path:
+        if (save_states, on_disk) not in runs:
+            extra = (
+                []
+                if save_states is None
+                else [f"assimilation.save_states={save_states}"]
+            )
+            cfg = compose(
+                "assimilation",
+                "+test=assimilation",
+                *SURROGATE,
+                *surrogate(session_root),
+                "assimilation.num_windows=2",
+                "smoothing.num_steps=3",
+                f"assimilation.ensemble_save_on_disk={str(on_disk).lower()}",
+                *extra,
+                root=tmp_path_factory.mktemp(f"save_states_{save_states}_{on_disk}"),
+            )
+            load_script("scripts/run_smoother.py").run(cfg)
+            runs[save_states, on_disk] = (
+                pathlib.Path(cfg.paths.results_dir) / "smoother"
+            )
+        return runs[save_states, on_disk]
+
+    return run
+
+
+def _window_files(run_dir: pathlib.Path, w: int) -> set[str]:
+    prefix = f"window_{w}_"
+    names = {p.name for p in (run_dir / "windows").glob(f"{prefix}*.nc")}
+    return {n[len(prefix) : -len(".nc")] for n in names}
+
+
+@pytest.mark.parametrize("on_disk", [False, True])  # type: ignore[misc]
+@pytest.mark.parametrize("save_states", SAVE_STATES)  # type: ignore[misc]
+def test_save_states_window_files(
+    save_states: str, on_disk: bool, save_states_runs: Any
+) -> None:
+    """Each window holds exactly the requested states, the same in memory and
+    on disk; the posterior does not depend on which other states are saved."""
+    run_dir = save_states_runs(save_states, on_disk)
+    for w in range(2):
+        assert _window_files(run_dir, w) == WINDOW_FILES | SAVE_STATES[save_states]
+    assert not (run_dir / "_ensemble_states").exists()
+
+    windows = run_dir / "windows"
+    memory = save_states_runs(save_states, False) / "windows"
+    posterior = save_states_runs("posterior", on_disk) / "windows"
+    for w in range(2):
+        for kind in SAVE_STATES[save_states] | {"posterior_state"}:
+            name = f"window_{w}_{kind}.nc"
+            state = xarray.load_dataset(windows / name)
+            assert state.sizes["ensemble"] == 2, name
+            # Memory and disk mode write the same files.
+            xarray.testing.assert_identical(state, xarray.load_dataset(memory / name))
+        name = f"window_{w}_posterior_state.nc"
+        xarray.testing.assert_identical(
+            xarray.load_dataset(windows / name), xarray.load_dataset(posterior / name)
+        )
+    if save_states == "all":
+        # The saved steps are distinct forecasts, not copies of one.
+        prior = xarray.load_dataset(windows / "window_0_prior_state.nc")
+        for kind in ("step_1_state", "step_2_state", "posterior_state"):
+            other = xarray.load_dataset(windows / f"window_0_{kind}.nc")
+            assert not prior.u.equals(other.u), kind
+
+
+@pytest.mark.parametrize("on_disk", [False, True])  # type: ignore[misc]
+def test_default_saves_only_the_posterior_state(
+    on_disk: bool, save_states_runs: Any
+) -> None:
+    """The default writes the files it wrote before save_states existed: no
+    prior or intermediate states, and the same as an explicit posterior."""
+    default = save_states_runs(None, on_disk)
+    explicit = save_states_runs("posterior", on_disk)
+    assert {p.name for p in (default / "windows").iterdir()} == {
+        f"window_{w}_{kind}.nc" for w in range(2) for kind in WINDOW_FILES
+    }
+    for path in sorted((default / "windows").iterdir()):
+        xarray.testing.assert_identical(
+            xarray.load_dataset(path),
+            xarray.load_dataset(explicit / "windows" / path.name),
+        )
+
+
 ADAPTIVE = "observation.adaptive_error=${adaptive_error.desroziers}"
 
 
