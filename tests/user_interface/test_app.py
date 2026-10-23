@@ -44,6 +44,8 @@ class FakeTools(Tools):
         self.release = threading.Event()
         self.release.set()
         self.frame_ancestor: str | None = None
+        self.times = 150  # more than RenderOptions.max_frames
+        self.render_options: Any = None
 
     def prepare_city_case(self, bbox: Any, **kwargs: Any) -> dict[str, Any]:  # type: ignore[override]
         if self.prepare_error is not None:
@@ -142,12 +144,17 @@ class FakeTools(Tools):
         if artifact_id is None:
             return {"artifacts": [{"artifact_id": 0, "path": "state.nc"}]}
         return {
-            "dimensions": {"time": 3},
+            "dimensions": {"time": self.times},
             "variables": {"v": {}, "u": {}},
-            "coordinates": {"time": {"size": 3, "first": "0.0", "last": "2.0"}},
+            "coordinates": {
+                "time": {"size": self.times, "first": "0.0", "last": "2.0"}
+            },
         }
 
-    def render_simulation(self, run_id: str, idempotency_key: str, **_: Any) -> Any:  # type: ignore[override]
+    def render_simulation(
+        self, run_id: str, idempotency_key: str, options: Any = None
+    ) -> Any:
+        self.render_options = options
         self.jobs_state["vis1"] = "succeeded"
         return {"visualization_id": "vis1"}
 
@@ -397,11 +404,12 @@ def test_run_lifecycle(app: App, monkeypatch: pytest.MonkeyPatch) -> None:
     tools.jobs_state["run1"] = "succeeded"
     body = request(app, "api/runs/run1")[1]
     assert body["results"]["variables"] == ["u", "v"]
-    assert body["results"]["times"]["size"] == 3
+    assert body["results"]["times"]["size"] == 150
     (listed,) = request(app, "api/runs")[1]["runs"]
     assert set(listed) == {"run_id", "case_id", "model", "state", "created"}
     status, body, _ = request(app, "api/runs/run1/visualization", raw=b"")
     assert status == 200 and body == {"visualization_id": "vis1"}
+    assert tools.render_options == {"stride": 3}  # 150 saved times in 60 frames
     assert request(app, "api/visualizations/vis1")[1] == {
         "state": "succeeded",
         "viewer_url": "http://127.0.0.1:1/v/",
