@@ -8,21 +8,35 @@ defaults:
 
 # Which model scripts/surrogate/train.py builds.
 task: latent_generator
-name: latent_generator_s
+# A new name per architecture: resume=true would load a checkpoint of another net.
+name: latent_generator_s_h176
 autoencoder_dir: ${paths.weights_dir}/tadpole_ae_s
 architecture:
   _target_: neural_surrogates.TadpoleLatentGenerator
   param_history_steps: 12
-  hidden_size: null
-  n_layers: 4
-  num_heads: 8
+  hidden_size: 176  # the DFT B sub-network width; needs latent_skip
+  n_layers: 6
+  num_heads: 8  # head width 22, as in the DFT
   time_embed_dim: 64
-  film_hidden: 512  # width of the conditioning embedding every adaLN block reads
-  mlp_ratio: 2  # 177M with adaln at hidden 1536; the width cannot drop below D
+  film_hidden: 256  # width of the conditioning embedding every adaLN block reads
+  mlp_ratio: 4  # 5.5M trainable with adaln at hidden 176 on the B AE (177M at hidden 1536)
   use_checkpoint: false
   # How params + flow time reach the velocity net: input_film (one FiLM on the
-  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block).
+  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block), or
+  # adaln_bottleneck (design B: a D-wide residual stream, attention at
+  # hidden_size, a per-token D -> mlp_hidden -> D MLP per block).
   velocity_conditioning: adaln
+  # Full-rank skip (a(tau) + Linear(t_emb)) * z_tau, so hidden_size can be < D.
+  latent_skip: true
+  # Optional, absent = off (docs/neural_surrogates.md, "Compact velocity nets"):
+  # gaussian_skip: true         # v = exact velocity of N(mu, Sigma) per token + net
+  #                             #   (replaces latent_skip: set at most one)
+  # gaussian_eig_floor: 1.0e-4  # floor of the Sigma eigenvalues
+  # head_hidden: 1024           # design A (adaln): per-token head of this width
+  # head_layers: 2              #   adaLN MLP blocks in that head
+  # mlp_hidden: 512             # design B (adaln_bottleneck): per-token MLP width
+  # prediction: data            # net predicts the clean sample (absent: velocity)
+  # time_shift: 3.0             # SD3 shift of the flow-time grid (absent: 1)
   normalize: true
   num_sampling_steps: 50
   latent_eps: 1.0e-6

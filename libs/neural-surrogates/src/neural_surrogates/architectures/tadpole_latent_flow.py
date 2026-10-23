@@ -46,10 +46,19 @@ With a hidden width ``H < D`` the final ``Linear(H, D)`` confines every
 velocity to a fixed ``H``-dimensional subspace, so the ODE could never remove
 the initial noise in the orthogonal complement. Here ``hidden_size`` defaults
 to ``D`` (rounded up to a multiple of ``num_heads``) and an explicit value
-below ``D`` is rejected. The output projection keeps its zero initialisation:
-the hidden activations are nonzero, so it receives gradients on the very first
-step; conditioning layers (param FiLM, geometry FiLM) start receiving
-gradients once it has moved.
+below ``D`` is rejected -- unless another path adds a full-rank term: the
+per-token head (``head_hidden``), the ``D``-wide residual stream of
+``"adaln_bottleneck"``, the Gaussian skip (``gaussian_skip``, the exact flow
+of a full-covariance Gaussian added to the net's output), or the per-channel
+``latent_skip``, ``v += (a(tau) + Linear(t_emb)) * z_tau`` (like the DFT's
+``latent_residual_scale * z`` residual), with ``a(tau)`` the exact velocity
+coefficient for ``z1 ~ N(0, I)`` (:func:`_gaussian_flow_coeff`) and the
+``Linear`` zero-initialised. Only the head and the bottleneck let the
+conditioning reach every direction; the two skips are fixed per-token linear
+flows. The output projection keeps its zero initialisation: the hidden
+activations are nonzero, so it receives gradients on the very first step;
+conditioning layers (param FiLM, geometry FiLM) start receiving gradients once
+it has moved.
 
 Conditioning vector = ``concat(z-scored flattened params_hist (Hp*P),
 sinusoidal embedding of the flow time tau (time_embed_dim))``. With
@@ -117,6 +126,10 @@ _TAU_SCALE = 1000.0
 # (NFE) per step: Euler 1, Heun 2 (predictor + corrector on every interval).
 SAMPLER_NFE_PER_STEP = {"euler": 1, "heun": 2}
 
+# prediction="data" turns the clean-sample estimate x into the velocity
+# (x - z_tau) / (1 - tau); the denominator is floored here near tau = 1.
+_DATA_PREDICTION_MIN_SIGMA = 0.05
+
 # Hydra bookkeeping keys that may sit in an exported ``architecture`` node.
 _HYDRA_KEYS = ("_target_", "_partial_", "_recursive_", "_convert_", "_args_")
 
@@ -167,6 +180,70 @@ def _sinusoidal_time_embedding(tau: torch.Tensor, dim: int) -> torch.Tensor:
     )
     args = tau.to(torch.float32)[:, None] * _TAU_SCALE * freqs[None, :]
     return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+
+
+def _gaussian_flow_coeff(tau: torch.Tensor) -> torch.Tensor:
+    """``a(tau) = (2 tau - 1) / (tau^2 + (1 - tau)^2)``, same shape as ``tau``.
+
+    With the path ``z_tau = (1 - tau) z0 + tau z1`` and ``z0, z1 ~ N(0, I)``,
+    the exact optimal velocity is ``a(tau) * z_tau``: the full-rank part of the
+    velocity on z-scored latents. ``a(0) = -1``, ``a(1/2) = 0``, ``a(1) = 1``.
+    """
+    return (2.0 * tau - 1.0) / (tau**2 + (1.0 - tau) ** 2)
+
+
+def time_shift_warp(sigma: Any, alpha: float) -> Any:
+    """Noise-level warp ``sigma' = alpha*sigma / (1 + (alpha-1)*sigma)``.
+
+    Monotone on ``[0, 1]`` with ``0 -> 0`` and ``1 -> 1``; ``alpha > 1`` spends
+    more of the flow time near the noise end (SD3 / RAE time shift). Works on
+    floats and tensors alike.
+    """
+    return alpha * sigma / (1.0 + (alpha - 1.0) * sigma)
+
+
+def _gaussian_gain(
+    tau: torch.Tensor, eig: torch.Tensor, prediction: str
+) -> torch.Tensor:
+    """Per-direction gain of the exact flow of a Gaussian ``N(mu, P diag(eig) P^T)``.
+
+    With ``s = tau^2 eig + (1-tau)^2`` (the variance of ``z_tau`` along each
+    eigendirection): ``"velocity"`` -> ``c = (tau eig - (1-tau)) / s`` (the
+    coefficient of ``E[z1 - z0 | z_tau]``), ``"data"`` -> ``g = tau eig / s``
+    (that of ``E[z1 | z_tau]``). ``tau`` broadcasts against ``eig``.
+    """
+    one_minus = 1.0 - tau
+    denom = tau * tau * eig + one_minus * one_minus
+    if prediction == "data":
+        return tau * eig / denom
+    return (tau * eig - one_minus) / denom
+
+
+def gaussian_flow(
+    z: torch.Tensor,
+    tau: torch.Tensor,
+    basis: torch.Tensor,
+    eig: torch.Tensor,
+    mean: torch.Tensor,
+    prediction: str = "velocity",
+) -> torch.Tensor:
+    """Exact posterior mean of the linear flow ``z_tau = (1-tau) z0 + tau z1``
+    with ``z0 ~ N(0, I)`` and ``z1 ~ N(mean, basis diag(eig) basis^T)``.
+
+    ``z`` is token-last ``(..., D)``; ``tau`` broadcasts against ``z[..., :1]``.
+    With ``y = P^T (z - tau mean)`` and ``m = P^T mean``:
+
+    * ``prediction="velocity"``: ``E[z1 - z0 | z] = P (m + c(tau) * y)``;
+    * ``prediction="data"``:     ``E[z1 | z] = mean + P (g(tau) * y)``.
+
+    No ``1/(1-tau)`` appears, so both are finite on all of ``[0, 1]``.
+    """
+    y = (z - tau * mean) @ basis
+    gain = _gaussian_gain(tau, eig, prediction)
+    if prediction == "data":
+        return mean + (gain * y) @ basis.T
+    m = mean @ basis
+    return (m + gain * y) @ basis.T
 
 
 def _plain(obj: Any) -> Any:
@@ -220,7 +297,9 @@ class TadpoleLatentGenerator(nn.Module):
     hidden_size:
         Velocity-net width; ``None`` -> ``D`` rounded up to a multiple of
         ``num_heads``. An explicit value below ``D`` is rejected (see the
-        module docstring).
+        module docstring) unless another path adds a full-rank term:
+        ``head_hidden``, ``velocity_conditioning="adaln_bottleneck"``,
+        ``gaussian_skip`` or ``latent_skip``.
     n_layers, num_heads, mlp_ratio, film_hidden:
         Velocity-net transformer / FiLM-MLP sizing (with ``"adaln"``,
         ``film_hidden`` is the width of the conditioning embedding).
@@ -229,7 +308,41 @@ class TadpoleLatentGenerator(nn.Module):
         applies the conditioning vector once, as a FiLM on the input tokens,
         and the geometry as a spatial FiLM. ``"adaln"``: an
         ``AdaLNVelocityNet`` with per-block adaLN-Zero conditioning and
-        additive per-token geometry.
+        additive per-token geometry. ``"adaln_bottleneck"``: an
+        ``AdaLNBottleneckVelocityNet`` whose residual stream stays ``D`` wide,
+        with attention at width ``hidden_size`` and a per-token MLP of width
+        ``mlp_hidden``.
+    head_hidden, head_layers:
+        ``"adaln"`` only: a per-token adaLN MLP head of width ``head_hidden``
+        with ``head_layers`` blocks on ``concat(hidden, z)``, added to the
+        output projection. ``None`` builds no head.
+    mlp_hidden:
+        MLP width of the ``"adaln_bottleneck"`` blocks (required there,
+        rejected elsewhere).
+    gaussian_skip:
+        Add the exact flow of a per-token Gaussian ``N(mu, Sigma)`` of the
+        z-scored state latents (buffers ``latent_pca_basis`` /
+        ``latent_pca_eig`` / ``latent_pca_mean``, installed with the latent
+        statistics) to the network's output, so the untrained model already
+        samples that Gaussian (see :func:`gaussian_flow`). ``False`` builds no
+        buffers.
+    gaussian_eig_floor:
+        Floor of the covariance eigenvalues ``latent_pca_eig``.
+    prediction:
+        ``"velocity"`` (default): the network predicts the velocity.
+        ``"data"``: it predicts the clean sample ``x`` (plus the Gaussian's
+        ``E[z1 | z_tau]`` with ``gaussian_skip``), turned into the velocity
+        ``(x - z_tau) / max(1 - tau, 0.05)``; the loss stays the velocity MSE.
+    time_shift:
+        ``alpha`` of :func:`time_shift_warp`: training draws ``sigma = 1 - tau``
+        uniformly and warps it, and :meth:`sample` steps on the same warped
+        grid. ``1`` (default) is the plain uniform schedule.
+    latent_skip:
+        Add the per-channel skip ``(a(tau) + Linear(t_emb)) * z_tau`` to the
+        velocity (``Linear`` zero-initialised), which allows ``hidden_size <
+        D``. ``False`` (default) builds no extra modules, so older artifacts
+        load strictly. Exclusive with ``gaussian_skip``, which generalises it
+        to the full latent covariance.
     use_checkpoint:
         Recompute velocity-transformer blocks during backward to reduce
         activation memory.
@@ -264,10 +377,18 @@ class TadpoleLatentGenerator(nn.Module):
         mlp_ratio: int = 4,
         use_checkpoint: bool = False,
         velocity_conditioning: str = "input_film",
+        latent_skip: bool = False,
         num_sampling_steps: int = 50,
         latent_eps: float = 1e-6,
         max_latent_tokens: int | None = None,
         normalize: bool = True,
+        head_hidden: int | None = None,
+        head_layers: int = 2,
+        mlp_hidden: int | None = None,
+        gaussian_skip: bool = False,
+        gaussian_eig_floor: float = 1e-4,
+        prediction: str = "velocity",
+        time_shift: float = 1.0,
     ) -> None:
         super().__init__()
 
@@ -287,10 +408,31 @@ class TadpoleLatentGenerator(nn.Module):
             )
         if float(latent_eps) <= 0:
             raise ValueError(f"latent_eps must be > 0, got {latent_eps}")
-        if velocity_conditioning not in ("input_film", "adaln"):
+        if velocity_conditioning not in ("input_film", "adaln", "adaln_bottleneck"):
             raise ValueError(
-                "velocity_conditioning must be 'input_film' or 'adaln', got "
-                f"{velocity_conditioning!r}"
+                "velocity_conditioning must be 'input_film', 'adaln' or "
+                f"'adaln_bottleneck', got {velocity_conditioning!r}"
+            )
+        if head_hidden is not None and velocity_conditioning != "adaln":
+            raise ValueError(
+                "head_hidden (the per-token head) needs velocity_conditioning="
+                f"'adaln', got {velocity_conditioning!r}"
+            )
+        if (mlp_hidden is None) != (velocity_conditioning != "adaln_bottleneck"):
+            raise ValueError(
+                "mlp_hidden is required with velocity_conditioning="
+                "'adaln_bottleneck' and only used there; got mlp_hidden="
+                f"{mlp_hidden!r} with {velocity_conditioning!r}"
+            )
+        if prediction not in ("velocity", "data"):
+            raise ValueError(
+                f"prediction must be 'velocity' or 'data', got {prediction!r}"
+            )
+        if not float(time_shift) > 0:
+            raise ValueError(f"time_shift must be > 0, got {time_shift}")
+        if not float(gaussian_eig_floor) > 0:
+            raise ValueError(
+                f"gaussian_eig_floor must be > 0, got {gaussian_eig_floor}"
             )
         if max_latent_tokens is not None and int(max_latent_tokens) < 1:
             raise ValueError(
@@ -353,13 +495,40 @@ class TadpoleLatentGenerator(nn.Module):
 
         # -- velocity network ----------------------------------------------- #
         d = self.state_latent_dim
-        if hidden_size is not None and int(hidden_size) < d:
+        self.latent_skip = bool(latent_skip)
+        self.head_hidden = None if head_hidden is None else int(head_hidden)
+        self.head_layers = int(head_layers)
+        self.mlp_hidden = None if mlp_hidden is None else int(mlp_hidden)
+        self.gaussian_skip = bool(gaussian_skip)
+        self.gaussian_eig_floor = float(gaussian_eig_floor)
+        self.prediction = prediction
+        self.time_shift = float(time_shift)
+        full_reach = (
+            self.head_hidden is not None
+            or velocity_conditioning == "adaln_bottleneck"
+            or self.gaussian_skip
+            or self.latent_skip
+        )
+        if self.latent_skip and prediction != "velocity":
+            raise ValueError(
+                "latent_skip is a velocity-space skip; use it with "
+                "prediction='velocity' (gaussian_skip supports 'data')."
+            )
+        if self.latent_skip and self.gaussian_skip:
+            raise ValueError(
+                "latent_skip and gaussian_skip both add the Gaussian flow of the "
+                "latents; set one (gaussian_skip uses the full covariance)."
+            )
+        if hidden_size is not None and int(hidden_size) < d and not full_reach:
             raise ValueError(
                 f"hidden_size={hidden_size} is below the latent width D={d}: the "
                 "final Linear(hidden_size, D) would confine every velocity to a "
                 f"{hidden_size}-dimensional subspace and the flow could never "
                 "remove the initial noise in its complement. Use hidden_size=None "
-                f"(-> D) or a value >= {d}."
+                f"(-> D) or a value >= {d}, or add a full-rank path: head_hidden "
+                "(with 'adaln') or velocity_conditioning='adaln_bottleneck' (the "
+                "conditioning then reaches every direction), or gaussian_skip / "
+                "latent_skip (a fixed Gaussian flow outside the net)."
             )
         h = d if hidden_size is None else int(hidden_size)
         heads = int(num_heads)
@@ -379,6 +548,13 @@ class TadpoleLatentGenerator(nn.Module):
                 AdaLNVelocityNet,
             )
 
+            # The head kwargs only when a head is asked for: absent, the net
+            # is built exactly as before.
+            head: dict[str, Any] = (
+                {}
+                if self.head_hidden is None
+                else {"head_hidden": self.head_hidden, "head_layers": self.head_layers}
+            )
             self.velocity_net = AdaLNVelocityNet(
                 in_dim=d,
                 cond_dim=self.cond_dim,
@@ -387,6 +563,24 @@ class TadpoleLatentGenerator(nn.Module):
                 num_heads=heads,
                 hidden_size=h,
                 mlp_ratio=self.mlp_ratio,
+                film_hidden=int(film_hidden),
+                use_checkpoint=self.use_checkpoint,
+                **head,
+            )
+        elif velocity_conditioning == "adaln_bottleneck":
+            from neural_surrogates.architectures.latent_velocity_adaln import (
+                AdaLNBottleneckVelocityNet,
+            )
+
+            assert self.mlp_hidden is not None
+            self.velocity_net = AdaLNBottleneckVelocityNet(
+                in_dim=d,
+                cond_dim=self.cond_dim,
+                geom_cond_dim=self.geom_cond_dim,
+                n_layers=self.n_layers,
+                num_heads=heads,
+                hidden_size=h,
+                mlp_hidden=self.mlp_hidden,
                 film_hidden=int(film_hidden),
                 use_checkpoint=self.use_checkpoint,
             )
@@ -403,6 +597,12 @@ class TadpoleLatentGenerator(nn.Module):
                 use_checkpoint=self.use_checkpoint,
                 geom_cond_dim=self.geom_cond_dim,
             )
+        if self.latent_skip:
+            # Learned per-channel correction to a(tau); zero at init, so the
+            # skip starts as the exact Gaussian velocity a(tau) * z_tau.
+            self.velocity_skip = nn.Linear(self.time_embed_dim, d)
+            nn.init.zeros_(self.velocity_skip.weight)
+            nn.init.zeros_(self.velocity_skip.bias)
 
         # -- normalisation buffers ------------------------------------------ #
         self.register_buffer("latent_mean", torch.zeros(self.working_latent_dim))
@@ -410,6 +610,12 @@ class TadpoleLatentGenerator(nn.Module):
         self.register_buffer("latent_stats_installed", torch.tensor(False))
         self.register_buffer("param_mean", torch.zeros(self.n_params))
         self.register_buffer("param_std", torch.ones(self.n_params))
+        if self.gaussian_skip:
+            # N(mean, basis diag(eig) basis^T) of the z-scored state latents,
+            # installed together with the latent statistics.
+            self.register_buffer("latent_pca_basis", torch.eye(d))
+            self.register_buffer("latent_pca_eig", torch.ones(d))
+            self.register_buffer("latent_pca_mean", torch.zeros(d))
 
         # -- physical conditioning schema ------------------------------------ #
         # Plain attributes, NOT buffers: they are provenance the artifact's
@@ -525,8 +731,30 @@ class TadpoleLatentGenerator(nn.Module):
             f"velocity_conditioning={self.velocity_conditioning!r}, "
             f"geom_cond_dim={self.geom_cond_dim}, "
             f"spatial_mode={self.spatial_mode!r}, "
-            f"trainable_params={self.count_parameters():,}"
+            f"trainable_params={self.count_parameters():,}" + self._knobs_repr()
         )
+
+    def _knobs_repr(self) -> str:
+        """The skip / full-reach / objective knobs that are set (none by default)."""
+        knobs = []
+        if self.latent_skip:
+            knobs.append("latent_skip=True")
+        if self.head_hidden is not None:
+            knobs += [
+                f"head_hidden={self.head_hidden}",
+                f"head_layers={self.head_layers}",
+            ]
+        if self.mlp_hidden is not None:
+            knobs.append(f"mlp_hidden={self.mlp_hidden}")
+        if self.gaussian_skip:
+            knobs.append(
+                f"gaussian_skip=True, gaussian_eig_floor={self.gaussian_eig_floor:g}"
+            )
+        if self.prediction != "velocity":
+            knobs.append(f"prediction={self.prediction!r}")
+        if self.time_shift != 1.0:
+            knobs.append(f"time_shift={self.time_shift:g}")
+        return "".join(f", {k}" for k in knobs)
 
     @property
     def _device(self) -> torch.device:
@@ -581,14 +809,61 @@ class TadpoleLatentGenerator(nn.Module):
 
     @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def set_latent_normalization(
-        self, mean: Any, std: Any, *, eps: float | None = None
+        self,
+        mean: Any,
+        std: Any,
+        *,
+        eps: float | None = None,
+        second_moment: Any = None,
     ) -> None:
         """Install per-channel latent statistics for all ``D + D_geom`` working
-        latent channels (state first, then geometry) and mark them installed."""
+        latent channels (state first, then geometry) and mark them installed.
+
+        With ``gaussian_skip``, ``second_moment`` -- the raw ``E[x x^T]``
+        ``(D, D)`` of the **state** latents over the same cells as ``mean`` --
+        is required, and the Gaussian buffers are filled from it (see
+        :meth:`_set_latent_gaussian`); without it, it is ignored.
+        """
+        if self.gaussian_skip and second_moment is None:
+            raise ValueError(
+                "gaussian_skip=True needs the raw second moment of the state "
+                "latents (second_moment=E[x x^T], (D, D)) with the latent "
+                "statistics: use compute_latent_normalization, or a latent "
+                "cache that stores it (prepared by this version of the code)."
+            )
         eps = self.latent_eps if eps is None else float(eps)
         self.latent_mean.copy_(self._to_buffer(self.latent_mean, mean))
         self.latent_std.copy_(self._to_buffer(self.latent_std, std, eps))
+        if self.gaussian_skip:
+            self._set_latent_gaussian(mean, second_moment)
         self.latent_stats_installed.fill_(True)
+
+    def _set_latent_gaussian(self, mean: Any, second_moment: Any) -> None:
+        """Fill ``latent_pca_*`` with the z-scored state-latent Gaussian.
+
+        ``Sigma_z = S^-1 (E[x x^T] - m m^T) S^-1`` with ``S = diag(std)`` the
+        installed (floored) state std, eigendecomposed in float64 with the
+        eigenvalues floored at ``gaussian_eig_floor``; the mean is
+        ``(m - latent_mean) / latent_std`` (zero up to the buffers' fp32
+        rounding).
+        """
+        d = self.state_latent_dim
+        m = torch.as_tensor(mean, dtype=torch.float64).reshape(-1)[:d].cpu()
+        m2 = torch.as_tensor(second_moment, dtype=torch.float64).cpu()
+        if tuple(m2.shape) != (d, d):
+            raise ValueError(
+                f"second_moment must be (D, D) = ({d}, {d}), got {tuple(m2.shape)}"
+            )
+        if not torch.isfinite(m2).all():
+            raise ValueError("second_moment must be finite")
+        std = self.latent_std[:d].to(torch.float64).cpu()
+        cov = (m2 - torch.outer(m, m)) / torch.outer(std, std)
+        eig, basis = torch.linalg.eigh(0.5 * (cov + cov.T))
+        eig = eig.clamp_min(self.gaussian_eig_floor)
+        z_mean = (m - self.latent_mean[:d].to(torch.float64).cpu()) / std
+        self.latent_pca_basis.copy_(basis)
+        self.latent_pca_eig.copy_(eig)
+        self.latent_pca_mean.copy_(z_mean)
 
     @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def compute_latent_normalization(
@@ -604,11 +879,19 @@ class TadpoleLatentGenerator(nn.Module):
         sums / sums of squares accumulated in float64 over the batch and
         spatial axes for **every** working latent channel; standard deviations
         are floored at ``latent_eps`` and near-constant channels are reported.
+        With ``gaussian_skip`` the sum of the state latents' outer products is
+        accumulated as well (float64), for the Gaussian buffers.
         Returns the installed ``(mean, std)``.
         """
         n_work = self.working_latent_dim
         total = torch.zeros(n_work, dtype=torch.float64, device=self._device)
         total_sq = torch.zeros_like(total)
+        d = self.state_latent_dim
+        outer = (
+            torch.zeros(d, d, dtype=torch.float64, device=self._device)
+            if self.gaussian_skip
+            else None
+        )
         count = 0
         n_batches = 0
         for batch in batches:
@@ -621,6 +904,9 @@ class TadpoleLatentGenerator(nn.Module):
             w64 = work.to(torch.float64)
             total += w64.sum(dim=(0, 2, 3, 4))
             total_sq += (w64 * w64).sum(dim=(0, 2, 3, 4))
+            if outer is not None:
+                tokens = w64[:, :d].transpose(0, 1).reshape(d, -1)
+                outer += tokens @ tokens.T
             count += w64.shape[0] * w64.shape[2] * w64.shape[3] * w64.shape[4]
             n_batches += 1
         if count == 0:
@@ -644,7 +930,9 @@ class TadpoleLatentGenerator(nn.Module):
             f"TadpoleLatentGenerator: latent stats over {n_batches} batches, "
             f"{count} latent cells, {near_constant} near-constant channel(s)"
         )
-        self.set_latent_normalization(mean, std)
+        self.set_latent_normalization(
+            mean, std, second_moment=None if outer is None else outer / count
+        )
         return self.latent_mean.clone(), self.latent_std.clone()
 
     def _require_latent_stats(self, what: str) -> None:
@@ -1109,7 +1397,45 @@ class TadpoleLatentGenerator(nn.Module):
             )
         cond_vec = self._conditioning_vector(tau, params_hist)
         v: torch.Tensor = self.velocity_net(z, cond_vec, geom_cond=geom_cond)
-        return v
+        if self.latent_skip:
+            # The sinusoidal tau embedding is the tail of cond_vec.
+            t_emb = cond_vec[:, -self.time_embed_dim :]
+            coeff = _gaussian_flow_coeff(tau.to(torch.float32))[
+                :, None
+            ] + self.velocity_skip(t_emb)
+            v = v + coeff[:, :, None, None, None].to(v.dtype) * z.to(v.dtype)
+        if not self.gaussian_skip and self.prediction == "velocity":
+            return v
+        return self._velocity_from_net(z, tau, v)
+
+    def _velocity_from_net(
+        self, z: torch.Tensor, tau: torch.Tensor, out: torch.Tensor
+    ) -> torch.Tensor:
+        """The velocity from the net's output ``out`` under ``gaussian_skip`` /
+        ``prediction="data"``, in fp32 outside autocast.
+
+        ``"velocity"``: ``v = v_G + out``. ``"data"``: ``x = x_G + out`` (``x =
+        out`` without the skip) and ``v = (x - z) / max(1 - tau, 0.05)``.
+        ``v_G`` / ``x_G`` are :func:`gaussian_flow` of the installed Gaussian.
+        """
+        with self._autocast_off(z.device):
+            z32 = z.to(torch.float32)
+            x = out.to(torch.float32)
+            if self.gaussian_skip:
+                tokens = z32.flatten(2).transpose(1, 2)  # (B, N, D)
+                base = gaussian_flow(
+                    tokens,
+                    tau.to(torch.float32).view(-1, 1, 1),
+                    self.latent_pca_basis,
+                    self.latent_pca_eig,
+                    self.latent_pca_mean,
+                    self.prediction,
+                )
+                x = x + base.transpose(1, 2).reshape(z32.shape)
+            if self.prediction == "velocity":
+                return x
+            t = tau.to(torch.float32).view(-1, 1, 1, 1, 1)
+            return (x - z32) / (1.0 - t).clamp_min(_DATA_PREDICTION_MIN_SIGMA)
 
     # -- training objective ------------------------------------------------- #
 
@@ -1171,6 +1497,8 @@ class TadpoleLatentGenerator(nn.Module):
         tau = torch.rand(
             z1.shape[0], generator=generator, device=z1.device, dtype=z1.dtype
         )
+        if self.time_shift != 1.0:  # sigma = 1 - tau uniform, then warped
+            tau = 1.0 - time_shift_warp(1.0 - tau, self.time_shift)
         t = tau.view(-1, 1, 1, 1, 1)
         z_tau = (1.0 - t) * z0 + t * z1
         v_target = z1 - z0
@@ -1178,6 +1506,18 @@ class TadpoleLatentGenerator(nn.Module):
         return v_pred, v_target
 
     # -- sampling ----------------------------------------------------------- #
+
+    def sampling_times(self, steps: int) -> list[float]:
+        """The ``steps + 1`` flow times ``0 = tau_0 < ... < tau_steps = 1`` of
+        :meth:`sample`: ``i / steps``, or with ``time_shift`` the training
+        warp ``tau_i = 1 - warp(1 - i / steps)``."""
+        dt = 1.0 / steps
+        if self.time_shift == 1.0:
+            return [i * dt for i in range(steps + 1)]
+        return [
+            1.0 - time_shift_warp(1.0 - i / steps, self.time_shift)
+            for i in range(steps + 1)
+        ]
 
     @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def sample(
@@ -1194,10 +1534,12 @@ class TadpoleLatentGenerator(nn.Module):
         decode_spatial_mode: str | None = None,
         decode_halo_size: int | None = None,
         sampler: str = "euler",
-    ) -> torch.Tensor:
+        return_latents: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Generate physical states ``(B, C, d, h, w)`` for ``params_hist``.
 
-        Integrates from ``tau = 0`` to ``1`` in ``num_steps`` equal intervals in
+        Integrates from ``tau = 0`` to ``1`` in ``num_steps`` intervals
+        (equal, or warped by ``time_shift``; see :meth:`sampling_times`) in
         fp32 (autocast disabled), then :meth:`decode_latents`. ``sampler``:
         ``"euler"`` (explicit Euler, ``num_steps`` velocity evaluations) or
         ``"heun"`` (explicit trapezoidal: an Euler predictor, then the average
@@ -1212,6 +1554,9 @@ class TadpoleLatentGenerator(nn.Module):
         ``decode_spatial_mode`` / ``decode_halo_size`` override the decoder's
         spatial processing (``None``: the AE's trained policy; see
         :meth:`_resolve_decode_mode`); the sampled latents are the same.
+        ``return_latents=True`` returns ``(states, z)`` with ``z`` the
+        normalised latents ``(B, D, Zl, Yl, Xl)`` after the last step, the
+        ones that were decoded.
         """
         self._check_conditioning_schema(param_names, history_dt_seconds, "sample")
         if initial_noise is not None and generator is not None:
@@ -1251,21 +1596,24 @@ class TadpoleLatentGenerator(nn.Module):
             z = torch.randn(shape, generator=generator, device=device)
 
         with self._autocast_off(device):
-            dt = 1.0 / steps
+            taus = self.sampling_times(steps)
             for i in range(steps):
-                tau = torch.full((b,), i * dt, device=device, dtype=torch.float32)
+                # Uniform grid: the constant 1/steps, as before time_shift.
+                dt = 1.0 / steps if self.time_shift == 1.0 else taus[i + 1] - taus[i]
+                tau = torch.full((b,), taus[i], device=device, dtype=torch.float32)
                 if sampler == "euler":
                     z = z + dt * self.velocity(z, tau, params_hist, cond)
                     continue
                 v = self.velocity(z, tau, params_hist, cond)
                 tau_next = torch.full(
-                    (b,), (i + 1) * dt, device=device, dtype=torch.float32
+                    (b,), taus[i + 1], device=device, dtype=torch.float32
                 )
                 v_next = self.velocity(z + dt * v, tau_next, params_hist, cond)
                 z = z + (0.5 * dt) * (v + v_next)
-            return self.decode_latents(
+            fields = self.decode_latents(
                 z,
                 cond,
                 spatial_mode=decode_spatial_mode,
                 halo_size=decode_halo_size,
             )
+        return (fields, z) if return_latents else fields
