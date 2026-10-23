@@ -3,7 +3,8 @@
 October 2026 · Follows `sgs_correction_assessment_2026-10.md` §6 (directions 3
 and 4). Code: PR #208 (`roughness_length` for uDALES and PALM, new sensor
 layout) and PR #211 (log and bounded parameter
-transforms). Runs: `/export/scratch2/ntm/z0_experiments/` (local, not in git).
+transforms). Runs: small results in `/export/scratch2/ntm/z0_results_archive/`
+(local, not in git).
 
 **Result.**
 - Both twins recover z0 and are calibrated.
@@ -14,8 +15,10 @@ transforms). Runs: `/export/scratch2/ntm/z0_experiments/` (local, not in git).
   below 5 m, but leaves the field-wide wind and turbulence errors unchanged,
   and the fit doesn't transfer to another inflow angle.
 
-So the cross-model z0 compensates for the uDALES–PALM model difference (most
-likely their wall treatments), not for resolution.
+So the cross-model z0 compensates for the uDALES–PALM model difference, not
+for resolution. The follow-up (below) locates it: uDALES applies its wall law
+2 m from walls PALM resolves at 1 m, and the estimate swings from 0.17 at 10°
+to 0.02 at 40°.
 
 ## Setup
 
@@ -172,13 +175,53 @@ Validation spread/skill is 0.59–0.60 in both arms.
    replica level with or without z0, and the validation variance error gets
    slightly worse with z0.
 
+## Follow-up, 21–23 Oct (seed 1 unless noted; several runs lost to OOM and a crash)
+
+**Outflow buffer.** 20 m let backflow bursts into the bounds in 3 of 40 uDALES
+runs and inflated street-level TKE at x = 65–79 m 2–5× at 40°; 40 m and 60 m
+had no bursts in 36 runs and agree within noise. 40 m is now the
+xie_and_castro default (docs/pyudales.md §7).
+
+**What z0 compensates: the wall-law distance.** On the 2 m grid both codes put
+the first fluid point 1 m from a blocked face, but uDALES evaluates its log
+law at the true facet distance, which for every cube wall in this case is
+2 m (docs/pyudales.md, docs/pypalm.md "Wall treatment"). On the same near-wall
+flow the uDALES law gives PALM's ground stress, 0.65× its roof stress and
+0.47× its wall stress. uDALES on an STL snapped to the grid matches PALM's
+canopy mean u at 1 m (0.85 vs 0.94 m/s; real STL 1.41). In a forward sweep the
+best uDALES z0 against PALM's 0.1 is 0.15–0.17, the DA estimate. With the walls
+matched, a street-level error of the opposite sign remains that no z0 removes
+(SGS or numerics).
+
+**z0 swings with the inflow angle** (PALM truth z0 0.1, inflated error per
+regime from an inflow-only calibration run):
+
+| Inflow | z0 posterior median [5–95 %] |
+|---|---|
+| 10°, 6 m/s | 0.17 [0.11, 0.22] |
+| 40°, 6 m/s | 0.021 [0.011, 0.043] |
+
+An 8× change between two angles: the estimate is a sensor-weighted mix of the
+ground (1×) and wall (about 2.5×) mismatch, not a site property.
+
+**Adaptive observation error** (Desroziers inflation per sensor height, updated
+online from previous windows; preliminary):
+- The inflation settles at about 5× the realisation noise: 0.53 / 0.45 /
+  0.35 m/s at 2 / 8 / 20 m, matching the offline calibration.
+- Inflow only, adaptive error (2 seeds): angle 9.5 / 9.7° and speed 6.18 /
+  6.08 m/s (truth 10°, 6.0 m/s), with spread that covers the truth.
+- Inflow + z0 with the noise-only error (5 of 6 windows): z0 pinned at the
+  0.3 m prior bound with almost no spread, angle 8.3°. Inflow + z0 with the
+  adaptive error has not completed yet.
+
 ## Caveats
 
 - Cross-model seed 1 first failed when one member diverged in window 1 under
   `failure.policy=raise`. It was rerun with `resample_from_successes`.
-- The 20 m outflow buffer doesn't always stop uDALES' outflow backflow at
-  c_vreman 0.12 (transfer TKE outliers). A 40 m buffer, which stabilised a case
-  the 20 m one didn't in the SGS study, is worth checking as the default.
+- The runs above used the 20 m outflow buffer, which doesn't always stop
+  uDALES' outflow backflow at c_vreman 0.12 (transfer TKE outliers); 40 m is
+  now the default.
+- The follow-up DA results are single seeds.
 - The inflated error comes from the same experiment's inflow-only run.
   With real data it would come from earlier windows or a separate period.
 - One truth realisation per model, so seed spread understates truth
@@ -186,14 +229,13 @@ Validation spread/skill is 0.59–0.60 in both arms.
 
 ## Next steps
 
-- **Locate the uDALES–PALM wall-treatment difference** that z0 absorbs, for
-  example by aligning the first-cell distance or comparing the wall stress
-  directly. Only a solver change would remove it, which is out of scope, so
-  in practice it belongs in the observation-error model.
-- **Use z0 as a sensor-level correction only within the conditions it was
-  estimated for,** and re-estimate it per inflow regime. Don't treat it as a
-  site property.
-- **Outflow buffer:** test 40 m against 20 m for uDALES at c_vreman 0.12 (the
-  transfer TKE outliers).
-- **Per-surface z0** (ground vs walls vs roofs) only if a single z0 proves
-  physical. uDALES supports it; PALM would need its urban surface model.
+- **Estimate wall z0 separately from ground/roof z0** in uDALES (per facet
+  type; PALM, the truth, keeps one z0). If the pair agrees across inflow
+  angles, it is a parameterisation that transfers; the single z0 is not.
+- **Finish inflow + z0 with the adaptive error** (2 seeds): does z0 then stay
+  off the bounds with honest spread?
+- **Keep a structural error at street level** for what no parameter fixes;
+  the adaptive error estimates it from innovations, so it applies to real
+  observations.
+- **Use a single z0 only within the conditions it was estimated for.** Don't
+  treat it as a site property.
