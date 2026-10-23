@@ -130,7 +130,6 @@ class BaseSmoothing:
         observations: Observations,
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
-        return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the analysis."""
@@ -142,7 +141,6 @@ class BaseSmoothing:
         params: Optional[xarray.Dataset] = None,
         observations: Optional[Observations] = None,
         return_params_history: bool = False,
-        return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the analysis.
@@ -160,6 +158,5 @@ class BaseSmoothing:
             params=params,
             observations=observations,
             return_params_history=return_params_history,
-            return_state_history=return_state_history,
             final_forecast=final_forecast,
         )

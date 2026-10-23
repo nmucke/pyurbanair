@@ -546,7 +546,7 @@ class BaseFilter:
         self._state_augmentation = StateAugmentation()
 
         # On-disk peak-storage control, set by the caller after construction
-        # (mirrors the smoother's prune_disk_steps / keep_prior_disk_step).
+        # (cf. the smoother's keep_steps).
         self.prune_disk_cycles = False
         self.keep_first_disk_cycle = True
 

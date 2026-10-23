@@ -5,7 +5,7 @@ import os
 import pathlib
 import shutil
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any, Optional
 
 import jax
@@ -17,6 +17,7 @@ from data_assimilation.filtering.analysis import (
     stochastic_enkf_update,
     validate_variances,
 )
+from data_assimilation.io import concat_member_files, last_frames
 from data_assimilation.io import load_dataset as _load_dataset
 from data_assimilation.localization.base import BaseLocalization
 from data_assimilation.observation_operator import (
@@ -219,22 +220,20 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # via a local analysis driven by the strategy's inflation factors.
         self.localization = localization
 
-        # On-disk peak-storage control, set by the caller (e.g. run_smoother.py)
-        # after construction. When ``prune_disk_steps`` is True and the forward
-        # model saves on disk, each ESMDA step's per-member forecast directory is
-        # deleted as soon as its Kalman update is computed -- the warm-start IC
-        # for the next forecast is already carried in memory, and only the prior
-        # (step 0) and posterior (final step) forecasts are re-read by the caller.
-        # ``keep_prior_disk_step`` retains step 0 for the caller to assemble; set
-        # it False when the prior state is not being saved. Together these cap the
-        # on-disk peak at ~2x ensemble_size regardless of ``num_steps`` (instead of
-        # num_steps+1 step directories coexisting until the window ends).
-        self.prune_disk_steps = False
-        self.keep_prior_disk_step = True
+        # The ESMDA steps whose ensemble state the caller reads back with
+        # ``get_state`` after the window (0 the prior forecast, 1..num_steps-1
+        # the intermediate ones), set by the caller (e.g. run_smoother.py) after
+        # construction. The posterior (step ``num_steps``) is always kept. Every
+        # other step's forecast is dropped as soon as its Kalman update is
+        # computed -- not retained in memory, its per-member directory deleted
+        # on disk -- so the peak does not grow with ``num_steps``. The kept
+        # states are released when the next window starts.
+        self.keep_steps: Collection[int] = ()
+        self._kept_states: dict[int, xarray.Dataset] = {}
 
         # Observation-space diagnostics, set by the caller (e.g. run_smoother.py)
         # after construction, same attribute-plumbing pattern as
-        # ``prune_disk_steps``. When ``collect_obs_diagnostics`` is True each
+        # ``keep_steps``. When ``collect_obs_diagnostics`` is True each
         # ``_one_step`` records the predicted observations it materialized, and
         # ``_analysis`` appends one final entry for the posterior forecast --
         # ``num_steps + 1`` entries per window, entry 0 the prior. Off by
@@ -245,11 +244,6 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # Optional H(actual returned trajectory) after final-time smoothing.
         self.collect_analyzed_observations = False
         self.analyzed_pred_obs: np.ndarray | None = None
-        # Each step's state attrs with ``return_state_history`` (entry 0 the
-        # prior, -1 the posterior): per-step provenance such as a backend's
-        # per-member discrepancy coefficients differs between steps, so the
-        # stacked history keeps only the attrs every step shares.
-        self.state_history_attrs: list[dict[str, Any]] = []
 
         if self.forward_model.save_on_disk:
             assert self.forward_model.results_dir is not None
@@ -398,11 +392,11 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
 
         Called once a step's Kalman update is computed, so its per-member forecast
         files are no longer needed (the next forecast warm-starts from the in-memory
-        analyzed IC, and the caller re-reads only the prior/posterior steps). No-op
-        unless on-disk pruning is enabled; ``ignore_errors`` so an already-removed
-        or never-written directory is harmless.
+        analyzed IC, and the caller re-reads only the ``keep_steps`` and the
+        posterior). No-op in memory; ``ignore_errors`` so an already-removed or
+        never-written directory is harmless.
         """
-        if self.forward_model.save_on_disk and self.prune_disk_steps:
+        if self.forward_model.save_on_disk:
             shutil.rmtree(self.base_results_dir / f"step_{step}", ignore_errors=True)
 
     def _record_pred_obs(self, pred_obs: jnp.ndarray) -> None:
@@ -426,11 +420,46 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
             self.forward_model.results_dir if self.forward_model.save_on_disk else None
         )
 
-    def get_state(self, ensemble_member: int, step: int) -> xarray.Dataset:
-        """Get the state for one ensemble member at a given step."""
-        return _load_dataset(
-            self.base_results_dir / f"step_{step}" / f"state_{ensemble_member}.nc"
-        )
+    def _kept_step_files(self, step: int) -> list[pathlib.Path]:
+        """Check that ``step`` was kept; on disk its per-member files."""
+        if step != self.num_steps and step not in self.keep_steps:
+            raise ValueError(
+                f"ESMDA step {step} was not kept: only the posterior (step "
+                f"{self.num_steps}) and keep_steps {list(self.keep_steps)} are."
+            )
+        if not self.forward_model.save_on_disk:
+            return []
+        return self._get_sorted_state_files(self.base_results_dir / f"step_{step}")
+
+    def get_state(self, step: int) -> xarray.Dataset:
+        """The last window's ensemble state at one ESMDA step.
+
+        Step 0 is the prior forecast, ``num_steps`` the posterior. Only the
+        posterior and the ``keep_steps`` are available: held in memory, or
+        read from their per-member files in on-disk save mode.
+        """
+        files = self._kept_step_files(step)
+        if not self.forward_model.save_on_disk:
+            return self._kept_states[step]
+        members = [_load_dataset(f) for f in files]
+        return xarray.concat(members, dim="ensemble", join="override")
+
+    def save_state(self, step: int, path: pathlib.Path) -> None:
+        """Write ``get_state(step)`` to NetCDF; on disk one member at a time,
+        so the whole ensemble is never in memory."""
+        files = self._kept_step_files(step)
+        if not self.forward_model.save_on_disk:
+            self._kept_states[step].to_netcdf(path)
+        else:
+            concat_member_files(files, path)
+
+    def final_frame(self) -> xarray.Dataset:
+        """The posterior's last time frame (a copy; on disk only that frame is
+        read per member): the next window's warm start."""
+        files = self._kept_step_files(self.num_steps)
+        if not self.forward_model.save_on_disk:
+            return self._kept_states[self.num_steps].isel(time=-1).copy(deep=True)
+        return last_frames(files)
 
     def _compute_kalman_update(
         self,
@@ -598,7 +627,6 @@ sensor_observation_coords` (shared with the filtering package); see its
         observations: Observations,
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
-        return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Run one window, committing only a successful posterior forecast.
@@ -607,19 +635,6 @@ sensor_observation_coords` (shared with the filtering package); see its
         forecast. Analysis-only calls and exceptions leave its pre-window state
         intact, so intermediate endpoints cannot leak into a later forecast.
         """
-        if not final_forecast and return_state_history:
-            raise ValueError(
-                "return_state_history requires the final forecast: with "
-                "final_forecast=False there is no posterior state to close "
-                "the history with."
-            )
-        if return_state_history and self.forward_model.save_on_disk:
-            raise ValueError(
-                "return_state_history is not supported in on-disk save mode: "
-                "the per-step states live in the step_{i}/ directories "
-                "(see get_state). Use an in-memory forward model "
-                "(results_dir=None) to collect the state history."
-            )
         self._validate_global_parameters(params)
         replay = getattr(self.forward_model, "forecast_window_replay_enabled", False)
         if replay:
@@ -630,7 +645,6 @@ sensor_observation_coords` (shared with the filtering package); see its
                 observations=observations,
                 state=state,
                 return_params_history=return_params_history,
-                return_state_history=return_state_history,
                 final_forecast=final_forecast,
             )
             if replay:
@@ -656,7 +670,6 @@ sensor_observation_coords` (shared with the filtering package); see its
         observations: Observations,
         state: Optional[xarray.Dataset] = None,
         return_params_history: bool = False,
-        return_state_history: bool = False,
         final_forecast: bool = True,
     ) -> xarray.Dataset | tuple[xarray.Dataset, xarray.Dataset]:
         """Perform the ESMDA analysis loop.
@@ -705,19 +718,18 @@ sensor_observation_coords` (shared with the filtering package); see its
         # the caller may still hold the previous window's list.
         self.pred_obs_history = []
         self.analyzed_pred_obs = None
-        self.state_history_attrs = []
+        # Release the previous window's kept states before the first forecast.
+        self._kept_states = {}
+        for i in range(self.num_steps + 1):
+            self._prune_step_results_dir(i)
 
         params_history: list[xarray.Dataset] = [params] if return_params_history else []
-        state_history: list[xarray.Dataset] = []
 
         for i in range(self.num_steps):
             self._set_step_results_dir(i)
 
             state = self._forecast_step(state=initial_state, params=params)
             params = self.forward_model.apply_failure_substitutions_to_params(params)
-
-            if return_state_history:
-                state_history.append(state)
 
             updated_state, params = self._one_step(
                 params=params,
@@ -740,14 +752,14 @@ sensor_observation_coords` (shared with the filtering package); see its
             if return_params_history:
                 params_history.append(params)
 
-            # Free this step's on-disk forecast now that its update is done. The
-            # next forecast warm-starts from the in-memory analyzed IC, and only
-            # the prior (step 0, kept when ``keep_prior_disk_step``) and the
-            # posterior (final step, written after the loop) are re-read by the
-            # caller -- so every intermediate step is safe to drop here. No-op
-            # unless on-disk pruning is enabled.
-            if not (i == 0 and self.keep_prior_disk_step):
+            # Keep or free this step's forecast now that its update is done: the
+            # next forecast warm-starts from the analyzed IC, and the caller
+            # re-reads only the ``keep_steps`` and the posterior.
+            if i not in self.keep_steps:
                 self._prune_step_results_dir(i)
+            elif state is not None:
+                self._kept_states[i] = state
+            state = None
 
             logger.info("ESMDA step %d completed", i)
 
@@ -792,9 +804,8 @@ sensor_observation_coords` (shared with the filtering package); see its
                     )
                 ).T
 
-            if return_state_history:
-                assert state is not None
-                state_history.append(state)
+            if state is not None:
+                self._kept_states[self.num_steps] = state
 
         # Build return values
         result_params = (
@@ -808,16 +819,6 @@ sensor_observation_coords` (shared with the filtering package); see its
 
         if self.forward_model.save_on_disk:
             return result_params
-
-        if return_state_history:
-            self.state_history_attrs = [dict(step.attrs) for step in state_history]
-            result_state = xarray.concat(
-                state_history,
-                dim="esmda_step",
-                join="override",
-                combine_attrs="drop_conflicts",
-            )
-            return result_params, result_state
 
         assert state is not None
         return result_params, state

@@ -161,9 +161,6 @@ def run(cfg: DictConfig) -> None:
         **({"num_time_points": int(params.sizes["time"])} if is_dynamic else {}),
     )
     smoother.collect_obs_diagnostics = True
-    # On disk, delete forecasts once used: the filter makes the window's state.
-    smoother.prune_disk_steps = True
-    smoother.keep_prior_disk_step = False
     enkf = instantiate(
         cfg.filtering,
         observation_operator=operator,

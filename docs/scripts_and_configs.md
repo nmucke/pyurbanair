@@ -268,8 +268,12 @@ All DA run dirs share one layout: `config.yaml`, `run_info.yaml`,
 `windows/window_{w}_{prior,posterior}_{params,state}.nc` plus
 `window_{w}_obs.nc`. The smoother assimilates each window's observations with
 `smoothing.num_steps` ESMDA steps and starts the next window from the
-posterior. The filter forecasts `assimilation.assimilate_every_n_step` frames,
-then assimilates the last one; windows only chunk the run. The hybrid runs the
+posterior. `assimilation.save_states` picks the smoother's state files, the
+same in memory and on disk: `posterior` (default), `prior` (+
+`window_{w}_prior_state.nc`) or `all` (+ `window_{w}_step_{i}_state.nc` for
+every intermediate ESMDA step). The filter forecasts
+`assimilation.assimilate_every_n_step` frames, then assimilates the last one;
+windows only chunk the run. The hybrid runs the
 smoother for the parameters, then the filter over the same observations for the
 state (`window_{w}_filter_obs.nc`, and `window_{w}_filter_params.nc` in
 `mode=joint`). See each script's docstring for the exact files.

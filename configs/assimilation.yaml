@@ -58,10 +58,12 @@ assimilation:
   # one in-memory ensemble Dataset.
   ensemble_save_on_disk: false
   # --- smoothing only ---
-  # Persist the per-window PRIOR state ensemble (windows/window_*_prior_state.nc).
-  # The posterior state and both parameter ensembles are always saved; this is
-  # the large artifact, so it is off by default.
-  save_prior_state: false
+  # Per-window state ensembles to save (the large artifacts). Both parameter
+  # ensembles are always saved. posterior: window_*_posterior_state.nc only;
+  # prior: + window_*_prior_state.nc (ESMDA step 0); all: + every intermediate
+  # step, window_*_step_{i}_state.nc for i = 1..num_steps-1. Unsaved steps are
+  # freed as soon as their update is done, in memory and on disk.
+  save_states: posterior
   # --- filtering only ---
   # Assimilate every n-th observation frame. Must divide
   # `time.simulation_time / time.output_frequency`.

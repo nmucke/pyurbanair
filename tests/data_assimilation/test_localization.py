@@ -605,35 +605,6 @@ def test_get_states_on_disk_selects_initial_frame(tmp_path: pathlib.Path) -> Non
     np.testing.assert_allclose(on_disk["u"].values, [[0.0] * 3, [1.0] * 3])
 
 
-@pytest.mark.parametrize(  # type: ignore[misc]
-    ("save_on_disk", "final_forecast"), [(True, True), (False, False)]
-)
-def test_unsupported_state_history_raises_before_replay(
-    save_on_disk: bool, final_forecast: bool
-) -> None:
-    """Silently returning params-only while the caller expects a state history
-    crashes downstream; the unsupported combination must fail loudly instead."""
-    from types import SimpleNamespace
-
-    from data_assimilation.smoothing.esmda import ParameterESMDA
-
-    obj = ParameterESMDA.__new__(ParameterESMDA)
-    obj.forward_model = SimpleNamespace(
-        save_on_disk=save_on_disk,
-        forecast_window_replay_enabled=True,
-        begin_forecast_window=lambda: pytest.fail(
-            "Invalid history requests must fail before starting solver replay."
-        ),
-    )
-    with pytest.raises(ValueError, match="return_state_history"):
-        obj._analysis(
-            params=None,
-            observations=None,
-            return_state_history=True,
-            final_forecast=final_forecast,
-        )
-
-
 def test_a_zero_inflation_is_excluded_by_both_local_analyses() -> None:
     """The two local analyses agree on what "not a taper" means.
 
