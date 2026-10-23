@@ -755,7 +755,7 @@ both at nx = 60 with the buffer, or 5 for uDALES and 2-4 for PALM periodic).
 | pressure gradient, Coriolis | dpdx = dpdy = 0, `lcoriol` off | `omega = 0` | aligned |
 | top | free-slip u, v; w open (`BCtopm = 3`, forced by uDALES under inflow-outflow; 1 periodic) | free-slip u, v (`bc_uv_t = 'neumann'` since 2026-10); w = 0 | u, v aligned; w cannot be (PALM has no open lid outside nesting) |
 | lateral | cyclic y | cyclic y | aligned |
-| outflow | convective, 20 m flat buffer (since 2026-10) | radiation + damping (1/s, 4 m), 20 m buffer | different schemes, both outside the bounds |
+| outflow | convective, 40 m flat buffer (20 m before 2026-10-21) | radiation + damping (1/s, 4 m), 40 m buffer | different schemes, both outside the bounds |
 | upstream ground | wall (STL ground extended over the fetch since 2026-10; before it was free-slip) | wall | aligned |
 | walls, roofs, ground | log-law wall function, z0 = 0.05 m (`factypes` type 1) | MOST, `roughness_length = 0.05` m | same law and z0; first point 1 m (dz/2) in both |
 | SGS | Vreman, c = 0.12 (0.24 before 2026-10-14) | Deardorff 1.5-order TKE | cannot be aligned, see below |
@@ -1147,8 +1147,9 @@ cube column. Without a buffer PALM's time-mean u at x = 78 m, z = 1-9 m was
 1.0-1.5 m/s above uDALES's (the damping layer pulls the wake toward the inflow
 profile); with 20 m of buffer in both models the difference is -0.2 m/s, and
 20 vs 40 m changes uDALES by ≤ 0.06 m/s and PALM by its realisation noise
-(array rms 0.10 m/s). `xie_and_castro` therefore sets `flow.outflow_buffer: 20`
-for both backends.
+(array rms 0.10 m/s). `xie_and_castro` set `flow.outflow_buffer: 20` for both
+backends; since 2026-10-21 it is 40 m, because 20 m let rare uDALES backflow
+bursts into the bounds (docs/pyudales.md §7). PALM runs cleanly with 40 m.
 
 The ~15% member divergence on this case (next section, noted 2026-06, 13-23%
 across runs) is very likely the same outflow instability; not yet confirmed by

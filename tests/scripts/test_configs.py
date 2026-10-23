@@ -151,7 +151,11 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
         ("smoother", ["assimilation.params_to_estimate=[nope]"], "does not define"),
         (
             "smoother",
-            ["domain.nx=30", "assim_model.forward_model.ncpu=7"],
+            [
+                "domain.nx=30",
+                "flow.outflow_buffer=null",
+                "assim_model.forward_model.ncpu=7",
+            ],
             "must divide nx",
         ),
         (
