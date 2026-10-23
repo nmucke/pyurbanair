@@ -451,7 +451,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         if not self.forward_model.save_on_disk:
             self._kept_states[step].to_netcdf(path)
         else:
-            concat_member_files(files, path)
+            concat_member_files(
+                files, path, getattr(self.forward_model, "member_attrs", ())
+            )
 
     def final_frame(self) -> xarray.Dataset:
         """The posterior's last time frame (a copy; on disk only that frame is
