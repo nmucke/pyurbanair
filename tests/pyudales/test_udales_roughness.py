@@ -234,6 +234,154 @@ def test_partial_or_mixed_split_raises(
         model._apply_roughness(xarray.Dataset({**PARAMS, **params}))
 
 
+# Facet type, normal and class: a type mixing walls (|n_z| < 0.5) and horizontal
+# facets (ground, roofs, slopes up to 60 deg), a walls-only type, a
+# horizontal-only type and the free-slip bounding walls on both orientations.
+MIXED_FACETS = [
+    (1, "0.0000 0.0000 1.0000", "ground"),
+    (1, "1.0000 0.0000 0.0000", "wall"),
+    (1, "0.0000 0.0000 1.0000", "ground"),  # roof
+    (1, "0.8000 0.0000 0.6000", "ground"),  # 53 deg slope
+    (1, "0.9165 0.0000 0.4000", "wall"),  # 66 deg slope
+    (2, "0.0000 1.0000 0.0000", "wall"),
+    (2, "-1.0000 0.0000 0.0000", "wall"),
+    (-1, "0.0000 0.0000 1.0000", "ground"),
+    (-101, "1.0000 0.0000 0.0000", "free"),
+    (-101, "0.0000 0.0000 -1.0000", "free"),
+]
+SPLIT = {"roughness_length_wall": 0.2, "roughness_length_ground": 0.01}
+
+
+def _mixed_facets(model: ForwardModel) -> pathlib.Path:
+    facets = model.dirs.experiment_dir / f"facets.inp.{model.dirs.experiment_name}"
+    facets.write_text(
+        "# type, normal\n"
+        + "".join(f"{t:<4d} {normal}\n" for t, normal, _ in MIXED_FACETS)
+    )
+    return facets
+
+
+def _facet_types(facets: pathlib.Path) -> list[int]:
+    return np.loadtxt(facets, skiprows=1, usecols=0).astype(int).tolist()
+
+
+def test_split_classifies_every_facet_and_keeps_free_slip(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Only the walls of the mixed type move to the one new type; the walls-only
+    type keeps its id with the wall z0, horizontal types get the ground z0, and
+    the free-slip bounding walls keep their type, z0 = 0 and every other row."""
+    model = _model(tmp_path)
+    facets = _mixed_facets(model)
+    normals = [line.split()[1:] for line in facets.read_text().splitlines()[1:]]
+    before = np.loadtxt(_factypes(model), skiprows=3)
+    model._apply_roughness(xarray.Dataset({**PARAMS, **SPLIT}))
+
+    new = int(before[:, 0].max()) + 1
+    expected = [new if (t, c) == (1, "wall") else t for t, _, c in MIXED_FACETS]
+    assert _facet_types(facets) == expected
+    # Only the type column of facets.inp changes.
+    assert [line.split()[1:] for line in facets.read_text().splitlines()[1:]] == (
+        normals
+    )
+
+    z0 = _z0(model)
+    assert z0[new] == pytest.approx(0.2) and z0[2] == pytest.approx(0.2)
+    assert z0[1] == pytest.approx(0.01) and z0[-1] == pytest.approx(0.01)
+    assert z0[-101] == 0.0
+    after = np.loadtxt(_factypes(model), skiprows=3)
+    # One row added; the rows of the types not in use are untouched.
+    assert len(after) == len(before) + 1
+    in_use = {1, 2, -1, -101}
+    for row in before:
+        if int(row[0]) not in in_use:
+            assert np.array_equal(after[after[:, 0] == row[0]][0], row)
+    free = after[after[:, 0] == -101][0]
+    assert np.array_equal(free, before[before[:, 0] == -101][0])
+    # uDALES counts the factypes rows as the file's lines minus 3 headers.
+    assert len(_factypes(model).read_text().splitlines()) - 3 == len(after)
+
+
+def test_switching_between_single_and_split_z0(tmp_path: pathlib.Path) -> None:
+    """After a split, a single roughness_length writes the same z0 to the wall
+    and the ground types (the walls keep their new type); a later split reuses
+    that type instead of adding another."""
+    model = _model(tmp_path)
+    facets = _mixed_facets(model)
+    model._apply_roughness(xarray.Dataset({**PARAMS, **SPLIT}))
+    split_types = _facet_types(facets)
+    rows = len(np.loadtxt(_factypes(model), skiprows=3))
+    new = max(split_types)
+
+    model._apply_roughness(xarray.Dataset({**PARAMS, "roughness_length": 0.07}))
+    z0 = _z0(model)
+    for t in (1, 2, -1, new):
+        assert z0[t] == pytest.approx(0.07)
+    assert z0[-101] == 0.0
+    assert _facet_types(facets) == split_types
+
+    model._apply_roughness(
+        xarray.Dataset(
+            {**PARAMS, "roughness_length_wall": 0.03, "roughness_length_ground": 0.1}
+        )
+    )
+    z0 = _z0(model)
+    assert z0[new] == pytest.approx(0.03) and z0[2] == pytest.approx(0.03)
+    assert z0[1] == pytest.approx(0.1) and z0[-1] == pytest.approx(0.1)
+    assert _facet_types(facets) == split_types
+    assert len(np.loadtxt(_factypes(model), skiprows=3)) == rows
+
+
+def test_default_leaves_facets_and_factypes_byte_identical(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With walls and ground sharing a type: no knob, or the file's 0.05 as the
+    model default, writes neither file."""
+    for name, kwargs in (("absent", {}), ("default", {"roughness_length": 0.05})):
+        model = _model(tmp_path / name, **kwargs)
+        facets = _mixed_facets(model)
+        before = (_factypes(model).read_bytes(), facets.read_bytes())
+        model._apply_roughness(xarray.Dataset(PARAMS))
+        model._apply_inflow_settings(xarray.Dataset(PARAMS))
+        assert (_factypes(model).read_bytes(), facets.read_bytes()) == before
+
+
+def test_split_params_override_the_model_default_every_window(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Through the per-window path: the split params win over the model
+    config's roughness_length, and a warm window without params re-applies them
+    to inputs put back to their preprocessed state."""
+    model = _model(tmp_path, roughness_length=0.3)
+    facets = _mixed_facets(model)
+    pristine = (_factypes(model).read_bytes(), facets.read_bytes())
+    model._apply_inflow_settings(xarray.Dataset({**PARAMS, **SPLIT}))
+    new = max(_facet_types(facets))
+    assert _z0(model)[new] == pytest.approx(0.2)
+    assert _z0(model)[1] == pytest.approx(0.01)
+    split = (_factypes(model).read_bytes(), facets.read_bytes())
+
+    _factypes(model).write_bytes(pristine[0])
+    facets.write_bytes(pristine[1])
+    model._apply_inflow_settings(None, warm_start=True)
+    assert (_factypes(model).read_bytes(), facets.read_bytes()) == split
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "name, value",
+    [("roughness_length_wall", 0.0), ("roughness_length_ground", np.nan)],
+)
+def test_invalid_split_value_raises_and_writes_nothing(
+    tmp_path: pathlib.Path, name: str, value: float
+) -> None:
+    model = _model(tmp_path)
+    facets = _mixed_facets(model)
+    before = (_factypes(model).read_bytes(), facets.read_bytes())
+    with pytest.raises(ValueError, match=name):
+        model._apply_roughness(xarray.Dataset({**PARAMS, **SPLIT, name: value}))
+    assert (_factypes(model).read_bytes(), facets.read_bytes()) == before
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_rougher_walls_slow_the_near_wall_flow(tmp_path: pathlib.Path) -> None:
     """The tiny case at two z0: the higher one gives the lower near-wall speed."""
@@ -263,3 +411,42 @@ def test_e2e_rougher_walls_slow_the_near_wall_flow(tmp_path: pathlib.Path) -> No
         speeds[z0] = float(u.mean())
     print(f"near-wall mean u by z0: {speeds}")
     assert speeds[0.1] < speeds[0.01]
+
+
+@pytest.mark.integration  # type: ignore[misc]
+def test_e2e_split_wall_and_ground_z0_runs(tmp_path: pathlib.Path) -> None:
+    """The tiny case with separate wall and ground z0: the walls of the cube
+    case's one facet type get their own type with the wall z0, and uDALES runs
+    on the retyped inputs to a finite state."""
+    from hydra.utils import instantiate
+
+    from tests.conftest import compose
+
+    cfg = compose(
+        "forward",
+        "+test=forward",
+        "model=pyudales_stock",
+        "flow.roughness_length=0.05",
+        "time.simulation_time=3.0",
+        "time.spinup_time=3.0",
+        root=tmp_path,
+    )
+    fm = instantiate(cfg.model.forward_model)
+    instantiate(cfg.model.prepare, forward_model=fm)
+    split = {"roughness_length_wall": 0.1, "roughness_length_ground": 0.02}
+    state = fm.run_single(params=xarray.Dataset({**PARAMS, **split}))
+
+    facets = fm.dirs.experiment_dir / f"facets.inp.{fm.dirs.experiment_name}"
+    table = np.loadtxt(facets, skiprows=1, ndmin=2)
+    types = table[:, 0].astype(int)
+    wall = np.abs(table[:, 3]) < 0.5
+    z0 = _z0(fm)
+    wall_types = set(types[wall].tolist())
+    ground_types = set(types[~wall].tolist())
+    assert wall.any() and (~wall).any()
+    assert not wall_types & ground_types
+    # Free-slip bounding types (z0 = 0) aside, every type holds one class.
+    assert [z0[t] for t in sorted(wall_types) if z0[t] > 0] == pytest.approx([0.1])
+    assert [z0[t] for t in sorted(ground_types) if z0[t] > 0] == pytest.approx([0.02])
+    for name in ("u", "v", "w"):
+        assert np.isfinite(state[name].values).all()
