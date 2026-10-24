@@ -181,6 +181,59 @@ def test_warns_when_most_sections_are_within_e_z0(
     assert "75% of the IBM wall sections" in caplog.text
 
 
+def test_wall_and_ground_split_retypes_walls(tmp_path: pathlib.Path) -> None:
+    """Walls of a type shared with horizontal facets move to a new type with the
+    wall z0; ground and roofs keep their type with the ground z0. Idempotent."""
+    model = _model(tmp_path)
+    facets = model.dirs.experiment_dir / f"facets.inp.{model.dirs.experiment_name}"
+    facets.write_text(
+        "# type, normal\n"
+        "1    0.0000 0.0000 1.0000\n"  # ground
+        "1    1.0000 0.0000 0.0000\n"  # wall
+        "1    0.0000 -1.0000 0.0000\n"  # wall
+        "-101 1.0000 0.0000 0.0000\n"  # free-slip bounding wall
+    )
+    before = np.loadtxt(_factypes(model), skiprows=3)
+    split = {"roughness_length_wall": 0.2, "roughness_length_ground": 0.01}
+    model._apply_roughness(xarray.Dataset({**PARAMS, **split}))
+
+    new = int(before[:, 0].max()) + 1
+    types = np.loadtxt(facets, skiprows=1, usecols=0).astype(int)
+    assert types.tolist() == [1, new, new, -101]
+    z0 = _z0(model)
+    assert z0[1] == pytest.approx(0.01) and z0[new] == pytest.approx(0.2)
+    assert z0[-101] == 0.0
+    after = np.loadtxt(_factypes(model), skiprows=3)
+    original = after[after[:, 0] == 1][0]
+    wall_row = after[after[:, 0] == new][0]
+    # The new type copies type 1's row apart from its id and z0.
+    assert np.array_equal(np.delete(wall_row, [0, 2]), np.delete(original, [0, 2]))
+
+    files = (_factypes(model).read_bytes(), facets.read_bytes())
+    model._apply_roughness(xarray.Dataset({**PARAMS, **split}))
+    assert (_factypes(model).read_bytes(), facets.read_bytes()) == files
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "params",
+    [
+        {"roughness_length_wall": 0.1},
+        {"roughness_length_ground": 0.1},
+        {
+            "roughness_length": 0.1,
+            "roughness_length_wall": 0.1,
+            "roughness_length_ground": 0.1,
+        },
+    ],
+)
+def test_partial_or_mixed_split_raises(
+    tmp_path: pathlib.Path, params: dict[str, float]
+) -> None:
+    model = _model(tmp_path)
+    with pytest.raises(ValueError, match="roughness_length_wall"):
+        model._apply_roughness(xarray.Dataset({**PARAMS, **params}))
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_rougher_walls_slow_the_near_wall_flow(tmp_path: pathlib.Path) -> None:
     """The tiny case at two z0: the higher one gives the lower near-wall speed."""

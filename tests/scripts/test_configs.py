@@ -390,19 +390,26 @@ def test_log_space_prior_composes(workflow: str, tmp_path: pathlib.Path) -> None
 
 
 def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
-    """The commented-out roughness_length prior instantiates once uncommented."""
+    """The commented-out roughness_length priors (single and wall/ground)
+    instantiate once uncommented."""
     from hydra.utils import instantiate
 
     from pyurbanair.static_parameters import LogNormal
 
     lines = (CONFIGS / "params" / "static.yaml").read_text().splitlines()
-    start = lines.index("  # roughness_length:")
-    block = []
-    for line in lines[start:]:
-        if not line.startswith("  #"):
-            break
-        block.append(line.replace("# ", "", 1))
-    prior = instantiate(OmegaConf.create("\n".join(block)).roughness_length)
-    assert isinstance(prior, LogNormal)
-    # Bounded: the DA keeps z0 inside (min, max) through every update.
-    assert prior.bounds == (0.005, 0.3)
+    for name in (
+        "roughness_length",
+        "roughness_length_wall",
+        "roughness_length_ground",
+    ):
+        start = lines.index(f"  # {name}:")
+        block = [lines[start]]
+        for line in lines[start + 1 :]:
+            if not line.startswith("  #   "):
+                break
+            block.append(line)
+        block = [line.replace("# ", "", 1) for line in block]
+        prior = instantiate(OmegaConf.create("\n".join(block))[name])
+        assert isinstance(prior, LogNormal)
+        # Bounded: the DA keeps z0 inside (min, max) through every update.
+        assert prior.bounds == (0.005, 0.3)

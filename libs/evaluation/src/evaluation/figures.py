@@ -116,6 +116,8 @@ _PARAM_LABELS = {
     "vertical_inflow_exponent": "Vertical inflow exponent (α)",
     "sgs_constant": "SGS constant",
     "roughness_length": "Roughness length z0 (m)",
+    "roughness_length_wall": "Wall roughness length z0 (m)",
+    "roughness_length_ground": "Ground roughness length z0 (m)",
     "sgs_bias_b0": "SGS discrepancy coefficient b0",
     "sgs_bias_b1": "SGS discrepancy coefficient b1",
     "sgs_bias_b2": "SGS discrepancy coefficient b2",

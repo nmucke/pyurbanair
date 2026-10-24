@@ -91,7 +91,8 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
     ``vertical_inflow_exponent`` (power-law shear exponent α) and ``sgs_constant``
     (sub-grid-scale mixing constant) are model-error compensation knobs every
     backend can consume per-member; see docs/archive/esmda_model_error_parameters.md.
-    ``roughness_length`` (wall z0) is read by the two LES backends only.
+    ``roughness_length`` (wall z0) is read by the two LES backends only; its
+    wall/ground split by uDALES only.
     """
     base = (
         "inflow_angle",
@@ -104,6 +105,8 @@ def resolve_parameter_schema(model_name: str) -> tuple[str, ...]:
     if model_name == "pyudales":
         return base + (
             "roughness_length",
+            "roughness_length_wall",
+            "roughness_length_ground",
             "pressure_gradient_magnitude",
             "sgs_bias_b0",
             "sgs_bias_b1",

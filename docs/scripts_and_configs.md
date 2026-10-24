@@ -139,7 +139,11 @@ update is also bounded: no member ever leaves (min, max)
 ([data_assimilation.md §1](data_assimilation.md)). Keep `max` below the grid's
 wall-distance limit (uDALES reconstructs at e·z0 from the wall: ≲ 0.3 m on the
 2 m xie_and_castro grid). Override e.g.
-`prior_params.parameters.roughness_length.max=0.2`. With PALM, drop
+`prior_params.parameters.roughness_length.max=0.2`. For uDALES the same files
+carry commented `roughness_length_wall` / `roughness_length_ground` blocks:
+both together replace `roughness_length` (walls vs ground and roofs,
+[pyudales.md](pyudales.md) "Roughness"); `check_config` rejects a mix, one
+alone, or the pair with a PALM model. With PALM, drop
 `sgs_constant` from the prior when estimating z0 (the two raise together,
 [pypalm.md](pypalm.md) "Roughness").
 

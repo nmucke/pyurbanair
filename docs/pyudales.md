@@ -909,6 +909,8 @@ INFLOW_PARAM_NAMES = (
     "vertical_inflow_exponent",
     "sgs_constant",
     "roughness_length",
+    "roughness_length_wall",
+    "roughness_length_ground",
 )
 ```
 
@@ -919,6 +921,7 @@ INFLOW_PARAM_NAMES = (
 | `pressure_gradient_magnitude` | `dpdx`/`dpdy` in namoptions | Pa/m; decomposed by angle. uDALES-only parameter. |
 | `vertical_inflow_exponent` (α) | Overrides `profile_config["alpha"]` in `_resolve_nudging_config` | Estimated by ESMDA; per-member shear |
 | `roughness_length` | z0 column of `factypes.inp.<expnr>` via `_apply_roughness` | m; see "Roughness" below |
+| `roughness_length_wall`, `roughness_length_ground` | same, per facet class (walls get their own facet type) | m; both instead of `roughness_length`; uDALES only |
 | `sgs_constant` | `&NAMSUBGRID cs` (Smagorinsky) or `c_vreman` (Vreman) via `_apply_sgs_setting` | Dimensionless SGS constant; the target key is picked from the case's `lsmagorinsky`/`lvreman` switches (§4). The two constants are on different scales (`c_vreman ≈ 2.5 cs²`: 0.217 ↔ 0.12). |
 
 **`pressure_gradient_magnitude`** is the third parameter unique to pyudales.
@@ -947,6 +950,21 @@ window-checkpoint restore. When the file already holds the value (the default
 0.05 against the preprocessing's `%6.2f` 0.05) nothing is written. z0 must be
 at least 1e-6 m: uDALES treats z0 = 0 as free slip, and anything smaller would
 be written as 0.000000 and stay free slip in every later window.
+
+**Wall and ground z0.** Instead of `roughness_length`, the params may hold both
+`roughness_length_wall` and `roughness_length_ground` (one of them alone, or
+either with `roughness_length`, raises; so does `check_config`). Walls are the
+facets whose `facets.inp` normal has |n_z| < 0.5; **ground is every other
+facet, the ground and the roofs**. `set_facet_roughness` moves the walls of a
+type shared with horizontal facets to a new type (id = largest in
+`factypes.inp` + 1, its row a copy of the original's) by rewriting their type
+in `facets.inp`, then writes each class's z0. uDALES uses a facet's type only
+to look up its `factypes.inp` row (`initfac.f90` `initfac`: z0, z0h, lGR,
+emissivity and the layer properties; the copy keeps all but z0 equal), and
+the IBM files reference facet ids, not types, so no preprocessing is redone.
+After the split every type is all-wall or all-horizontal, so later windows
+only rewrite z0. The fallback warning uses the larger of the two. PALM has a
+single z0 and raises with the pair ([pypalm.md](pypalm.md) "Roughness").
 
 The wall function is the neutral log law evaluated at the **true distance d**
 of each section's fluid point from its facet (`facet_sections_*.txt`, column 4),
