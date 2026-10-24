@@ -1054,9 +1054,10 @@ class ForwardModel(BaseForwardModel):
         share = wall_function_fallback_share(self.dirs.experiment_dir, z0_max)
         if share > ROUGHNESS_FALLBACK_WARN_SHARE:
             logger.warning(
-                "roughness_length=%.4g m: %.0f%% of the IBM wall sections lie "
+                "%s=%.4g m: %.0f%% of the IBM wall sections lie "
                 "within e*z0 = %.3f m of their facet, where uDALES reconstructs "
                 "the velocity further out or drops the wall stress.",
+                "roughness_length" if z0_wall is None else "max(z0_wall, z0_ground)",
                 z0_max,
                 100.0 * share,
                 np.e * z0_max,

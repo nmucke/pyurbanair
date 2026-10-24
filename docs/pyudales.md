@@ -958,10 +958,16 @@ facets whose `facets.inp` normal has |n_z| < 0.5; **ground is every other
 facet, the ground and the roofs**. `set_facet_roughness` moves the walls of a
 type shared with horizontal facets to a new type (id = largest in
 `factypes.inp` + 1, its row a copy of the original's) by rewriting their type
-in `facets.inp`, then writes each class's z0. uDALES uses a facet's type only
-to look up its `factypes.inp` row (`initfac.f90` `initfac`: z0, z0h, lGR,
-emissivity and the layer properties; the copy keeps all but z0 equal), and
-the IBM files reference facet ids, not types, so no preprocessing is redone.
+in `facets.inp`, then writes each class's z0; a rerun of the preprocessing in
+the same experiment dir reuses the unused copy an earlier split left instead
+of appending another. In a neutral run uDALES uses a facet's type only to look
+up its `factypes.inp` row (`initfac.f90` `initfac`: z0, z0h, lGR, emissivity
+and the layer properties; the copy keeps all but z0 equal), and the IBM files
+reference facet ids, not types, so no preprocessing is redone. Thermal runs
+(`lEB`, `iwallmom`/`iwalltemp`/`iwallmoist` = 2) also read the type's sign
+(`initfac.f90`: > 0 is not a floor for the inner-layer facet temperature,
+< -100 skips the energy-balance layers), so there splitting a negative floor
+type that also covers walls would turn those walls into "building" facets.
 After the split every type is all-wall or all-horizontal, so later windows
 only rewrite z0. The fallback warning uses the larger of the two. PALM has a
 single z0 and raises with the pair ([pypalm.md](pypalm.md) "Roughness").

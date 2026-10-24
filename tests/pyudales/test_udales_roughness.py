@@ -332,6 +332,26 @@ def test_switching_between_single_and_split_z0(tmp_path: pathlib.Path) -> None:
     assert len(np.loadtxt(_factypes(model), skiprows=3)) == rows
 
 
+def test_split_after_a_preprocessing_rerun_reuses_the_wall_type(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Rerunning the preprocessing in the same experiment dir resets facets.inp
+    to the original types but keeps the wall row factypes.inp got appended:
+    the next split reuses that row instead of adding another."""
+    model = _model(tmp_path)
+    facets = _mixed_facets(model)
+    pristine = facets.read_bytes()
+    model._apply_roughness(xarray.Dataset({**PARAMS, **SPLIT}))
+    split_types = _facet_types(facets)
+    rows = len(np.loadtxt(_factypes(model), skiprows=3))
+
+    facets.write_bytes(pristine)
+    model._apply_roughness(xarray.Dataset({**PARAMS, **SPLIT}))
+    assert _facet_types(facets) == split_types
+    assert len(np.loadtxt(_factypes(model), skiprows=3)) == rows
+    assert _z0(model)[max(split_types)] == pytest.approx(0.2)
+
+
 def test_default_leaves_facets_and_factypes_byte_identical(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -450,3 +470,42 @@ def test_e2e_split_wall_and_ground_z0_runs(tmp_path: pathlib.Path) -> None:
     assert [z0[t] for t in sorted(ground_types) if z0[t] > 0] == pytest.approx([0.02])
     for name in ("u", "v", "w"):
         assert np.isfinite(state[name].values).all()
+
+
+@pytest.mark.integration  # type: ignore[misc]
+def test_e2e_equal_split_matches_a_single_roughness_length(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Wall z0 == ground z0 gives the state of a single roughness_length run:
+    the retyped walls only change which (identical) factypes row is read. Not
+    exact: identical uDALES runs can differ by 1 ulp (FFTW_MEASURE)."""
+    from hydra.utils import instantiate
+
+    from tests.conftest import compose
+
+    states, types = {}, {}
+    for name, params in (
+        ("single", {"roughness_length": 0.1}),
+        ("split", {"roughness_length_wall": 0.1, "roughness_length_ground": 0.1}),
+    ):
+        cfg = compose(
+            "forward",
+            "+test=forward",
+            "model=pyudales_stock",
+            "time.simulation_time=3.0",
+            "time.spinup_time=3.0",
+            root=tmp_path / name,
+        )
+        fm = instantiate(cfg.model.forward_model)
+        instantiate(cfg.model.prepare, forward_model=fm)
+        states[name] = fm.run_single(params=xarray.Dataset({**PARAMS, **params}))
+        facets = fm.dirs.experiment_dir / f"facets.inp.{fm.dirs.experiment_name}"
+        types[name] = set(_facet_types(facets))
+    assert types["split"] != types["single"]  # the split did retype the walls
+    for var in ("u", "v", "w"):
+        np.testing.assert_allclose(
+            states["split"][var].values,
+            states["single"][var].values,
+            rtol=1e-6,
+            atol=1e-8,
+        )

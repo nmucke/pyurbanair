@@ -253,9 +253,11 @@ def set_facet_roughness(
     With ``z0_wall``, the walls (facets with |n_z| < 0.5) get ``z0_wall`` and
     the horizontal facets (ground and roofs) ``z0``. A type shared by both is
     split: its walls are retyped in facets.inp to a new type, a copy of the
-    original's factypes.inp row. uDALES reads the type only to look up the
-    facet's factypes row, so this needs no new IBM preprocessing. Once split,
-    every type is all-wall or all-horizontal, so a second call only writes z0.
+    original's factypes.inp row (or an unused such copy left by an earlier run).
+    In neutral runs uDALES reads the type only to look up the facet's factypes
+    row, so this needs no new IBM preprocessing; thermal runs also read its
+    sign (docs/pyudales.md "Wall and ground z0"). Once split, every type is
+    all-wall or all-horizontal, so a second call only writes z0.
 
     Returns False, writing nothing, when every in-use type already has its z0
     (the default 0.05 on a preprocessed case), so default runs stay
@@ -282,6 +284,10 @@ def set_facet_roughness(
     def current(t: int) -> float:
         return float(lines[rows[t]].split()[_FACTYPES_Z0_COLUMN])
 
+    def properties(t: int) -> list[str]:  # a factypes row without id and z0
+        fields = lines[rows[t]].split()
+        return fields[1:_FACTYPES_Z0_COLUMN] + fields[_FACTYPES_Z0_COLUMN + 1 :]
+
     targets = {int(t): z0 for t in np.unique(types)}
     retyped = False
     if z0_wall is not None:
@@ -292,11 +298,25 @@ def set_facet_roughness(
             if wall[types == t].all():
                 targets[t] = z0_wall
                 continue
-            new = max(rows) + 1
-            if not lines[-1].endswith("\n"):
-                lines[-1] += "\n"
-            lines.append(_ID_FIELD.sub(lambda m: f"{m[1]}{new}", lines[rows[t]], 1))
-            rows[new] = len(lines) - 1
+            # Rerun preprocessing resets facets.inp but keeps the row an earlier
+            # split appended: reuse an unused copy instead of adding another.
+            unused = [
+                r
+                for r in rows
+                if r > 0  # as a new id would be
+                and r not in targets
+                and current(r) > 0.0
+                and properties(r) == properties(t)
+            ]
+            if unused:
+                new = unused[0]
+            else:
+                new = max(rows) + 1
+                if not lines[-1].endswith("\n"):
+                    lines[-1] += "\n"
+                line = _ID_FIELD.sub(lambda m: f"{m[1]}{new}", lines[rows[t]], 1)
+                lines.append(line)
+                rows[new] = len(lines) - 1
             types[(types == t) & wall] = new
             targets[new] = z0_wall
             retyped = True
