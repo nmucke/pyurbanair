@@ -31,10 +31,9 @@ def _attach_member_discrepancy(
 ) -> None:
     """Keep member-specific provenance through xarray's attribute override."""
     if any(value is not None for value in metadata):
-        result.attrs.pop("model_discrepancy", None)
-        result.attrs["model_discrepancy_by_member"] = json.dumps(
-            metadata, sort_keys=True
-        )
+        (name,) = EnsembleForwardModel.member_attrs
+        result.attrs.pop(name, None)
+        result.attrs[f"{name}_by_member"] = json.dumps(metadata, sort_keys=True)
 
 
 def _native_layout(model: ForwardModel) -> tuple[int, int, int, int, int]:
@@ -90,6 +89,9 @@ class EnsembleForwardModel(BaseEnsembleForwardModel):
 
     The forward model is a wrapper around the uDALES code.
     """
+
+    # Per-member JSON attrs that on-disk ensemble files keep as `<name>_by_member`.
+    member_attrs = ("model_discrepancy",)
 
     def __init__(
         self,
