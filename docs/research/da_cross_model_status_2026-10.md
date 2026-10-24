@@ -1,6 +1,6 @@
 # Cross-model data assimilation: status and next experiments
 
-Status as of 23 October 2026. This is the single entry point for the
+Status as of 24 October 2026. This is the single entry point for the
 data-assimilation / cross-model (uDALES vs PALM) / model-discrepancy line of
 work. It replaces the October notes and the September review, now in
 [docs/archive/](../archive/) (map at the end). The z0 study's detailed results
@@ -114,14 +114,40 @@ bounded 0.005–0.3 m, updated in bounded log space (#211). Detail:
     run the first update pushed z0 to 1–3 m and uDALES crashed. With a
     Desroziers-inflated R (about 5× noise: 0.53 / 0.45 / 0.35 m/s at 2 / 8 /
     20 m) runs are calibrated and stable.
-13. **Adaptive (online) observation error works for the inflow** *(session,
-    preliminary)*: inflow only, 2 seeds: angle 9.5 / 9.7°, speed 6.18 / 6.08
-    m/s (truth 10°, 6.0), spread covers the truth; the online inflation
-    settles at the offline calibration values. Inflow + z0 with the adaptive
-    error (arm B): no completed run yet.
+13. **Adaptive observation error, complete study** (24 Oct, on dev with the
+    40 m buffer and `save_states=prior`; PALM truth 10°, 6.0 m/s, z0 0.1 →
+    uDALES; 6 windows, 2 seeds per arm; `runs_adaptive_r2`). Final-window
+    posterior median [5–95 %]:
+
+    | Arm | Angle (°) | Speed (m/s) | z0 (m) | Inflation 2 / 8 / 20 m |
+    |---|---|---|---|---|
+    | A: noise-only R, inflow + z0 | 7.9 [7.7, 8.1] / 8.2 [8.0, 8.3] | 5.91 / 6.11 | 0.29 / 0.30 (at the 0.3 bound, no spread) | – |
+    | B: adaptive R, inflow + z0 | 8.1 [7.4, 9.3] / 9.0 [7.3, 10.1] | 6.04 / 6.02 | 0.20 [0.16, 0.22] / 0.19 [0.15, 0.22] | ×4.8 / 4.7 / 4.2–4.7 |
+    | C: adaptive R, inflow only | 9.7 [8.8, 10.7] / 10.1 [8.6, 11.2] | 6.22 / 6.06 | – | ×5.5 / 5.1–5.4 / 4.0–5.2 |
+
+    - The adaptive inflation is reproducible: ×4–6 the realisation noise in all
+      runs, matching the offline calibration (item 12).
+    - With the adaptive error, z0 stays off the bound with real spread, but
+      at about 2× the truth, and it still pulls the angle 1–2° low. The inflow
+      is recovered best without z0 (C).
+    - Held-out sensors, all 10 (CRPS of window-mean u; replica 0.096): A
+      0.21–0.22, **B 0.15–0.17**, C 0.21–0.24. B is best on every sensor
+      score in both seeds.
+    - By height (seed 1; CRPS of window-mean |U|; replica 0.063 / 0.079 /
+      0.046 / 0.129 / 0.083 at 2 / 5 / 8 / 14 / 26 m): A 0.26 / 0.09 / 0.08 /
+      0.34 / 0.13, **B 0.12 / 0.05 / 0.07** / 0.17 / 0.13, C 0.31 / 0.27 / 0.07
+      / **0.14** / 0.13. The z0 gain is at street level; without z0 the 2–5 m
+      wind is too fast; z0 pinned at the bound (A) overcorrects at 14 m; B is
+      still ~2× the noise at 2 m (the structural residual of item 5).
+    - All arms are overconfident at the held-out sensors (z-score std 3.5–4.9,
+      expected ~1): the adaptive error widens the uncertainty of the assimilated
+      observations, but a parameter-only ensemble has too little spread at
+      unobserved locations.
 14. **Summary verdict:** inflow angle and speed are robustly estimable
-    cross-model; roughness isn't (as a single z0). Street-level structural
-    error belongs in the observation error.
+    cross-model. A single z0 buys street-level accuracy at the cost of a biased
+    inflow angle, and only with the adaptive error does it not hurt higher
+    sensors; it is not a transferable parameter. Street-level structural error
+    belongs in the observation error.
 15. **Separate wall z0 is possible only in uDALES** *(session)*. uDALES
     supports z0 per facet type (`factypes.inp`), but in `xie_and_castro` all
     facets are type 1 and pyudales writes one z0 to all; splitting walls /
@@ -152,15 +178,14 @@ model and ~2 % density drift.
 
 ## 5. Open questions
 
-- Does z0 stay off the bounds with honest spread when the observation error is
-  adaptive (arm B)?
 - Is a (wall z0, ground/roof z0) pair consistent across inflow angles, i.e. a
   transferable parameterisation where the single z0 isn't?
 - What is the street-level residual left after the walls are matched (SGS,
   numerics)? Is the SGS constant a sensible nuisance parameter for it?
-- Should the structural error get a spatial correlation, and does the
-  height-banded adaptive inflation stay calibrated at held-out sensors (not
-  just Desroziers at assimilated ones)?
+- Should the structural error get a spatial correlation? The height-banded
+  adaptive inflation does NOT make the held-out predictions calibrated
+  (z-score std 3.5–4.9, item 13): how should uncertainty reach unobserved
+  locations? (Deferred until after the wall-z0 runs.)
 - With real data, the inflation must come from earlier windows or a separate
   period, not from the same experiment's calibration run (the adaptive error
   does this; the offline calibration doesn't).
@@ -169,22 +194,19 @@ model and ~2 % density drift.
 
 ## 6. Immediate experiment plan (priority order)
 
-1. **Merge the infrastructure**: `assimilation.save_states:
-   posterior|prior|all` (replaces `save_prior_state`; fixes ESMDA memory
-   growth, same behaviour in memory and disk mode; in progress) and the
-   adaptive observation error (PR #220: online per-height Desroziers
-   inflation, smoother only, off by default, settings in
-   `configs/assimilation_settings/adaptive_error.yaml`). Relaunch with
-   `save_states=prior` (or disk mode); up to ~4 concurrent runs after the fix.
-2. **Finish the adaptive-error study**: B_s1, B_s2, A_s1, and salvage C_s2
-   (all windows saved, final assembly lost) and A_s2 (5/6 windows). Question:
-   does z0 stay off the bounds with honest spread under the adaptive error?
-3. **Estimate wall z0 separately from ground/roof z0** in uDALES (PALM truth
-   keeps one z0), at 10° and 40°. Needs a small pyudales change: a wall facet
-   type and a `roughness_length_wall` parameter. If the pair agrees across
-   angles it is a transferable parameterisation; the single z0 is not.
-4. **Trim the z0-regime runs** to seed 2 at 10° and 40° plus the 70°
-   calibration (lost, rerun); drop third seeds.
+1. **Separate wall and ground roughness in uDALES** (in progress): either
+   `roughness_length` (all facets) or `roughness_length_wall` (vertical facets)
+   + `roughness_length_ground` (ground and roofs). PALM, the truth, keeps one
+   z0.
+2. **Twin identifiability check**: uDALES truth with different wall and ground
+   z0, DA estimating inflow + both. If they can't be separated with a perfect
+   model, the cross-model test can't be read.
+3. **Cross-model wall/ground test**: PALM truth at 10° and 40°, adaptive error,
+   arms inflow + single z0 vs inflow + wall z0 + ground z0, 2 seeds, window
+   states kept for every seed. Success: the pair agrees across angles, the
+   inflow angle is unbiased, the street-level error is below the single-z0
+   arm's.
+4. **Then** the held-out overconfidence (item 13, §5).
 5. **Later**: the SGS constant as a candidate for the street-level residual
    (low priority; ~4–9 % so far); a real-data dry run (deferred by the user).
 
@@ -212,10 +234,12 @@ become relevant):
 
 ## 7. Running experiments: lessons
 
-- **Memory.** ESMDA in memory mode with `save_prior_state` keeps all 5 step
-  states, stacks them, and holds the previous window's history: 30–50 GB per
-  uDALES run. Five concurrent runs on the 125 GB box got 4 OOM-killed. Until
-  `save_states` lands, run at most 2–3 at a time.
+- **Memory.** Before #223, ESMDA in memory mode with `save_prior_state` kept
+  all 5 step states, stacked them, and held the previous window's history:
+  30–50 GB per uDALES run, and 4 of 5 concurrent runs were OOM-killed. With
+  `save_states=prior` (#223) a 32-member run peaks at ~9 GB (memory mode) or
+  ~5 GB (disk mode), and nothing carries over between windows: 4 concurrent
+  runs fit easily.
 - **Cores.** pyurbanair's `cpu_pinning` round-robins from the process
   affinity, so concurrent runs all land on cores 0, 4, 8, 12; PALM's prterun
   binds its ranks to cores 0–4. Give each run its own `taskset` slot and set
@@ -225,14 +249,16 @@ become relevant):
   the z0 runs use `resample_from_successes`.
 - **Outflow.** Check member max speed near the outflow for backflow bursts;
   results before #218 used the 20 m buffer.
-- **Machine.** squamish crashed on 22 Oct (system SSD I/O errors) and
-  rebooted; several runs were lost (§8).
+- **Machine.** squamish crashed on 22, 23 (twice) and 24 Oct (attributed to
+  the GPU drivers; IT fix scheduled). Keep runs restartable and don't run GPU
+  jobs on it meanwhile.
 
 ## 8. Where the data lives (local, not in git)
 
-| What | Where | State (23 Oct) |
+| What | Where | State (24 Oct) |
 |---|---|---|
-| Adaptive-error study (A: z0 + noise-only R; B: z0 + adaptive R; C: inflow + adaptive R) | `/export/scratch2/ntm/runs_adaptive_r/` | C_s1 complete; C_s2 windows saved, assembly lost; A_s2 5/6 windows; A_s1, B_s1, B_s2 lost (OOM) |
+| Adaptive-error study, complete rerun on dev (40 m buffer) | `/export/scratch2/ntm/runs_adaptive_r2/` | all 6 runs complete (24 Oct); window states for seed 1; `valid_by_height.yaml` per seed-1 run |
+| Adaptive-error study, first attempt (20 m buffer, superseded) | `/export/scratch2/ntm/runs_adaptive_r/` | partial (OOM, crash) |
 | z0 regimes (calibrations `C_*`, finals `Z_*` inflow + z0, `T2_*` inflow only) | `/export/scratch2/ntm/runs_z0_regimes/` | Calibrations 10°, 40°, 10° at 4 m/s done; 70° lost. Finals done: Z_a10_s1, Z_a40_s1, T2_a40_s1, T2_a10v4_s1; lost: Z_a10v4_s1, T2_a10_s1; seeds 2–3 pending |
 | First z0 study (small results) | `/export/scratch2/ntm/z0_results_archive/` | complete |
 | Overnight runs, 14–15 Oct | `/export/scratch1/ntm/overnight_2026-10-14/` (per the note) | not found on 23 Oct |
