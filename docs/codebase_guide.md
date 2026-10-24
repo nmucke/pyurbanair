@@ -427,6 +427,8 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - `roughness_length` (wall z0, m) is a third knob for the two LES backends:
   uDALES `factypes.inp`, PALM `roughness_length` (raises with `sgs_constant`).
   pylbm ignores it. Default `flow.roughness_length` in `common.yaml`.
+  uDALES alone also takes `roughness_length_wall` + `roughness_length_ground`
+  instead (walls vs ground and roofs; docs/pyudales.md "Roughness").
 
 ### pypalm
 - Lazy-imported. All `pypalm.*` `_target_` blocks live only in

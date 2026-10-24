@@ -229,12 +229,20 @@ def update_lscale_file_profile(
 
 
 # Column of the momentum roughness z0 in factypes.inp (wallid, lGR, z0, z0h, ...),
-# and a pattern matching the line up to and including that field.
+# and patterns matching a line's first field and its fields up to that z0.
 _FACTYPES_Z0_COLUMN = 2
+_ID_FIELD = re.compile(r"^(\s*)\S+")
 _Z0_FIELD = re.compile(r"^(\s*\S+\s+\S+\s+)(\S+)")
+# A facet is a wall (vertical) when its unit normal has |n_z| below this.
+_WALL_NORMAL_Z = 0.5
 
 
-def set_facet_roughness(experiment_dir: pathlib.Path, expnr: str, z0: float) -> bool:
+def set_facet_roughness(
+    experiment_dir: pathlib.Path,
+    expnr: str,
+    z0: float,
+    z0_wall: Optional[float] = None,
+) -> bool:
     """Write ``z0`` into the factypes.inp z0 column of every facet type in use.
 
     A type is in use when facets.inp names it; types with z0 = 0 (free slip,
@@ -242,7 +250,16 @@ def set_facet_roughness(experiment_dir: pathlib.Path, expnr: str, z0: float) -> 
     it). Only the z0 field is replaced, as ``%10.6f`` (the preprocessing's
     ``%6.2f`` rounds 0.004 to free slip), so the rest of each line is kept.
 
-    Returns False, writing nothing, when every in-use type already has ``z0``
+    With ``z0_wall``, the walls (facets with |n_z| < 0.5) get ``z0_wall`` and
+    the horizontal facets (ground and roofs) ``z0``. A type shared by both is
+    split: its walls are retyped in facets.inp to a new type, a copy of the
+    original's factypes.inp row (or an unused such copy left by an earlier run).
+    In neutral runs uDALES reads the type only to look up the facet's factypes
+    row, so this needs no new IBM preprocessing; thermal runs also read its
+    sign (docs/pyudales.md "Wall and ground z0"). Once split, every type is
+    all-wall or all-horizontal, so a second call only writes z0.
+
+    Returns False, writing nothing, when every in-use type already has its z0
     (the default 0.05 on a preprocessed case), so default runs stay
     byte-identical.
     """
@@ -254,23 +271,72 @@ def set_facet_roughness(experiment_dir: pathlib.Path, expnr: str, z0: float) -> 
                 f"{path} not found: roughness_length is written after "
                 "preprocessing (write_inputs) has created it."
             )
-    in_use = set(np.loadtxt(facets, skiprows=1, usecols=0, ndmin=1).astype(int))
-
+    table = np.loadtxt(facets, skiprows=1, usecols=(0, 3), ndmin=2)
+    types = table[:, 0].astype(int)
+    original = types.copy()
     lines = factypes.read_text().splitlines(keepends=True)
-    changed = False
-    for i, line in enumerate(lines):
-        if line.lstrip().startswith("#") or not line.strip():
+    rows = {
+        int(float(line.split()[0])): i
+        for i, line in enumerate(lines)
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    def current(t: int) -> float:
+        return float(lines[rows[t]].split()[_FACTYPES_Z0_COLUMN])
+
+    def properties(t: int) -> list[str]:  # a factypes row without id and z0
+        fields = lines[rows[t]].split()
+        return fields[1:_FACTYPES_Z0_COLUMN] + fields[_FACTYPES_Z0_COLUMN + 1 :]
+
+    targets = {int(t): z0 for t in np.unique(types)}
+    retyped = False
+    if z0_wall is not None:
+        wall = np.abs(table[:, 1]) < _WALL_NORMAL_Z
+        for t in sorted(targets):
+            if t not in rows or current(t) <= 0.0 or not wall[types == t].any():
+                continue
+            if wall[types == t].all():
+                targets[t] = z0_wall
+                continue
+            # Rerun preprocessing resets facets.inp but keeps the row an earlier
+            # split appended: reuse an unused copy instead of adding another.
+            unused = [
+                r
+                for r in rows
+                if r > 0  # as a new id would be
+                and r not in targets
+                and current(r) > 0.0
+                and properties(r) == properties(t)
+            ]
+            if unused:
+                new = unused[0]
+            else:
+                new = max(rows) + 1
+                if not lines[-1].endswith("\n"):
+                    lines[-1] += "\n"
+                line = _ID_FIELD.sub(lambda m: f"{m[1]}{new}", lines[rows[t]], 1)
+                lines.append(line)
+                rows[new] = len(lines) - 1
+            types[(types == t) & wall] = new
+            targets[new] = z0_wall
+            retyped = True
+
+    changed = retyped
+    for t, value in targets.items():
+        if t not in rows or current(t) <= 0.0 or abs(current(t) - value) <= 1e-12:
             continue
-        fields = line.split()
-        current = float(fields[_FACTYPES_Z0_COLUMN])
-        if int(float(fields[0])) not in in_use or current <= 0.0:
-            continue
-        if abs(current - z0) <= 1e-12:
-            continue
-        lines[i] = _Z0_FIELD.sub(lambda m: f"{m[1]}{z0:10.6f}", line, count=1)
+        line = lines[rows[t]]
+        lines[rows[t]] = _Z0_FIELD.sub(lambda m: f"{m[1]}{value:10.6f}", line, 1)
         changed = True
     if changed:
         factypes.write_text("".join(lines))
+    if retyped:
+        facet_lines = facets.read_text().splitlines(keepends=True)
+        for n in np.flatnonzero(types != original):
+            facet_lines[n + 1] = _ID_FIELD.sub(
+                lambda m: f"{m[1]}{types[n]}", facet_lines[n + 1], 1
+            )
+        facets.write_text("".join(facet_lines))
     return changed
 
 

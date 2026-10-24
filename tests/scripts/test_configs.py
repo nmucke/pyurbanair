@@ -390,19 +390,172 @@ def test_log_space_prior_composes(workflow: str, tmp_path: pathlib.Path) -> None
 
 
 def test_static_yaml_log_z0_block_is_ready_to_use() -> None:
-    """The commented-out roughness_length prior instantiates once uncommented."""
+    """The commented-out roughness_length priors (single and wall/ground)
+    instantiate once uncommented."""
     from hydra.utils import instantiate
 
     from pyurbanair.static_parameters import LogNormal
 
     lines = (CONFIGS / "params" / "static.yaml").read_text().splitlines()
-    start = lines.index("  # roughness_length:")
-    block = []
-    for line in lines[start:]:
-        if not line.startswith("  #"):
-            break
-        block.append(line.replace("# ", "", 1))
-    prior = instantiate(OmegaConf.create("\n".join(block)).roughness_length)
-    assert isinstance(prior, LogNormal)
-    # Bounded: the DA keeps z0 inside (min, max) through every update.
-    assert prior.bounds == (0.005, 0.3)
+    for name in (
+        "roughness_length",
+        "roughness_length_wall",
+        "roughness_length_ground",
+    ):
+        start = lines.index(f"  # {name}:")
+        block = [lines[start]]
+        for line in lines[start + 1 :]:
+            if not line.startswith("  #   "):
+                break
+            block.append(line)
+        block = [line.replace("# ", "", 1) for line in block]
+        prior = instantiate(OmegaConf.create("\n".join(block))[name])
+        assert isinstance(prior, LogNormal)
+        # Bounded: the DA keeps z0 inside (min, max) through every update.
+        assert prior.bounds == (0.005, 0.3)
+
+
+def _z0_param(block: str, name: str, value: float) -> str:
+    """Add a Constant z0 parameter to a params sampler (the test sets it)."""
+    return (
+        f"+{block}.parameters.{name}={{_target_:pyurbanair.static_parameters."
+        f"Constant,value:{value}}}"
+    )
+
+
+# Static truth, prior and smoother, set here so the roughness tests don't depend
+# on assimilation.yaml's parameter groups; uDALES' discrepancy off (PALM has none).
+STATIC_DA = [
+    "params@truth_params=static_truth",
+    "params@prior_params=static",
+    "smoothing.smoother=${smoother.static}",
+    "assimilation.params_to_estimate=[inflow_angle]",
+]
+NO_UDALES_DISCREPANCY = "assim_model.forward_model.model_discrepancy.enabled=false"
+WALL, GROUND = "roughness_length_wall", "roughness_length_ground"
+ONE_ALONE = "set either roughness_length or both"
+PALM_ONLY = "supports only roughness_length"
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "overrides, message",
+    [
+        ([_z0_param("params", WALL, 0.1)], ONE_ALONE),
+        ([_z0_param("params", GROUND, 0.1)], ONE_ALONE),
+        (
+            [
+                _z0_param("params", "roughness_length", 0.1),
+                _z0_param("params", WALL, 0.1),
+                _z0_param("params", GROUND, 0.1),
+            ],
+            ONE_ALONE,
+        ),
+        (
+            [
+                "model=pypalm",
+                _z0_param("params", WALL, 0.1),
+                _z0_param("params", GROUND, 0.1),
+            ],
+            PALM_ONLY,
+        ),
+    ],
+)
+def test_check_config_rejects_forward_roughness(
+    overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose(
+        "forward", "+test=forward", "params=static", *overrides, root=tmp_path
+    )
+    with pytest.raises(ValueError, match=f"params: .*{message}"):
+        check(cfg, "forward")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "overrides, message",
+    [
+        ([_z0_param("prior_params", WALL, 0.1)], f"prior_params: {ONE_ALONE}"),
+        ([_z0_param("prior_params", GROUND, 0.1)], f"prior_params: {ONE_ALONE}"),
+        ([_z0_param("truth_params", WALL, 0.1)], f"truth_params: {ONE_ALONE}"),
+        ([_z0_param("truth_params", GROUND, 0.1)], f"truth_params: {ONE_ALONE}"),
+        (
+            [
+                _z0_param("prior_params", "roughness_length", 0.1),
+                _z0_param("prior_params", WALL, 0.1),
+                _z0_param("prior_params", GROUND, 0.1),
+            ],
+            f"prior_params: {ONE_ALONE}",
+        ),
+        (
+            [
+                _z0_param("truth_params", "roughness_length", 0.1),
+                _z0_param("truth_params", GROUND, 0.1),
+            ],
+            f"truth_params: {ONE_ALONE}",
+        ),
+        (
+            [
+                "model@truth_model=pypalm",
+                _z0_param("truth_params", WALL, 0.1),
+                _z0_param("truth_params", GROUND, 0.1),
+            ],
+            f"truth_params: .*{PALM_ONLY}",
+        ),
+        (
+            [
+                "model@assim_model=pypalm",
+                _z0_param("prior_params", WALL, 0.1),
+                _z0_param("prior_params", GROUND, 0.1),
+            ],
+            f"prior_params: .*{PALM_ONLY}",
+        ),
+    ],
+)
+def test_check_config_rejects_assimilation_roughness(
+    overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check = load_script("scripts/utils/inconsistency_check.py").check_config
+    if "model@assim_model=pypalm" not in overrides:
+        overrides = [*overrides, NO_UDALES_DISCREPANCY]
+    cfg = compose(
+        "assimilation", "+test=assimilation", *STATIC_DA, *overrides, root=tmp_path
+    )
+    with pytest.raises(ValueError, match=message):
+        check(cfg, "smoother")
+
+
+def test_check_config_accepts_split_prior_with_a_palm_truth(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The intended cross-model run: PALM truth with one z0, uDALES prior with
+    the wall/ground pair; the DA treats both LogNormal priors in bounded log
+    space, like roughness_length."""
+    from hydra.utils import instantiate
+
+    log_z0 = (
+        "{_target_:pyurbanair.static_parameters.LogNormal,median:0.05,"
+        "log_std:0.7,min:0.005,max:0.3}"
+    )
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *STATIC_DA,
+        NO_UDALES_DISCREPANCY,
+        "model@truth_model=pypalm",
+        "truth_model.forward_model.sgs_constant=null",
+        _z0_param("truth_params", "roughness_length", 0.1),
+        f"+prior_params.parameters.{WALL}={log_z0}",
+        f"+prior_params.parameters.{GROUND}={log_z0}",
+        f"assimilation.params_to_estimate=[inflow_angle,{WALL},{GROUND}]",
+        root=tmp_path,
+    )
+    load_script("scripts/utils/inconsistency_check.py").check_config(cfg, "smoother")
+    sampler = instantiate(cfg.prior_params)
+    params = sampler.sample(4)
+    for name in (WALL, GROUND):
+        values = params[name].values
+        assert bool(((values > 0.005) & (values < 0.3)).all())
+    helpers = load_script("scripts/utils/helper_functions.py")
+    selected, _, log_names = helpers.parameter_names(cfg, params, sampler)
+    assert selected == ["inflow_angle", WALL, GROUND]
+    assert log_names == {WALL: (0.005, 0.3), GROUND: (0.005, 0.3)}

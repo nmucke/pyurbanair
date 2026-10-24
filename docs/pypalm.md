@@ -339,7 +339,8 @@ z0 for momentum (m), shared with pyudales: from the params Dataset, else
 `_apply_roughness` writes it to `&initialization_parameters roughness_length`
 on every `_apply_inflow_settings`, so on every member and window. Without the
 land/urban surface models every surface (ground, roofs, walls) is the default
-surface type, so this one scalar is the roughness of all of them. A
+surface type, so this one scalar is the roughness of all of them; uDALES'
+`roughness_length_wall` / `roughness_length_ground` therefore raise here. A
 model-config value equal to the `_p3d`'s is not written. Default runs are
 unchanged: xie_and_castro's 0.05 equals its template, and barcelona and the
 urbantales templates (0.1, while uDALES generates 0.05) keep their own values

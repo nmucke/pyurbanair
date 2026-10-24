@@ -360,6 +360,8 @@ _PLOTTED_PARAMS = (
     "vertical_inflow_exponent",
     "sgs_constant",
     "roughness_length",
+    "roughness_length_wall",
+    "roughness_length_ground",
     "sgs_bias_b0",
     "sgs_bias_b1",
     "sgs_bias_b2",

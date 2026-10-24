@@ -25,12 +25,13 @@ from pyurbanair.config.discrepancy import (
 )
 
 WORKFLOWS = ("forward", "smoother", "filtering", "hybrid")
+SPLIT_ROUGHNESS = ("roughness_length_wall", "roughness_length_ground")
 
 
 def check_config(cfg: DictConfig, workflow: str) -> None:
     if workflow not in WORKFLOWS:
         raise ValueError(f"workflow must be one of {WORKFLOWS}, got {workflow!r}")
-    problems = _models(cfg)
+    problems = _models(cfg) + _roughness(cfg)
     if workflow != "forward":
         problems += _assimilation(cfg)
         problems += _discrepancy(cfg, workflow)
@@ -86,6 +87,34 @@ def _models(cfg: DictConfig) -> list[str]:
     return problems
 
 
+def _roughness(cfg: DictConfig) -> list[str]:
+    """roughness_length, or both split z0s (uDALES only), per params sampler."""
+    problems = []
+    for role, block in (
+        ("model", "params"),
+        ("truth_model", "truth_params"),
+        ("assim_model", "prior_params"),
+    ):
+        model, sampler = cfg.get(role), cfg.get(block)
+        if model is None or sampler is None:
+            continue
+        names = _param_names(sampler)
+        split = sorted(names & set(SPLIT_ROUGHNESS))
+        if not split:
+            continue
+        if "roughness_length" in names or len(split) == 1:
+            problems.append(
+                f"{block}: set either roughness_length or both "
+                "roughness_length_wall and roughness_length_ground."
+            )
+        if model.name == "pypalm":
+            problems.append(
+                f"{block}: {split} need uDALES; {role} is PALM, which supports "
+                "only roughness_length."
+            )
+    return problems
+
+
 def _solver_nx(fm: DictConfig) -> int:
     """Grid points along x the solver runs on: ``nx`` plus any outflow buffer.
 
@@ -105,7 +134,7 @@ def _assimilation(cfg: DictConfig) -> list[str]:
     da = cfg.assimilation
     if da.num_windows < 1:
         problems.append("assimilation.num_windows must be at least 1.")
-    unknown = set(da.params_to_estimate or []) - _prior_names(cfg)
+    unknown = set(da.params_to_estimate or []) - _param_names(cfg.prior_params)
     if unknown:
         problems.append(
             f"assimilation.params_to_estimate names {sorted(unknown)}, which "
@@ -368,8 +397,8 @@ def _dynamic(sampler: DictConfig) -> bool:
     return "seconds_per_knot" in sampler
 
 
-def _prior_names(cfg: DictConfig) -> set[str]:
+def _param_names(sampler: DictConfig) -> set[str]:
     names: set[str] = set()
     for block in ("parameters", "external_parameters", "static_parameters"):
-        names |= set(cfg.prior_params.get(block) or {})
+        names |= set(sampler.get(block) or {})
     return names

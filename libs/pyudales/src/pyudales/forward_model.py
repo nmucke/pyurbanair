@@ -121,7 +121,7 @@ ROUGHNESS_FALLBACK_WARN_SHARE = 0.25
 MIN_ROUGHNESS_LENGTH = 1e-6
 
 
-def validate_roughness_length(z0: float) -> float:
+def validate_roughness_length(z0: float, name: str = "roughness_length") -> float:
     """Return ``z0`` as a float, raising unless it is a finite length >= 1e-6 m.
 
     uDALES treats z0 = 0 as free slip (the wall function skips the facet). A
@@ -131,10 +131,33 @@ def validate_roughness_length(z0: float) -> float:
     z0 = float(z0)
     if not np.isfinite(z0) or z0 < MIN_ROUGHNESS_LENGTH:
         raise ValueError(
-            f"roughness_length must be a finite z0 >= {MIN_ROUGHNESS_LENGTH} m, "
-            f"got {z0}"
+            f"{name} must be a finite z0 >= {MIN_ROUGHNESS_LENGTH} m, got {z0}"
         )
     return z0
+
+
+def split_roughness_params(
+    params: Optional[xarray.Dataset],
+) -> Optional[tuple[float, float]]:
+    """``(roughness_length_wall, roughness_length_ground)`` from the params.
+
+    None when neither is set. Raises when only one is set, or when either is
+    set together with ``roughness_length``: the pair replaces it.
+    """
+    wall = get_param_value(params, "roughness_length_wall")
+    ground = get_param_value(params, "roughness_length_ground")
+    if wall is None and ground is None:
+        return None
+    if (
+        wall is None
+        or ground is None
+        or get_param_value(params, "roughness_length") is not None
+    ):
+        raise ValueError(
+            "Set either roughness_length or both roughness_length_wall and "
+            "roughness_length_ground in the params, not a mix."
+        )
+    return wall, ground
 
 
 def validate_closure(closure: Optional[str]) -> None:
@@ -999,37 +1022,50 @@ class ForwardModel(BaseForwardModel):
         member and window without redoing the IBM preprocessing. Precedence as
         for ``sgs_constant``: params, then the model config; absent in both, or
         equal to the file's value (the default 0.05), nothing is written.
+        ``roughness_length_wall`` and ``roughness_length_ground`` in the params
+        (both, instead of ``roughness_length``) give the walls and the
+        horizontal facets (ground and roofs) their own z0.
 
         The wall function evaluates the log law at each section's true wall
         distance d; sections with d <= e*z0 fall back to a reconstruction point
         further out and are skipped (no wall stress) if that is still too close
         (docs/pyudales.md "Roughness"). A warning flags z0 values for which
-        over a quarter of the sections are that close.
+        over a quarter of the sections are that close (the larger z0 of a split).
         """
-        z0 = get_param_value(params, "roughness_length")
-        source = "params"
-        if z0 is None:
-            z0 = self.roughness_length
-            source = "model config"
-        if z0 is None:
-            return
-        z0 = validate_roughness_length(z0)
+        z0_wall = None
+        split = split_roughness_params(params)
+        if split is not None:
+            z0_wall = validate_roughness_length(split[0], "roughness_length_wall")
+            z0 = validate_roughness_length(split[1], "roughness_length_ground")
+            source = "params (wall, ground)"
+        else:
+            value = get_param_value(params, "roughness_length")
+            source = "params"
+            if value is None:
+                value = self.roughness_length
+                source = "model config"
+            if value is None:
+                return
+            z0 = validate_roughness_length(value)
         expnr = self.dirs.experiment_name
-        if not set_facet_roughness(self.dirs.experiment_dir, expnr, z0):
+        if not set_facet_roughness(self.dirs.experiment_dir, expnr, z0, z0_wall):
             return
-        share = wall_function_fallback_share(self.dirs.experiment_dir, z0)
+        z0_max = max(z0, z0_wall or 0.0)
+        share = wall_function_fallback_share(self.dirs.experiment_dir, z0_max)
         if share > ROUGHNESS_FALLBACK_WARN_SHARE:
             logger.warning(
-                "roughness_length=%.4g m: %.0f%% of the IBM wall sections lie "
+                "%s=%.4g m: %.0f%% of the IBM wall sections lie "
                 "within e*z0 = %.3f m of their facet, where uDALES reconstructs "
                 "the velocity further out or drops the wall stress.",
-                z0,
+                "roughness_length" if z0_wall is None else "max(z0_wall, z0_ground)",
+                z0_max,
                 100.0 * share,
-                np.e * z0,
+                np.e * z0_max,
             )
         logger.info(
-            "Set uDALES facet roughness z0 = %.6f m (roughness_length from %s)",
+            "Set uDALES facet roughness z0 = %.6f m%s (from %s)",
             z0,
+            "" if z0_wall is None else f", walls {z0_wall:.6f} m",
             source,
         )
 
