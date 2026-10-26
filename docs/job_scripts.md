@@ -157,10 +157,11 @@ The flow-matching generator on the realistic corpus, trained on a cache of the
 frozen autoencoder's latents (`latent_cache`, see
 [neural_surrogates.md](neural_surrogates.md) §38). First one GPU job encodes
 every train/val frame, then the training reads the latents instead of the
-states and skips the encoder:
+states and skips the encoder. `latent_generator_architecture` picks the
+velocity net (options in §38) and with it the default run `name`:
 
 ```bash
-args=(name=latent_generator_b_realistic_adaln
+args=(latent_generator_architecture=compact_h512  # sets name=latent_generator_compact_h512
   paths.weights_dir=/projects/urbanair/model_weights
   paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
   autoencoder_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic

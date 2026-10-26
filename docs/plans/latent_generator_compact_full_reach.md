@@ -1,9 +1,12 @@
 # Compact latent generator with full latent reach
 
-**Status: open (2026-10-23).** Follows PR #221 (`feat/small-velocity-net`) and
+**Status: open (2026-10-26).** Follows PR #221 (`feat/small-velocity-net`) and
 the study in §1. Supersedes PR #221's default of a 176-wide velocity net.
-Phase 1 is implemented on `feat/latent-generator-full-reach`. CPU tests pass.
-The idealized GPU proof of concept is still pending: the local RTX 3090 failed
+Phase 1 is implemented and merged into `feat/small-velocity-net`. Phase 2 runs
+R1–R5 were done on Snellius 2026-10-24..26 (§3, Phase 2 results): no model
+passes W1, R3 (`compact_h512`) gives the best samples and is the default of the
+new config group `configs/latent_generator_architecture/`. The
+idealized GPU proof of concept (§5) was skipped: the local RTX 3090 failed
 under sustained load on 2026-10-23.
 
 **Goal.** A latent flow-matching generator of **10–40M trainable parameters**
@@ -298,6 +301,46 @@ byte-identical.
     2025], or diffusability regularisation.
   - Plus a check of the W1 bound itself (bootstrap vs AE).
 
+### Phase 2 results (Snellius, 2026-10-24..26)
+
+**Setup, deviating from the plan above:** batch 32 instead of 40, 250 epochs,
+MIG A100 slices (~172 s per epoch). The latent cache was copied from the
+earlier DelftBlue cache, with `second_moment` added from the cached latents.
+B AE, lr 1e-4, `pyudales_realistic`. Evaluation: `evaluate_latent_generator.py`
+with Heun 25 steps (`latent_generator.num_steps=25`), 16 noise seeds, 64 test
+snapshots; the W1 bound in that evaluation is 0.031. Every run fails only the
+W1 check. Run dirs:
+`/projects/prjs2304/urbanair/model_weights/lg_b_realistic_{a_h320_w1024,b_h256_m512,h512_l6,h512_l6_xpred,h512_l6_ts0p5,h512_l6_ts3}/eval_heun25_s16/`.
+
+| run | best val | W1 (u/v/w) | profile RMSE | div RMS | spectra LSD dB (AE 1.03) |
+|---|---|---|---|---|---|
+| R1 = A `compact_wide_head` | 1.115 | 0.053 (.075/.048/.036) | 0.056 | 0.035 | 1.20 |
+| R2 = B `compact_bottleneck` | 1.127 | 0.052 (.075/.048/.032) | 0.060 | 0.032 | 1.33 |
+| R3 `compact_h512` | 1.157 | 0.042 (.050/.049/.025) | 0.047 | 0.035 | 1.24 |
+| R4 = R3 + `prediction: data` | 1.162 | 0.048 (.074/.044/.025) | 0.057 | 0.034 | 1.27 |
+| R5a = R3 + `time_shift` 0.5, 100 ep | 1.147* | 0.051 | 0.064 | 0.036 | 1.30 |
+| R5b = R3 + `time_shift` 3, 100 ep | 1.149* | 0.041 (.053/.047/.023) | 0.059 | 0.047 | 1.83 |
+
+\* `time_shift` warps the validation flow times too, so these val losses are
+not comparable. The stored 177M adaLN evaluation (other machine, Euler) had W1
+0.093 (.104/.089/.086), profile 0.062, div 0.024.
+
+- **R3 gives the best samples** (W1, profile) and is adopted as the config
+  default (`latent_generator_architecture=compact_h512`). A has the best val
+  loss and spectra; B the best divergence and Reynolds stresses.
+- **R4 and `time_shift` do not help.** `time_shift` 3 adds high-k energy and
+  divergence; 0.5 is worse on W1 and profile.
+- **Heun 25 beats Euler 50** at equal NFE on every model (W1 for `w` down
+  ~35–40%), hence the new `latent_generator.num_steps` in `eval.yaml`.
+- **Open issues.** With Heun all models over-disperse latent components
+  1025–1536 (variance ratio 2.0–3.4); `time_shift` 3 makes it worse, 0.5
+  reduces it. The W1 bound is noisy: it is computed on a 200k-value random
+  subsample, and the AE's own W1 was 0.008 vs 0.016 between two evaluation
+  configs.
+- **Next candidates:** a higher `gaussian_eig_floor` (1e-3) against the tail
+  over-dispersion, and a deterministic W1 (all values, or one fixed subsample
+  shared by all sources).
+
 ## 4. Risks
 
 - **The PCA basis comes from the training latent cache.** It must be computed
@@ -312,19 +355,21 @@ byte-identical.
   not, prefer B.
 - **Design B's D-wide adaLN is memory-heavy at batch 40.** Measure the peak
   before the long runs; fall back to a shared modulation.
-- **PR #221.** Its `latent_skip` (channel) stays as a supported option. Its
-  default config (`hidden_size: 176`, `latent_generator_s_h176`) should not
-  land. Either drop it from the PR, or close the PR in favour of Phase 1.
-  Phase 1 is now merged into PR #221's branch, so the default config still
-  sets `latent_skip: true`. Every run that uses `gaussian_skip` must set
-  `architecture.latent_skip=false`; the two are mutually exclusive.
+- **PR #221.** Its `latent_skip` (channel) stays as a supported option,
+  now `latent_generator_architecture=channel_skip_h176`. Its h176 default is
+  replaced by the group default `compact_h512`. Each group option sets
+  `latent_skip` and `gaussian_skip` explicitly, so the two (mutually exclusive)
+  no longer need a CLI override.
 
 ## 5. Test recipe (proof of concept, then realistic)
 
 For running on a machine with a working GPU. Run everything from the repository
 root on branch `feat/small-velocity-net`, through `pixi run -e cuda` (GPU) or
 `pixi run -e dev` (CPU). All configs below were composed and built on CPU on
-2026-10-23; nothing below has run on a GPU yet.
+2026-10-23; nothing below has run on a GPU yet. The overrides predate the
+`latent_generator_architecture` group and assume PR #221's h176 default; with
+the group, pick an option instead (`channel_skip_h176`, `compact_wide_head`,
+`compact_bottleneck`, `full_width`) and override only the widths.
 
 ### 5.0 Inputs
 

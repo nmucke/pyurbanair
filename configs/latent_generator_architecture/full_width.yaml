@@ -1,0 +1,10 @@
+# @package _global_
+# Full-width adaLN net (hidden_size = D), no skip: the model of
+# latent_generator_b_realistic_adaln. ~177M trainable on the B AE (D = 1536).
+name: latent_generator_full_width
+architecture:
+  hidden_size: null  # -> D
+  n_layers: 6
+  velocity_conditioning: adaln
+  latent_skip: false
+  gaussian_skip: false

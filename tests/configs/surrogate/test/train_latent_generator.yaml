@@ -11,6 +11,11 @@ architecture:
   film_hidden: 128
   mlp_ratio: 4
   velocity_conditioning: input_film
+  # Below D (768 for the S autoencoder), reached by the per-channel skip.
+  hidden_size: 176
+  n_layers: 6
+  latent_skip: true
+  gaussian_skip: false
 trainer:
   lr_min: 1.0e-6
 latent_stats:

@@ -10,9 +10,16 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-from tests.conftest import TRAIN_ORDER, compose, inlet_turbulence_corpus, load_script
+from tests.conftest import (
+    CONFIGS,
+    TRAIN_ORDER,
+    compose,
+    inlet_turbulence_corpus,
+    load_script,
+)
 
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
@@ -204,6 +211,57 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
+    "option",
+    sorted(p.stem for p in (CONFIGS / "latent_generator_architecture").glob("*.yaml")),
+)
+def test_latent_generator_architecture_builds(
+    option: str, tmp_path: pathlib.Path
+) -> None:
+    """Each velocity-net option, made shallow and narrow, builds on a tiny
+    autoencoder and gives a finite velocity of the latent's shape."""
+    pytest.importorskip("diffusers")
+    from tests.neural_surrogates._latent_generator_fixtures import (
+        GRID,
+        HP,
+        NET,
+        C,
+        P,
+        make_ae_export,
+    )
+
+    cfg = compose(
+        "surrogate/train_latent_generator",
+        f"latent_generator_architecture={option}",
+        root=tmp_path,
+    )
+    arch = cfg.architecture
+    tiny = {**NET, "param_history_steps": HP, "max_latent_tokens": None}
+    if arch.hidden_size is not None:
+        tiny["hidden_size"] = 16
+    for key in ("head_hidden", "mlp_hidden"):
+        if key in arch:
+            tiny[key] = 32
+    model = instantiate(
+        OmegaConf.merge(arch, tiny),
+        n_state_channels=C,
+        n_params=P,
+        pretrained_ae_dir=str(make_ae_export(tmp_path)),
+    )
+    assert model.velocity_conditioning == arch.velocity_conditioning
+    assert model.latent_skip == arch.latent_skip
+    assert model.gaussian_skip == arch.gaussian_skip
+    n, d = model.working_latent_dim, model.state_latent_dim
+    model.set_latent_normalization(
+        torch.zeros(n), torch.ones(n), second_moment=torch.eye(d)
+    )
+    cond = model.geometry_condition(torch.ones(*GRID), batch_size=2)
+    z = torch.randn(2, d, *model.latent_grid_for(GRID))
+    with torch.no_grad():
+        v = model.velocity(z, torch.rand(2), torch.randn(2, HP, P), cond)
+    assert v.shape == z.shape and torch.isfinite(v).all()
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
     "design",
     [
         # Design A: narrow adaLN trunk + per-token head, clean-sample prediction.
@@ -234,7 +292,7 @@ def test_full_reach_latent_generator_trains_samples_and_evaluates(
         "architecture.hidden_size=16",
         # The Gaussian skip replaces the per-channel latent_skip.
         "architecture.latent_skip=false",
-        "+architecture.gaussian_skip=true",
+        "architecture.gaussian_skip=true",
         *design,
     )
     load_script("scripts/surrogate/train.py").run(cfg)

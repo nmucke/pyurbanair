@@ -2,39 +2,32 @@
 # Train the flow-matching generator of initial fields in the autoencoder's latent space.
 # Shared training defaults: training.yaml. The `trainer`, `optimizer`,
 # `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+# The velocity net: latent_generator_architecture=<name>, one of compact_h512,
+# compact_wide_head, compact_bottleneck, channel_skip_h176, full_width. Each sets
+# its own default `name`, so a switch never resumes another net's checkpoint.
 defaults:
   - training
   - _self_
+  - /latent_generator_architecture: compact_h512
 
 # Which model scripts/surrogate/train.py builds.
 task: latent_generator
-# A new name per architecture: resume=true would load a checkpoint of another net.
-name: latent_generator_s_h176
 autoencoder_dir: ${paths.weights_dir}/tadpole_ae_s
 architecture:
   _target_: neural_surrogates.TadpoleLatentGenerator
   param_history_steps: 12
-  hidden_size: 176  # the DFT B sub-network width; needs latent_skip
-  n_layers: 6
-  num_heads: 8  # head width 22, as in the DFT
+  # hidden_size, n_layers, the skips and velocity_conditioning come from
+  # configs/latent_generator_architecture/. velocity_conditioning is how params
+  # + flow time reach the net: input_film (one FiLM on the input tokens), adaln
+  # (adaLN-Zero in every block) or adaln_bottleneck (design B, a D-wide stream).
+  num_heads: 8
   time_embed_dim: 64
   film_hidden: 256  # width of the conditioning embedding every adaLN block reads
-  mlp_ratio: 4  # 5.5M trainable with adaln at hidden 176 on the B AE (177M at hidden 1536)
+  mlp_ratio: 4
   use_checkpoint: false
-  # How params + flow time reach the velocity net: input_film (one FiLM on the
-  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block), or
-  # adaln_bottleneck (design B: a D-wide residual stream, attention at
-  # hidden_size, a per-token D -> mlp_hidden -> D MLP per block).
-  velocity_conditioning: adaln
-  # Full-rank skip (a(tau) + Linear(t_emb)) * z_tau, so hidden_size can be < D.
-  latent_skip: true
-  # Optional, absent = off (docs/neural_surrogates.md, "Compact velocity nets"):
-  # gaussian_skip: true         # v = exact velocity of N(mu, Sigma) per token + net
-  #                             #   (replaces latent_skip: set at most one)
-  # gaussian_eig_floor: 1.0e-4  # floor of the Sigma eigenvalues
-  # head_hidden: 1024           # design A (adaln): per-token head of this width
-  # head_layers: 2              #   adaLN MLP blocks in that head
-  # mlp_hidden: 512             # design B (adaln_bottleneck): per-token MLP width
+  # Optional, absent = off (docs/neural_surrogates.md, "Compact velocity nets";
+  # gaussian_skip, head_hidden, head_layers, mlp_hidden: see the group files):
+  # gaussian_eig_floor: 1.0e-4  # floor of the Sigma eigenvalues (gaussian_skip)
   # prediction: data            # net predicts the clean sample (absent: velocity)
   # time_shift: 3.0             # SD3 shift of the flow-time grid (absent: 1)
   normalize: true

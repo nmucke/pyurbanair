@@ -2127,11 +2127,12 @@ channel outside the transformer (`velocity_skip`, zero-initialised, reading the
 sinusoidal tau tail of the conditioning vector), like the DFT's
 `latent_residual_scale * z` residual, so at init the model *is* the Gaussian
 velocity and the transformer only learns the low-rank remainder. It lifts the
-`hidden_size >= D` rule: the default config runs the DFT B width (`hidden_size:
+`hidden_size >= D` rule: `latent_generator_architecture=channel_skip_h176`
+(§38; the default before the compact nets) runs the DFT B width (`hidden_size:
 176`, 8 heads of 22, `n_layers: 6`, `mlp_ratio: 4`, `film_hidden: 256`, adaLN:
 5.5M trainable on the B AE, versus 177M at full width). `latent_skip: false`
-(the default, and absent in older artifacts) builds no extra module, so old
-weights load strictly.
+(the model default, and absent in older artifacts) builds no extra module, so
+old weights load strictly.
 
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
@@ -2193,12 +2194,14 @@ work, measured on the `pyudales_realistic` test split (B AE):
 
 So the output path must reach all ~1300 useful directions with context, while
 attention (the H² part) can stay narrow. The knobs below do that; each is
-absent by default, builds nothing then, and old artifacts load strictly.
+absent by default, builds nothing then, and old artifacts load strictly. The
+config group `latent_generator_architecture` (§38) packages the tested
+combinations; its default `compact_h512` is H 512 + `gaussian_skip`.
 `hidden_size < D` is accepted only together with one of `head_hidden`,
 `adaln_bottleneck`, `gaussian_skip` or `latent_skip`. Only the first two let
 the conditioning reach every direction; the skips are fixed per-token flows.
-`gaussian_skip` and `latent_skip` are mutually exclusive (the default config
-sets `latent_skip: true`, so set it to `false` with `gaussian_skip`), and
+`gaussian_skip` and `latent_skip` are mutually exclusive (every
+`latent_generator_architecture` option, §38, sets both explicitly), and
 `latent_skip` requires `prediction: velocity`.
 
 | Knob | What it builds | Use |
@@ -2371,13 +2374,38 @@ estimated on exactly what the objective later encodes.
 ```bash
 pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_latent_generator \
     autoencoder_dir=model_weights/tadpole_ae_s paths.data_dir=training_data/pyudales_idealized \
-    'dataset.param_vars=[inflow_angle,velocity_magnitude]' name=latent_generator_s
+    'dataset.param_vars=[inflow_angle,velocity_magnitude]' \
+    latent_generator_architecture=compact_wide_head
 ```
+
+**Velocity-net architecture.** The config group
+[latent_generator_architecture/](../configs/latent_generator_architecture/)
+picks the velocity net (`latent_generator_architecture=<option>`; default
+`compact_h512`). Each option sets its own default run `name` (so switching
+never resumes another net's checkpoint; `name=` on the CLI still wins) and all
+of `hidden_size`, `n_layers`, `velocity_conditioning`, `latent_skip` and
+`gaussian_skip`, plus its own extras; the base config keeps only the shared
+keys. Trainable parameters on the B AE (D = 1536):
+
+| Option | Net | Params | Default `name` |
+|---|---|---|---|
+| `compact_h512` (default) | uniform H 512, 6 layers, adaLN + Gaussian skip | 32.0M | `latent_generator_compact_h512` |
+| `compact_wide_head` | design A: H 320, 6 layers + head W 1024 × 2, Gaussian skip | 27.6M | `latent_generator_compact_wide_head` |
+| `compact_bottleneck` | design B: `adaln_bottleneck`, H 256, 4 layers, `mlp_hidden` 512, Gaussian skip | 26.8M | `latent_generator_compact_bottleneck` |
+| `channel_skip_h176` | H 176, 6 layers, `latent_skip` (PR #221's former default) | 5.5M | `latent_generator_s_h176` |
+| `full_width` | `hidden_size` = D, adaLN, no skip | ~177M | `latent_generator_full_width` |
+
+`gaussian_eig_floor`, `prediction` and `time_shift` stay outside the group
+(absent = off; add them as `+architecture.<key>=...`). `compact_h512` is the
+default because on `pyudales_realistic` it gave the best samples of the compact
+nets (W1 0.042 vs 0.093 for the 177M adaLN, better profiles), though none
+passed the W1 check; `prediction: data` and `time_shift` did not help
+([plans/latent_generator_compact_full_reach.md](plans/latent_generator_compact_full_reach.md) §3, Phase 2 results).
 
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size` (`null` → `D`; below `D` needs `latent_skip`, `gaussian_skip`, `head_hidden` or `adaln_bottleneck`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `latent_skip` (§36; absent → `false`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`, shared keys: `param_history_steps: 12` (`Hp`), `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096`. The group above adds `hidden_size` (`null` → `D`; below `D` needs `latent_skip`, `gaussian_skip`, `head_hidden` or `adaln_bottleneck`), `n_layers`, `velocity_conditioning` (`adaln`, `adaln_bottleneck` or `input_film`, §36; absent → `input_film`), `latent_skip`, `gaussian_skip` and the design knobs |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2483,7 +2511,9 @@ spread over the trajectories) under matched geometry and history:
   `generated_<sampler>_steps<k>` for samplers other than `sampler` (the
   main samples' sampler, default `euler`). `step_sweep` rows in
   `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
-  plots against NFE, one line per sampler;
+  plots against NFE, one line per sampler. `num_steps` sets the main
+  samples' step count (`null`: the model's `generator.sampling.num_steps`);
+  Heun at 25 steps beat Euler at 50 (equal NFE) on every realistic model;
 * with `decode_modes` (e.g. `[local, halo, global]`, halo from
   `decode_halo_size`, default the AE's), per mode that differs from the trained
   policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
@@ -2495,7 +2525,7 @@ spread over the trajectories) under matched geometry and history:
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
-    latent_generator.model_dir=model_weights/latent_generator_s \
+    latent_generator.model_dir=model_weights/latent_generator_compact_wide_head \
     latent_generator.rollout_stepper_dir=model_weights/dft_s
 ```
 
