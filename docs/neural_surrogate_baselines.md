@@ -57,7 +57,8 @@ run these on a GPU ([job_scripts.md](job_scripts.md)), and
 `surrogate_finetune_{local_fno,ssrolling}.slurm pretrained_dir=<model>
 name=<new name> paths.data_dir=<new corpus>` fine-tune a trained model on new
 data (the SSRolling one with Roll-3 and the activation checkpointing that
-realistic-size grids need, see §3).
+realistic-size grids need, every weight or, with a first argument
+`finetune_roll3_lora`, through LoRA; see §3).
 
 **Data loading.** Each sample reads a few whole frames (Local-FNO t−1…t+1,
 SSRollingUrbanNet t−1…t+K; Local-FNO's patches are cut on the GPU). From a
@@ -193,6 +194,16 @@ parameters do not follow from its description; ours has 0.1 M at 96 channels.
   MSE of the other term), so it only rescales the MSE (see [losses.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/losses.py)).
 - `train_roll1.yaml` and `train_roll3.yaml` train from scratch;
   `finetune_roll3.yaml` is TL Roll-3 from a Roll-1 run.
+- `finetune_roll3_lora.yaml` is the same Roll-3 fine-tune through PEFT LoRA
+  (`method: lora`, rank 32): the pretrained model is frozen, adapters train on
+  the backbone Swin blocks' `attn.qkv`/`attn.proj`/`mlp.fc1`/`mlp.fc2`, and
+  `param_embed` and SSGen train fully (`trainable_modules`), 11.9 M of the
+  452 M weights at 512. Aurora's own LoRA (`use_lora`, rank 8 on every
+  attention's `qkv` and `proj`, 1.1 M weights, one adapter for all rollout
+  steps) is part of the base weights: `method: full` trains it with
+  everything else, `method: lora` keeps it frozen. weights.pt is the merged
+  plain model. Pass `finetune_roll3_lora` as the first argument of
+  `surrogate_finetune_ssrolling.slurm`.
 - Adam at a constant 1e-5, batch 2, patience 50, no gradient clipping.
 - `epoch_batches` / `val_batches` (default null: the whole split) cap an
   epoch, as for Local-FNO. A full pyudales_idealized epoch is ~25k batches,
