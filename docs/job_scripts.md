@@ -24,11 +24,13 @@ job_scripts/
 │   ├── compare_models.slurm          # workflows/compare_models.sh 'models=[pyudales,pypalm]'
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
+│   ├── surrogate_finetune_{dft,ssrolling,local_fno}.slurm # train.py on surrogate/finetune_dft or a baseline fine-tune (GPU)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
 │   ├── surrogate_evaluate_latent_generator_gpu.slurm # on latent_generator_b_realistic (GPU)
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
-└── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
+└── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files, plus
+    └── surrogate_finetune_barcelona.sh # bash: the Barcelona copy, then the three fine-tunes after it
 ```
 
 Each job is an `#SBATCH` header, `source job_scripts/<machine>/env.sh` and one
@@ -122,10 +124,13 @@ prechunk.output_root=<copy>` makes its copy; train with the same two
 overrides. A job cut off at its time limit resumes where it stopped when
 resubmitted. The copy takes about 1.5 min per 700 MB trajectory (about 13 h
 for the 520-file corpus); the DFT's whole-frame copy about half that, using up
-to about 1 GB of memory. The DFT has its own whole-frame copy: start the
-arguments with `--config-name surrogate/train_dft` (the last one wins, and
-`key=value` overrides must all come after it) and give it its own
-`prechunk.output_root`. Without the CPU job the GPU job makes
+to about 1 GB of memory. The DFT, the steppers and the baselines (also their
+fine-tunes) share one whole-frame copy, separate from the autoencoder's tiles:
+start the arguments with `--config-name surrogate/train_dft` (the last one
+wins, and `key=value` overrides must all come after it) and give it its own
+`prechunk.output_root`. The copy holds every state variable and frame and does
+not depend on the model's inputs, history or rollout length, but its manifest
+pins the resolved source: train with the same `paths.data_dir`. Without the CPU job the GPU job makes
 the copy itself; with a complete copy it only validates it in seconds, so once
 the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It
 continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is

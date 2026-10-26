@@ -1,0 +1,23 @@
+# @package _global_
+defaults:
+  - training
+
+name: dft_finetuned
+pretrained_dir: ${paths.weights_dir}/dft
+lora:
+  target_preset: tadpole_encdec+subnetwork
+  fused_forward: false
+trainable_modules:
+  - skip_mixing
+  - dft.decoder.conv_decoder.scales
+  - dft.decoder.transformer_decoder.scales
+  - latent_residual_scale
+trainer:
+  num_epochs: 2
+  compile_modules: null
+  pushforward_start_steps: 2
+  pushforward_epochs_per_step: 1
+  grad_unroll_steps: ${dataset.pushforward_steps}
+  grad_accum_samples: null
+dataset:
+  pushforward_steps: 3

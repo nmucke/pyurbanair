@@ -46,12 +46,18 @@ command line. Change the key at its source,
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/train
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/train_roll1
 pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/finetune_roll3
+pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune \
+    pretrained_dir=model_weights/local_fno name=local_fno_ft paths.data_dir=<new corpus>
 pixi run -e dev bash workflows/compare_surrogates.sh \
     'models=[model_weights/local_fno,model_weights/ssrolling_tl_roll3,model_weights/p3d_idealized]'
 ```
 
 On the clusters, `job_scripts/<machine>/surrogate_train_{local_fno,ssrolling}.slurm`
-run these on a GPU ([job_scripts.md](job_scripts.md)).
+run these on a GPU ([job_scripts.md](job_scripts.md)), and
+`surrogate_finetune_{local_fno,ssrolling}.slurm pretrained_dir=<model>
+name=<new name> paths.data_dir=<new corpus>` fine-tune a trained model on new
+data (the SSRolling one with Roll-3 and the activation checkpointing that
+realistic-size grids need, see §3).
 
 **Data loading.** Each sample reads a few whole frames (Local-FNO t−1…t+1,
 SSRollingUrbanNet t−1…t+K; Local-FNO's patches are cut on the GPU). From a
@@ -101,6 +107,12 @@ with the others below.
 - Stop at the first validation rise (`patience: 1`), at most 12 epochs.
 - Our corpora have about 10× more samples per epoch than their record, so
   `epoch_batches` / `val_batches` cap an epoch at about theirs.
+
+**Fine-tuning** (`local_fno/finetune.yaml`, `task: finetune_stepper`,
+`method: full`): the same schedule (halving per epoch, first validation rise,
+at most 12 epochs) from lr 2e-4, 10× below the paper's start, on uncapped
+epochs since a fine-tuning corpus is small. The architecture, inputs and
+normalisation come from the pretrained model.
 
 **Chosen where the paper is silent:** GELU; hidden width 2 × width in the
 MLPs; z-score normalisation; Li et al.'s `rfftn` corner-block layout for the
@@ -196,6 +208,12 @@ to 16×112×224):
 | SSRolling 512, Roll-3 | out of memory on the largest grid | – |
 | SSRolling 512, Roll-3 + `'trainer.activation_checkpoint_modules=[aurora.backbone.*.blocks.*]'` | 19 GB | 0.68 |
 | SSRolling 256, Roll-1 | 5 GB | 0.11 |
+
+On realistic-size grids (nz 32, up to 32×288×304), TL Roll-3
+(`ssrolling_tl_roll3_realistic`) ran at batch 2 on a 40 GB A100 with the
+encoder, the decoder and every Swin block recomputed (~5.3 h per 29k-batch epoch):
+`'trainer.activation_checkpoint_modules=[aurora.backbone.encoder_layers.*.blocks.*,aurora.backbone.decoder_layers.*.blocks.*,aurora.encoder,aurora.decoder]'`
+(set by `surrogate_finetune_ssrolling.slurm`).
 
 Local-FNO's paper recipe runs its 12 capped epochs in about 70 min. Roll-1 at
 512 with `trainer.epoch_batches=2000 trainer.val_batches=200` takes ~6 min per

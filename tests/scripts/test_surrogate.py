@@ -148,6 +148,88 @@ def test_prechunked_dft_reads_whole_frames_and_source_params(
     assert (model_dir / "weights.pt").exists()
 
 
+def _finetune_dft_cfg(
+    root: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> Any:
+    dft = trained["train_dft"]
+    return compose(
+        "surrogate/finetune_dft",
+        "+test=finetune_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=root,
+    )
+
+
+def test_finetune_dft_trains_adapters_and_skips_only(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    trainable = [n for n, p in setup.model.named_parameters() if p.requires_grad]
+    lora = [n for n in trainable if ".lora_" in n]
+    for part in (".dft.encoder.", ".dft.decoder.", ".dft.subnetwork.seqmodel."):
+        assert any(part in n for n in lora), part
+    assert all(
+        ".dft.encoder." in n or ".dft.decoder." in n or ".seqmodel." in n for n in lora
+    )
+    full = [n for n in trainable if ".lora_" not in n]
+    for module in cfg.trainable_modules:  # every listed module trains, fully
+        params = [n for n, _ in setup.model.named_parameters() if f".{module}" in n]
+        assert params and all(n in full for n in params), module
+    assert all(any(f".{m}" in n for m in cfg.trainable_modules) for n in full)
+    assert not any("geometry_branch" in n or "_film" in n for n in trainable)
+    assert not any(".param_mlp." in n for n in trainable)
+
+
+def test_finetune_dft_rollout_and_export(
+    tmp_path: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from neural_surrogates import Trainer
+    from neural_surrogates.finetuning import resolve_target_modules
+
+    # Every training-mode model call carries gradients: backprop through the
+    # whole rollout.
+    calls: list[bool] = []
+    model_forward = Trainer._model_forward
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self.model.training:
+            calls.append(torch.is_grad_enabled())
+        return model_forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(Trainer, "_model_forward", spy)
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert calls and all(calls)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    with open(model_dir / "metrics.csv") as f:
+        horizons = [int(row["pushforward_steps"]) for row in csv.DictReader(f)]
+    assert horizons == [2, 3]  # the curriculum, up to dataset.pushforward_steps
+
+    # A plain merged dict that rebuilds the architecture from config.yaml alone.
+    dft = trained["train_dft"]
+    before = torch.load(pathlib.Path(dft.paths.weights_dir) / dft.name / "weights.pt")
+    after = torch.load(model_dir / "weights.pt")
+    assert after.keys() == before.keys()
+    eval_common = load_script("scripts/utils/eval_common.py")
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    adapted = resolve_target_modules(model, preset=cfg.lora.target_preset)
+    trained_prefixes = (*adapted, *cfg.trainable_modules)
+    for key in before:  # frozen: neither adapted nor listed
+        if not any(f".{p}." in f".{key}." for p in trained_prefixes):
+            assert torch.equal(after[key], before[key]), key
+    for key in ("dft.subnetwork.seqmodel.input_proj.weight", "dft.decoder"):
+        changed = [k for k in before if k.startswith(key)]
+        assert not all(torch.equal(after[k], before[k]) for k in changed), key
+    assert all(torch.equal(model.state_dict()[k], after[k]) for k in after)
+    assert (model_dir / "adapter" / "adapter_config.json").exists()
+
+
 def _latent_cache_cfg(
     tmp_path: pathlib.Path, trained: dict[str, Any], *overrides: str
 ) -> Any:

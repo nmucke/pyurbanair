@@ -11,7 +11,7 @@ the scripts and configs are:
 | Step | Script | Config (`configs/`) |
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
-| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
+| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
 | Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
@@ -1300,9 +1300,10 @@ matching; it is not limited to `weights_transform` runs.
    keep the pretrained ones.
 3. `method: full` trains every weight from there. `method: lora` freezes the
    model and `inject_lora`s the `lora:` block (`variant`, `rank`, `alpha`,
-   `dropout`, `target_preset`, `target_modules`, `modules_to_save`); the
-   optimizer gets only the trainable (adapter) parameters and the trainer
-   `weights_transform=merge_to_state_dict`.
+   `dropout`, `target_preset`, `target_modules`, `modules_to_save`) and
+   unfreezes the optional `trainable_modules` (dotted module paths, trained
+   fully; absent: none); the optimizer gets only the trainable parameters and
+   the trainer `weights_transform=merge_to_state_dict`.
 4. After `fit()` (LoRA): `save_adapter` → `<name>/adapter/`, then overwrite
    `weights.pt` with the merged plain dict (and `best_val.json`) **only when
    `trainer.restored_best_weights`**, else keep the trainer's on-disk best
@@ -1340,7 +1341,7 @@ fine-tune data (that *is* the domain the fine-tuned model targets).
 | `resolve_target_modules` / presets / `all_adaptable_module_names` | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
 | `weights_transform` hook + resume-safe best-val restore | [training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
 | Shared loader + normalization helpers | [training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py) |
-| Config | [configs/surrogate/finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml) |
+| Config | [configs/surrogate/finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml), [finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml) (§32b) |
 | Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: finetune_stepper`) |
 | Tests | [test_lora_finetuning.py](../tests/neural_surrogates/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/neural_surrogates/test_base_training_weights_transform.py) |
 
@@ -1921,6 +1922,91 @@ convs). The 1×1×1 convs (`to_latent`, `linear_conv`) and the `cpb_mlp`
 positional-bias net are excluded for the same merge-safety / dead-capacity reasons
 as the P3D presets.
 
+### 32b. Fine-tuning a trained DFT — `finetune_dft.yaml`
+
+`train.py --config-name surrogate/finetune_dft`
+([finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml)) adapts an
+already-trained DFT (a §32 export, e.g. `dft_b`) to new data. It is the
+`finetune_stepper` task (§23) with a DFT `pretrained_dir`: the architecture,
+the merged `weights.pt` and the normalization buffers come from the DFT, whose
+saved architecture already has `skip_pretrained_load: true`, so no autoencoder
+dir is read. The task then freezes everything, injects fresh LoRA on
+`dft.encoder` / `dft.decoder` and the latent subnetwork
+(`lora.target_preset: tadpole_encdec+subnetwork`, below) and trains
+`trainable_modules` fully. The export is §33's: `weights.pt` merges the new
+adapters into the DFT and loads into a fresh stepper from `config.yaml`.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `pretrained_dir` | `${paths.weights_dir}/dft_b` | the trained DFT (not the autoencoder) |
+| `paths.data_dir` | `${paths.training_data_dir}/pyudales_barcelona_finetune` | the new data (`dataset.root_dir`) |
+| `lora.*` | rank 32, alpha 64, `tadpole_encdec+subnetwork`, `fused_forward: true` | adapters on the AE encoder/decoder and the subnetwork's transformer (`tadpole_encdec`: encoder/decoder only) |
+| `trainable_modules` | `skip_mixing`, `dft.decoder.{conv,transformer}_decoder.scales`, `latent_residual_scale` | trained fully: the skip and mixer connections |
+| `recompute_normalization` | `false` | keep the DFT's stats (its frozen encoder and subnetwork were trained with them) |
+| `dataset.pushforward_steps` | 5 | final rollout horizon |
+| `trainer.pushforward_start_steps` / `pushforward_epochs_per_step` | 3 / 3 | curriculum: horizon 3, 4, 5 |
+| `trainer.grad_unroll_steps` | `${dataset.pushforward_steps}` | ≥ the horizon: backprop through every step |
+| `trainer.activation_checkpoint_modules` | the conv blocks | memory, see below |
+| `trainer.compile_modules` | the conv stems | as the `dft_b` run |
+| `batch_sampler.batch_size` / `trainer.grad_accum_samples` | 1 / 8 | one sample per micro-batch, a step per 8 samples |
+| `optimizer.lr` | `1e-4` | per-step warmup over epoch 0, then cosine |
+
+**Skip and mixer connections.** The modules that carry the encoder features
+past the latent bottleneck: `skip_mixing` (the zero-init pointwise state
+mixers on the skips, §31; 77 k parameters at size B), the γ gates of the
+encoder→decoder skips (`dft.decoder.conv_decoder.scales`,
+`dft.decoder.transformer_decoder.scales`, 2 + 2 scalars) and
+`latent_residual_scale` (the gate of the latent residual around the
+subnetwork, 1 scalar). Frozen: the base weights under the adapters, the
+subnetwork's param FiLM (`param_mlp`) and geometry FiLM (`geom_film`), and
+the `geometry_branch`; list e.g. `subnetwork.param_mlp` to train the param
+FiLM fully. At size B (`dft_b`, 46.6 M base parameters) this trains 4.57 M:
+3.67 M encoder/decoder LoRA, 0.82 M subnetwork LoRA (of its 4.7 M), 77 k
+skip mixing and 5 gates. Entries that match nothing are skipped silently, so
+check the `parameters trained` line `train.py` prints.
+
+**Subnetwork LoRA presets** ([targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py)):
+`tadpole_subnetwork` selects the subnetwork transformer's Linears
+(`seqmodel.input_proj` / `out_proj`, each layer's `attn.qkv` / `attn.proj` and
+`mlp.{gate,up,down}_proj`); `tadpole_encdec+subnetwork` is the union with
+`tadpole_encdec` (unchanged, what `train_dft.yaml` uses). The conditioning
+heads are left out: `geom_film` is a 1×1×1 conv (not mergeable, §21) and
+`param_mlp`'s first Linear has only P (3) inputs, fewer than the rank, so a
+LoRA there is no low-rank update.
+
+**Full backpropagation through the rollout.** The trainer runs the first
+`K - g` steps of a horizon-`K` rollout under `no_grad`, with
+`g = min(grad_unroll_steps, K)` (`BaseTraining._forward` in
+[training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py)), so `grad_unroll_steps` ≥ the final
+horizon gives `g = K` at every curriculum stage. Gradients still pass through
+the frozen modules of earlier steps to reach their adapters.
+
+**Memory (estimated, not measured).** Every grad step keeps its activations,
+encoder and decoder ~98 % of them, the subnetwork < 1 % (so its adapters
+cost no noticeable memory); freezing modules saves only their weight
+gradients and optimizer state. From the H100 model of the B DFT (fused LoRA + compile:
+≈ 0.5 GB + 8.9 GB per Mcell and sample for 2 grad steps,
+[dft_training_speed_handover.md](plans/dft_training_speed_handover.md)), 5
+grad steps take ≈ 22 GB per Mcell and sample: ≈ 36 GB for one 32×224×224
+sample (1.6 Mcell), ≈ 30 GB with the default conv-block checkpointing (−18 %,
+~−10 % samples/s), ≈ 20 GB checkpointing all four stages
+(`[dft.encoder.conv_encoder, dft.encoder.transformer_encoder,
+dft.decoder.transformer_decoder, dft.decoder.conv_decoder]`, about −65 %,
++30–50 % step time). Hence one sample per micro-batch: two fit an 80 GB A100
+with conv-block checkpointing (≈ 60 GB), a 40 GB A100 takes one. Not the vendored
+skip wrappers' `use_checkpoint` (reentrant: drops the encoder LoRA gradients,
+see the handover).
+
+```bash
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/finetune_dft \
+    pretrained_dir=model_weights/dft_b name=dft_b_ft_barcelona \
+    paths.data_dir=training_data/pyudales_barcelona_finetune \
+    prechunk.output_root=<whole-frame copy>
+```
+
+On the clusters: `job_scripts/{delftblue,snellius}/surrogate_finetune_dft.slurm`
+(these defaults; `prechunk.output_root` as for §32, resubmit to resume).
+
 ### 33. ESMDA deploy + artifact layout
 
 The export is the standard plan-01 shape, so
@@ -1960,11 +2046,11 @@ unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
 | `TadpoleTimeStepper` / `ParamConditionedSubnetwork` | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
 | Vendored `TadpoleDFT` + downstream sub-network | [architectures/_tadpole/model/dft.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/model/dft.py), [.../architecture/downstream/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/architecture/downstream/) |
 | Shared field IO mixin | [architectures/_tadpole_field_io.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_field_io.py) |
-| `tadpole_encdec` LoRA preset | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
-| Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml) |
-| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`) |
+| `tadpole_encdec` / `tadpole_subnetwork` / `tadpole_encdec+subnetwork` LoRA presets | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
+| Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml), [finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml) (§32b) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`; §32b: `finetune_stepper`) |
 | `GeometryBranch` (shared with the AE) | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
-| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py), `test_finetune_dft_*` in [tests/scripts/test_surrogate.py](../tests/scripts/test_surrogate.py) |
 
 ---
 
