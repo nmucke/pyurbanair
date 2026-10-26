@@ -446,6 +446,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
         "latent_generator.decode_modes=[local,halo,global]",
         "latent_generator.samplers=[euler,heun]",
+        "latent_generator.num_steps=5",
         "latent_generator.max_snapshots=6",
         "latent_generator.max_internal_batchsize=2",
         root=session_root,
@@ -454,6 +455,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
     load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
     out = pathlib.Path(cfg.latent_generator.output_dir)
     summary = json.loads((out / "summary.json").read_text())
+    assert summary["num_steps"] == 5
     others = [m for m in ("local", "halo", "global") if m != trained_mode]
     assert summary["decode_modes"] == others
     expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}

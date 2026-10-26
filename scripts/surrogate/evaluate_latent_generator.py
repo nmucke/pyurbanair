@@ -15,10 +15,11 @@ decoder can do), generated fields with the true parameter history
 (`generated_omitted_history`), and with other numbers of sampling steps
 (`generated_steps<k>`). Statistics are computed per grid and merged.
 
-`sampler` (euler | heun) integrates the main samples. With `samplers` (e.g.
-[euler, heun]) the step sweep runs once per sampler; sweeps of a sampler other
-than `sampler` are named `generated_<sampler>_steps<k>`. Each sweep entry
-records its sampler and NFE (velocity evaluations: Euler 1, Heun 2 per step).
+`sampler` (euler | heun) integrates the main samples, in `num_steps` steps (null:
+the model's own). With `samplers` (e.g. [euler, heun]) the step sweep runs once
+per sampler; sweeps of a sampler other than `sampler` are named
+`generated_<sampler>_steps<k>`. Each sweep entry records its sampler and NFE
+(velocity evaluations: Euler 1, Heun 2 per step).
 
 `decode_modes` (e.g. [local, halo, global]) decodes with other decoder spatial
 policies than the AE was trained in (`decode_halo_size`: the halo; null = the
@@ -118,7 +119,9 @@ def run(cfg: DictConfig) -> None:
     )
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split)
     names = list(data.state_vars)
-    steps = int(train_cfg.generator.sampling.num_steps)
+    steps = int(
+        train_cfg.generator.sampling.num_steps if ev.num_steps is None else ev.num_steps
+    )
     seeds = int(ev.num_noise_seeds)
     sampler = str(ev.sampler)
     samplers = [str(x) for x in ev.samplers] if ev.samplers else [sampler]

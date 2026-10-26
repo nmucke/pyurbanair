@@ -70,6 +70,8 @@ latent_generator:
   max_internal_batchsize: null
   # ODE sampler of the main samples: euler (NFE = steps) | heun (NFE = 2 x steps).
   sampler: euler
+  # Sampling steps of the main samples; null -> the model's generator.sampling.num_steps.
+  num_steps: null
   # Sampling steps tried in the step sweep, once per entry of `samplers`
   # (e.g. [euler, heun]; null -> `sampler` only).
   num_steps_sweep: [5, 25, 50, 100]
