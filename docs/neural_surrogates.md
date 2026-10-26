@@ -2107,7 +2107,8 @@ that projection's columns, `aᵀ v = aᵀ bias` — so the ODE could only *trans
 those components of its Gaussian initialisation, never remove their noise or
 learn their conditional distribution (equal input/output widths do not resolve
 this). Here `hidden_size: null` resolves to `D`, rounded **up** to a multiple of
-`num_heads`, and an explicit value below `D` is rejected. The build is
+`num_heads`, and an explicit value below `D` is rejected (unless
+`latent_skip` or a full-reach knob is set: "Compact velocity nets" below). The build is
 `ParamConditionedSubnetwork(in_dim=D, n_params=Hp*P + time_embed_dim,
 n_layers=4, num_heads=8, hidden_size=h, param_conditioning="film",
 geom_cond_dim=G)`; the output projection keeps its zero initialisation — the
@@ -2116,6 +2117,22 @@ and the conditioning layers (parameter FiLM, geometry FiLM) start receiving
 gradients once it has moved (the unit test asserts exactly this order). This
 removes a structural blocker, not a guarantee of sample quality; report the
 actual `count_parameters()` (also in `extra_repr`), not the paper's figure.
+
+**Latent skip (`latent_skip: true`) — a DFT-width net.** With
+`z_tau = (1-tau) z0 + tau z1` and `z0, z1 ~ N(0, I)` the exact velocity is
+`a(tau) z_tau`, `a(tau) = (2tau-1) / (tau² + (1-tau)²)` (`_gaussian_flow_coeff`;
+`a(0) = -1`, `a(1) = 1`): the full-rank part of the velocity on z-scored
+latents. `latent_skip` adds `v += (a(tau) + Linear(t_emb)) ⊙ z_tau` per latent
+channel outside the transformer (`velocity_skip`, zero-initialised, reading the
+sinusoidal tau tail of the conditioning vector), like the DFT's
+`latent_residual_scale * z` residual, so at init the model *is* the Gaussian
+velocity and the transformer only learns the low-rank remainder. It lifts the
+`hidden_size >= D` rule: `latent_generator_architecture=channel_skip_h176`
+(§38; the default before the compact nets) runs the DFT B width (`hidden_size:
+176`, 8 heads of 22, `n_layers: 6`, `mlp_ratio: 4`, `film_hidden: 256`, adaLN:
+5.5M trainable on the B AE, versus 246.7M for `full_width`). `latent_skip: false`
+(the model default, and absent in older artifacts) builds no extra module, so
+old weights load strictly.
 
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
@@ -2149,6 +2166,66 @@ and the precision policy are shared. For `D = h = 1536`, 6 layers,
 236.4 M for `input_film` (`G = 1536`); the modulation costs ~1.2 M per block
 because `c` is `film_hidden` wide, not `h`. A config without the key builds
 `input_film`, so existing artifacts rebuild and load unchanged.
+
+**Compact velocity nets with full latent reach** (plan
+[latent_generator_compact_full_reach](plans/latent_generator_compact_full_reach.md)).
+The full-width rule above makes the net cost ~H² with H = D: 177–241 M
+parameters for the B AE (`D = 1536`). Why a uniformly narrower net does not
+work, measured on the `pyudales_realistic` test split (B AE):
+
+* **The latent is high-dimensional.** PCA of the z-scored per-token latents:
+  the top 176 components hold 37% of the variance, 90% needs 859 and 99%
+  needs 1140; the eigenvalues sit on a plateau near 1 from ~30 to ~1000, and
+  ~400 directions fall below 0.1 (down to ~1e-7).
+* **The decoder uses ~1100–1300 directions.** Real latents cut to their top-k
+  components and decoded: relative L2 error 7.9× the AE's at k = 176, 2.3× at
+  1024, 1.08× at 1280. `w` lives mostly in the mid- and low-variance
+  directions; filling the unreached ones with unit noise (what a confined
+  generator does) gives ~6× the real divergence.
+* **A narrow output projection caps quality, not training.** A 176-wide net
+  (5.5 M) plateaus at val loss 1.29 from epoch 20; even a perfect generator in
+  its trained output span would decode at ~6× the AE error. Width alone does
+  not pass W1 either: the 177 M adaLN model passes profile, divergence and
+  diversity but has W1 0.093 against a bound of 0.016.
+* **A Gaussian alone fails, but gets the small scales right.** Tokens drawn
+  iid from the full-covariance `N(μ, Σ)` and decoded fail profile, W1 and
+  divergence (it is unconditional), yet on `w` its W1 (0.045) beats the 177 M
+  model's (0.086): the trained net gets the low-variance directions wrong.
+
+So the output path must reach all ~1300 useful directions with context, while
+attention (the H² part) can stay narrow. The knobs below do that; each is
+absent by default, builds nothing then, and old artifacts load strictly. The
+config group `latent_generator_architecture` (§38) packages the tested
+combinations; its default `compact_h512` is H 512 + `gaussian_skip`.
+`hidden_size < D` is accepted only together with one of `head_hidden`,
+`adaln_bottleneck`, `gaussian_skip` or `latent_skip`. Only the first two let
+the conditioning reach every direction; the skips are fixed per-token flows.
+`gaussian_skip` and `latent_skip` are mutually exclusive (every
+`latent_generator_architecture` option, §38, sets both explicitly), and
+`latent_skip` requires `prediction: velocity`.
+
+| Knob | What it builds | Use |
+|---|---|---|
+| `gaussian_skip: true` (`gaussian_eig_floor`, default `1e-4`) | buffers `latent_pca_basis` (D×D), `latent_pca_eig`, `latent_pca_mean` of the z-scored state latents, filled with the latent statistics (from the raw second moment, one float64 pass: `compute_latent_normalization`, or the latent cache's per-file outer-product sums — a cache prepared before this knob lacks them and must be re-prepared); 0 trainable parameters | always with a sub-D net: the untrained model already samples `N(μ, Σ)` with the right variance in every direction |
+| `head_hidden: W`, `head_layers` (design A, `adaln` only) | a per-token head on `concat(h, z_τ)`: `Linear(H+D → W)`, `head_layers` adaLN MLP blocks at width W, LayerNorm, zero-init `Linear(W → D)`, added to the output projection | narrow trunk (e.g. H 320, 6 layers) + wide head (W 1536, 2 layers): ~19 M |
+| `velocity_conditioning: adaln_bottleneck`, `mlp_hidden: M` (design B) | `AdaLNBottleneckVelocityNet`: a D-wide residual stream; per block `LN → Linear(D→H) → attention at H → Linear(H→D)` and a per-token `D → M → D` MLP, both zero-init and gated, adaLN at width D | H 256, 4 layers, M 512: 24.1 M (6 layers: 34.4 M); every block can write any direction with spatial context |
+| `prediction: data` | the net predicts the clean sample `x̂`; `v = (x̂ − z_τ) / max(1 − τ, 0.05)`; the loss stays the v-MSE, so val losses compare | narrow nets [Li & He 2025] |
+| `time_shift: α` | training draws `σ = 1 − τ` uniformly and warps it, `σ' = ασ / (1 + (α−1)σ)`; `sample()` steps on the same warped grid | α ≈ 3–10 for ~5e5 latent values per sample [RAE; SD3] |
+
+**The Gaussian skip.** With `P`, `λ`, `μ` the buffers, `y = Pᵀ(z_τ − τμ)` and
+`m = Pᵀμ`, the exact flow-matching velocity of a per-token Gaussian
+`N(μ, P diag(λ) Pᵀ)` under `z_τ = (1−τ) z₀ + τ z₁` is
+
+`v_G = P (m + c(τ) ⊙ y)`,  `c_j(τ) = (τλ_j − (1−τ)) / (τ²λ_j + (1−τ)²)`,
+
+and the model returns `v = v_G + net(...)`. It has no `1/(1−τ)` singularity,
+`c_j` is the plain rectified-flow coefficient where `λ_j = 1`, and since the
+net's output starts at zero the untrained model *is* the Gaussian. With
+`prediction: data` the skip is `x̂_G = μ + P diag(g) y`,
+`g_j = τλ_j / (τ²λ_j + (1−τ)²)`. Cost: two D×D matmuls per token per
+evaluation. The Gaussian is iid over tokens: spatial structure and the
+conditioning still come from the net. `evaluate_latent_generator.py`'s latent
+spectrum (§39) shows per eigen-band whether a model gets the variance right.
 
 **Flow objective.** `forward(state, params_hist, geometry, geom_features=None,
 *, generator=None)` encodes the normalised target `z1`, draws `z0 ~ N(0, I)`
@@ -2297,13 +2374,38 @@ estimated on exactly what the objective later encodes.
 ```bash
 pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_latent_generator \
     autoencoder_dir=model_weights/tadpole_ae_s paths.data_dir=training_data/pyudales_idealized \
-    'dataset.param_vars=[inflow_angle,velocity_magnitude]' name=latent_generator_s
+    'dataset.param_vars=[inflow_angle,velocity_magnitude]' \
+    latent_generator_architecture=compact_wide_head
 ```
+
+**Velocity-net architecture.** The config group
+[latent_generator_architecture/](../configs/latent_generator_architecture/)
+picks the velocity net (`latent_generator_architecture=<option>`; default
+`compact_h512`). Each option sets its own default run `name` (so switching
+never resumes another net's checkpoint; `name=` on the CLI still wins) and all
+of `hidden_size`, `n_layers`, `velocity_conditioning`, `latent_skip` and
+`gaussian_skip`, plus its own extras; the base config keeps only the shared
+keys. Trainable parameters on the B AE (D = 1536):
+
+| Option | Net | Params | Default `name` |
+|---|---|---|---|
+| `compact_h512` (default) | uniform H 512, 6 layers, adaLN + Gaussian skip | 31.96M | `latent_generator_compact_h512` |
+| `compact_wide_head` | design A: H 320, 6 layers + head W 1024 × 2, Gaussian skip | 27.56M | `latent_generator_compact_wide_head` |
+| `compact_bottleneck` | design B: `adaln_bottleneck`, H 256, 4 layers, `mlp_hidden` 512, Gaussian skip | 26.75M | `latent_generator_compact_bottleneck` |
+| `channel_skip_h176` | H 176, 6 layers, `latent_skip` (PR #221's former default) | 5.5M | `latent_generator_s_h176` |
+| `full_width` | `hidden_size` = D, adaLN, no skip (not the 177M run's shared settings) | 246.7M | `latent_generator_full_width` |
+
+`gaussian_eig_floor`, `prediction` and `time_shift` stay outside the group
+(absent = off; add them as `+architecture.<key>=...`). `compact_h512` is the
+default because on `pyudales_realistic` it gave the best samples of the compact
+nets (W1 0.042 vs 0.093 for the 177M adaLN, better profiles), though none
+passed the W1 check; `prediction: data` and `time_shift` did not help
+([plans/latent_generator_compact_full_reach.md](plans/latent_generator_compact_full_reach.md) §3, Phase 2 results).
 
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`, shared keys: `param_history_steps: 12` (`Hp`), `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096`. The group above adds `hidden_size` (`null` → `D`; below `D` needs `latent_skip`, `gaussian_skip`, `head_hidden` or `adaln_bottleneck`), `n_layers`, `velocity_conditioning` (`adaln`, `adaln_bottleneck` or `input_film`, §36; absent → `input_film`), `latent_skip`, `gaussian_skip` and the design knobs |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2409,7 +2511,9 @@ spread over the trajectories) under matched geometry and history:
   `generated_<sampler>_steps<k>` for samplers other than `sampler` (the
   main samples' sampler, default `euler`). `step_sweep` rows in
   `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
-  plots against NFE, one line per sampler;
+  plots against NFE, one line per sampler. `num_steps` sets the main
+  samples' step count (`null`: the model's `generator.sampling.num_steps`);
+  Heun at 25 steps beat Euler at 50 (equal NFE) on the three realistic nets compared (R1–R3);
 * with `decode_modes` (e.g. `[local, halo, global]`, halo from
   `decode_halo_size`, default the AE's), per mode that differs from the trained
   policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
@@ -2421,7 +2525,7 @@ spread over the trajectories) under matched geometry and history:
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
-    latent_generator.model_dir=model_weights/latent_generator_s \
+    latent_generator.model_dir=model_weights/latent_generator_compact_wide_head \
     latent_generator.rollout_stepper_dir=model_weights/dft_s
 ```
 
@@ -2450,10 +2554,26 @@ The real pairwise spread (so the diversity ratio) and the Reynolds stresses
 need several snapshots **per grid**: with one per grid (e.g. `max_snapshots: 8`
 over 7 test grids) they are NaN, a gate failure; the default is 64.
 
+**Latent spectrum** (`latent_spectrum: true`, the default; one extra encoder
+pass). The physical metrics cannot say *which latent directions* a generator
+gets wrong. `ge.latent_spectrum` fits the PCA basis (centred covariance) of
+the real snapshots' normalised per-token state latents (`encode_latents(...).z`,
+padding tokens included) and measures the generated latents' variance along
+the same directions. Per eigen-band (components 1–32, 33–256, 257–768,
+769–1024, 1025–D, cut at `D`) the **geometric mean** of generated / real
+variance becomes `latent_var_ratio_<lo>_<hi>` on the `generated` row of
+`metrics.csv` and in `summary.json` (`latent_spectrum`, with both full
+spectra); `latent_spectrum.png` plots them. The geometric mean keeps the
+near-empty tail (real variance down to ~1e-7) from being swamped by the band's
+largest directions. A ratio well above 1 in the tail bands is the signature of
+a velocity net that cannot reach those directions (§36, "Compact velocity
+nets"). The generated latents are the sampled ones, before decoding
+(`sample(..., return_latents=True)`; `"latents": "sampled"`).
+
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
-`divergence.png`, `step_sweep.png` and `rollout_transients.png` (with a
-rollout stepper).
+`divergence.png`, `step_sweep.png`, `latent_spectrum.png` and
+`rollout_transients.png` (with a rollout stepper).
 
 The metric functions are pure numpy over `(N, C, nz, ny, nx)` stacks and a
 fluid mask — no Hydra, no files, no model — so each is unit-tested on analytic

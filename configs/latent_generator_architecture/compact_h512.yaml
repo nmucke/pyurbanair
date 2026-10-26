@@ -1,0 +1,11 @@
+# @package _global_
+# Uniform compact velocity net: hidden 512, 6 adaLN blocks, Gaussian skip for
+# full reach. 31.96M trainable on the B AE (D = 1536). Plan R3, the Phase-2
+# winner (docs/plans/latent_generator_compact_full_reach.md).
+name: latent_generator_compact_h512
+architecture:
+  hidden_size: 512
+  n_layers: 6
+  velocity_conditioning: adaln
+  latent_skip: false
+  gaussian_skip: true  # v = exact velocity of N(mu, Sigma) per token + net

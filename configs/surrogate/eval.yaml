@@ -70,6 +70,8 @@ latent_generator:
   max_internal_batchsize: null
   # ODE sampler of the main samples: euler (NFE = steps) | heun (NFE = 2 x steps).
   sampler: euler
+  # Sampling steps of the main samples; null -> the model's generator.sampling.num_steps.
+  num_steps: null
   # Sampling steps tried in the step sweep, once per entry of `samplers`
   # (e.g. [euler, heun]; null -> `sampler` only).
   num_steps_sweep: [5, 25, 50, 100]
@@ -87,6 +89,10 @@ latent_generator:
   n_bins: 64
   # Resamples for the held-out variability the thresholds are relative to.
   bootstrap_resamples: 200
+  # Variance of the generated latents per eigen-band of the real ones
+  # (latent_spectrum.png, latent_var_ratio_*): one extra encoder pass over the
+  # real and `generated` fields.
+  latent_spectrum: true
   # Roll a trained stepper out from the generated fields; null -> skip.
   rollout_stepper_dir: null
   rollout_steps: 20

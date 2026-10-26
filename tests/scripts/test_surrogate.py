@@ -10,9 +10,16 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-from tests.conftest import TRAIN_ORDER, compose, inlet_turbulence_corpus, load_script
+from tests.conftest import (
+    CONFIGS,
+    TRAIN_ORDER,
+    compose,
+    inlet_turbulence_corpus,
+    load_script,
+)
 
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
@@ -203,6 +210,115 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
     assert isinstance(model.velocity_net, AdaLNVelocityNet)
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "option",
+    sorted(p.stem for p in (CONFIGS / "latent_generator_architecture").glob("*.yaml")),
+)
+def test_latent_generator_architecture_builds(
+    option: str, tmp_path: pathlib.Path
+) -> None:
+    """Each velocity-net option, made shallow and narrow, builds on a tiny
+    autoencoder and gives a finite velocity of the latent's shape."""
+    pytest.importorskip("diffusers")
+    from tests.neural_surrogates._latent_generator_fixtures import (
+        GRID,
+        HP,
+        NET,
+        C,
+        P,
+        make_ae_export,
+    )
+
+    cfg = compose(
+        "surrogate/train_latent_generator",
+        f"latent_generator_architecture={option}",
+        root=tmp_path,
+    )
+    arch = cfg.architecture
+    tiny = {**NET, "param_history_steps": HP, "max_latent_tokens": None}
+    if arch.hidden_size is not None:
+        tiny["hidden_size"] = 16
+    for key in ("head_hidden", "mlp_hidden"):
+        if key in arch:
+            tiny[key] = 32
+    model = instantiate(
+        OmegaConf.merge(arch, tiny),
+        n_state_channels=C,
+        n_params=P,
+        pretrained_ae_dir=str(make_ae_export(tmp_path)),
+    )
+    assert model.velocity_conditioning == arch.velocity_conditioning
+    assert model.latent_skip == arch.latent_skip
+    assert model.gaussian_skip == arch.gaussian_skip
+    n, d = model.working_latent_dim, model.state_latent_dim
+    model.set_latent_normalization(
+        torch.zeros(n), torch.ones(n), second_moment=torch.eye(d)
+    )
+    cond = model.geometry_condition(torch.ones(*GRID), batch_size=2)
+    z = torch.randn(2, d, *model.latent_grid_for(GRID))
+    with torch.no_grad():
+        v = model.velocity(z, torch.rand(2), torch.randn(2, HP, P), cond)
+    assert v.shape == z.shape and torch.isfinite(v).all()
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "design",
+    [
+        # Design A: narrow adaLN trunk + per-token head, clean-sample prediction.
+        [
+            "architecture.velocity_conditioning=adaln",
+            "+architecture.head_hidden=32",
+            "+architecture.head_layers=1",
+            "+architecture.prediction=data",
+        ],
+        # Design B: D-wide residual stream, narrow attention, shifted time grid.
+        [
+            "architecture.velocity_conditioning=adaln_bottleneck",
+            "+architecture.mlp_hidden=32",
+            "+architecture.time_shift=3.0",
+        ],
+    ],
+    ids=["design_a", "design_b"],
+)
+def test_full_reach_latent_generator_trains_samples_and_evaluates(
+    tmp_path: pathlib.Path, trained: dict[str, Any], design: list[str]
+) -> None:
+    """A sub-D net with the Gaussian skip trains from the cache (which stores
+    the second moment), rebuilds strictly, and goes through the evaluation."""
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path,
+        trained,
+        "architecture.hidden_size=16",
+        # The Gaussian skip replaces the per-channel latent_skip.
+        "architecture.latent_skip=false",
+        "architecture.gaussian_skip=true",
+        *design,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert model.gaussian_skip and "gaussian_skip=True" in model.extra_repr()
+    eig = model.latent_pca_eig
+    assert torch.isfinite(eig).all() and float(eig.min()) > 0
+    assert not torch.equal(model.latent_pca_basis, torch.eye(len(eig)))
+
+    ev = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator.model_dir={model_dir}",
+        "latent_generator.max_snapshots=2",
+        "latent_generator.num_steps_sweep=[2]",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(ev)
+    summary = json.loads(
+        (pathlib.Path(ev.latent_generator.output_dir) / "summary.json").read_text()
+    )
+    assert np.isfinite(summary["scalars"]["generated"]["w1"])
+    assert all(np.isfinite(r) for r in summary["latent_spectrum"]["var_ratio"].values())
+
+
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
     cfg = compose("surrogate/eval", "+test=eval", root=session_root)
     load_script("scripts/surrogate/evaluate_stepper.py").run(cfg)
@@ -366,6 +482,15 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+    spectrum = summary["latent_spectrum"]
+    assert spectrum["var_ratio"] and all(
+        np.isfinite(r) and r > 0 for r in spectrum["var_ratio"].values()
+    )
+    assert len(spectrum["real_eigenvalues"]) == len(spectrum["generated_variance"])
+    with open(out / "metrics.csv") as f:
+        generated = next(r for r in csv.DictReader(f) if r["source"] == "generated")
+    assert all(f"latent_var_ratio_{b}" in generated for b in spectrum["var_ratio"])
+    assert (out / "latent_spectrum.png").exists()
 
 
 def test_evaluate_latent_generator_decode_modes_and_samplers(
@@ -379,6 +504,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
         "latent_generator.decode_modes=[local,halo,global]",
         "latent_generator.samplers=[euler,heun]",
+        "latent_generator.num_steps=5",
         "latent_generator.max_snapshots=6",
         "latent_generator.max_internal_batchsize=2",
         root=session_root,
@@ -387,6 +513,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
     load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
     out = pathlib.Path(cfg.latent_generator.output_dir)
     summary = json.loads((out / "summary.json").read_text())
+    assert summary["num_steps"] == 5
     others = [m for m in ("local", "halo", "global") if m != trained_mode]
     assert summary["decode_modes"] == others
     expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}

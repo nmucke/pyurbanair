@@ -110,6 +110,7 @@ surrogate/eval.yaml                    # all evaluation: blocks stepper (one or 
 surrogate/training.yaml                # training defaults every training config shares
 surrogate/architectures.yaml           # every stepper architecture, <family>_<size>
 params/surrogate_training_data.yaml    # sampler for the training data
+latent_generator_architecture/         # train_latent_generator's velocity net, one file each
 ```
 
 Each training config loads `training.yaml` (shared `trainer`, `optimizer`,

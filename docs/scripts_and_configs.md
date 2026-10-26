@@ -53,6 +53,7 @@ configs/
   assimilation_settings/  # smoother, analysis, localization, state_reduction, inflation
   surrogate/              # generate_data, train_*, finetune_stepper, eval,
                           #   training (shared defaults), architectures
+  latent_generator_architecture/  # train_latent_generator's velocity net, one file each
 ```
 
 ### 1.1 Entry points and `common.yaml`
@@ -208,6 +209,7 @@ example overrides are in [`configs/README.md`](../configs/README.md#neural-surro
 | `train_stepper.yaml` | `train.py` | next-step stepper; `'architecture=${architectures.<name>}'` |
 | `train_autoencoder.yaml` | `train.py` | field autoencoder (Tadpole); optional `prechunk` re-chunked data copy |
 | `train_latent_generator.yaml` | `train.py` | flow-matching latent initial-field generator; optional precomputed `latent_cache` |
+| `../latent_generator_architecture/` | — | top-level group of `train_latent_generator.yaml`: one velocity net per file, each with its own default `name` (`latent_generator_architecture=compact_wide_head`; default `compact_h512`; options in [neural_surrogates.md](neural_surrogates.md) §38) |
 | `train_dft.yaml` | `train.py` | pretrained autoencoder -> stepper (DFT); optional whole-frame `prechunk` copy |
 | `finetune_stepper.yaml` | `train.py` | fine-tune a pretrained stepper, `method: full \| lora` |
 | `eval.yaml` | `evaluate_*.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator` |

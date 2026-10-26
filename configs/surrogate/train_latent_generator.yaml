@@ -2,27 +2,34 @@
 # Train the flow-matching generator of initial fields in the autoencoder's latent space.
 # Shared training defaults: training.yaml. The `trainer`, `optimizer`,
 # `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+# The velocity net: latent_generator_architecture=<name>, one of compact_h512,
+# compact_wide_head, compact_bottleneck, channel_skip_h176, full_width. Each sets
+# its own default `name`, so a switch never resumes another net's checkpoint.
 defaults:
   - training
   - _self_
+  - /latent_generator_architecture: compact_h512
 
 # Which model scripts/surrogate/train.py builds.
 task: latent_generator
-name: latent_generator_s
 autoencoder_dir: ${paths.weights_dir}/tadpole_ae_s
 architecture:
   _target_: neural_surrogates.TadpoleLatentGenerator
   param_history_steps: 12
-  hidden_size: null
-  n_layers: 4
+  # hidden_size, n_layers, the skips and velocity_conditioning come from
+  # configs/latent_generator_architecture/. velocity_conditioning is how params
+  # + flow time reach the net: input_film (one FiLM on the input tokens), adaln
+  # (adaLN-Zero in every block) or adaln_bottleneck (design B, a D-wide stream).
   num_heads: 8
   time_embed_dim: 64
-  film_hidden: 512  # width of the conditioning embedding every adaLN block reads
-  mlp_ratio: 2  # 177M with adaln at hidden 1536; the width cannot drop below D
+  film_hidden: 256  # width of the conditioning embedding every adaLN block reads
+  mlp_ratio: 4
   use_checkpoint: false
-  # How params + flow time reach the velocity net: input_film (one FiLM on the
-  # input tokens) or adaln (adaLN-Zero shift/scale/gate in every block).
-  velocity_conditioning: adaln
+  # Optional, absent = off (docs/neural_surrogates.md, "Compact velocity nets";
+  # gaussian_skip, head_hidden, head_layers, mlp_hidden: see the group files):
+  # gaussian_eig_floor: 1.0e-4  # floor of the Sigma eigenvalues (gaussian_skip)
+  # prediction: data            # net predicts the clean sample (absent: velocity)
+  # time_shift: 3.0             # SD3 shift of the flow-time grid (absent: 1)
   normalize: true
   num_sampling_steps: 50
   latent_eps: 1.0e-6

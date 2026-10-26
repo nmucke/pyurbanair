@@ -1,0 +1,12 @@
+# @package _global_
+# D-wide residual stream with attention at hidden 256 and a per-token
+# D -> 512 -> D MLP per block, with Gaussian skip. 26.75M trainable on the B AE
+# (D = 1536). Plan design B / R2.
+name: latent_generator_compact_bottleneck
+architecture:
+  hidden_size: 256
+  n_layers: 4
+  velocity_conditioning: adaln_bottleneck
+  latent_skip: false
+  gaussian_skip: true
+  mlp_hidden: 512  # per-token MLP width

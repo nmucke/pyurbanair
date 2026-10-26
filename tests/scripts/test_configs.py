@@ -45,6 +45,56 @@ def test_every_option_resolves(group: str, tmp_path: pathlib.Path) -> None:
         OmegaConf.to_container(cfg, resolve=True)
 
 
+LATENT_NETS = CONFIGS / "latent_generator_architecture"
+# The keys every velocity-net option sets, and the ones only some add.
+LATENT_NET_KEYS = (
+    "hidden_size",
+    "n_layers",
+    "velocity_conditioning",
+    "latent_skip",
+    "gaussian_skip",
+)
+LATENT_NET_EXTRAS = ("head_hidden", "head_layers", "mlp_hidden")
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "option", sorted(p.stem for p in LATENT_NETS.glob("*.yaml"))
+)
+def test_latent_generator_architecture_sets_the_whole_net(
+    option: str, tmp_path: pathlib.Path
+) -> None:
+    """Each option sets the name and the whole velocity net: nothing is left
+    over from the base config or another option."""
+    group = OmegaConf.load(LATENT_NETS / f"{option}.yaml")
+    assert set(LATENT_NET_KEYS) <= set(group.architecture)
+    cfg = compose(
+        "surrogate/train_latent_generator",
+        f"latent_generator_architecture={option}",
+        root=tmp_path,
+    )
+    OmegaConf.to_container(cfg, resolve=True)
+    assert cfg.name == group.name
+    for key in (*LATENT_NET_KEYS, *LATENT_NET_EXTRAS):
+        assert cfg.architecture.get(key) == group.architecture.get(key), key
+        assert (key in cfg.architecture) == (key in group.architecture), key
+
+
+def test_latent_generator_architecture_overrides_win(tmp_path: pathlib.Path) -> None:
+    cfg = compose(
+        "surrogate/train_latent_generator",
+        "latent_generator_architecture=full_width",
+        "name=my_net",
+        "architecture.hidden_size=64",
+        "architecture.gaussian_skip=true",
+        "+architecture.head_hidden=32",
+        root=tmp_path,
+    )
+    assert cfg.name == "my_net"
+    assert cfg.architecture.hidden_size == 64
+    assert cfg.architecture.gaussian_skip
+    assert cfg.architecture.head_hidden == 32
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "name", ["forward", "assimilation", "surrogate/generate_data"]
 )

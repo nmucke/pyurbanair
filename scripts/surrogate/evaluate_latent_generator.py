@@ -15,10 +15,11 @@ decoder can do), generated fields with the true parameter history
 (`generated_omitted_history`), and with other numbers of sampling steps
 (`generated_steps<k>`). Statistics are computed per grid and merged.
 
-`sampler` (euler | heun) integrates the main samples. With `samplers` (e.g.
-[euler, heun]) the step sweep runs once per sampler; sweeps of a sampler other
-than `sampler` are named `generated_<sampler>_steps<k>`. Each sweep entry
-records its sampler and NFE (velocity evaluations: Euler 1, Heun 2 per step).
+`sampler` (euler | heun) integrates the main samples, in `num_steps` steps (null:
+the model's own). With `samplers` (e.g. [euler, heun]) the step sweep runs once
+per sampler; sweeps of a sampler other than `sampler` are named
+`generated_<sampler>_steps<k>`. Each sweep entry records its sampler and NFE
+(velocity evaluations: Euler 1, Heun 2 per step).
 
 `decode_modes` (e.g. [local, halo, global]) decodes with other decoder spatial
 policies than the AE was trained in (`decode_halo_size`: the halo; null = the
@@ -43,6 +44,18 @@ Outputs, in `latent_generator.output_dir`:
                       per sampler
   rollout_transients.png  kinetic energy of a stepper rolled out from real,
                       AE and generated fields (if `rollout_stepper_dir`)
+  latent_spectrum.png variance of the generated latents along each principal
+                      direction of the real ones, against the real
+                      eigenvalues (if `latent_spectrum`)
+
+`latent_spectrum` fits the PCA basis of the real snapshots' normalised
+per-token state latents and measures the generated latents' variance in it.
+Per eigen-band (components 1-32, 33-256, 257-768, 769-1024, 1025-D, cut at D)
+the geometric mean of generated / real variance is `latent_var_ratio_<band>`
+on the `generated` row of metrics.csv and in summary.json (`latent_spectrum`):
+> 1 means the band comes out too noisy (e.g. a velocity net that cannot reach
+the low-variance directions leaves noise there). The generated latents are the
+sampled latents themselves (`latent_spectrum.latents: sampled`), before decoding.
 """
 
 from __future__ import annotations
@@ -106,7 +119,9 @@ def run(cfg: DictConfig) -> None:
     )
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split)
     names = list(data.state_vars)
-    steps = int(train_cfg.generator.sampling.num_steps)
+    steps = int(
+        train_cfg.generator.sampling.num_steps if ev.num_steps is None else ev.num_steps
+    )
     seeds = int(ev.num_noise_seeds)
     sampler = str(ev.sampler)
     samplers = [str(x) for x in ev.samplers] if ev.samplers else [sampler]
@@ -136,6 +151,7 @@ def run(cfg: DictConfig) -> None:
         num_steps: int = steps,
         how: str = sampler,
         decode: str | None = None,
+        latents: list[dict] | None = None,
     ) -> np.ndarray:
         return _generate(
             model,
@@ -148,6 +164,7 @@ def run(cfg: DictConfig) -> None:
             dev,
             sampler=how,
             decode=(decode, halo if decode else None),
+            latents=latents,
         )
 
     def sweep_source(how: str, k: int) -> str:
@@ -160,6 +177,8 @@ def run(cfg: DictConfig) -> None:
         "generated_const_history": [],
         **{f"generated_decode_{mode}": [] for mode in decode_modes},
     }
+    # Token moments of the real / generated state latents (`latent_spectrum`).
+    latent_parts: dict[str, list[dict]] = {"real": [], "generated": []}
     real_spread, sweep_seconds = [], {}
     rollout_inputs: list[tuple[int, dict[str, np.ndarray], torch.Tensor]] = []
     start = 0
@@ -195,10 +214,18 @@ def run(cfg: DictConfig) -> None:
         ae = _ae_reconstruct(model, real, data, traj, int(ev.batch_size), dev)
         add("ae_recon", ae)
 
+        sampled = latent_parts["generated"] if ev.latent_spectrum else None
         generated = np.stack(
-            [generate(hist, traj, 1000 * int(cfg.seed) + s) for s in range(seeds)]
+            [
+                generate(hist, traj, 1000 * int(cfg.seed) + s, latents=sampled)
+                for s in range(seeds)
+            ]
         )
         add("generated", generated.reshape(-1, *generated.shape[2:]))
+        if ev.latent_spectrum:
+            latent_parts["real"] += _latent_moments(
+                model, real, data, traj, int(ev.batch_size), dev
+            )
         diversity["generated"].append(ge.diversity(generated, fluid)["per_condition"])
         variants: list[tuple[str, np.ndarray]] = []
         for mode in decode_modes:
@@ -322,6 +349,16 @@ def run(cfg: DictConfig) -> None:
         scalars[source]["diversity"] = ge.nanmean(np.concatenate(per_condition))
     verdict = ge.aggregate_report(scalars, reference, dict(ev.acceptance))
 
+    spectrum = None
+    if ev.latent_spectrum:
+        spectrum = ge.latent_spectrum(
+            ge.merge_latent_moments(latent_parts["real"]),
+            ge.merge_latent_moments(latent_parts["generated"]),
+        )
+        scalars["generated"] |= {
+            f"latent_var_ratio_{band}": r for band, r in spectrum["bands"].items()
+        }
+
     true_history = scalars["generated"]
     conditioning = {
         f"{probe}_{key}": scalars[f"generated_{probe}_history"][key] - true_history[key]
@@ -357,6 +394,16 @@ def run(cfg: DictConfig) -> None:
         "decode_modes": decode_modes,
         "decode_halo_size": halo,
     }
+
+    if spectrum is not None:
+        summary["latent_spectrum"] = {
+            "latents": "sampled",
+            "note": "geometric mean per eigen-band (1-based components) of the generated / real latent variance along the real principal directions",
+            "var_ratio": spectrum["bands"],
+            "real_eigenvalues": spectrum["real"],
+            "generated_variance": spectrum["generated"],
+        }
+        _plot_latent_spectrum(spectrum, out / "latent_spectrum.png")
 
     if ev.rollout_stepper_dir is not None:
         transients = _rollout_transients(ev, rollout_inputs, data, dev)
@@ -442,6 +489,25 @@ def _ae_reconstruct(
 
 
 @torch.no_grad()  # type: ignore[misc, unused-ignore]
+def _latent_moments(
+    model: Any, fields: np.ndarray, data: Any, traj: int, batch: int, dev: torch.device
+) -> list[dict]:
+    """Token moments (:func:`ge.latent_moments`) of the normalised state latents
+    the frozen encoder gives `fields`, one dict per batch."""
+    out = []
+    for start in range(0, len(fields), batch):
+        state = torch.from_numpy(fields[start : start + batch]).to(dev)
+        b = len(state)
+        enc = model.encode_latents(
+            state,
+            expand(data.geometry_for(traj), b, dev),
+            expand(data.geom_features_for(traj), b, dev),
+        )
+        out.append(ge.latent_moments(enc.z.float().cpu().numpy()))
+    return out
+
+
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
 def _generate(
     model: Any,
     hist: torch.Tensor,
@@ -453,10 +519,12 @@ def _generate(
     dev: torch.device,
     sampler: str = "euler",
     decode: tuple[str | None, int | None] = (None, None),
+    latents: list[dict] | None = None,
 ) -> np.ndarray:
     """Generated fields for parameter histories (B, Hp, P); the noise is fixed by
     `seed`. `decode` = (spatial mode, halo size) of the decoder, `None` for the
-    trained ones."""
+    trained ones. `latents`, if given, gets the token moments of the sampled
+    latents (:func:`ge.latent_moments`), one dict per batch."""
     noise = torch.Generator(device=dev).manual_seed(int(seed))
     out = []
     for start in range(0, len(hist), batch):
@@ -473,7 +541,11 @@ def _generate(
             sampler=sampler,
             decode_spatial_mode=decode[0],
             decode_halo_size=decode[1],
+            return_latents=latents is not None,
         )
+        if latents is not None:
+            sample, z = sample
+            latents.append(ge.latent_moments(z.float().cpu().numpy()))
         out.append(sample.float().cpu().numpy())
     return np.concatenate(out)
 
@@ -657,6 +729,33 @@ def _plot_sweep(sweep: list[dict], path: pathlib.Path) -> None:
         ax.grid(alpha=0.3)
     if len(samplers) > 1:
         axes[0].legend(fontsize=7, frameon=False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+
+
+def _plot_latent_spectrum(spectrum: dict, path: pathlib.Path) -> None:
+    """Real eigenvalues and the generated variance along the same directions,
+    with the per-band ratio; band edges dotted."""
+    real, gen = spectrum["real"], spectrum["generated"]
+    k = np.arange(1, len(real) + 1)
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
+    axes[0].semilogy(k, np.maximum(real, 1e-12), "k--", lw=2, label="real")
+    axes[0].semilogy(k, np.maximum(gen, 1e-12), lw=1.4, label="generated")
+    axes[0].set_ylabel("variance (normalised latents)")
+    axes[0].legend(frameon=False)
+    ratio = np.maximum(gen, 1e-12) / np.maximum(real, 1e-12)
+    axes[1].semilogy(k, ratio, lw=1, color="tab:blue", alpha=0.6)
+    for band, r in spectrum["bands"].items():
+        lo, hi = (int(x) for x in band.split("_"))
+        axes[1].hlines(r, lo, hi, color="tab:red", lw=2)
+    axes[1].axhline(1.0, color="k", lw=0.8)
+    axes[1].set_ylabel("generated / real variance")
+    for ax in axes:
+        for band in list(spectrum["bands"])[1:]:
+            ax.axvline(int(band.split("_")[0]), color="grey", ls=":", lw=0.8)
+        ax.set_xlabel("principal component of the real latents")
+        ax.grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=110)
     plt.close(fig)

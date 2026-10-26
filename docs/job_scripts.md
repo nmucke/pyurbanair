@@ -40,7 +40,7 @@ cleans the per-job solver scratch, sets the MPI options for PALM's nested
 
 | Machine | `paths.results_root` | Scratch (`paths.scratch.<machine>`) |
 |---|---|---|
-| snellius | `/projects/prjs2075/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
+| snellius | `/projects/prjs2304/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
 | delftblue | `/projects/urbanair` | `/scratch/$USER/urbanair_temp/$SLURM_JOB_ID` |
 
 Locally there is no job script: run the script or `workflows/*.sh` directly.
@@ -74,7 +74,7 @@ its own `paths.results_root`, or the outputs collide:
 ```bash
 for n in 32 64 96; do
   sbatch job_scripts/snellius/assimilation_workflow.slurm smoother ensemble.ensemble_size=$n \
-    paths.results_root=/projects/prjs2075/urbanair/ens$n
+    paths.results_root=/projects/prjs2304/urbanair/ens$n
 done
 for i in 0 1 2 3; do
   sbatch job_scripts/snellius/surrogate_generate_data.slurm data.sharding.num_shards=4 data.sharding.shard_index=$i
@@ -91,7 +91,7 @@ bounds and sensors:
 sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
   model@truth_model=pyudales model@assim_model=pylbm \
   params@truth_params=dynamic_truth params@prior_params=dynamic 'smoothing.smoother=${smoother.dynamic}' \
-  assimilation.truth_dir=/projects/prjs2075/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
+  assimilation.truth_dir=/projects/prjs2304/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
   assimilation.num_windows=6 assimilation.ensemble_save_on_disk=true \
   domain.nx=50 time.output_frequency=2.0 time.spinup_time=50.0 \
   ensemble.ensemble_size=96 smoothing.num_steps=3 'smoothing.localization=${localization.none}'
@@ -157,10 +157,11 @@ The flow-matching generator on the realistic corpus, trained on a cache of the
 frozen autoencoder's latents (`latent_cache`, see
 [neural_surrogates.md](neural_surrogates.md) §38). First one GPU job encodes
 every train/val frame, then the training reads the latents instead of the
-states and skips the encoder:
+states and skips the encoder. `latent_generator_architecture` picks the
+velocity net (options in §38) and with it the default run `name`:
 
 ```bash
-args=(name=latent_generator_b_realistic_adaln
+args=(latent_generator_architecture=compact_h512  # sets name=latent_generator_compact_h512
   paths.weights_dir=/projects/urbanair/model_weights
   paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
   autoencoder_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic
