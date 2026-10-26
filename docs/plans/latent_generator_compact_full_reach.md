@@ -4,7 +4,7 @@
 the study in §1. Supersedes PR #221's default of a 176-wide velocity net.
 Phase 1 is implemented and merged into `feat/small-velocity-net`. Phase 2 runs
 R1–R5 were done on Snellius 2026-10-24..26 (§3, Phase 2 results): no model
-passes W1, R3 (`compact_h512`) gives the best samples and is the default of the
+passes W1, R3 (`compact_h512`) gives the best samples overall and is the default of the
 new config group `configs/latent_generator_architecture/`. The
 idealized GPU proof of concept (§5) was skipped: the local RTX 3090 failed
 under sustained load on 2026-10-23.
@@ -195,7 +195,7 @@ byte-identical.
     model width [Bhojanapalli et al. 2020].
   - Narrow-latent/wide-interface computation, as in RIN [Jabri et al. 2022].
 - **Config B.** `hidden_size: 256, n_layers: 4, num_heads: 8, mlp_hidden: 512`,
-  measured at 26.7M with `film_hidden: 256` (the design study's 24.1M prototype differed slightly).
+  measured at 26.75M with `film_hidden: 256` (the design study's 24.1M prototype differed slightly).
   - Most of it is the D-wide adaLN modulation (~1.7M per block). If that
     dominates, share one modulation across blocks or feed it from a smaller
     `film_hidden`.
@@ -280,7 +280,7 @@ byte-identical.
 | run | design | params | purpose |
 |---|---|---|---|
 | R1 | A + Gaussian skip | 27.6M | main candidate |
-| R2 | B + Gaussian skip | 26.7M | main candidate |
+| R2 | B + Gaussian skip | 26.75M | main candidate |
 | R3 | uniform H512 L6 + Gaussian skip | 32M | control: rank without full reach |
 | R4 | best of R1/R2 + `prediction: data` | same | objective |
 | R5 | best + `time_shift` α ∈ {3, 6, 10}, 100 epochs each | same | schedule |
@@ -325,12 +325,15 @@ W1 check. Run dirs:
 not comparable. The stored 177M adaLN evaluation (other machine, Euler) had W1
 0.093 (.104/.089/.086), profile 0.062, div 0.024.
 
-- **R3 gives the best samples** (W1, profile) and is adopted as the config
-  default (`latent_generator_architecture=compact_h512`). A has the best val
-  loss and spectra; B the best divergence and Reynolds stresses.
+- **R3 gives the best samples overall** and is adopted as the config default
+  (`latent_generator_architecture=compact_h512`): the best profile and, but for
+  R5b (0.041 vs 0.042, at the cost of spectra and divergence), the best W1. A
+  has the best val loss and spectra; B the best divergence and Reynolds
+  stresses.
 - **R4 and `time_shift` do not help.** `time_shift` 3 adds high-k energy and
   divergence; 0.5 is worse on W1 and profile.
-- **Heun 25 beats Euler 50** at equal NFE on every model (W1 for `w` down
+- **Heun 25 beats Euler 50** at equal NFE on R1–R3, the runs evaluated with
+  both (W1 0.064 → 0.053, 0.059 → 0.052, 0.053 → 0.042; W1 for `w` down
   ~35–40%), hence the new `latent_generator.num_steps` in `eval.yaml`.
 - **Open issues.** With Heun all models over-disperse latent components
   1025–1536 (variance ratio 2.0–3.4); `time_shift` 3 makes it worse, 0.5
@@ -366,10 +369,8 @@ not comparable. The stored 177M adaLN evaluation (other machine, Euler) had W1
 For running on a machine with a working GPU. Run everything from the repository
 root on branch `feat/small-velocity-net`, through `pixi run -e cuda` (GPU) or
 `pixi run -e dev` (CPU). All configs below were composed and built on CPU on
-2026-10-23; nothing below has run on a GPU yet. The overrides predate the
-`latent_generator_architecture` group and assume PR #221's h176 default; with
-the group, pick an option instead (`channel_skip_h176`, `compact_wide_head`,
-`compact_bottleneck`, `full_width`) and override only the widths.
+2026-10-23 and rewritten for the `latent_generator_architecture` group on
+2026-10-26; nothing below has run on a GPU yet.
 
 ### 5.0 Inputs
 
@@ -424,10 +425,10 @@ Run them one at a time, with the same `$C`:
 
 | name | overrides after `$C` | trainable (D = 768) |
 |---|---|---|
-| `lg_s_poc_full` | `architecture.hidden_size=null architecture.latent_skip=false` | 65.6M |
-| `lg_s_poc_h176` | (none: PR #221's default, H 176 + `latent_skip`) | 5.1M |
-| `lg_s_poc_a` | `architecture.hidden_size=320 architecture.latent_skip=false +architecture.gaussian_skip=true +architecture.head_hidden=768 +architecture.head_layers=2` | 21.0M |
-| `lg_s_poc_b` | `architecture.velocity_conditioning=adaln_bottleneck architecture.hidden_size=256 architecture.n_layers=4 architecture.latent_skip=false +architecture.gaussian_skip=true +architecture.mlp_hidden=768` | 15.7M |
+| `lg_s_poc_full` | `latent_generator_architecture=full_width` | 65.6M |
+| `lg_s_poc_h176` | `latent_generator_architecture=channel_skip_h176` | 5.1M |
+| `lg_s_poc_a` | `latent_generator_architecture=compact_wide_head architecture.head_hidden=768` | 21.0M |
+| `lg_s_poc_b` | `latent_generator_architecture=compact_bottleneck architecture.mlp_hidden=768` | 15.7M |
 
 ```bash
 pixi run -e cuda python scripts/surrogate/train.py \
@@ -438,8 +439,7 @@ Every run's model `repr` in the log shows `trainable_params` and the knobs that
 are set; check they match the table.
 
 Optional, only after A or B works:
-- `+architecture.prediction=data` on the better design (needs
-  `latent_skip=false`);
+- `+architecture.prediction=data` on the better design;
 - `+architecture.time_shift=3.0`. Heun with α > 1 over-disperses the
   low-variance directions (variance ratio 1.06 at α = 3, 1.49 at α = 10, for
   λ = 0.01), so keep α ≤ 3 for now.
@@ -480,11 +480,9 @@ the largest.
 - Build a new cache of `pyudales_realistic` with `tadpole_ae_b_realistic`
   under a **new** `latent_cache.output_root`; the old one has no second
   moments.
-- Train R1–R3 of §3 with D = 1536 configs:
-  - A: `hidden_size=320`, `head_hidden=1024`, `head_layers=2` (27.6M);
-  - B: `adaln_bottleneck`, `hidden_size=256`, `n_layers=4`, `mlp_hidden=512`
-    (26.7M);
-  - each with `latent_skip=false` and `+gaussian_skip=true`.
+- Train R1–R3 of §3 with the group's D = 1536 options:
+  `latent_generator_architecture=compact_wide_head` (A, 27.56M),
+  `compact_bottleneck` (B, 26.75M) and `compact_h512` (R3, 31.96M).
 - Evaluate the unevaluated 232M `latent_generator_b_realistic_restart` there
   too; it never finished here because of the GPU fault.
 

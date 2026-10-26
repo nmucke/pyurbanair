@@ -2130,7 +2130,7 @@ velocity and the transformer only learns the low-rank remainder. It lifts the
 `hidden_size >= D` rule: `latent_generator_architecture=channel_skip_h176`
 (§38; the default before the compact nets) runs the DFT B width (`hidden_size:
 176`, 8 heads of 22, `n_layers: 6`, `mlp_ratio: 4`, `film_hidden: 256`, adaLN:
-5.5M trainable on the B AE, versus 177M at full width). `latent_skip: false`
+5.5M trainable on the B AE, versus 246.7M for `full_width`). `latent_skip: false`
 (the model default, and absent in older artifacts) builds no extra module, so
 old weights load strictly.
 
@@ -2389,11 +2389,11 @@ keys. Trainable parameters on the B AE (D = 1536):
 
 | Option | Net | Params | Default `name` |
 |---|---|---|---|
-| `compact_h512` (default) | uniform H 512, 6 layers, adaLN + Gaussian skip | 32.0M | `latent_generator_compact_h512` |
-| `compact_wide_head` | design A: H 320, 6 layers + head W 1024 × 2, Gaussian skip | 27.6M | `latent_generator_compact_wide_head` |
-| `compact_bottleneck` | design B: `adaln_bottleneck`, H 256, 4 layers, `mlp_hidden` 512, Gaussian skip | 26.8M | `latent_generator_compact_bottleneck` |
+| `compact_h512` (default) | uniform H 512, 6 layers, adaLN + Gaussian skip | 31.96M | `latent_generator_compact_h512` |
+| `compact_wide_head` | design A: H 320, 6 layers + head W 1024 × 2, Gaussian skip | 27.56M | `latent_generator_compact_wide_head` |
+| `compact_bottleneck` | design B: `adaln_bottleneck`, H 256, 4 layers, `mlp_hidden` 512, Gaussian skip | 26.75M | `latent_generator_compact_bottleneck` |
 | `channel_skip_h176` | H 176, 6 layers, `latent_skip` (PR #221's former default) | 5.5M | `latent_generator_s_h176` |
-| `full_width` | `hidden_size` = D, adaLN, no skip | ~177M | `latent_generator_full_width` |
+| `full_width` | `hidden_size` = D, adaLN, no skip (not the 177M run's shared settings) | 246.7M | `latent_generator_full_width` |
 
 `gaussian_eig_floor`, `prediction` and `time_shift` stay outside the group
 (absent = off; add them as `+architecture.<key>=...`). `compact_h512` is the
@@ -2513,7 +2513,7 @@ spread over the trajectories) under matched geometry and history:
   `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
   plots against NFE, one line per sampler. `num_steps` sets the main
   samples' step count (`null`: the model's `generator.sampling.num_steps`);
-  Heun at 25 steps beat Euler at 50 (equal NFE) on every realistic model;
+  Heun at 25 steps beat Euler at 50 (equal NFE) on the three realistic nets compared (R1–R3);
 * with `decode_modes` (e.g. `[local, halo, global]`, halo from
   `decode_halo_size`, default the AE's), per mode that differs from the trained
   policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
