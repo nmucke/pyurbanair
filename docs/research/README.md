@@ -5,3 +5,6 @@ context, not a reference for the code. Not maintained; verify against the code.
 
 Start with [da_cross_model_status_2026-10.md](da_cross_model_status_2026-10.md)
 for the state of the data-assimilation / cross-model (uDALES vs PALM) work.
+
+[latent_generator_results_2026-10.md](latent_generator_results_2026-10.md):
+results of the compact latent generators on `pyudales_realistic`.
