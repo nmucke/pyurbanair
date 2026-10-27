@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 import xarray
+from omegaconf import OmegaConf
 
 from tests.conftest import compose, load_script, surrogate
 
@@ -23,6 +24,17 @@ def local_fno(session_root: pathlib.Path, training_data: pathlib.Path) -> Any:
         "+test=train",
         "trainer.num_epochs=2",
         "trainer.patience=null",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    return cfg
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def local_fno_ft(session_root: pathlib.Path, local_fno: Any) -> Any:
+    cfg = compose(
+        "surrogate/baselines/local_fno/finetune",
+        "+test=finetune",
         root=session_root,
     )
     load_script("scripts/surrogate/train.py").run(cfg)
@@ -47,6 +59,22 @@ def test_rebuilds_from_the_saved_config(local_fno: Any) -> None:
     assert model.num_history_steps == 2
     # The training split's statistics travel with the weights.
     assert not torch.equal(model.state_std, torch.ones(3))
+
+
+def test_finetune_continues_the_pretrained_model(
+    local_fno: Any, local_fno_ft: Any
+) -> None:
+    model_dir = pathlib.Path(local_fno_ft.paths.weights_dir) / local_fno_ft.name
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    pretrained = OmegaConf.load(
+        pathlib.Path(local_fno.paths.weights_dir) / local_fno.name / "config.yaml"
+    )
+    assert saved.architecture == pretrained.architecture
+    assert saved.dataset.num_history_steps == 2
+    with (model_dir / "metrics.csv").open() as f:
+        rows = list(csv.DictReader(f))
+    assert float(rows[0]["lr"]) == pytest.approx(local_fno_ft.optimizer.lr)
+    assert (model_dir / "weights.pt").exists()
 
 
 def test_evaluate_stepper(session_root: pathlib.Path, local_fno: Any) -> None:

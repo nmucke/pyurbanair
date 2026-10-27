@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import pathlib
+import re
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,17 @@ def tl_roll3(session_root: pathlib.Path, roll1: Any) -> Any:
     return cfg
 
 
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def tl_roll3_lora(session_root: pathlib.Path, roll1: Any) -> Any:
+    cfg = compose(
+        "surrogate/baselines/ssrolling/finetune_roll3_lora",
+        "+test=finetune_roll3_lora",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    return cfg
+
+
 def _model_dir(cfg: Any) -> pathlib.Path:
     return pathlib.Path(cfg.paths.weights_dir, cfg.name)
 
@@ -65,6 +77,22 @@ def test_tl_roll3_continues_roll1(roll1: Any, tl_roll3: Any) -> None:
     assert saved.dataset.num_history_steps == 2
     assert saved.dataset.pushforward_steps == 3
     assert (_model_dir(tl_roll3) / "weights.pt").exists()
+
+
+def test_lora_roll3_changes_only_the_adapted_and_listed_weights(
+    roll1: Any, tl_roll3_lora: Any
+) -> None:
+    before = torch.load(_model_dir(roll1) / "weights.pt", map_location="cpu")
+    after = torch.load(_model_dir(tl_roll3_lora) / "weights.pt", map_location="cpu")
+    # The merged export is the plain architecture, loadable as any stepper.
+    assert after.keys() == before.keys()
+    assert (_model_dir(tl_roll3_lora) / "adapter").is_dir()
+    adapted = re.compile(tl_roll3_lora.lora.target_modules + r"\.weight")
+    changed = {k for k in before if not torch.equal(before[k], after[k])}
+    assert any(adapted.fullmatch(k) for k in changed)
+    assert any(k.startswith(("param_embed.", "ssgen.")) for k in changed)
+    for k in changed:
+        assert adapted.fullmatch(k) or k.startswith(("param_embed.", "ssgen.")), k
 
 
 def test_the_rebuilt_model_rolls_out(

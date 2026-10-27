@@ -155,6 +155,88 @@ def test_prechunked_dft_reads_whole_frames_and_source_params(
     assert (model_dir / "weights.pt").exists()
 
 
+def _finetune_dft_cfg(
+    root: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> Any:
+    dft = trained["train_dft"]
+    return compose(
+        "surrogate/finetune_dft",
+        "+test=finetune_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=root,
+    )
+
+
+def test_finetune_dft_trains_adapters_and_skips_only(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    trainable = [n for n, p in setup.model.named_parameters() if p.requires_grad]
+    lora = [n for n in trainable if ".lora_" in n]
+    for part in (".dft.encoder.", ".dft.decoder.", ".dft.subnetwork.seqmodel."):
+        assert any(part in n for n in lora), part
+    assert all(
+        ".dft.encoder." in n or ".dft.decoder." in n or ".seqmodel." in n for n in lora
+    )
+    full = [n for n in trainable if ".lora_" not in n]
+    for module in cfg.trainable_modules:  # every listed module trains, fully
+        params = [n for n, _ in setup.model.named_parameters() if f".{module}" in n]
+        assert params and all(n in full for n in params), module
+    assert all(any(f".{m}" in n for m in cfg.trainable_modules) for n in full)
+    assert not any("geometry_branch" in n or "_film" in n for n in trainable)
+    assert not any(".param_mlp." in n for n in trainable)
+
+
+def test_finetune_dft_rollout_and_export(
+    tmp_path: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from neural_surrogates import Trainer
+    from neural_surrogates.finetuning import resolve_target_modules
+
+    # Every training-mode model call carries gradients: backprop through the
+    # whole rollout.
+    calls: list[bool] = []
+    model_forward = Trainer._model_forward
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self.model.training:
+            calls.append(torch.is_grad_enabled())
+        return model_forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(Trainer, "_model_forward", spy)
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert calls and all(calls)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    with open(model_dir / "metrics.csv") as f:
+        horizons = [int(row["pushforward_steps"]) for row in csv.DictReader(f)]
+    assert horizons == [2, 3]  # the curriculum, up to dataset.pushforward_steps
+
+    # A plain merged dict that rebuilds the architecture from config.yaml alone.
+    dft = trained["train_dft"]
+    before = torch.load(pathlib.Path(dft.paths.weights_dir) / dft.name / "weights.pt")
+    after = torch.load(model_dir / "weights.pt")
+    assert after.keys() == before.keys()
+    eval_common = load_script("scripts/utils/eval_common.py")
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    adapted = resolve_target_modules(model, preset=cfg.lora.target_preset)
+    trained_prefixes = (*adapted, *cfg.trainable_modules)
+    for key in before:  # frozen: neither adapted nor listed
+        if not any(f".{p}." in f".{key}." for p in trained_prefixes):
+            assert torch.equal(after[key], before[key]), key
+    for key in ("dft.subnetwork.seqmodel.input_proj.weight", "dft.decoder"):
+        changed = [k for k in before if k.startswith(key)]
+        assert not all(torch.equal(after[k], before[k]) for k in changed), key
+    assert all(torch.equal(model.state_dict()[k], after[k]) for k in after)
+    assert (model_dir / "adapter" / "adapter_config.json").exists()
+
+
 def _latent_cache_cfg(
     tmp_path: pathlib.Path, trained: dict[str, Any], *overrides: str
 ) -> Any:
@@ -547,3 +629,139 @@ def test_generate_data(tmp_path: pathlib.Path) -> None:
         s: len(list((out / "state" / s).glob("*.nc"))) for s in ("train", "val", "test")
     }
     assert counts == {"train": 2, "val": 1, "test": 1}
+
+
+def _seed_ensemble_corpus(root: pathlib.Path) -> pathlib.Path:
+    """A reference corpus as the archived generator wrote it: two test samples."""
+    import xarray
+
+    (root / "state" / "test").mkdir(parents=True)
+    (root / "param" / "test").mkdir(parents=True)
+    (root / "geometries").mkdir()
+    fields = "split,sample,stl_file,nx,ny,nz,lx_domain_m,ly_domain_m,lz_domain_m"
+    rows = [
+        f"{fields},x0_domain_m,y0_domain_m",
+        "train,0000,a.stl,16,16,8,64,64,32,-8,-8",
+    ]
+    for i, (stl, spinup) in enumerate([("b.stl", 20.0), ("c.stl", 30.0)]):
+        rows.append(f"test,{i:04d},{stl},16,32,8,64,128,32,-8,-16")
+        (root / "geometries" / stl).touch()
+        state = xarray.Dataset(attrs={"spinup_time_s": spinup})
+        state.to_netcdf(root / "state" / "test" / f"sample_{i:04d}.nc")
+        times = np.arange(0.0, 20.0, 5.0, dtype=np.float32)
+        xarray.Dataset(
+            {"inflow_angle": ("time", np.full(4, 10.0 * i))},
+            coords={"time": times},
+        ).to_netcdf(root / "param" / "test" / f"sample_{i:04d}.nc")
+    (root / "geometries.csv").write_text("\n".join(rows) + "\n")
+    return root
+
+
+def test_seed_ensemble_reads_the_reference_samples(tmp_path: pathlib.Path) -> None:
+    script = load_script("scripts/surrogate/generate_data.py")
+    ref = _seed_ensemble_corpus(tmp_path / "ref")
+    cfg = compose(
+        "surrogate/generate_seed_ensemble",
+        "+test=generate_seed_ensemble",
+        f"data.seed_ensemble.reference_dir={ref}",
+        root=tmp_path,
+    )
+    refs = script._references(cfg.data.seed_ensemble)
+    assert [(r.index, r.geometry.stl.name, r.spinup) for r in refs] == [
+        (0, "b.stl", 20.0),
+        (1, "c.stl", 30.0),
+    ]
+    assert refs[0].geometry.bounds == ((-8.0, 56.0), (-16.0, 112.0), (0.0, 32.0))
+    assert (refs[0].geometry.nx, refs[0].geometry.ny) == (16, 32)
+    cfg.data.seed_ensemble.samples = [1]
+    assert [r.index for r in script._references(cfg.data.seed_ensemble)] == [1]
+    cfg.data.seed_ensemble.samples = [5]
+    with pytest.raises(ValueError, match="only"):
+        script._references(cfg.data.seed_ensemble)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "vary", [["initial_condition"], ["initial_condition", "inlet_turbulence"]]
+)
+def test_seed_ensemble_varies_only_the_chosen_seeds(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, vary: list[str]
+) -> None:
+    """Each member is a cold start on a fresh clock with its own seeds; member 0
+    keeps the reference's, and rerunning skips what is on disk."""
+    import xarray
+
+    script = load_script("scripts/surrogate/generate_data.py")
+    ref = _seed_ensemble_corpus(tmp_path / "ref")
+    cfg = compose(
+        "surrogate/generate_seed_ensemble",
+        "+test=generate_seed_ensemble",
+        f"data.seed_ensemble.reference_dir={ref}",
+        f"data.seed_ensemble.vary=[{','.join(vary)}]",
+        root=tmp_path,
+    )
+    runs: list[dict[str, Any]] = []
+
+    class FakeModel:
+        def __init__(self, experiment_dir: pathlib.Path) -> None:
+            self.inlet_turbulence: dict[str, Any] = {"seed": None}
+            self._elapsed_time = 0.0
+            self.dirs = type(
+                "Dirs", (), {"experiment_dir": experiment_dir, "experiment_name": "999"}
+            )()
+            (experiment_dir / "namoptions.999").write_text("&RUN\nirandom = 43\n/\n")
+
+        def __call__(self, state: Any, params: xarray.Dataset) -> xarray.Dataset:
+            from pyudales.utils.namoptions_utils import NamoptionsFile
+
+            namoptions = NamoptionsFile(self.dirs.experiment_dir / "namoptions.999")
+            runs.append(
+                {
+                    "state": state,
+                    "clock": self._elapsed_time,
+                    "irandom": int(namoptions.get_value("RUN", "irandom")),
+                    "inlet_seed": self.inlet_turbulence["seed"],
+                    "angle": float(params.inflow_angle[0]),
+                }
+            )
+            self._elapsed_time += 25.0  # a cold start advances the clock
+            times = np.array([5.0, 10.0])
+            return xarray.Dataset({"u": ("time", times)}, coords={"time": times})
+
+    def make_model(cfg: Any, geometry: Any, spinup: float) -> FakeModel:
+        experiment_dir = tmp_path / "scratch" / geometry.stl.stem
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return FakeModel(experiment_dir)
+
+    def save(cfg: Any, model: Any, state: Any, params: Any, sp: Any, pp: Any) -> None:
+        for path in (sp, pp):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        state.to_netcdf(sp)
+        params.to_netcdf(pp)
+
+    monkeypatch.setattr(script, "_make_model", make_model)
+    monkeypatch.setattr(script, "_save", save)
+    script.run(cfg)
+
+    out = pathlib.Path(cfg.paths.results_dir)
+    assert len(runs) == 6
+    assert all(r["state"] is None and r["clock"] == 0.0 for r in runs)
+    assert [r["angle"] for r in runs] == [0.0] * 3 + [10.0] * 3
+    # runs[0:3] are sample 0's members, runs[3:6] sample 1's.
+    for member0 in (runs[0], runs[3]):
+        assert member0["irandom"] == 43 and member0["inlet_seed"] is None
+    others = runs[1:3] + runs[4:6]
+    # Every varied (sample, member) pair has its own seeds.
+    assert len({r["irandom"] for r in others} | {43}) == 5
+    inlet_seeds = [r["inlet_seed"] for r in others]
+    if "inlet_turbulence" in vary:
+        assert None not in inlet_seeds and len(set(inlet_seeds)) == 4
+    else:
+        assert inlet_seeds == [None] * 4
+    state = xarray.open_dataset(out / "state" / "sample_0001" / "member_0002.nc")
+    assert state.sizes["time"] == 1 and float(state.time[0]) == 10.0
+    assert state.attrs["member"] == 2 and state.attrs["spinup_time_s"] == 30.0
+    assert (out / "param" / "sample_0001" / "member_0002.nc").exists()
+
+    runs.clear()
+    script.run(cfg)
+    assert runs == []

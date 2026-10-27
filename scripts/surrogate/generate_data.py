@@ -26,6 +26,20 @@ Outputs, in `<paths.results_dir>/`:
     state/{train,val,test}/sample_XXXX.nc   the field on cell centres, plus the
                                             `blanking` mask (1 = building)
     param/{train,val,test}/sample_XXXX.nc   the parameters at the state times
+
+Seed ensemble (`data.seed_ensemble`, configs/surrogate/generate_seed_ensemble.yaml,
+uDALES only): many spun-up states per geometry of an existing corpus's `split`.
+Every member reruns one reference sample from a cold start with its geometry,
+parameters and spin-up, and keeps the single frame `output_frequency` after the
+spin-up (the reference's first frame); only the seeds listed in `vary` change:
+  * initial_condition: uDALES's `&RUN irandom` (the random initial-velocity
+    perturbation),
+  * inlet_turbulence: the synthetic inlet turbulence seed.
+Both are derived from (`data.seed`, sample, member), so they differ across
+samples too. Member 0 keeps the reference's seeds, so it reproduces the
+reference frame.
+Outputs state/sample_XXXX/member_YYYY.nc and param/sample_XXXX/member_YYYY.nc,
+the seeds in the state attrs; sharded over (sample, member) pairs.
 """
 
 from __future__ import annotations
@@ -39,6 +53,7 @@ import os
 import pathlib
 import re
 import shutil
+import tempfile
 import traceback
 from typing import Any
 
@@ -75,12 +90,15 @@ class Sample:
 
 
 def run(cfg: DictConfig) -> None:
+    if cfg.data.get("seed_ensemble") is not None:
+        _run_seed_ensemble(cfg)
+        return
     data = cfg.data
     out_dir = pathlib.Path(cfg.paths.results_dir)
     for split in SPLITS:
         (out_dir / "state" / split).mkdir(parents=True, exist_ok=True)
         (out_dir / "param" / split).mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, out_dir / "config.yaml", resolve=True)
+    _save_config(cfg, out_dir)
 
     samples = _plan(cfg)
     params = _sample_params(cfg, len(samples))
@@ -112,7 +130,7 @@ def run(cfg: DictConfig) -> None:
                     )
                 state = model(state=None, params=member)
                 state.attrs.update(geometry=name, spinup_time_s=spinup)
-                _save(cfg, model, state, member, out_dir, sample)
+                _save(cfg, model, state, member, *_paths(out_dir, sample))
                 print(f"  {sample.split} sample {sample.index}")
         except Exception:  # one bad geometry must not cost the rest of the job
             traceback.print_exc()
@@ -122,6 +140,152 @@ def run(cfg: DictConfig) -> None:
             f"{len(failed)} geometries failed (rerun to retry): {failed}"
         )
     print(f"Done. Training data in {out_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Seed ensemble: many spun-up states per reference sample
+# ---------------------------------------------------------------------------
+
+VARY = ("initial_condition", "inlet_turbulence")
+# uDALES's compiled-in &RUN irandom, the reference corpus's initial-condition seed.
+UDALES_DEFAULT_IRANDOM = 43
+
+
+@dataclasses.dataclass(frozen=True)
+class Reference:
+    """One sample of the reference corpus: its geometry, spin-up and parameters."""
+
+    index: int
+    geometry: Geometry
+    spinup: float
+    param_path: pathlib.Path
+
+
+def _run_seed_ensemble(cfg: DictConfig) -> None:
+    data, ens = cfg.data, cfg.data.seed_ensemble
+    if cfg.model.name != "pyudales":
+        raise ValueError("data.seed_ensemble supports model=pyudales only.")
+    unknown = set(ens.vary) - set(VARY)
+    if unknown:
+        raise ValueError(
+            f"data.seed_ensemble.vary: unknown {sorted(unknown)}, use {VARY}."
+        )
+    out_dir = pathlib.Path(cfg.paths.results_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _save_config(cfg, out_dir)
+
+    pairs = [
+        (ref, member) for ref in _references(ens) for member in range(int(ens.members))
+    ]
+    shards, shard = int(data.sharding.num_shards), int(data.sharding.shard_index)
+    groups: dict[Reference, list[int]] = {}
+    for k, (ref, member) in enumerate(pairs):
+        if k % shards == shard and not all(
+            p.exists() for p in _member_paths(out_dir, ref, member)
+        ):
+            groups.setdefault(ref, []).append(member)
+
+    from pyudales.forward_model import IRANDOM_MODULUS
+    from pyudales.utils.random_utils import apply_random_initial_condition
+
+    from pyurbanair.utils.digital_filter import derive_seed, reset_elapsed_time
+
+    failed = []
+    for ref, members in groups.items():
+        name = ref.geometry.stl.stem
+        print(f"sample {ref.index} ({name}): {len(members)} member(s)")
+        try:
+            params = xarray.load_dataset(ref.param_path)
+            params = params.assign_coords(time=params.time.astype(float))
+            model = _make_model(cfg, ref.geometry, ref.spinup)
+            reference_inlet_seed = model.inlet_turbulence.get("seed")
+            for member in members:
+                vary = set(ens.vary) if member > 0 else set()
+                irandom = UDALES_DEFAULT_IRANDOM
+                if "initial_condition" in vary:
+                    irandom = (
+                        derive_seed(f"seed_ensemble/{data.seed}/{ref.index}/{member}")
+                        % IRANDOM_MODULUS
+                    )
+                inlet_seed = reference_inlet_seed
+                if "inlet_turbulence" in vary:
+                    inlet_seed = derive_seed(
+                        f"seed_ensemble_inlet/{data.seed}/{ref.index}/{member}"
+                    )
+                # Every member is its own cold start: a fresh solver clock (so
+                # its inlet turbulence starts at the reference's first record)
+                # and its own seeds, written before each run.
+                reset_elapsed_time(model.dirs)
+                model._elapsed_time = 0.0
+                model.inlet_turbulence["seed"] = inlet_seed
+                apply_random_initial_condition(model.dirs, {"irandom": irandom})
+                state = model(state=None, params=params).isel(time=[-1])
+                state.attrs.update(
+                    geometry=name,
+                    reference_sample=ref.index,
+                    member=member,
+                    spinup_time_s=ref.spinup,
+                    irandom=irandom,
+                    inlet_turbulence_seed=(
+                        "experiment_name" if inlet_seed is None else str(inlet_seed)
+                    ),
+                )
+                _save(cfg, model, state, params, *_member_paths(out_dir, ref, member))
+                print(f"  member {member}")
+        except Exception:  # one bad geometry must not cost the rest of the job
+            traceback.print_exc()
+            failed.append(name)
+    if failed:
+        raise RuntimeError(f"{len(failed)} samples failed (rerun to retry): {failed}")
+    print(f"Done. Seed ensemble in {out_dir}")
+
+
+def _references(ens: DictConfig) -> list[Reference]:
+    """The reference corpus's `split` samples (all, or `ens.samples`).
+
+    Reads the corpus's geometries.csv (geometry and grid), each state file's
+    `spinup_time_s` and its parameter file, as the archived generator wrote them.
+    """
+    ref_dir = pathlib.Path(ens.reference_dir)
+    with open(ref_dir / "geometries.csv", newline="") as f:
+        rows = [row for row in csv.DictReader(f) if row["split"] == ens.split]
+    wanted = None if ens.samples is None else {int(i) for i in ens.samples}
+    refs = []
+    for row in rows:
+        index = int(row["sample"])
+        if wanted is not None and index not in wanted:
+            continue
+        x0, y0 = float(row["x0_domain_m"]), float(row["y0_domain_m"])
+        geometry = Geometry(
+            stl=ref_dir / "geometries" / row["stl_file"],
+            nx=int(row["nx"]),
+            ny=int(row["ny"]),
+            nz=int(row["nz"]),
+            bounds=(
+                (x0, x0 + float(row["lx_domain_m"])),
+                (y0, y0 + float(row["ly_domain_m"])),
+                (0.0, float(row["lz_domain_m"])),
+            ),
+        )
+        name = f"sample_{index:04d}.nc"
+        with xarray.open_dataset(ref_dir / "state" / ens.split / name) as state:
+            spinup = float(state.attrs["spinup_time_s"])
+        refs.append(
+            Reference(index, geometry, spinup, ref_dir / "param" / ens.split / name)
+        )
+    if wanted is not None and len(refs) != len(wanted):
+        raise ValueError(
+            f"data.seed_ensemble.samples {sorted(wanted)}: only "
+            f"{[r.index for r in refs]} are in the {ens.split} split."
+        )
+    return refs
+
+
+def _member_paths(
+    out_dir: pathlib.Path, ref: Reference, member: int
+) -> tuple[pathlib.Path, pathlib.Path]:
+    sample, name = f"sample_{ref.index:04d}", f"member_{member:04d}.nc"
+    return out_dir / "state" / sample / name, out_dir / "param" / sample / name
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +533,8 @@ def _save(
     model: Any,
     state: xarray.Dataset,
     params: xarray.Dataset,
-    out_dir: pathlib.Path,
-    sample: Sample,
+    state_path: pathlib.Path,
+    param_path: pathlib.Path,
 ) -> None:
     """Write one sample: the state on cell centres and its parameters."""
     if cfg.model.name == "pyudales":
@@ -399,7 +563,8 @@ def _save(
         coords={"time": times},
     )
 
-    state_path, param_path = _paths(out_dir, sample)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    param_path.parent.mkdir(parents=True, exist_ok=True)
     _write_atomic(state, state_path, _encoding(state, cfg.data.state_encoding))
     _write_atomic(params, param_path, {})
 
@@ -433,6 +598,14 @@ def _encoding(state: xarray.Dataset, cfg: DictConfig) -> dict:
         }
         for name, da in state.data_vars.items()
     }
+
+
+def _save_config(cfg: DictConfig, out_dir: pathlib.Path) -> None:
+    """Save the resolved config atomically: shard jobs write it concurrently."""
+    fd, tmp = tempfile.mkstemp(dir=out_dir, prefix=".config.yaml.")
+    os.close(fd)
+    OmegaConf.save(cfg, tmp, resolve=True)
+    os.replace(tmp, out_dir / "config.yaml")
 
 
 def _write_atomic(ds: xarray.Dataset, path: pathlib.Path, encoding: dict) -> None:

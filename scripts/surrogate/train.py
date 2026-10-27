@@ -5,6 +5,7 @@
     python scripts/surrogate/train.py --config-name surrogate/train_latent_generator
     python scripts/surrogate/train.py --config-name surrogate/train_dft
     python scripts/surrogate/train.py --config-name surrogate/finetune_stepper
+    python scripts/surrogate/train.py --config-name surrogate/finetune_dft
 
 Every run does the same: build the train/val datasets and the model for the
 config's `task` (tasks.py), then fit with the configured `trainer`,

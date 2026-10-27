@@ -81,18 +81,41 @@ P3D_PRESETS: dict[str, str | None] = {
 # No grouped convs exist in this tree, so nothing is dropped on that count.
 #
 # The NEW trainable modules (``dft.subnetwork``, ``dft.latent_residual_scale``,
-# and the gamma skip ``scales``) are NOT LoRA-adapted -- the fine-tune script
-# unfreezes them fully via ``trainable_modules`` instead.
+# and the gamma skip ``scales``) are NOT LoRA-adapted by ``tadpole_encdec`` --
+# the DFT task unfreezes them fully via ``trainable_modules`` instead.
+#
+# Fine-tuning an already-trained DFT can also adapt its latent subnetwork
+# (``tadpole_subnetwork``, or ``tadpole_encdec+subnetwork`` for both). Its
+# Linear leaves, by enumeration (the same at S/B/L):
+#
+#   dft.subnetwork.seqmodel.input_proj / .out_proj          Linear (token <-> hidden)
+#   dft.subnetwork.seqmodel.layers.N.attn.qkv / .attn.proj  Linear (attention)
+#   dft.subnetwork.seqmodel.layers.N.mlp.{gate,up,down}_proj Linear (gated FFN)
+#
+# EXCLUDED: the conditioning heads. ``geom_film`` is a 1x1x1 Conv3d (not
+# mergeable, see above); ``param_mlp`` maps the P (~3) params to the FiLM
+# (scale, shift): its first Linear has fewer inputs than a typical rank, so
+# a LoRA there is no low-rank update. List ``subnetwork.param_mlp`` in
+# ``trainable_modules`` to train it fully.
 _TADPOLE_ENCDEC_SUFFIX = (
     r"qkv|mlp\.fc1|mlp\.fc2|adaLN_modulation\.\d+|out_proj|conv_1|conv_2|"
     r"decompress|feature_embed|downsampling_layers\.\d+|"
     r"downsamples\.\d+\.body\.\d+|upsamples\.\d+\.body\.\d+"
 )
 
+_TADPOLE_ENCDEC = rf"dft\.(encoder|decoder)\..*\.({_TADPOLE_ENCDEC_SUFFIX})"
+_TADPOLE_SUBNETWORK = (
+    r"dft\.subnetwork\.seqmodel\.(input_proj|out_proj|"
+    r"layers\.\d+\.(attn\.qkv|attn\.proj|mlp\.(gate|up|down)_proj))"
+)
+
 TADPOLE_PRESETS: dict[str, str | None] = {
     # Linear + 3x3x3 Conv3d leaves inside dft.encoder / dft.decoder (excludes the
     # 1x1x1 convs and cpb_mlp as documented above).
-    "tadpole_encdec": rf".*dft\.(encoder|decoder)\..*\.({_TADPOLE_ENCDEC_SUFFIX})",
+    "tadpole_encdec": rf".*{_TADPOLE_ENCDEC}",
+    # The latent subnetwork's transformer Linears (not its FiLM heads).
+    "tadpole_subnetwork": rf".*{_TADPOLE_SUBNETWORK}",
+    "tadpole_encdec+subnetwork": rf".*({_TADPOLE_ENCDEC}|{_TADPOLE_SUBNETWORK})",
     "all": None,
 }
 

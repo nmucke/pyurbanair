@@ -9,7 +9,8 @@ before and after fitting. `TASKS` maps a config's `task` to its builder:
   latent_generator  a flow-matching generator on a frozen autoencoder
   dft               a stepper built around a pretrained autoencoder, trained
                     through LoRA adapters plus `trainable_modules`
-  finetune_stepper  a pretrained stepper, trained fully or through LoRA
+  finetune_stepper  a pretrained stepper (also a trained DFT), trained fully
+                    or through LoRA plus optional `trainable_modules`
 """
 
 from __future__ import annotations
@@ -215,10 +216,7 @@ def _dft(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
         model.set_normalization(None, None, *get_param_normalization_stats(train))
 
     peft = _with_lora(model, cfg.lora)
-    for name, p in peft.named_parameters():  # the new modules train fully
-        path = "." + name.replace("base_model.model.", "") + "."
-        if any(f".{module}." in path for module in cfg.trainable_modules):
-            p.requires_grad_(True)
+    _train_fully(peft, cfg.trainable_modules)  # the new modules
     # The saved config rebuilds the stepper from weights.pt alone.
     cfg.architecture.skip_pretrained_load = True
     cfg.architecture.pretrained_ae_dir = None
@@ -249,6 +247,8 @@ def _finetune_stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     if cfg.method == "full":
         return Setup(model, train, val)
     peft = _with_lora(model, cfg.lora)
+    # Optional modules trained fully next to the adapters (e.g. a DFT's skips).
+    _train_fully(peft, cfg.get("trainable_modules") or [])
     return Setup(
         peft,
         train,
@@ -387,6 +387,14 @@ def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:
         modules_to_save=list(lora.modules_to_save) or None,
         fused_forward=lora.get("fused_forward", False),
     )
+
+
+def _train_fully(peft: Any, modules: Any) -> None:
+    """Unfreeze every parameter inside one of `modules` (dotted paths)."""
+    for name, p in peft.named_parameters():
+        path = "." + name.replace("base_model.model.", "") + "."
+        if any(f".{module}." in path for module in modules):
+            p.requires_grad_(True)
 
 
 def _save_lora(trainer: Any, peft: Any, out_dir: pathlib.Path) -> None:

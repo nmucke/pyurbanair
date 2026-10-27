@@ -1,0 +1,17 @@
+# @package _global_
+# Tiny seed ensemble (configs/surrogate/generate_seed_ensemble.yaml): three
+# members per reference sample; the test points reference_dir at its corpus.
+defaults:
+  - /test/tiny
+  - override /model: pyudales_tiny
+
+data:
+  seed: 0
+  sharding:
+    num_shards: 1
+    shard_index: 0
+  seed_ensemble:
+    split: test
+    samples: null
+    members: 3
+    vary: [initial_condition, inlet_turbulence]
