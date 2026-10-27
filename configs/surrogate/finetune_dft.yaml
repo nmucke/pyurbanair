@@ -54,7 +54,8 @@ trainer:
   compile_modules: [dft.encoder.conv_encoder, dft.decoder.conv_decoder]
   # Memory. Every rollout step carries gradients, so the activations of all
   # of them are kept: about 4.5 GB per Mcell and sample per step for size B
-  # (fused LoRA + compile), i.e. ~36 GB for one 32x224x224 sample at horizon 5.
+  # (fused LoRA + compile), i.e. ~36 GB for one 32x224x224 sample at horizon 5
+  # (measured with the conv blocks below checkpointed: 28.7 GB on an A100).
   # Checkpointing the conv blocks takes ~18 % off for ~10 % time; all four
   # stages ([dft.encoder.conv_encoder, dft.encoder.transformer_encoder,
   # dft.decoder.transformer_decoder, dft.decoder.conv_decoder]) about two

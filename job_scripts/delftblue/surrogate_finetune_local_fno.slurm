@@ -15,4 +15,6 @@
 #SBATCH --output=job_scripts/delftblue/out_files/%x-%j.out
 
 source job_scripts/delftblue/env.sh
-run python -u scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune trainer.checkpoint_every=1 "$@"
+run python -u scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune trainer.checkpoint_every=1 \
+  paths.weights_dir=/projects/urbanair/model_weights \
+  paths.training_data_dir=/projects/urbanair/training_data "$@"

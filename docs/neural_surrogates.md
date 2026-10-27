@@ -157,6 +157,36 @@ pixi run -e dev python scripts/surrogate/generate_data.py model=pypalm \
 - **`ncpu` must divide every `nx`** for pypalm/pyudales (slab decomposition).
   Pool `nx` are multiples of 16, so `ncpu` ∈ {1, 2, 4, 8, 16} always works.
 
+### 3a. Seed ensembles of an existing corpus
+
+`data.seed_ensemble` (uDALES only; preset
+[configs/surrogate/generate_seed_ensemble.yaml](../configs/surrogate/generate_seed_ensemble.yaml))
+makes many spun-up states per geometry, to compare a generative model's
+samples with the solver's spread at fixed forcing. Every member reruns one
+sample of the corpus at `reference_dir` (its `split`, all or `samples`) from a
+cold start, with the sample's geometry and grid (`geometries.csv`), spin-up
+(`spinup_time_s`) and parameter file, and keeps the one frame
+`output_frequency` after the spin-up: the reference's first frame. Only the
+seeds named in `vary` change between members:
+
+- `initial_condition`: `&RUN irandom`, the seed of uDALES's ±`randu` noise on
+  the initial velocity (otherwise 43 in every run);
+- `inlet_turbulence`: the synthetic inlet seed.
+
+Both are digests of (`seed`, sample, member), so member *m* of one sample does
+not share its seeds with member *m* of another.
+
+Member 0 keeps the reference's seeds (`irandom` 43, the inlet seed derived
+from `experiment_name`), so it reproduces the reference frame up to round-off.
+Each member resets the solver clock, so all start on the reference's first
+inlet record. The preset pins the settings `pyudales_realistic` was generated
+with where today's defaults differ (`sgs_constant` 0.24, inlet length scales
+48/24/24 m, interior nudging, no outflow buffer, `model_discrepancy` off).
+Output: `state/sample_XXXX/member_YYYY.nc` (one frame, seeds in the attrs) and
+the matching `param/sample_XXXX/member_YYYY.nc`. Sharding runs every
+`num_shards`-th (sample, member) pair; `surrogate_generate_seed_ensemble.slurm`
+is a SLURM array over them ([job_scripts.md](job_scripts.md)).
+
 ### 4. The parameter sampler
 
 [configs/params/surrogate_training_data.yaml](../configs/params/surrogate_training_data.yaml)
@@ -1996,6 +2026,11 @@ dft.decoder.transformer_decoder, dft.decoder.conv_decoder]`, about −65 %,
 with conv-block checkpointing (≈ 60 GB), a 40 GB A100 takes one. Not the vendored
 skip wrappers' `use_checkpoint` (reentrant: drops the encoder LoRA gradients,
 see the handover).
+
+**Measured** (`dft_b` on pyudales_barcelona_finetune, one DelftBlue A100 80 GB
+PCIe, horizon 5, conv-block checkpointing, batch 1): 28.7 GB peak (nvidia-smi),
+1.14 s per sample at 98 % device busy, so ~44 min per 2300-sample epoch at the
+final horizon. The first step spends ~2.5 min compiling.
 
 ```bash
 pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/finetune_dft \

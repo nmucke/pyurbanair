@@ -25,4 +25,6 @@ fi
 
 source job_scripts/delftblue/env.sh
 run python -u scripts/surrogate/train.py --config-name "surrogate/baselines/ssrolling/${stage}" trainer.checkpoint_every=1 \
-    'trainer.activation_checkpoint_modules=[aurora.backbone.encoder_layers.*.blocks.*,aurora.backbone.decoder_layers.*.blocks.*,aurora.encoder,aurora.decoder]' "$@"
+    'trainer.activation_checkpoint_modules=[aurora.backbone.encoder_layers.*.blocks.*,aurora.backbone.decoder_layers.*.blocks.*,aurora.encoder,aurora.decoder]' \
+    paths.weights_dir=/projects/urbanair/model_weights \
+    paths.training_data_dir=/projects/urbanair/training_data "$@"

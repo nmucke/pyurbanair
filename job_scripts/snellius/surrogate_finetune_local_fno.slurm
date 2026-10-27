@@ -17,4 +17,6 @@ source job_scripts/snellius/env.sh
 # The snellius env has CPU-only torch (+cpu); train in the CUDA env
 # (`pixi install -e cuda` once on a login node).
 run_gpu() { pixi run -e cuda -- "$@"; }
-run_gpu python -u scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune trainer.checkpoint_every=1 "$@"
+run_gpu python -u scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune trainer.checkpoint_every=1 \
+  paths.weights_dir=/projects/prjs2304/urbanair/model_weights \
+  paths.training_data_dir=/projects/prjs2304/urbanair/training_data "$@"

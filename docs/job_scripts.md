@@ -16,6 +16,7 @@ job_scripts/
 │   ├── forward_workflow.slurm        # workflows/forward_workflow.sh
 │   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid>
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
+│   ├── surrogate_generate_seed_ensemble.slurm # generate_data.py on surrogate/generate_seed_ensemble (array)
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
@@ -82,6 +83,10 @@ for i in 0 1 2 3; do
   sbatch job_scripts/snellius/surrogate_generate_data.slurm data.sharding.num_shards=4 data.sharding.shard_index=$i
 done
 ```
+
+`surrogate_generate_seed_ensemble.slurm` is a SLURM array instead: task `i`
+of `N` passes `data.sharding.num_shards=N data.sharding.shard_index=i`, so
+`--array=0-15` splits the runs over 16 tasks.
 
 ## Example: ESMDA from a loaded ground truth
 
@@ -229,9 +234,10 @@ memory.
 - **DelftBlue:** OpenMPI 4 takes `rmaps_base_oversubscribe` instead (and
   does need `osc=pt2pt`, set in its activation script). Each job
   builds LBM in a private copy (`PYLBM_LBM_PATH`) so concurrent jobs don't
-  clobber the source tree. When the arguments mention `pypalm`, `env.sh`
-  drops PALM's stale CMake caches and nvhpc's compiler variables, so PALM is
-  built with conda's gfortran.
+  clobber the source tree. Unless the arguments mention `pylbm` (the only
+  build that wants nvfortran), `env.sh` drops nvhpc's compiler variables, so
+  PALM and uDALES are built with conda's gfortran and MPI; jobs whose arguments
+  mention `pypalm` also drop PALM's stale CMake caches.
 - The MPI `pml`/`btl` settings live in `activation_scripts/*_activation.sh`.
 - **DelftBlue OpenMPI:** the `delftblue` env pins OpenMPI below 5: 5.0.x
   segfaults uDALES in `MPI_Finalize` (exit 139 after a clean run).

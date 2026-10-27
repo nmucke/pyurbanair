@@ -1,0 +1,49 @@
+# @package _global_
+# Many spun-up states per held-out geometry of an existing uDALES corpus
+# (scripts/surrogate/generate_data.py, "Seed ensemble"): each member reruns one
+# reference sample's spin-up with its geometry and parameters and keeps one
+# frame; only the seeds in `vary` change between members.
+defaults:
+  - generate_data
+  - _self_
+
+paths:
+  results_dir: ${data.seed_ensemble.reference_dir}_seed_ensemble
+
+# One frame, `output_frequency` after the spin-up: the reference's first frame.
+# The spin-up is each reference sample's own (`spinup_time_s`).
+time:
+  simulation_time: 5.0
+  output_frequency: 5.0
+
+# The settings the reference corpus pyudales_realistic was generated with
+# (its config.yaml), where today's defaults differ.
+flow:
+  outflow_buffer: null
+  inlet_turbulence:
+    length_scale_x: 48.0
+    length_scale_y: 24.0
+    length_scale_z: 24.0
+model:
+  forward_model:
+    ncpu: 16
+    sgs_constant: 0.24
+    nudging_config:
+      interior_nudging: true
+    instability_check:
+      min_dt: 0.0001
+    # The stock closure (the corpus predates the SGS correction).
+    model_discrepancy:
+      enabled: false
+
+data:
+  adaptive_spinup:
+    enabled: false
+  seed_ensemble:
+    reference_dir: ${paths.results_root}/${paths.training_data_dir}/pyudales_realistic
+    split: test
+    # Reference sample indices within `split`; null: all of them.
+    samples: null
+    members: 64
+    # Seeds that differ between members: initial_condition, inlet_turbulence.
+    vary: [initial_condition, inlet_turbulence]

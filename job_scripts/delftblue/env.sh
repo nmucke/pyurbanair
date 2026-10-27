@@ -28,11 +28,14 @@ export PYLBM_LBM_PATH="${scratch}/LBM"
 export OMPI_MCA_mpi_yield_when_idle=1 OMPI_MCA_hwloc_base_binding_policy=none
 export OMPI_MCA_rmaps_base_oversubscribe=true
 
+# The activation loads nvhpc, whose mpif90 (nvfortran) shadows conda's
+# gfortran that PALM and uDALES are built with. PALM jobs drop PALM's stale CMake
+# caches (only they, so no other job deletes them under a running PALM build).
 if [[ " $* " == *pypalm* ]]; then
-    # The activation loads nvhpc, whose mpif90 (nvfortran) shadows conda's
-    # gfortran that PALM is built with: drop stale CMake caches and nvhpc's
-    # compiler variables.
     find libs/pypalm/palm_model_system -type f -name CMakeCache.txt -delete
+fi
+if [[ " $* " != *pylbm* ]]; then
+    # Drop nvhpc's compiler variables. Only the LBM build uses nvfortran.
     run() {
         pixi run -e delftblue -- bash -c '
             unset OPAL_PREFIX CC CXX F77 F90 FC

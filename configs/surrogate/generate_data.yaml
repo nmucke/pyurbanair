@@ -52,6 +52,9 @@ data:
   sharding:
     num_shards: 1
     shard_index: 0
+  # Seed ensemble of an existing corpus instead (generate_seed_ensemble.yaml);
+  # null: the training data above.
+  seed_ensemble: null
   geometry:
     # random: draw a building layout per trajectory from `source`;
     # fixed: use the case geometry for every trajectory.
