@@ -1,11 +1,13 @@
 # Latent generator results (2026-10)
 
+**Superseded** by [research/latent_generator_final_2026-10.md](../../research/latent_generator_final_2026-10.md).
+
 Status of the flow-matching latent generator of initial fields on
 `pyudales_realistic` (B autoencoder, D = 1536 latent channels per token). The
 design and the full evidence are in
-[plans/latent_generator_compact_full_reach.md](../plans/latent_generator_compact_full_reach.md);
+[plans/latent_generator_compact_full_reach.md](../../plans/implemented/latent_generator_compact_full_reach.md);
 the configs in `configs/latent_generator_architecture/`
-([neural_surrogates.md](../neural_surrogates.md) §38).
+([neural_surrogates.md](../../neural_surrogates.md) §38).
 
 ## Setup
 

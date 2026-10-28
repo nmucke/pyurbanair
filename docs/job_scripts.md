@@ -28,7 +28,9 @@ job_scripts/
 │   ├── surrogate_finetune_{dft,ssrolling,local_fno}.slurm # train.py on surrogate/finetune_dft or a baseline fine-tune (GPU)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
-│   ├── surrogate_evaluate_latent_generator_gpu.slurm # on latent_generator_b_realistic (GPU)
+│   ├── surrogate_evaluate_latent_generator_gpu.slurm # on best_latent_flow_matching_realistic (GPU)
+│   ├── surrogate_evaluate_latent_generator_ensemble.slurm # vs the seed ensemble, array over the models (GPU)
+│   ├── surrogate_compare_latent_generator_ensembles.slurm # compare_latent_generator_ensembles.py on their outputs
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
 └── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files, plus
     └── surrogate_finetune_barcelona.sh # bash: the Barcelona copy, then the three fine-tunes after it
@@ -87,6 +89,15 @@ done
 `surrogate_generate_seed_ensemble.slurm` is a SLURM array instead: task `i`
 of `N` passes `data.sharding.num_shards=N data.sharding.shard_index=i`, so
 `--array=0-15` splits the runs over 16 tasks.
+
+`surrogate_evaluate_latent_generator_ensemble.slurm` is an array over the
+compact latent generators: task `i` evaluates model `i` of the list in the
+script (`--array=2` is R3 alone); the compare job then waits on the array:
+
+```bash
+jid=$(sbatch --parsable job_scripts/delftblue/surrogate_evaluate_latent_generator_ensemble.slurm)
+sbatch --dependency=afterok:${jid} job_scripts/delftblue/surrogate_compare_latent_generator_ensembles.slurm
+```
 
 ## Example: ESMDA from a loaded ground truth
 

@@ -107,7 +107,8 @@ surrogate/train_dft.yaml               # fine-tune a pretrained autoencoder into
 surrogate/finetune_stepper.yaml        # fine-tune a pretrained stepper (full or LoRA)
 surrogate/finetune_dft.yaml            # fine-tune a trained DFT (LoRA + skips, full-BPTT rollout)
 surrogate/eval.yaml                    # all evaluation: blocks stepper (one or several
-                                       #   models), autoencoder, latent_generator
+                                       #   models), autoencoder, latent_generator,
+                                       #   latent_generator_ensemble(_compare)
 surrogate/training.yaml                # training defaults every training config shares
 surrogate/architectures.yaml           # every stepper architecture, <family>_<size>
 params/surrogate_training_data.yaml    # sampler for the training data
@@ -133,6 +134,8 @@ python scripts/surrogate/train.py --config-name surrogate/train_<task>   # or fi
 python scripts/surrogate/evaluate_stepper.py            # all read surrogate/eval.yaml
 python scripts/surrogate/evaluate_autoencoder.py
 python scripts/surrogate/evaluate_latent_generator.py
+python scripts/surrogate/evaluate_latent_generator_ensemble.py   # vs a seed ensemble
+python scripts/surrogate/compare_latent_generator_ensembles.py
 ```
 
 `train.py` builds the model and datasets for the config's `task` from

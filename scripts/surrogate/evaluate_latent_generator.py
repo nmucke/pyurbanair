@@ -76,9 +76,13 @@ from omegaconf import DictConfig
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
+    ae_reconstruct,
     device,
+    encoded_latent_moments,
     expand,
+    generator_samples,
     grid_spacing,
+    load_latent_generator,
     load_model,
     load_states,
     open_dataset,
@@ -110,12 +114,8 @@ def run(cfg: DictConfig) -> None:
     torch.manual_seed(int(cfg.seed))
     rng = np.random.default_rng(int(cfg.seed))
 
-    model, train_cfg = load_model(ev.model_dir, dev)
-    if ev.max_internal_batchsize is not None:
-        model.ae.ae.max_internal_batchsize = int(ev.max_internal_batchsize)
-    schema = train_cfg.generator.physical_schema
-    model.set_conditioning_schema(
-        list(schema.param_vars), float(schema.history_dt_seconds)
+    model, train_cfg = load_latent_generator(
+        ev.model_dir, dev, ev.max_internal_batchsize
     )
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split)
     names = list(data.state_vars)
@@ -153,7 +153,7 @@ def run(cfg: DictConfig) -> None:
         decode: str | None = None,
         latents: list[dict] | None = None,
     ) -> np.ndarray:
-        return _generate(
+        return generator_samples(
             model,
             hist,
             data,
@@ -211,7 +211,7 @@ def run(cfg: DictConfig) -> None:
         real = load_states(data, traj, times)
         add("real", real)
         real_spread.append(ge.pairwise_rms_distance(real, fluid))
-        ae = _ae_reconstruct(model, real, data, traj, int(ev.batch_size), dev)
+        ae = ae_reconstruct(model, real, data, traj, int(ev.batch_size), dev)
         add("ae_recon", ae)
 
         sampled = latent_parts["generated"] if ev.latent_spectrum else None
@@ -223,7 +223,7 @@ def run(cfg: DictConfig) -> None:
         )
         add("generated", generated.reshape(-1, *generated.shape[2:]))
         if ev.latent_spectrum:
-            latent_parts["real"] += _latent_moments(
+            latent_parts["real"] += encoded_latent_moments(
                 model, real, data, traj, int(ev.batch_size), dev
             )
         diversity["generated"].append(ge.diversity(generated, fluid)["per_condition"])
@@ -231,7 +231,7 @@ def run(cfg: DictConfig) -> None:
         for mode in decode_modes:
             add(
                 f"ae_recon_decode_{mode}",
-                _ae_reconstruct(
+                ae_reconstruct(
                     model, real, data, traj, int(ev.batch_size), dev, (mode, halo)
                 ),
             )
@@ -458,96 +458,6 @@ def _weighted(per_grid: dict[str, float], merged: dict[str, dict]) -> float:
         if pairs
         else float("nan")
     )
-
-
-@torch.no_grad()  # type: ignore[misc, unused-ignore]
-def _ae_reconstruct(
-    model: Any,
-    real: np.ndarray,
-    data: Any,
-    traj: int,
-    batch: int,
-    dev: torch.device,
-    decode: tuple[str | None, int | None] = (None, None),
-) -> np.ndarray:
-    """Real fields through the frozen AE; `decode` = (spatial mode, halo size)
-    of the decoder, `None` for the trained ones."""
-    out = []
-    for start in range(0, len(real), batch):
-        state = torch.from_numpy(real[start : start + batch]).to(dev)
-        b = len(state)
-        enc = model.encode_latents(
-            state,
-            expand(data.geometry_for(traj), b, dev),
-            expand(data.geom_features_for(traj), b, dev),
-        )
-        recon = model.decode_latents(
-            enc.z, enc, spatial_mode=decode[0], halo_size=decode[1]
-        )
-        out.append(recon.float().cpu().numpy())
-    return np.concatenate(out)
-
-
-@torch.no_grad()  # type: ignore[misc, unused-ignore]
-def _latent_moments(
-    model: Any, fields: np.ndarray, data: Any, traj: int, batch: int, dev: torch.device
-) -> list[dict]:
-    """Token moments (:func:`ge.latent_moments`) of the normalised state latents
-    the frozen encoder gives `fields`, one dict per batch."""
-    out = []
-    for start in range(0, len(fields), batch):
-        state = torch.from_numpy(fields[start : start + batch]).to(dev)
-        b = len(state)
-        enc = model.encode_latents(
-            state,
-            expand(data.geometry_for(traj), b, dev),
-            expand(data.geom_features_for(traj), b, dev),
-        )
-        out.append(ge.latent_moments(enc.z.float().cpu().numpy()))
-    return out
-
-
-@torch.no_grad()  # type: ignore[misc, unused-ignore]
-def _generate(
-    model: Any,
-    hist: torch.Tensor,
-    data: Any,
-    traj: int,
-    seed: int,
-    num_steps: int,
-    batch: int,
-    dev: torch.device,
-    sampler: str = "euler",
-    decode: tuple[str | None, int | None] = (None, None),
-    latents: list[dict] | None = None,
-) -> np.ndarray:
-    """Generated fields for parameter histories (B, Hp, P); the noise is fixed by
-    `seed`. `decode` = (spatial mode, halo size) of the decoder, `None` for the
-    trained ones. `latents`, if given, gets the token moments of the sampled
-    latents (:func:`ge.latent_moments`), one dict per batch."""
-    noise = torch.Generator(device=dev).manual_seed(int(seed))
-    out = []
-    for start in range(0, len(hist), batch):
-        h = hist[start : start + batch].to(dev)
-        b = len(h)
-        sample = model.sample(
-            h,
-            expand(data.geometry_for(traj), b, dev),
-            expand(data.geom_features_for(traj), b, dev),
-            generator=noise,
-            num_steps=int(num_steps),
-            param_names=model.param_names,
-            history_dt_seconds=model.history_dt_seconds,
-            sampler=sampler,
-            decode_spatial_mode=decode[0],
-            decode_halo_size=decode[1],
-            return_latents=latents is not None,
-        )
-        if latents is not None:
-            sample, z = sample
-            latents.append(ge.latent_moments(z.float().cpu().numpy()))
-        out.append(sample.float().cpu().numpy())
-    return np.concatenate(out)
 
 
 @torch.no_grad()  # type: ignore[misc, unused-ignore]

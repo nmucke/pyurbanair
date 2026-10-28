@@ -705,6 +705,422 @@ def latent_spectrum(
     return {"real": eig, "generated": gen, "bands": ratios}
 
 
+# --------------------------------------------------------------------------- #
+# Seed ensembles: many draws of ONE conditioning against the solver's own spread
+# --------------------------------------------------------------------------- #
+#
+# ``scripts/surrogate/evaluate_latent_generator_ensemble.py`` compares, per
+# geometry, a source ensemble ``S`` (generated, AE reconstruction, ...) with the
+# solver's seed ensemble ``R`` at fixed geometry and forcing. Every estimator
+# here is unbiased (expected 0 or 1 when ``S`` and ``R`` come from the same
+# distribution) or meant to be read against a split-half floor of ``R``
+# (:func:`split_half_floor`). A source whose member ``i`` is derived from real
+# member ``i`` (the AE reconstruction) is *paired*: the functions take
+# ``exclude_self`` / ``paired`` / ``diff_var`` so member ``i`` is never scored
+# against its own truth.
+
+
+def ensemble_moments(fields: np.ndarray, fluid: np.ndarray) -> dict[str, Any]:
+    """Pointwise ensemble mean and unbiased (``ddof = 1``) variance over the
+    ``N`` samples at every fluid cell.
+
+    Returns ``{"mean": (C, M), "var": (C, M), "n": N, "z": (M,), "nz": nz}``
+    with ``M`` the fluid cells in C order and ``z`` the level of each (for the
+    per-height reductions); ``var`` is nan with fewer than two samples.
+    Accumulates in float64 one component at a time, so a float32 stack is
+    never copied whole.
+    """
+    f = np.asarray(fields)
+    m = np.asarray(fluid).astype(bool)
+    if f.ndim != 5 or m.shape != f.shape[2:]:
+        raise ValueError(
+            f"fields must be (N, C, *fluid.shape), got {f.shape} for {m.shape}"
+        )
+    n, c = f.shape[0], f.shape[1]
+    cells = int(m.sum())
+    mean = np.full((c, cells), np.nan)
+    var = np.full((c, cells), np.nan)
+    for i in range(c):
+        x = f[:, i][:, m].astype(np.float64)  # (N, M)
+        if n > 0:
+            mean[i] = x.mean(axis=0)
+        if n > 1:
+            var[i] = x.var(axis=0, ddof=1)
+    return {"mean": mean, "var": var, "n": n, "z": np.nonzero(m)[0], "nz": m.shape[0]}
+
+
+def _level_sum(values: np.ndarray, z: np.ndarray, nz: int) -> np.ndarray:
+    """Per-level sums ``(C, nz)`` of per-cell ``values`` ``(C, M)``."""
+    return np.stack([np.bincount(z, weights=v, minlength=nz) for v in values])
+
+
+def _level_mean(values: np.ndarray, z: np.ndarray, nz: int) -> np.ndarray:
+    count = np.bincount(z, minlength=nz).astype(np.float64)
+    out = _level_sum(values, z, nz) / np.where(count > 0, count, 1.0)
+    out[:, count == 0] = np.nan
+    return out
+
+
+def mean_bias(
+    source: dict[str, Any],
+    real: dict[str, Any],
+    diff_var: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Squared bias of the ensemble mean, raw and debiased.
+
+    ``source`` / ``real`` are :func:`ensemble_moments`. ``raw = mean_cells
+    (mu_S - mu_R)^2``; its sampling noise ``mean_cells (var_S / n_S + var_R /
+    n_R)`` is subtracted for ``debiased`` (expected 0 when the means agree).
+    A paired source passes ``diff_var``, the per-cell variance ``(C, M)`` of
+    the member differences ``S_i - R_i``, whose mean has noise ``diff_var /
+    n``. ``standardised`` divides by ``mean_cells var_R``: the bias in units of
+    the solver's own spread. Returns ``(C,)`` arrays ``raw``, ``debiased``,
+    ``standardised`` and their per-level ``(C, nz)`` ``profile`` (debiased)
+    and ``profile_standardised``.
+    """
+    d2 = (source["mean"] - real["mean"]) ** 2
+    if diff_var is None:
+        noise = source["var"] / source["n"] + real["var"] / real["n"]
+    else:
+        noise = np.asarray(diff_var) / real["n"]
+    z, nz = real["z"], real["nz"]
+    scale = real["var"].mean(axis=1)
+    debiased = d2.mean(axis=1) - noise.mean(axis=1)
+    profile = _level_mean(d2 - noise, z, nz)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return {
+            "raw": d2.mean(axis=1),
+            "debiased": debiased,
+            "standardised": debiased / scale,
+            "profile": profile,
+            "profile_standardised": profile / _level_mean(real["var"], z, nz),
+        }
+
+
+def spread(source: dict[str, Any], real: dict[str, Any]) -> dict[str, Any]:
+    """Ensemble spread of ``source`` against ``real`` (both
+    :func:`ensemble_moments`).
+
+    ``ratio = sqrt(sum var_S / sum var_R)`` per component ``(C,)``, per level
+    (``ratio_profile`` ``(C, nz)``) and over every component (``ratio_total``);
+    1 = the solver's spread, < 1 under-dispersed. The spatial pattern: the
+    Pearson correlation of the ``sigma_S`` and ``sigma_R`` maps over cells
+    (``map_corr``) and the RMS of ``log(sigma_S / sigma_R)`` (``log_ratio_rms``;
+    > 0 even for equal distributions at finite ``n``, so read it against the
+    split-half floor). Both skip the cells where ``sigma_R = 0`` (a solver
+    ensemble can be exactly constant in an enclosed courtyard; their count per
+    component is ``excluded``), and the log ratio also those with ``sigma_S =
+    0``.
+    """
+    vs, vr = source["var"], real["var"]
+    z, nz = real["z"], real["nz"]
+    ss, sr = np.sqrt(np.maximum(vs, 0.0)), np.sqrt(np.maximum(vr, 0.0))
+    c = vs.shape[0]
+    corr = np.full(c, np.nan)
+    log_rms = np.full(c, np.nan)
+    varying = sr > 0
+    for i in range(c):
+        a, b = ss[i][varying[i]], sr[i][varying[i]]
+        if a.size > 1 and np.std(a) > 0 and np.std(b) > 0:
+            corr[i] = float(np.corrcoef(a, b)[0, 1])
+        ok = (ss[i] > 0) & varying[i]
+        if ok.any():
+            log_rms[i] = float(np.sqrt(np.mean(np.log(ss[i][ok] / sr[i][ok]) ** 2)))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        prof = _level_sum(vs, z, nz) / _level_sum(vr, z, nz)
+        prof[:, np.bincount(z, minlength=nz) == 0] = np.nan
+        return {
+            "ratio": np.sqrt(vs.sum(axis=1) / vr.sum(axis=1)),
+            "ratio_total": float(np.sqrt(vs.sum() / vr.sum())),
+            "ratio_profile": np.sqrt(prof),
+            "map_corr": corr,
+            "log_ratio_rms": log_rms,
+            "excluded": (~varying).sum(axis=1),
+        }
+
+
+def select_points(fluid: np.ndarray, num_points: int, seed: int = 0) -> np.ndarray:
+    """A fixed, deterministic set of ``num_points`` cells of the mask
+    ``fluid`` (sorted flat indices into ``fluid.ravel()``, all of them when
+    there are fewer): the same ``seed`` and mask give the same points for
+    every source and model. Pass the fluid cells where the real ensemble
+    varies, so no point has a constant truth."""
+    cells = np.flatnonzero(np.asarray(fluid).astype(bool).ravel())
+    if len(cells) <= int(num_points):
+        return cells
+    rng = np.random.default_rng(int(seed))
+    return np.sort(rng.choice(cells, size=int(num_points), replace=False))
+
+
+def point_values(fields: np.ndarray, points: np.ndarray) -> np.ndarray:
+    """Values ``(N, C, P)`` (float64) of ``fields`` at :func:`select_points`."""
+    f = np.asarray(fields)
+    return f.reshape(f.shape[0], f.shape[1], -1)[:, :, points].astype(np.float64)
+
+
+def _check_self(ensemble: np.ndarray, truth: np.ndarray) -> None:
+    if len(ensemble) != len(truth):
+        raise ValueError(
+            "exclude_self pairs ensemble member i with truth i: got "
+            f"{len(ensemble)} members for {len(truth)} truths"
+        )
+
+
+def fair_crps(
+    ensemble: np.ndarray, truth: np.ndarray, exclude_self: bool = False
+) -> np.ndarray:
+    """Fair (ensemble-size unbiased) CRPS of an ensemble ``(m, C, P)`` against
+    each truth ``(n, C, P)``, averaged over truths and points: ``(C,)``.
+
+    ``CRPS_fair(X, y) = mean_i |x_i - y| - sum_{i != j} |x_i - x_j| / (2 m (m
+    - 1))``. Its expectation does not depend on ``m``, so ensembles of
+    different sizes compare directly. ``exclude_self`` scores truth ``r``
+    against the ensemble without member ``r`` (``m = n``): the leave-one-out
+    oracle ``fair_crps(R, R, exclude_self=True)`` -- the score of the solver's
+    own ensemble -- and the paired AE reconstruction.
+    """
+    x = np.asarray(ensemble, dtype=np.float64)
+    y = np.asarray(truth, dtype=np.float64)
+    if exclude_self:
+        _check_self(x, y)
+    m = len(x) - (1 if exclude_self else 0)
+    if m < 2:
+        return np.full(x.shape[1], np.nan)
+    # |x_r - x_j| summed over j, per member r; their sum is the full pair sum.
+    row = np.stack([np.abs(x - x[r]).sum(axis=0) for r in range(len(x))])
+    pair_sum = row.sum(axis=0)  # (C, P), each unordered pair counted twice
+    scores = []
+    for r in range(len(y)):
+        skill = np.abs(x - y[r]).sum(axis=0)
+        pairs = pair_sum
+        if exclude_self:
+            skill = skill - np.abs(x[r] - y[r])
+            pairs = pair_sum - 2.0 * row[r]
+        scores.append(skill / m - pairs / (2.0 * m * (m - 1)))
+    return np.asarray(np.mean(scores, axis=(0, 2)))
+
+
+def rank_histogram(
+    ensemble: np.ndarray,
+    truth: np.ndarray,
+    bins: int = 8,
+    exclude_self: bool = False,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Rank (Talagrand) histogram of each truth ``(n, C, P)`` within the
+    ensemble ``(m, C, P)``, coarsened to ``bins`` equal bins per component.
+
+    The rank is randomised (``u = (#{x < y} + V (#{x = y} + 1)) / (m + 1)``,
+    ``V ~ U(0, 1)``), so a calibrated ensemble gives exactly uniform ``u`` and
+    flat bins whatever ``m``. ``exclude_self`` as in :func:`fair_crps`
+    (``rank_histogram(R, R, exclude_self=True)`` is the solver's own, flat in
+    expectation). A U shape is under-dispersion, a hump over-dispersion, a
+    slope a bias. Returns ``counts`` ``(C, bins)``, ``density`` (``counts``
+    over the flat count: 1 = flat), ``chi2_per_bin`` ``(C,)`` (``sum (h - e)^2
+    / e / bins``; correlated points inflate it, so read it against the
+    real one) and ``outer_mass`` ``(C,)`` (the two outer bins' share; flat =
+    ``2 / bins``).
+    """
+    x = np.asarray(ensemble, dtype=np.float64)
+    y = np.asarray(truth, dtype=np.float64)
+    if exclude_self:
+        _check_self(x, y)
+    rng = np.random.default_rng(int(seed))
+    m = len(x) - (1 if exclude_self else 0)
+    c = x.shape[1]
+    counts = np.zeros((c, int(bins)))
+    for r in range(len(y)):
+        less = (x < y[r]).sum(axis=0)
+        equal = (x == y[r]).sum(axis=0)
+        if exclude_self:  # x[r] vs y[r]: one comparison to undo
+            less = less - (x[r] < y[r])
+            equal = equal - (x[r] == y[r])
+        u = (less + rng.random(less.shape) * (equal + 1)) / (m + 1)
+        b = np.minimum((u * bins).astype(int), int(bins) - 1)
+        for i in range(c):
+            counts[i] += np.bincount(b[i], minlength=int(bins))
+    expected = counts.sum(axis=1, keepdims=True) / bins
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return {
+            "counts": counts,
+            "density": counts / expected,
+            "chi2_per_bin": ((counts - expected) ** 2 / expected).sum(axis=1) / bins,
+            "outer_mass": (counts[:, 0] + counts[:, -1]) / counts.sum(axis=1),
+        }
+
+
+def rms_distances(
+    stacks: Sequence[np.ndarray], fluid: np.ndarray, chunk_cells: int = 65536
+) -> np.ndarray:
+    """RMS distance (over every component and fluid cell) between every pair
+    of samples of the concatenated ``stacks`` (each ``(N_k, C, nz, ny, nx)``):
+    a symmetric ``(sum N_k, sum N_k)`` matrix with a zero diagonal.
+
+    Built from a float64 Gram matrix accumulated over chunks of
+    ``chunk_cells`` fluid cells, each centred on its column mean (distances
+    are translation invariant; centring removes the cancellation of
+    ``|a|^2 + |b|^2 - 2 a.b`` on fields with a large mean). One pass serves
+    every energy distance and diversity of a geometry (:func:`energy_distance`).
+    """
+    m = np.asarray(fluid).astype(bool)
+    cells = np.flatnonzero(m.ravel())
+    flat = [np.asarray(s).reshape(len(s), s.shape[1], -1) for s in stacks]
+    n = sum(len(s) for s in flat)
+    c = flat[0].shape[1]
+    gram = np.zeros((n, n))
+    for start in range(0, len(cells), int(chunk_cells)):
+        cols = cells[start : start + int(chunk_cells)]
+        x = np.concatenate([s[:, :, cols].reshape(len(s), -1) for s in flat]).astype(
+            np.float64
+        )
+        x -= x.mean(axis=0)
+        gram += x @ x.T
+    sq = np.diag(gram)
+    d2 = np.maximum(sq[:, None] + sq[None, :] - 2.0 * gram, 0.0)
+    np.fill_diagonal(d2, 0.0)
+    return np.asarray(np.sqrt(d2 / max(c * len(cells), 1)))
+
+
+def _mean_pairwise(d: np.ndarray) -> float:
+    n = len(d)
+    return float(d.sum() / (n * (n - 1))) if n > 1 else float("nan")
+
+
+def energy_distance(
+    distances: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    paired: bool = False,
+) -> dict[str, float]:
+    """Unbiased (U-statistic) energy distance between the samples ``x`` and
+    ``y`` (index arrays into the :func:`rms_distances` matrix).
+
+    ``ED = 2 E|X - Y| - E|X - X'| - E|Y - Y'|``, each within-set mean over the
+    ``i != j`` pairs, so its expectation is exactly 0 when both sets come from
+    one distribution (an estimate can be slightly negative). ``paired`` (``x_i``
+    derived from ``y_i``, equal sizes) drops the ``i = j`` cross pairs, which
+    are not independent draws. Returns ``energy_distance`` (in the field's
+    units) and ``relative`` (over ``E|Y - Y'|``, the mean pairwise distance of
+    ``y``, the reference set).
+    """
+    d = np.asarray(distances)
+    x, y = np.asarray(x), np.asarray(y)
+    cross = d[np.ix_(x, y)]
+    if paired:
+        if len(x) != len(y):
+            raise ValueError("paired sets must have equal sizes")
+        cross_mean = _mean_pairwise(cross - np.diag(np.diag(cross)))
+    else:
+        cross_mean = float(cross.mean())
+    within_y = _mean_pairwise(d[np.ix_(y, y)])
+    ed = 2.0 * cross_mean - _mean_pairwise(d[np.ix_(x, x)]) - within_y
+    return {"energy_distance": ed, "relative": ed / within_y}
+
+
+def pointwise_w1(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """1-Wasserstein distance between the marginals of two ensembles at each
+    point (``(n_a, C, P)``, ``(n_b, C, P)``), averaged over points: ``(C,)``.
+    Equal sizes use the sorted-sample identity ``mean |a_(k) - b_(k)|``."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if len(a) == len(b):
+        return np.asarray(
+            np.abs(np.sort(a, axis=0) - np.sort(b, axis=0)).mean(axis=(0, 2))
+        )
+    return np.array(
+        [
+            np.mean([wasserstein_1(a[:, c, p], b[:, c, p]) for p in range(a.shape[2])])
+            for c in range(a.shape[1])
+        ]
+    )
+
+
+def split_half_floor(
+    metric: Any,
+    n_real: int,
+    num_splits: int = 16,
+    seed: int = 0,
+    n_source: int | None = None,
+    paired: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """The finite-sample floor of a metric: its value between disjoint random
+    halves of the real ensemble, and a source's value at the same sizes.
+
+    Per split, the ``n_real`` real indices are permuted into halves ``a`` and
+    ``b`` of ``n_real // 2``. ``metric(from_source, x, b)`` returns a dict of
+    numbers / arrays for the set ``x`` (real indices when ``from_source`` is
+    False, source indices otherwise) against the real half ``b``. The floor is
+    ``metric(False, a, b)``; with ``n_source`` the matched value is
+    ``metric(True, s, b)``, ``s`` a random half-size subset of the source --
+    or ``a`` itself when ``paired`` (source ``i`` derived from real ``i``, so
+    ``s`` stays independent of ``b``). Returns ``floor`` / ``floor_std`` (and
+    ``matched`` / ``matched_std``): the mean and standard deviation over the
+    splits, per key. The source subsets come from their own generator, so the
+    splits depend only on ``seed`` and ``n_real``: every source (paired or not)
+    is scored on the same splits as the floor.
+    """
+    rng = np.random.default_rng(int(seed))
+    pick = np.random.default_rng([int(seed), 1])
+    half = int(n_real) // 2
+    floor: list[dict[str, Any]] = []
+    matched: list[dict[str, Any]] = []
+    for _ in range(int(num_splits)):
+        perm = rng.permutation(int(n_real))
+        a, b = np.sort(perm[:half]), np.sort(perm[half : 2 * half])
+        floor.append(metric(False, a, b))
+        if n_source is not None:
+            s = (
+                a
+                if paired
+                else np.sort(
+                    pick.choice(int(n_source), min(half, int(n_source)), replace=False)
+                )
+            )
+            matched.append(metric(True, s, b))
+
+    def stats(values: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        keys = values[0].keys()
+        stacked = {
+            k: np.asarray([v[k] for v in values], dtype=np.float64) for k in keys
+        }
+        return {
+            "mean": {k: v.mean(axis=0) for k, v in stacked.items()},
+            "std": {k: v.std(axis=0) for k, v in stacked.items()},
+        }
+
+    out: dict[str, dict[str, Any]] = {}
+    if floor:
+        s = stats(floor)
+        out["floor"], out["floor_std"] = s["mean"], s["std"]
+    if matched:
+        s = stats(matched)
+        out["matched"], out["matched_std"] = s["mean"], s["std"]
+    return out
+
+
+def bootstrap_ci(
+    values: Sequence[float],
+    n_resamples: int = 2000,
+    seed: int = 0,
+    level: float = 0.95,
+) -> dict[str, float]:
+    """Mean over the finite ``values`` (e.g. one per geometry) and its
+    percentile bootstrap confidence interval: ``{"mean", "lo", "hi", "n"}``
+    (nan bounds with fewer than two values)."""
+    v = np.asarray(values, dtype=np.float64).ravel()
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return {"mean": float("nan"), "lo": float("nan"), "hi": float("nan"), "n": 0}
+    if v.size < 2:
+        x = float(v[0])
+        return {"mean": x, "lo": float("nan"), "hi": float("nan"), "n": 1}
+    rng = np.random.default_rng(int(seed))
+    means = v[rng.integers(0, v.size, size=(int(n_resamples), v.size))].mean(axis=1)
+    tail = 50.0 * (1.0 - float(level))
+    lo, hi = np.percentile(means, [tail, 100.0 - tail])
+    return {"mean": float(v.mean()), "lo": float(lo), "hi": float(hi), "n": int(v.size)}
+
+
 def _is_within(value: float, bound: float) -> bool:
     return bool(np.isfinite(value) and np.isfinite(bound) and value <= bound)
 
