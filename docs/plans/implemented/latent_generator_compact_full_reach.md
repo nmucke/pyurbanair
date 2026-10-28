@@ -1,6 +1,10 @@
 # Compact latent generator with full latent reach
 
-**Status: open (2026-10-26).** Follows PR #221 (`feat/small-velocity-net`) and
+**Status: implemented (2026-10-28).** R3 (`compact_h512`) is the default,
+`model_weights/best_latent_flow_matching_realistic`; the seed-ensemble
+evaluation and the summary of all runs are in
+[research/latent_generator_final_2026-10.md](../../research/latent_generator_final_2026-10.md).
+Follows PR #221 (`feat/small-velocity-net`) and
 the study in §1. Supersedes PR #221's default of a 176-wide velocity net.
 Phase 1 is implemented and merged into `feat/small-velocity-net`. Phase 2 runs
 R1–R5 were done on Snellius 2026-10-24..26 (§3, Phase 2 results): no model

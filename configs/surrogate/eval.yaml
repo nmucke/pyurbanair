@@ -3,6 +3,8 @@
 #   stepper           scripts/surrogate/evaluate_stepper.py
 #   autoencoder       scripts/surrogate/evaluate_autoencoder.py
 #   latent_generator  scripts/surrogate/evaluate_latent_generator.py
+#   latent_generator_ensemble          scripts/surrogate/evaluate_latent_generator_ensemble.py
+#   latent_generator_ensemble_compare  scripts/surrogate/compare_latent_generator_ensembles.py
 defaults:
   - /common
   - _self_
@@ -57,7 +59,7 @@ autoencoder:
   max_internal_batchsize: null
 
 latent_generator:
-  model_dir: ${paths.weights_dir}/latent_generator_s
+  model_dir: ${paths.weights_dir}/best_latent_flow_matching_realistic
   output_dir: ${.model_dir}/eval
   # Held-out snapshots compared against, spread over the trajectories. The real
   # pairwise spread (so diversity_ratio) and the Reynolds stresses need several
@@ -102,3 +104,50 @@ latent_generator:
     w1_factor: 2.0
     divergence_factor: 3.0
     diversity_min_ratio: 0.25
+
+# A latent generator against the solver's seed ensemble (state/sample_XXXX/
+# member_YYYY.nc, scripts/surrogate/generate_data.py "Seed ensemble"): per
+# geometry, `num_draws` draws with the reference's t = 0 history against the
+# members. The reference corpus is `data_dir`, or (null) the ensemble's own
+# data.seed_ensemble.reference_dir.
+latent_generator_ensemble:
+  model_dir: ${paths.weights_dir}/best_latent_flow_matching_realistic
+  ensemble_dir: ${paths.results_root}/${paths.training_data_dir}/pyudales_realistic_seed_ensemble
+  output_dir: ${.model_dir}/eval_seed_ensemble
+  # Reference sample indices to evaluate; null -> every sample in ensemble_dir.
+  samples: null
+  num_draws: 64
+  # Draws with another test geometry's t = 0 history (the conditioning probe).
+  probe_draws: 16
+  # ODE sampler and steps; null steps -> the model's generator.sampling.num_steps.
+  sampler: heun
+  num_steps: 25
+  # Fixed fluid points per geometry (where the members vary) for the CRPS,
+  # rank histogram and W1.
+  num_points: 20000
+  rank_bins: 8
+  # Random half / half splits of the members for the noise floors: of the
+  # energy distance and point W1 (cheap), and of the full-field spread / bias.
+  num_splits: 200
+  num_field_splits: 16
+  batch_size: 4
+  # Cap on the crops the frozen AE encodes/decodes at once (null: the model's own).
+  max_internal_batchsize: null
+  # Per-geometry variance of the generated latents in the PCA basis of the
+  # encoded members (one extra encoder pass over the members).
+  latent_spectrum: true
+  # Geometries with a std-map figure.
+  num_figures: 3
+  bootstrap_resamples: 2000
+
+# Several latent_generator_ensemble outputs side by side (CPU only).
+latent_generator_ensemble_compare:
+  # Each model's latent_generator_ensemble.output_dir (or its model dir, whose
+  # eval_seed_ensemble/ is read).
+  eval_dirs: []
+  # One tag per eval dir; null -> the model dir names.
+  tags: null
+  # Tag the paired per-geometry differences are taken against; null -> the first.
+  reference: null
+  output_dir: ${paths.weights_dir}/latent_generator_ensemble_comparison
+  bootstrap_resamples: 2000

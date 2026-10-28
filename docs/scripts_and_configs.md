@@ -31,7 +31,7 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Score a noise floor | `assimilation.replica_dir=<forward run dir>`: the truth rerun with another turbulence seed (see below) |
 | Generate surrogate training data | `python scripts/surrogate/generate_data.py` (§2.3) |
 | Train / fine-tune a surrogate | `python scripts/surrogate/train.py --config-name surrogate/<config>` |
-| Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` |
+| Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py` |
 | Compare several trained surrogates | `bash workflows/compare_surrogates.sh 'models=[dirA,dirB]'` (§2.4) |
 | Compare CFD backends on one case | `bash workflows/compare_models.sh 'models=[pyudales,pypalm]' replicas=2` (§2.3c) |
 | Run the scripts with tiny test configs | `--config-dir tests/configs +test=forward` (see [`tests/README.md`](../tests/README.md)) |
@@ -212,7 +212,7 @@ example overrides are in [`configs/README.md`](../configs/README.md#neural-surro
 | `../latent_generator_architecture/` | — | top-level group of `train_latent_generator.yaml`: one velocity net per file, each with its own default `name` (`latent_generator_architecture=compact_wide_head`; default `compact_h512`; options in [neural_surrogates.md](neural_surrogates.md) §38) |
 | `train_dft.yaml` | `train.py` | pretrained autoencoder -> stepper (DFT); optional whole-frame `prechunk` copy |
 | `finetune_stepper.yaml` | `train.py` | fine-tune a pretrained stepper, `method: full \| lora` |
-| `eval.yaml` | `evaluate_*.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator` |
+| `eval.yaml` | `evaluate_*.py`, `compare_latent_generator_ensembles.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator`, `latent_generator_ensemble`, `latent_generator_ensemble_compare` |
 
 Each training config loads `training.yaml` and overrides only what differs.
 Weights go to `<paths.weights_dir>/<name>/`, data to
@@ -303,6 +303,8 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 | `evaluate_stepper.py` | `surrogate/eval` block `stepper` (+ top-level `inlet_turbulence`, `periodic_y`) | rolls one or several steppers out on test trajectories; metrics + figures |
 | `evaluate_autoencoder.py` | `surrogate/eval` block `autoencoder` | reconstruction metrics + figures |
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
+| `evaluate_latent_generator_ensemble.py` | `surrogate/eval` block `latent_generator_ensemble` | generated ensembles vs a solver seed ensemble, per geometry, with noise floors |
+| `compare_latent_generator_ensembles.py` | `surrogate/eval` block `latent_generator_ensemble_compare` | cross-model table, figures and paired differences of those outputs (CPU) |
 
 `scripts/utils/eval_common.py` holds the loading and slice-figure helpers shared by the
 evaluation scripts and `scripts/surrogate_comparison/`. See [neural_surrogates.md](neural_surrogates.md) for the

@@ -24,3 +24,24 @@ latent_generator:
   num_figures: 1
   bootstrap_resamples: 10
   rollout_steps: 2
+
+latent_generator_ensemble:
+  model_dir: ${paths.weights_dir}/latent_generator
+  # Pinned: the real config's values change between runs.
+  samples: null
+  num_draws: 6
+  probe_draws: 2
+  sampler: euler
+  num_steps: 2
+  num_points: 64
+  rank_bins: 4
+  num_splits: 3
+  num_field_splits: 2
+  batch_size: 4
+  max_internal_batchsize: 2
+  latent_spectrum: true
+  num_figures: 1
+  bootstrap_resamples: 10
+
+latent_generator_ensemble_compare:
+  bootstrap_resamples: 10

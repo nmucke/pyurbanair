@@ -620,6 +620,122 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         assert (out / name).exists(), name
 
 
+def _synthetic_seed_ensemble(corpus: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
+    """A seed ensemble of the synthetic corpus's test trajectory 0 in
+    generate_data.py's layout: member 0 is frame 0, the others frame 0 plus
+    noise in the fluid. Member 5 is missing, as in the real ensemble, so the
+    7 members also exercise the odd split-half path."""
+    import xarray
+
+    rng = np.random.default_rng(0)
+    frame = xarray.load_dataset(corpus / "state" / "test" / "sample_0000.nc")
+    params = xarray.load_dataset(corpus / "param" / "test" / "sample_0000.nc")
+    fluid = frame.blanking.values == 0
+    for d in ("state", "param"):
+        (dest / d / "sample_0000").mkdir(parents=True)
+    for member in (0, 1, 2, 3, 4, 6, 7):
+        state = frame.isel(time=[0])
+        if member:
+            for v in ("u", "v", "w"):
+                noise = rng.normal(0, 0.3, state[v].shape) * fluid
+                state[v] = state[v] + noise.astype(np.float32)
+        state.attrs.update(geometry="tiny", reference_sample=0, member=member)
+        name = f"member_{member:04d}.nc"
+        state.to_netcdf(dest / "state" / "sample_0000" / name)
+        params.isel(time=[0]).to_netcdf(dest / "param" / "sample_0000" / name)
+    OmegaConf.save(
+        OmegaConf.create(
+            {"data": {"seed_ensemble": {"reference_dir": str(corpus), "split": "test"}}}
+        ),
+        dest / "config.yaml",
+    )
+    return dest
+
+
+def test_evaluate_latent_generator_ensemble_and_compare(
+    session_root: pathlib.Path, trained: dict[str, Any], training_data: pathlib.Path
+) -> None:
+    """Every source and floor per geometry, member 0 matches frame 0, the noise
+    depends only on (seed, sample, draw); the comparison pairs two runs."""
+    ensemble = _synthetic_seed_ensemble(training_data, session_root / "seed_ensemble")
+    script = load_script("scripts/surrogate/evaluate_latent_generator_ensemble.py")
+    outputs = []
+    for batch in (4, 2):
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"latent_generator_ensemble.ensemble_dir={ensemble}",
+            "latent_generator_ensemble.output_dir="
+            + str(session_root / f"lg_ensemble_eval_b{batch}"),
+            f"latent_generator_ensemble.batch_size={batch}",
+            root=session_root,
+        )
+        script.run(cfg)
+        outputs.append(pathlib.Path(cfg.latent_generator_ensemble.output_dir))
+    out = outputs[0]
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["member0_max_abs_diff"] == 0.0
+    assert summary["member0_rms_diff_over_median_pair"] == 0.0
+    geometry = summary["per_geometry"]["sample_0000"]
+    assert geometry["n_real"] == 7 and geometry["geometry"] == "tiny"
+    scalars = geometry["scalars"]
+    assert set(scalars) == {
+        "real",
+        "ae_recon",
+        "generated",
+        "generated_shuffled_params",
+    }
+    for key in ("crps_ratio", "spread_ratio", "energy_distance_rel", "rank_outer"):
+        assert np.isfinite(scalars["generated"][key]), key
+    assert np.isfinite(scalars["real"]["energy_distance_rel_half"])
+    assert np.isfinite(scalars["real"]["spread_ratio_half_std"])
+    assert scalars["real"]["zero_variance_cells"] == 0
+    assert "w1_points_half_u" in scalars["ae_recon"]
+    assert any(k.startswith("latent_var_ratio_") for k in scalars["generated"])
+    agg = summary["aggregate"]["generated"]["crps_ratio"]
+    assert agg["n"] == 1 and agg["mean"] == pytest.approx(
+        scalars["generated"]["crps_ratio"]
+    )
+    with open(out / "metrics.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert {(r["geometry"], r["source"]) for r in rows} >= {
+        ("sample_0000", "generated"),
+        ("mean", "generated"),
+        ("mean", "real"),
+    }
+    arrays = np.load(out / "arrays" / "sample_0000.npz")
+    nz = len(arrays["height_m"])
+    assert arrays["generated.spread_ratio_profile"].shape == (3, nz)
+    assert arrays["real.rank_counts"].shape == (3, 4)
+    for name in ("spread_ratio_profiles.png", "rank_histograms.png"):
+        assert (out / name).exists(), name
+    assert (out / "std_maps_sample_0000.png").exists()
+    # Per-draw noise: the batch size does not change the draws.
+    other = json.loads((outputs[1] / "summary.json").read_text())
+    other_gen = other["per_geometry"]["sample_0000"]["scalars"]["generated"]
+    assert other_gen["crps"] == pytest.approx(scalars["generated"]["crps"], rel=1e-4)
+
+    compare = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator_ensemble_compare.eval_dirs=[{outputs[0]},{outputs[1]}]",
+        "latent_generator_ensemble_compare.tags=[b4,b2]",
+        "latent_generator_ensemble_compare.reference=b4",
+        "latent_generator_ensemble_compare.output_dir="
+        + str(session_root / "lg_ensemble_compare"),
+        root=session_root,
+    )
+    load_script("scripts/surrogate/compare_latent_generator_ensembles.py").run(compare)
+    cmp_out = pathlib.Path(compare.latent_generator_ensemble_compare.output_dir)
+    table = (cmp_out / "comparison.md").read_text()
+    assert "| b2 |" in table and "| floor |" in table
+    with open(cmp_out / "paired_differences.csv") as f:
+        diffs = {r["metric"]: float(r["mean"]) for r in csv.DictReader(f)}
+    assert diffs["crps_ratio"] == pytest.approx(0.0, abs=1e-4)
+    for name in ("spread_ratio_profiles.png", "rank_histograms.png", "scores.png"):
+        assert (cmp_out / name).exists(), name
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_generate_data(tmp_path: pathlib.Path) -> None:
     cfg = compose("surrogate/generate_data", "+test=generate_data", root=tmp_path)

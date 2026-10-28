@@ -319,3 +319,225 @@ def test_latent_spectrum_measures_generated_variance_in_the_real_basis() -> None
     pooled = ge.latent_moments(np.concatenate([a, b], axis=2))
     assert merged["n"] == 800 and np.allclose(merged["outer"], pooled["outer"])
     assert list(ge.latent_spectrum(merged, merged)["bands"]) == ["1_32", "33_40"]
+
+
+# --------------------------------------------------------------------------- #
+# Seed-ensemble metrics (synthetic Gaussians with a known answer)
+# --------------------------------------------------------------------------- #
+
+_SHAPE = (4, 6, 6)  # (nz, ny, nx)
+
+
+def _gaussian_ensemble(
+    rng: np.random.Generator,
+    n: int,
+    scale: float = 1.0,
+    shift: float = 0.0,
+) -> np.ndarray:
+    """``n`` iid draws of a field whose mean and spread vary over the cells and
+    grow with height; ``scale`` / ``shift`` distort the spread / mean."""
+    z = np.arange(_SHAPE[0])[:, None, None]
+    mean = 2.0 + np.sin(np.arange(np.prod(_SHAPE))).reshape(_SHAPE) + shift
+    sigma = (0.5 + 0.25 * z) * np.ones(_SHAPE) * scale
+    noise = rng.standard_normal((n, 3, *_SHAPE))
+    return mean + sigma * noise
+
+
+def _fluid() -> np.ndarray:
+    fluid = np.ones(_SHAPE, dtype=bool)
+    fluid[0, :2, :2] = False  # a building
+    return fluid
+
+
+def test_ensemble_moments_are_unbiased_per_fluid_cell() -> None:
+    rng = np.random.default_rng(0)
+    fields = _gaussian_ensemble(rng, 5)
+    fluid = _fluid()
+    mom = ge.ensemble_moments(fields.astype(np.float32), fluid)
+    assert mom["n"] == 5 and mom["mean"].shape == (3, fluid.sum())
+    cells = fields[:, :, fluid]
+    assert np.allclose(mom["mean"], cells.mean(axis=0), atol=1e-6)
+    assert np.allclose(mom["var"], cells.var(axis=0, ddof=1), atol=1e-5)
+    assert list(np.bincount(mom["z"])) == list(fluid.sum(axis=(1, 2)))
+    assert np.isnan(ge.ensemble_moments(fields[:1], fluid)["var"]).all()
+
+
+def test_same_distribution_scores_as_the_solver() -> None:
+    """Two independent draws of one distribution: debiased bias ~ 0, spread
+    ratio ~ 1, fair CRPS = the leave-one-out oracle, flat ranks, ED ~ 0."""
+    rng = np.random.default_rng(1)
+    fluid = _fluid()
+    real, gen = _gaussian_ensemble(rng, 64), _gaussian_ensemble(rng, 64)
+    rm, gm = ge.ensemble_moments(real, fluid), ge.ensemble_moments(gen, fluid)
+    bias = ge.mean_bias(gm, rm)
+    assert np.all(np.abs(bias["standardised"]) < 0.02)
+    assert np.all(bias["raw"] > bias["debiased"])  # the noise term is removed
+    sp = ge.spread(gm, rm)
+    assert np.allclose(sp["ratio"], 1.0, atol=0.05)
+    assert np.allclose(sp["ratio_profile"], 1.0, atol=0.1)
+    points = ge.select_points(fluid, 64, seed=0)
+    rp, gp = ge.point_values(real, points), ge.point_values(gen, points)
+    ratio = ge.fair_crps(gp, rp) / ge.fair_crps(rp, rp, exclude_self=True)
+    assert np.allclose(ratio, 1.0, atol=0.05)
+    ranks = ge.rank_histogram(gp, rp, bins=8)
+    assert ranks["counts"].sum() == 3 * 64 * 64
+    assert np.allclose(ranks["outer_mass"], 2 / 8, atol=0.03)
+    assert np.allclose(ranks["density"], 1.0, atol=0.2)
+    d = ge.rms_distances([real, gen], fluid)
+    r_idx, g_idx = np.arange(64), np.arange(64, 128)
+    ed = ge.energy_distance(d, g_idx, r_idx)
+    assert abs(ed["relative"]) < 0.01
+
+
+def test_under_and_over_dispersed_ensembles_show_their_signatures() -> None:
+    rng = np.random.default_rng(2)
+    fluid = _fluid()
+    real = _gaussian_ensemble(rng, 64)
+    narrow = _gaussian_ensemble(rng, 64, scale=0.5)
+    wide = _gaussian_ensemble(rng, 64, scale=2.0)
+    rm = ge.ensemble_moments(real, fluid)
+    sp = ge.spread(ge.ensemble_moments(narrow, fluid), rm)
+    assert np.allclose(sp["ratio"], 0.5, atol=0.05)
+    assert sp["ratio_total"] == pytest.approx(0.5, abs=0.05)
+    assert np.all(sp["log_ratio_rms"] > 0.5)  # log(0.5) = -0.69
+    assert np.all(sp["map_corr"] > 0.5)  # the pattern is still right
+    assert np.all(sp["excluded"] == 0)
+    # A cell where the solver ensemble is constant (an enclosed courtyard) is
+    # left out of the map correlation and the log ratio, and counted.
+    walled = real.copy()
+    walled[:, :, 3, 2, 2] = 1.0
+    held = ge.spread(
+        ge.ensemble_moments(narrow, fluid), ge.ensemble_moments(walled, fluid)
+    )
+    assert list(held["excluded"]) == [1, 1, 1]
+    assert np.all(np.isfinite(held["log_ratio_rms"]) & np.isfinite(held["map_corr"]))
+    points = ge.select_points(fluid, 64)
+    rp = ge.point_values(real, points)
+    oracle = ge.fair_crps(rp, rp, exclude_self=True)
+    # Gaussian CRPS ratio for a spread s x the truth's: (sqrt(2 (1 + s^2)) - s)
+    # / (2 - 1), so 1.081 at s = 0.5 and 1.162 at s = 2.
+    for distorted, expected in ((narrow, 1.081), (wide, 1.162)):
+        ratio = ge.fair_crps(ge.point_values(distorted, points), rp) / oracle
+        assert np.allclose(ratio, expected, atol=0.04)
+    u_shape = ge.rank_histogram(ge.point_values(narrow, points), rp, bins=8)
+    hump = ge.rank_histogram(ge.point_values(wide, points), rp, bins=8)
+    flat = ge.rank_histogram(rp, rp, bins=8, exclude_self=True)
+    assert np.all(u_shape["outer_mass"] > 0.4) and np.all(hump["outer_mass"] < 0.1)
+    assert np.all(u_shape["chi2_per_bin"] > 10 * flat["chi2_per_bin"])
+    d = ge.rms_distances([real, narrow], fluid)
+    floor = ge.split_half_floor(
+        lambda src, x, b: ge.energy_distance(d, x + (64 if src else 0), b),
+        64,
+        num_splits=8,
+        n_source=64,
+    )
+    assert floor["matched"]["relative"] > 3 * abs(floor["floor"]["relative"])
+
+
+def test_mean_bias_recovers_a_known_shift() -> None:
+    rng = np.random.default_rng(3)
+    fluid = _fluid()
+    rm = ge.ensemble_moments(_gaussian_ensemble(rng, 512), fluid)
+    shifted = ge.ensemble_moments(_gaussian_ensemble(rng, 512, shift=0.3), fluid)
+    bias = ge.mean_bias(shifted, rm)
+    assert np.allclose(bias["debiased"], 0.09, atol=0.01)
+    # Standardised by the mean real variance; per level by that level's.
+    var_r = rm["var"].mean(axis=1)
+    assert np.allclose(bias["standardised"], bias["debiased"] / var_r)
+    assert bias["profile"].shape == (3, _SHAPE[0])
+    # A paired source: S_i = R_i + 0.3 exactly, so the difference has no noise.
+    diff_var = np.zeros_like(rm["var"])
+    same = dict(rm, mean=rm["mean"] + 0.3)
+    paired = ge.mean_bias(same, rm, diff_var=diff_var)
+    assert np.allclose(paired["debiased"], 0.09)
+
+
+def test_fair_crps_matches_its_definition() -> None:
+    # Two members {0, 1} and truth 0: mean |x - y| = 0.5, pair term 2 / 4.
+    ens = np.array([0.0, 1.0]).reshape(2, 1, 1)
+    assert ge.fair_crps(ens, np.zeros((1, 1, 1)))[0] == pytest.approx(0.0)
+    assert ge.fair_crps(ens, np.full((1, 1, 1), 2.0))[0] == pytest.approx(1.0)
+    # Leave-one-out equals scoring each truth against the others explicitly.
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal((7, 2, 5))
+    loo = ge.fair_crps(x, x, exclude_self=True)
+    explicit = np.mean(
+        [ge.fair_crps(np.delete(x, r, axis=0), x[r : r + 1]) for r in range(7)],
+        axis=0,
+    )
+    assert np.allclose(loo, explicit)
+    with pytest.raises(ValueError, match="exclude_self"):
+        ge.fair_crps(x, x[:3], exclude_self=True)
+
+
+def test_rms_distances_and_paired_energy_distance() -> None:
+    rng = np.random.default_rng(5)
+    fluid = _fluid()
+    a = rng.standard_normal((3, 3, *_SHAPE)) + 10.0  # a large mean
+    b = rng.standard_normal((2, 3, *_SHAPE)) + 10.0
+    d = ge.rms_distances([a, b], fluid, chunk_cells=7)
+    stack = np.concatenate([a, b])[:, :, fluid].reshape(5, -1)
+    brute = np.sqrt(((stack[:, None] - stack[None]) ** 2).mean(axis=2))
+    assert np.allclose(d, brute) and np.all(np.diag(d) == 0)
+    # Paired: the i = j cross pairs (a source derived from its own truth)
+    # are dropped; identical sets then have ED exactly 0.
+    same = ge.rms_distances([a, a], fluid)
+    x, y = np.arange(3), np.arange(3, 6)
+    assert ge.energy_distance(same, x, y, paired=True)["energy_distance"] == (
+        pytest.approx(0.0, abs=1e-9)
+    )
+    assert ge.energy_distance(same, x, y)["energy_distance"] < 0  # i = j pairs at 0
+    # Distinct paired sets: the cross mean is over the i != j pairs only.
+    near = ge.rms_distances([a, a + 0.1 * rng.standard_normal(a.shape)], fluid)
+    cross = near[np.ix_(x, y)]
+    off = ~np.eye(3, dtype=bool)
+    brute_ed = (
+        2 * cross[off].mean()
+        - near[np.ix_(x, x)][off].mean()
+        - near[np.ix_(y, y)][off].mean()
+    )
+    assert ge.energy_distance(near, x, y, paired=True)["energy_distance"] == (
+        pytest.approx(brute_ed)
+    )
+
+
+def test_split_half_floor_bootstrap_points_and_w1() -> None:
+    calls: list[tuple[bool, list[int], list[int]]] = []
+
+    def metric(src: bool, x: np.ndarray, b: np.ndarray) -> dict[str, Any]:
+        calls.append((src, list(x), list(b)))
+        return {"size": float(len(x)), "pair": np.array([1.0, 2.0])}
+
+    out = ge.split_half_floor(metric, 9, num_splits=3, seed=0, n_source=6)
+    assert out["floor"]["size"] == 4 and out["matched"]["size"] == 4
+    assert np.allclose(out["floor"]["pair"], [1, 2]) and out["floor_std"]["size"] == 0
+    for src, x, b in calls:
+        assert len(b) == 4 and (src or not set(x) & set(b))
+    calls.clear()
+    ge.split_half_floor(metric, 8, num_splits=2, n_source=8, paired=True)
+    assert calls[0][1] == calls[1][1]  # the paired source subset is half a
+    # The splits do not depend on the source: paired and unpaired runs share them.
+    calls.clear()
+    ge.split_half_floor(metric, 8, num_splits=3, seed=1, n_source=8, paired=True)
+    paired_splits = [(x, b) for src, x, b in calls if not src]
+    calls.clear()
+    ge.split_half_floor(metric, 8, num_splits=3, seed=1, n_source=8)
+    assert [(x, b) for src, x, b in calls if not src] == paired_splits
+    ci = ge.bootstrap_ci([1.0, 2.0, 3.0, np.nan], seed=0)
+    assert (
+        ci["mean"] == 2.0 and ci["n"] == 3 and 1.0 <= ci["lo"] < 2.0 < ci["hi"] <= 3.0
+    )
+    assert np.isnan(ge.bootstrap_ci([5.0])["lo"])
+    fluid = _fluid()
+    points = ge.select_points(fluid, 20, seed=7)
+    assert np.array_equal(points, ge.select_points(fluid, 20, seed=7))
+    assert len(points) == 20 and fluid.ravel()[points].all()
+    assert len(ge.select_points(fluid, 10**6)) == fluid.sum()
+    rng = np.random.default_rng(6)
+    a, b = rng.standard_normal((5, 2, 3)), rng.standard_normal((5, 2, 3)) + 1.0
+    expected = [
+        np.mean([ge.wasserstein_1(a[:, c, p], b[:, c, p]) for p in range(3)])
+        for c in range(2)
+    ]
+    assert np.allclose(ge.pointwise_w1(a, b), expected)
+    assert np.allclose(ge.pointwise_w1(a, b[:4]).shape, (2,))

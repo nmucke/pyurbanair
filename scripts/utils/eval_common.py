@@ -1,8 +1,9 @@
 """Helpers shared by the scripts/surrogate/evaluate_*.py scripts.
 
-Loading a trained model and its data, reading states, and the one figure type
-they all use: rows of horizontal slices (truth, prediction, error, ...).
-Fields are (..., C, z, y, x) arrays with C the state variables (u, v, w).
+Loading a trained model and its data, reading states, sampling and
+reconstructing with a latent generator, and the one figure type they all use:
+rows of horizontal slices (truth, prediction, error, ...). Fields are
+(..., C, z, y, x) arrays with C the state variables (u, v, w).
 """
 
 from __future__ import annotations
@@ -72,12 +73,138 @@ def load_states(
     dataset: Any, traj: int, times: Sequence[int] | None = None
 ) -> np.ndarray:
     """(T, C, z, y, x) states of one trajectory (all frames, or `times`)."""
-    with xarray.open_dataset(dataset._state_files[traj]) as ds:
+    return read_states(dataset._state_files[traj], dataset.state_vars, times)
+
+
+def read_states(
+    path: str | pathlib.Path,
+    state_vars: Sequence[str],
+    times: Sequence[int] | None = None,
+) -> np.ndarray:
+    """(T, C, z, y, x) float32 states of one state file (all frames, or `times`)."""
+    with xarray.open_dataset(path) as ds:
         if times is not None:
             ds = ds.isel(time=list(times))
-        return np.stack([ds[v].values for v in dataset.state_vars], axis=1).astype(
-            np.float32
+        return np.stack([ds[v].values for v in state_vars], axis=1).astype(np.float32)
+
+
+def load_latent_generator(
+    model_dir: str | pathlib.Path,
+    dev: torch.device,
+    max_internal_batchsize: int | None = None,
+) -> tuple[Any, DictConfig]:
+    """A trained latent generator with its conditioning schema reinstalled;
+    `max_internal_batchsize` caps the crops its frozen AE runs at once."""
+    model, train_cfg = load_model(model_dir, dev)
+    if max_internal_batchsize is not None:
+        model.ae.ae.max_internal_batchsize = int(max_internal_batchsize)
+    schema = train_cfg.generator.physical_schema
+    model.set_conditioning_schema(
+        list(schema.param_vars), float(schema.history_dt_seconds)
+    )
+    return model, train_cfg
+
+
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
+def ae_reconstruct(
+    model: Any,
+    real: np.ndarray,
+    data: Any,
+    traj: int,
+    batch: int,
+    dev: torch.device,
+    decode: tuple[str | None, int | None] = (None, None),
+) -> np.ndarray:
+    """Real fields through a latent generator's frozen AE; `decode` = (spatial
+    mode, halo size) of the decoder, `None` for the trained ones."""
+    out = []
+    for start in range(0, len(real), batch):
+        state = torch.from_numpy(real[start : start + batch]).to(dev)
+        b = len(state)
+        enc = model.encode_latents(
+            state,
+            expand(data.geometry_for(traj), b, dev),
+            expand(data.geom_features_for(traj), b, dev),
         )
+        recon = model.decode_latents(
+            enc.z, enc, spatial_mode=decode[0], halo_size=decode[1]
+        )
+        out.append(recon.float().cpu().numpy())
+    return np.concatenate(out)
+
+
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
+def encoded_latent_moments(
+    model: Any, fields: np.ndarray, data: Any, traj: int, batch: int, dev: torch.device
+) -> list[dict]:
+    """Token moments (`generator_evaluation.latent_moments`) of the normalised
+    state latents the frozen encoder gives `fields`, one dict per batch."""
+    from neural_surrogates import generator_evaluation as ge
+
+    out = []
+    for start in range(0, len(fields), batch):
+        state = torch.from_numpy(fields[start : start + batch]).to(dev)
+        b = len(state)
+        enc = model.encode_latents(
+            state,
+            expand(data.geometry_for(traj), b, dev),
+            expand(data.geom_features_for(traj), b, dev),
+        )
+        out.append(ge.latent_moments(enc.z.float().cpu().numpy()))
+    return out
+
+
+@torch.no_grad()  # type: ignore[misc, unused-ignore]
+def generator_samples(
+    model: Any,
+    hist: torch.Tensor,
+    data: Any,
+    traj: int,
+    seed: int,
+    num_steps: int,
+    batch: int,
+    dev: torch.device,
+    sampler: str = "euler",
+    decode: tuple[str | None, int | None] = (None, None),
+    latents: list[dict] | None = None,
+    noise: torch.Tensor | None = None,
+) -> np.ndarray:
+    """Generated fields for parameter histories (B, Hp, P) on trajectory
+    `traj`'s geometry. The noise is fixed by `seed` (one generator over the
+    batches), or given per sample as `noise` (B, D, Zl, Yl, Xl). `decode` =
+    (spatial mode, halo size) of the decoder, `None` for the trained ones.
+    `latents`, if given, gets the token moments of the sampled latents
+    (`generator_evaluation.latent_moments`), one dict per batch."""
+    from neural_surrogates import generator_evaluation as ge
+
+    generator = (
+        None
+        if noise is not None
+        else torch.Generator(device=dev).manual_seed(int(seed))
+    )
+    out = []
+    for start in range(0, len(hist), batch):
+        h = hist[start : start + batch].to(dev)
+        b = len(h)
+        sample = model.sample(
+            h,
+            expand(data.geometry_for(traj), b, dev),
+            expand(data.geom_features_for(traj), b, dev),
+            initial_noise=None if noise is None else noise[start : start + b],
+            generator=generator,
+            num_steps=int(num_steps),
+            param_names=model.param_names,
+            history_dt_seconds=model.history_dt_seconds,
+            sampler=sampler,
+            decode_spatial_mode=decode[0],
+            decode_halo_size=decode[1],
+            return_latents=latents is not None,
+        )
+        if latents is not None:
+            sample, z = sample
+            latents.append(ge.latent_moments(z.float().cpu().numpy()))
+        out.append(sample.float().cpu().numpy())
+    return np.concatenate(out)
 
 
 def inlet_turbulence(settings: Any, dataset: Any, traj: int) -> Any:

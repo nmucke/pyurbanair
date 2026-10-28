@@ -12,7 +12,7 @@ the scripts and configs are:
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
 | Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
-| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` | `surrogate/eval.yaml`, one block per script |
+| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
 Each script's module docstring lists its options and outputs. `train.py` builds
@@ -186,6 +186,19 @@ Output: `state/sample_XXXX/member_YYYY.nc` (one frame, seeds in the attrs) and
 the matching `param/sample_XXXX/member_YYYY.nc`. Sharding runs every
 `num_shards`-th (sample, member) pair; `surrogate_generate_seed_ensemble.slurm`
 is a SLURM array over them ([job_scripts.md](job_scripts.md)).
+
+**About `training_data/pyudales_realistic_seed_ensemble`** (2026-10): it was
+made by an older version of this code. Its `irandom` takes the same 63 values
+in every sample, and its inlet seed is the member index. The seeds are still
+unique within each sample, and member *m* of one geometry is uncorrelated with
+member *m* of another. Its member 0 does **not** reproduce the reference frame
+0 (fluid RMS difference in u 0.02–0.72 m/s, 3–53 % of the distance between two
+members), although the solver is deterministic, so some setting differs from
+the corpus run. Members are labelled t = 5 s with the t = 5 s parameter row,
+while the reference labels the same frame t = 0 with row 0 (at most 0.55° and
+0.02 m/s apart). sample_0004 lacks member 59 and sample_0006 member 40. The
+§39a evaluation conditions on `params_hist_for(traj, 0)` and only reports the
+member-0 difference.
 
 ### 4. The parameter sampler
 
@@ -2289,7 +2302,7 @@ because `c` is `film_hidden` wide, not `h`. A config without the key builds
 `input_film`, so existing artifacts rebuild and load unchanged.
 
 **Compact velocity nets with full latent reach** (plan
-[latent_generator_compact_full_reach](plans/latent_generator_compact_full_reach.md)).
+[latent_generator_compact_full_reach](plans/implemented/latent_generator_compact_full_reach.md)).
 The full-width rule above makes the net cost ~H² with H = D: 177–241 M
 parameters for the B AE (`D = 1536`). Why a uniformly narrower net does not
 work, measured on the `pyudales_realistic` test split (B AE):
@@ -2521,7 +2534,15 @@ keys. Trainable parameters on the B AE (D = 1536):
 default because on `pyudales_realistic` it gave the best samples of the compact
 nets (W1 0.042 vs 0.093 for the 177M adaLN, better profiles), though none
 passed the W1 check; `prediction: data` and `time_shift` did not help
-([plans/latent_generator_compact_full_reach.md](plans/latent_generator_compact_full_reach.md) §3, Phase 2 results).
+([plans/latent_generator_compact_full_reach.md](plans/implemented/latent_generator_compact_full_reach.md) §3, Phase 2 results).
+The seed-ensemble evaluation (§39a) confirms it: `compact_h512` ties with its
+`prediction: data` variant and beats the other compact nets
+([research/latent_generator_final_2026-10.md](research/latent_generator_final_2026-10.md)).
+
+**Default trained generator.** That `compact_h512` run (plan R3, trained as
+`lg_b_realistic_h512_l6`) is `model_weights/best_latent_flow_matching_realistic`:
+the default `model_dir` of the `latent_generator` and
+`latent_generator_ensemble` eval blocks and of the latent generator eval jobs.
 
 | Block | Contents |
 |---|---|
@@ -2702,6 +2723,103 @@ fields. They deliberately do not import `libs/evaluation`: that library is a
 leaf the *scripts* depend on, while `neural_surrogates` declares only numpy /
 xarray / torch.
 
+### 39a. Against the solver's seed ensemble
+
+The held-out snapshots of §39 mix geometries, parameters and time, so their
+"real" distribution is a mixture and nothing tests the *conditional*
+p(x | geometry, parameters) the generator samples. A seed ensemble (§3a) is
+that conditional: per test geometry, 63–64 spun-up states with the geometry,
+parameters and spin-up of test trajectory XXXX (`state/sample_XXXX/
+member_YYYY.nc`), differing only in their seeds, at the reference's first
+frame. Its generator conditioning is `params_hist_for(traj, 0)` (the first
+parameter row repeated, `constant_prehistory`).
+[scripts/surrogate/evaluate_latent_generator_ensemble.py](../scripts/surrogate/evaluate_latent_generator_ensemble.py)
+(block `latent_generator_ensemble` of [eval.yaml](../configs/surrogate/eval.yaml))
+compares, one geometry at a time:
+
+* `real` — the members, read like the corpus loader reads a frame, on the
+  reference corpus's test split (`data_dir`, or the ensemble's own
+  `data.seed_ensemble.reference_dir`). Each member's `reference_sample`,
+  `geometry` and obstacle mask are checked against the trajectory;
+* `ae_recon` — each member through the frozen AE (the decoder floor);
+* `generated` — `num_draws` (64) draws, Heun 25 steps by default;
+* `generated_shuffled_params` — `probe_draws` (16) draws with the next test
+  trajectory's t = 0 history: does the ensemble respond to the parameters?
+
+Draw `k`'s initial noise is drawn on the CPU from a seed that depends only on
+(`seed`, sample, `k`) (`sample(initial_noise=...)`), so it does not depend on
+the batch size or device, every model sees the same noise (common random
+numbers: paired model differences) and probe draw `k` reuses draw `k`'s noise.
+
+**Metrics** (`generator_evaluation`, per geometry and variable, fluid cells).
+With 64 vs 64 samples every distance has a finite-sample size, so each one is
+an unbiased estimator (0 or 1 when the distributions agree) or reported next
+to a **split-half floor**: the metric between disjoint random halves of the
+members (`num_splits` splits, `split_half_floor`), with the source's value at
+the same size (a half-size subset of the source against the other half).
+
+| Metric | Function | Reads |
+|---|---|---|
+| `bias_raw/debiased/standardised` | `mean_bias` | `mean (mu_S - mu_R)^2`, minus its noise `var_S/n_S + var_R/n_R`, over `mean var_R` |
+| `spread_ratio`, `spread_corr`, `spread_log_rms` | `spread` | `sqrt(sum var_S / sum var_R)` (global and per height); correlation of the sigma maps; RMS of `log(sigma_S/sigma_R)` |
+| `crps`, `crps_ratio` | `fair_crps` | fair CRPS at `num_points` fixed fluid cells (`select_points`), each member as truth, over the leave-one-out CRPS of the members (1 = the solver) |
+| `rank_chi2`, `rank_outer` | `rank_histogram` | randomised ranks in `rank_bins` bins: U shape = under-dispersed, hump = over-dispersed; outer-bin mass, flat `2/rank_bins` |
+| `energy_distance(_rel)` | `rms_distances`, `energy_distance` | U-statistic energy distance of the whole fields (RMS over u, v, w and fluid cells), relative to the members' mean pairwise distance |
+| `w1_points_half` | `pointwise_w1` | per-point marginal W1 at matched size |
+| `diversity_ratio` | from `rms_distances` | mean pairwise distance of S over that of R |
+| physics | `profiles`, `spectra`, `reynolds_stresses`, `divergence`, `compare_to_real` | like-for-like now: one geometry and forcing |
+| `latent_var_ratio_*` | `latent_spectrum` | generated vs encoded-member latent variance per eigen-band |
+
+The `real` row of the outputs holds the floors (leave-one-out CRPS and rank
+histogram, split-half `*_half` values and their `*_half_std`); `*_half` on a
+source row is the matched-size value. `ae_recon` is paired with the members
+(member `i` is the reconstruction of truth `i`): it is never scored against
+its own truth (`exclude_self`, `paired`, `diff_var`). Aggregates are the mean
+over geometries with a geometry-bootstrap 95 % CI (`bootstrap_ci`).
+
+Member 0 keeps the reference's seeds, so it *should* reproduce frame 0 of the
+reference trajectory. This is checked, not assumed, and only reported:
+`summary.json` records `member0_check` per geometry (per variable the max and
+RMS difference over fluid cells and the RMS over the median distance between
+two members, plus the member's parameters minus the history's last row), and
+the maxima `member0_max_abs_diff` / `member0_rms_diff_over_median_pair`.
+
+About 0.01–0.1 % of the fluid cells (enclosed courtyards) are exactly constant
+across the members. They are left out of the sigma-map correlation and the log
+ratio (`spread`), and the fixed points are drawn only where the members vary
+(`zero_variance_cells` on the `real` row). The split-half floors use
+`num_splits` (200) splits for the cheap metrics (energy distance from the
+distance matrix, per-point W1) and `num_field_splits` (16) for the full-field
+spread and bias. With ~1 M fluid cells per field these sampling floors are tiny
+(10-geometry null std ≈ 0.0015 in spread ratio, 0.0002 in CRPS ratio), so the
+geometry-bootstrap CI of the paired model differences is what decides; the
+comparison bolds the differences whose CI excludes 0.
+
+Outputs in `output_dir` (default `<model_dir>/eval_seed_ensemble`):
+`summary.json`, `metrics.csv` (geometry × source, plus `mean` rows),
+`arrays/sample_XXXX.npz` (per-height spread ratio and standardised bias, rank
+counts, sigma maps at z index nz/4), `spread_ratio_profiles.png`,
+`rank_histograms.png`, `std_maps_sample_XXXX.png`.
+[scripts/surrogate/compare_latent_generator_ensembles.py](../scripts/surrogate/compare_latent_generator_ensembles.py)
+(block `latent_generator_ensemble_compare`, CPU) reads several of them and
+writes `comparison.csv`, `comparison.md` (generated per model, the AE row and
+the floors), `paired_differences.csv` (model minus `reference` per geometry,
+bootstrap CI) and `spread_ratio_profiles.png`, `rank_histograms.png`,
+`scores.png`, `paired_differences.png`.
+
+```bash
+pixi run -e dev python scripts/surrogate/evaluate_latent_generator_ensemble.py \
+    latent_generator_ensemble.model_dir=model_weights/best_latent_flow_matching_realistic \
+    latent_generator_ensemble.ensemble_dir=training_data/pyudales_realistic_seed_ensemble
+pixi run -e dev python scripts/surrogate/compare_latent_generator_ensembles.py \
+    'latent_generator_ensemble_compare.eval_dirs=[model_weights/lg_a,model_weights/lg_b]'
+```
+
+On DelftBlue, `surrogate_evaluate_latent_generator_ensemble.slurm` is an array
+over the compact generators and `surrogate_compare_latent_generator_ensembles.slurm`
+compares them ([job_scripts.md](job_scripts.md)). Plan:
+[latent_generator_seed_ensemble_eval.md](plans/implemented/latent_generator_seed_ensemble_eval.md).
+
 ### 40. Deployment: `spinup_source: generative`
 
 [generative_spinup.py](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py)
@@ -2822,6 +2940,8 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Acceptance metrics (pure numpy) | [generator_evaluation.py](../libs/neural-surrogates/src/neural_surrogates/generator_evaluation.py) |
 | Acceptance config | [configs/surrogate/eval.yaml](../configs/surrogate/eval.yaml) (block `latent_generator`) |
 | Acceptance script | [scripts/surrogate/evaluate_latent_generator.py](../scripts/surrogate/evaluate_latent_generator.py) |
+| Seed-ensemble evaluation and comparison | [evaluate_latent_generator_ensemble.py](../scripts/surrogate/evaluate_latent_generator_ensemble.py), [compare_latent_generator_ensembles.py](../scripts/surrogate/compare_latent_generator_ensembles.py) (blocks `latent_generator_ensemble`, `latent_generator_ensemble_compare`) |
+| Shared eval helpers (`load_latent_generator`, `generator_samples`, `ae_reconstruct`, `encoded_latent_moments`) | [scripts/utils/eval_common.py](../scripts/utils/eval_common.py) |
 | `GenerativeSpinup` (deploy loader/sampler) | [generative_spinup.py](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py) |
 | Forward-model / ensemble integration | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py), [ensemble_forward_model.py](../libs/neural-surrogates/src/neural_surrogates/ensemble_forward_model.py) |
 | Deploy config block | [configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml) (`forward_model.generative_spinup`) |
