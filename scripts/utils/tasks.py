@@ -7,7 +7,8 @@ before and after fitting. `TASKS` maps a config's `task` to its builder:
   stepper           a next-step model from `architecture`
   autoencoder       the field autoencoder (+ optional discriminator)
   latent_generator  a flow-matching generator on a frozen autoencoder; from a
-                    trained one's weights with `pretrained_dir` (a fine-tune)
+                    trained one's weights with `pretrained_dir` (a fine-tune,
+                    trained fully or through LoRA like finetune_stepper)
   dft               a stepper built around a pretrained autoencoder, trained
                     through LoRA adapters plus `trainable_modules`
   finetune_stepper  a pretrained stepper (also a trained DFT), trained fully
@@ -181,13 +182,19 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
                 ),
             )
         cfg.dataloader.collate_fn = None  # cached items stack as they are
-        return Setup(
-            model,
-            LatentCacheDataset(root, train),
-            LatentCacheDataset(root, val),
-            {"_recursive_": False, "_convert_": "all"},
-            # The seed the latent_statistics pass would set before fitting.
-            before_fit=lambda trainer: torch.manual_seed(int(cfg.latent_stats.seed)),
+        return _finetune_method(
+            cfg,
+            out_dir,
+            Setup(
+                model,
+                LatentCacheDataset(root, train),
+                LatentCacheDataset(root, val),
+                {"_recursive_": False, "_convert_": "all"},
+                # The seed the latent_statistics pass would set before fitting.
+                before_fit=lambda trainer: torch.manual_seed(
+                    int(cfg.latent_stats.seed)
+                ),
+            ),
         )
 
     def latent_statistics(trainer: Any) -> None:
@@ -201,12 +208,16 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
             max_batches=int(cfg.latent_stats.max_batches),
         )
 
-    return Setup(
-        model,
-        train,
-        val,
-        {"_recursive_": False, "_convert_": "all"},
-        before_fit=latent_statistics,
+    return _finetune_method(
+        cfg,
+        out_dir,
+        Setup(
+            model,
+            train,
+            val,
+            {"_recursive_": False, "_convert_": "all"},
+            before_fit=latent_statistics,
+        ),
     )
 
 
@@ -252,18 +263,7 @@ def _finetune_stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     model.load_state_dict(torch.load(pretrained_dir / "weights.pt", map_location="cpu"))
     if cfg.recompute_normalization:
         model.set_normalization(*get_normalization_stats(train, source_root=source))
-    if cfg.method == "full":
-        return Setup(model, train, val)
-    peft = _with_lora(model, cfg.lora)
-    # Optional modules trained fully next to the adapters (e.g. a DFT's skips).
-    _train_fully(peft, cfg.get("trainable_modules") or [])
-    return Setup(
-        peft,
-        train,
-        val,
-        {"weights_transform": merge_to_state_dict},
-        after_fit=lambda trainer: _save_lora(trainer, peft, out_dir),
-    )
+    return _finetune_method(cfg, out_dir, Setup(model, train, val))
 
 
 TASKS: dict[str, Callable[[DictConfig, pathlib.Path], Setup]] = {
@@ -394,6 +394,28 @@ def _inherit_dataset(cfg: DictConfig, pretrained: Any) -> None:
     if cfg.dataset.get("num_history_steps") is None:
         # An autoencoder's data has no history: then one step.
         cfg.dataset.num_history_steps = pretrained.dataset.get("num_history_steps") or 1
+
+
+def _finetune_method(cfg: DictConfig, out_dir: pathlib.Path, setup: Setup) -> Setup:
+    """A fine-tune's `method`: full (absent: train `setup` as built) or lora
+    (freeze the model, train adapters plus optional `trainable_modules`)."""
+    if cfg.get("method", "full") == "full":
+        return setup
+    if cfg.get("pretrained_dir") is None:
+        raise ValueError(f"method: {cfg.method} fine-tunes a pretrained_dir")
+    peft = _with_lora(setup.model, cfg.lora)
+    # Optional modules trained fully next to the adapters (e.g. a DFT's skips).
+    _train_fully(peft, cfg.get("trainable_modules") or [])
+    # The task's before_fit still acts on the base model, which peft wraps.
+    return dataclasses.replace(
+        setup,
+        model=peft,
+        trainer_kwargs={
+            **setup.trainer_kwargs,
+            "weights_transform": merge_to_state_dict,
+        },
+        after_fit=lambda trainer: _save_lora(trainer, peft, out_dir),
+    )
 
 
 def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:

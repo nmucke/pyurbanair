@@ -1,13 +1,13 @@
 # @package _global_
 # Fine-tune a trained latent generator (train_latent_generator.yaml output) on
 # new data: its architecture, weights and normalization are the starting point,
-# the autoencoder stays frozen, the whole velocity net trains. The saved
-# `generator` block records the new data's geometries.
+# the autoencoder stays frozen. The saved `generator` block records the new
+# data's geometries.
 defaults:
   - train_latent_generator
   - _self_
 
-name: best_latent_flow_matching_realistic_ft_barcelona
+name: best_latent_flow_matching_realistic_lora_ft_barcelona
 # A train_latent_generator.yaml output folder (weights + config).
 pretrained_dir: ${paths.weights_dir}/best_latent_flow_matching_realistic
 # The autoencoder that generator was trained on (its fingerprint is checked).
@@ -15,6 +15,28 @@ autoencoder_dir: ${paths.weights_dir}/tadpole_ae_b_realistic
 # Recompute the param and latent normalization on the new data (false: keep
 # the pretrained generator's, the space its velocity net was trained in).
 recompute_normalization: false
+
+# full: train the whole velocity net, starting from the pretrained weights;
+# lora: freeze it and train low-rank adapters (`lora`) plus `trainable_modules`.
+# weights.pt is the merged plain generator either way.
+method: lora
+lora:
+  variant: standard  # standard | balora
+  rank: 16
+  alpha: 32
+  dropout: 0.0  # nonzero bypasses fused_forward
+  # No preset fits this architecture (`all` would adapt the frozen autoencoder):
+  # the attention and MLP Linears of the adaLN velocity net's blocks (30 modules,
+  # ~1.0M parameters at rank 16). A looser `(qkv|proj)` also hits input_proj,
+  # geom_proj, out_proj and the conditioning MLPs.
+  target_preset: null
+  target_modules: 'velocity_net\.blocks\.\d+\.(attn\.(qkv|proj)|mlp\.(gate|up|down)_proj)'
+  modules_to_save: []
+  fused_forward: true
+# Trained fully next to the adapters: the param/time embedder (feeding the
+# frozen adaLN modulations) and the only learned geometry -> token path (the new
+# data's main shift is new geometries).
+trainable_modules: [velocity_net.cond_mlp, velocity_net.geom_proj]
 
 paths:
   # The new data to fine-tune on.

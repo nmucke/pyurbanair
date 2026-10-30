@@ -106,7 +106,7 @@ surrogate/train_latent_generator.yaml  # train the latent initial-field generato
 surrogate/train_dft.yaml               # fine-tune a pretrained autoencoder into a stepper (DFT)
 surrogate/finetune_stepper.yaml        # fine-tune a pretrained stepper (full or LoRA)
 surrogate/finetune_dft.yaml            # fine-tune a trained DFT (LoRA + skips, full-BPTT rollout)
-surrogate/finetune_latent_generator.yaml # fine-tune a trained latent generator on new data
+surrogate/finetune_latent_generator.yaml # fine-tune a trained latent generator on new data (full or LoRA)
 surrogate/eval.yaml                    # all evaluation: blocks stepper (one or several
                                        #   models), autoencoder, latent_generator,
                                        #   latent_generator_ensemble(_compare)

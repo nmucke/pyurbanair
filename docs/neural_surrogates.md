@@ -2640,7 +2640,21 @@ otherwise the run raises. The pretrained param and latent normalization are kept
 (`recompute_normalization: true` recomputes both from the new data). The
 `generator` block is rebuilt from the new data, so `supported_geometries`
 lists the new corpus's geometries; spin-up refuses geometries outside it.
-The whole velocity net trains (no LoRA). A latent cache works as for training;
+`method: full` trains the whole velocity net; `method: lora` (the config's
+default) freezes it and trains low-rank adapters (the `lora:` block, as for
+`finetune_stepper`, §23) plus the modules listed in `trainable_modules`, through
+the same code path (`_finetune_method` in
+[tasks.py](../scripts/utils/tasks.py)). There is no LoRA preset for
+`TadpoleLatentGenerator`: `lora.target_modules` is a regex over the velocity
+net's Linears and must not match the frozen autoencoder (the trainer refuses
+trainable AE parameters). The config adapts the attention and MLP Linears of the
+adaLN blocks (rank 16, fused) and trains `velocity_net.cond_mlp` and
+`velocity_net.geom_proj` fully; another `velocity_conditioning` needs its own
+regex. The latent statistics act on the base model, and
+`weights.pt` is the merged plain state dict, so the spin-up rebuilds and
+strictly loads it as any trained generator; the adapters go to `adapter/`
+(LoRA deltas only, without the `trainable_modules`: `weights.pt` is the
+fine-tune). `method: lora` without `pretrained_dir` raises. A latent cache works as for training;
 make a new `latent_cache.output_root` for the new data with the same overrides
 and `latent_cache.prepare_only=true`. Without `pretrained_dir` (the default)
 nothing changes.
