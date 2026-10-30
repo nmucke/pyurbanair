@@ -24,7 +24,10 @@ with a larger `num_train`, only runs what is missing.
 Outputs, in `<paths.results_dir>/`:
     config.yaml
     state/{train,val,test}/sample_XXXX.nc   the field on cell centres, plus the
-                                            `blanking` mask (1 = building)
+                                            `blanking` mask (1 = building); attrs
+                                            `spinup_time_s` and, with uDALES inlet
+                                            turbulence, `inlet_turbulence_seed` and
+                                            `inlet_turbulence_start_record`
     param/{train,val,test}/sample_XXXX.nc   the parameters at the state times
 
 Seed ensemble (`data.seed_ensemble`, configs/surrogate/generate_seed_ensemble.yaml,
@@ -128,8 +131,9 @@ def run(cfg: DictConfig) -> None:
                     model.inlet_turbulence["seed"] = (
                         int(data.seed) * 100_003 + sample.member
                     )
+                turbulence = _inlet_turbulence_attrs(cfg, model)
                 state = model(state=None, params=member)
-                state.attrs.update(geometry=name, spinup_time_s=spinup)
+                state.attrs.update(geometry=name, spinup_time_s=spinup, **turbulence)
                 _save(cfg, model, state, member, *_paths(out_dir, sample))
                 print(f"  {sample.split} sample {sample.index}")
         except Exception:  # one bad geometry must not cost the rest of the job
@@ -452,6 +456,32 @@ def _spinup(
     return float(
         min(max(math.ceil(needed / step) * step, base), float(adaptive.max_spinup_time))
     )
+
+
+def _inlet_turbulence_attrs(cfg: DictConfig, model: Any) -> dict[str, Any]:
+    """uDALES's inlet turbulence seed and the global driver record the next run
+    starts at, for neural_surrogates.inlet_turbulence.InletTurbulence to replay:
+    samples on one model continue its clock. Empty without inlet turbulence."""
+    if cfg.model.name != "pyudales":
+        return {}
+    from pyudales.utils.inlet_turbulence_utils import (
+        is_inlet_turbulence_enabled,
+        resolve_inlet_turbulence_config,
+        window_start_record,
+    )
+
+    from pyurbanair.utils.digital_filter import read_elapsed_time
+
+    if not is_inlet_turbulence_enabled(model.inlet_turbulence):
+        return {}
+    turb = resolve_inlet_turbulence_config(model.inlet_turbulence)
+    elapsed = read_elapsed_time(model.dirs, model._elapsed_time)  # as run_single
+    return {
+        "inlet_turbulence_seed": int(turb["seed"]),
+        "inlet_turbulence_start_record": window_start_record(
+            elapsed, float(turb["time_step"])
+        ),
+    }
 
 
 def _make_model(cfg: DictConfig, geometry: Geometry | None, spinup: float) -> Any:

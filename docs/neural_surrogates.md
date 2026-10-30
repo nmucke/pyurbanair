@@ -838,21 +838,35 @@ building-free columns upstream of the first building; obstacle cells are never
 touched. The corpus must have been generated with inlet turbulence: the
 generator settings are read from its `config.yaml`
 (`model.forward_model.inlet_turbulence`, `nudging_config.profile_config`,
-`experiment_name`, `training_data.output_frequency`) and the spin-up from each
-state file's `spinup_time_s`; anything missing raises. `run_models.py` keeps the
-forcing out of `seconds_per_step` and records it in `models.yaml` and each
+`experiment_name`, `training_data.output_frequency` or `time.output_frequency`)
+and the spin-up from each state file's `spinup_time_s`; anything missing
+raises. A fresh `seed` starts its stream at record 0. `run_models.py` keeps
+the forcing out of `seconds_per_step` and records it in `models.yaml` and each
 rollout's `inlet_turbulence_seed` attr (`truth` or the seed);
 `evaluate_stepper.py`'s `rollout_seconds` includes it.
 
 Known limitations: `seed: null` places frame `t` at solver time
 `spinup + output_frequency * (t + 1)` on the truth's driver-record timeline.
-That holds for test/val samples and single-sample train geometries; the second
-sample of a repeated train geometry continued the solver clock, so its forcing
-does not match its truth (it is still a valid realization). Only corpora of the
-archived generator (`training_data.output_frequency` in their config.yaml, as
-`pyudales_idealized`/`_realistic`) are supported: `scripts/surrogate/generate_data.py`
-seeds per sample and runs samples back to back on one model without storing
-the seed or record offset, so `from_dataset` raises on its corpora.
+Two corpus layouts:
+
+- The archived generator's (`training_data.output_frequency` in config.yaml,
+  as `pyudales_idealized`/`_realistic`): seeded by the config's
+  `inlet_turbulence.seed` or the experiment name, every trajectory from driver
+  record 0. That holds for test/val samples and single-sample train
+  geometries; the second sample of a repeated train geometry continued the
+  solver clock, so its forcing does not match its truth (it is still a valid
+  realization).
+- `scripts/surrogate/generate_data.py`'s (`time.output_frequency`): it seeds
+  each sample (`data.seed * 100003 + member`, the member counting train, val,
+  test in order) and runs the samples of a geometry back to back on one model,
+  whose clock runs on, so a later sample's turbulence starts mid-history and a
+  rerun after a crash restarts the clock. Each state file records both:
+  `inlet_turbulence_seed` and `inlet_turbulence_start_record` (the global
+  driver record the run started at). `seed: null` replays them and raises
+  without them; a fresh `seed` needs neither. Corpora generated before these
+  attrs existed (`pyudales_barcelona_finetune` and `_test`) had them written
+  afterwards from their `hydra/generate_data/*/*/generate_data.log`
+  (`global record N), ... seed=S`).
 
 #### Inference-time y-periodicity
 
