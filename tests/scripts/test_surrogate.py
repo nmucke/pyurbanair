@@ -747,6 +747,63 @@ def test_generate_data(tmp_path: pathlib.Path) -> None:
     assert counts == {"train": 2, "val": 1, "test": 1}
 
 
+@pytest.mark.parametrize("enabled", [True, False])  # type: ignore[misc]
+def test_generate_data_records_the_inlet_turbulence_timeline(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """Samples run back to back on one model, which continues its clock: each
+    state records its inlet turbulence seed and the driver record its run
+    started at (InletTurbulence replays them); nothing without the knob."""
+    import xarray
+
+    script = load_script("scripts/surrogate/generate_data.py")
+    cfg = compose(
+        "surrogate/generate_data", "+test=generate_data", "data.seed=2", root=tmp_path
+    )
+
+    class FakeModel:
+        def __init__(self, experiment_dir: pathlib.Path) -> None:
+            self.inlet_turbulence: dict[str, Any] = {
+                "enabled": enabled,
+                "time_step": 0.5,
+            }
+            self._elapsed_time = 0.0
+            self.dirs = type(
+                "Dirs", (), {"experiment_dir": experiment_dir, "experiment_name": "999"}
+            )()
+
+        def __call__(self, state: Any, params: xarray.Dataset) -> xarray.Dataset:
+            self._elapsed_time += 25.0  # spin-up + simulation
+            times = np.array([5.0, 10.0])
+            return xarray.Dataset({"u": ("time", times)}, coords={"time": times})
+
+    def make_model(cfg: Any, geometry: Any, spinup: float) -> FakeModel:
+        experiment_dir = tmp_path / "scratch"
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return FakeModel(experiment_dir)
+
+    def save(cfg: Any, model: Any, state: Any, params: Any, sp: Any, pp: Any) -> None:
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        state.to_netcdf(sp)
+
+    monkeypatch.setattr(script, "_make_model", make_model)
+    monkeypatch.setattr(script, "_save", save)
+    script.run(cfg)
+
+    out = pathlib.Path(cfg.paths.results_dir)
+    files = [("train", 0), ("train", 1), ("val", 0), ("test", 0)]
+    for member, (split, index) in enumerate(files):
+        attrs = xarray.load_dataset(
+            out / "state" / split / f"sample_{index:04d}.nc"
+        ).attrs
+        if enabled:
+            assert attrs["inlet_turbulence_seed"] == 2 * 100_003 + member
+            assert attrs["inlet_turbulence_start_record"] == 50 * member
+        else:
+            assert "inlet_turbulence_seed" not in attrs
+            assert "inlet_turbulence_start_record" not in attrs
+
+
 def _seed_ensemble_corpus(root: pathlib.Path) -> pathlib.Path:
     """A reference corpus as the archived generator wrote it: two test samples."""
     import xarray
@@ -834,7 +891,7 @@ def test_seed_ensemble_varies_only_the_chosen_seeds(
                 {
                     "state": state,
                     "clock": self._elapsed_time,
-                    "irandom": int(namoptions.get_value("RUN", "irandom")),
+                    "irandom": int(str(namoptions.get_value("RUN", "irandom"))),
                     "inlet_seed": self.inlet_turbulence["seed"],
                     "angle": float(params.inflow_angle[0]),
                 }

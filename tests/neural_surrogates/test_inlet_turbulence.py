@@ -84,17 +84,15 @@ def _corpus(
     return TransitionDataset(root, "test")
 
 
-def test_replays_the_solver_driver_planes(tmp_path: Path) -> None:
-    """At U = 3 m/s, column 1's centre (1.5 m from the inlet face) holds the
-    inflow of 0.5 s before the frame: exactly one driver record."""
+def _solver_column(seed: int, start_index: int) -> np.ndarray:
+    """Column 1 of every predicted frame as the solver's driver planes hold it
+    (at U = 3 m/s its centre, 1.5 m from the inlet face, holds the inflow of
+    0.5 s before the frame: exactly one driver record)."""
     from pyudales.utils.inlet_turbulence_utils import (
         build_driver_planes,
         driver_time_grid,
     )
 
-    from pyurbanair.utils.digital_filter import derive_seed
-
-    footprint = InletTurbulence.from_dataset(_corpus(tmp_path), 0).footprint
     # As apply_inlet_turbulence builds them for this run (dtmax = 1 s).
     times = driver_time_grid(SPINUP + T_LEN * OUTPUT_FREQUENCY, 0.5, dtmax=1.0)
     kwargs = {
@@ -103,14 +101,14 @@ def test_replays_the_solver_driver_planes(tmp_path: Path) -> None:
         "zsize": float(NZ),
         "ylen": float(NY),
         "times": times,
-        "start_index": 0,
+        "start_index": start_index,
         "inflow_angle": np.zeros(times.size),
         "velocity_magnitude": np.full(times.size, 3.0),
         "profile_config": {"type": "uniform"},
         "length_scale_y": 2.0,
         "length_scale_z": 2.0,
         "length_scale_x": 4.0,
-        "seed": derive_seed("999"),
+        "seed": seed,
     }
     planes = build_driver_planes(intensity=0.15, **kwargs)
     means = build_driver_planes(intensity=0.0, **kwargs)
@@ -122,8 +120,42 @@ def test_replays_the_solver_driver_planes(tmp_path: Path) -> None:
         records.astype(int)
     ]
     expected[:, :, 0] = 0.0  # the ground layer is masked
+    return expected
+
+
+def test_replays_the_solver_driver_planes(tmp_path: Path) -> None:
+    from pyurbanair.utils.digital_filter import derive_seed
+
+    footprint = InletTurbulence.from_dataset(_corpus(tmp_path), 0).footprint
+    expected = _solver_column(derive_seed("999"), 0)
     np.testing.assert_allclose(footprint[1:, ..., 1], expected, atol=1e-5)
     assert not footprint[0].any()
+
+
+def _current_generator(root: Path, attrs: dict) -> TransitionDataset:
+    """The corpus in generate_data.py's layout: `time.output_frequency` and the
+    seed and start record in the state attrs."""
+    data = _corpus(root)
+    cfg = OmegaConf.load(root / "config.yaml")
+    del cfg["training_data"]
+    cfg.time = {"output_frequency": OUTPUT_FREQUENCY}
+    OmegaConf.save(cfg, root / "config.yaml")
+    path = data._state_files[0]
+    state = xr.load_dataset(path)
+    state.attrs.update(attrs)
+    state.to_netcdf(path)
+    return TransitionDataset(root, "test")
+
+
+def test_replays_a_sample_of_the_current_generator(tmp_path: Path) -> None:
+    """generate_data.py's later samples on one model start mid-history."""
+    data = _current_generator(
+        tmp_path,
+        {"inlet_turbulence_seed": 200007, "inlet_turbulence_start_record": 10060},
+    )
+    footprint = InletTurbulence.from_dataset(data, 0).footprint
+    expected = _solver_column(200007, 10060)
+    np.testing.assert_allclose(footprint[1:, ..., 1], expected, atol=1e-5)
 
 
 def test_forces_only_the_free_inlet_columns(tmp_path: Path) -> None:
@@ -188,15 +220,11 @@ def _edit_config(root: Path, key: str, value: object) -> None:
     OmegaConf.save(cfg, root / "config.yaml")
 
 
-def test_rejects_a_corpus_of_the_current_generator(tmp_path: Path) -> None:
-    """generate_data.py writes time.output_frequency and stores no seed or
-    record offset per sample."""
-    data = _corpus(tmp_path)
-    cfg = OmegaConf.load(tmp_path / "config.yaml")
-    del cfg["training_data"]
-    OmegaConf.save(cfg, tmp_path / "config.yaml")
-    with pytest.raises(ValueError, match="training_data.output_frequency"):
+def test_rejects_a_current_generator_sample_without_its_seed(tmp_path: Path) -> None:
+    data = _current_generator(tmp_path, {"inlet_turbulence_start_record": 0})
+    with pytest.raises(ValueError, match="inlet_turbulence_seed"):
         InletTurbulence.from_dataset(data, 0)
+    InletTurbulence.from_dataset(data, 0, seed=1)  # a fresh seed needs none
 
 
 def test_rejects_a_corpus_without_experiment_name(tmp_path: Path) -> None:
@@ -223,6 +251,28 @@ def test_knots_denser_than_frames_fall_back_to_the_frames(tmp_path: Path) -> Non
     torch.testing.assert_close(
         InletTurbulence.from_dataset(data, 0).footprint, reference
     )
+
+
+def test_current_generator_reads_its_knot_spacing(tmp_path: Path) -> None:
+    footprints = []
+    for layout, key in (
+        ("archived", "training_data.params_sampler.seconds_per_knot"),
+        ("current", "time.seconds_per_knot"),
+        ("no_knots", None),
+    ):
+        root = tmp_path / layout
+        root.mkdir()
+        _corpus(root) if layout == "archived" else _current_generator(root, {})
+        param = root / "param" / "test" / "sample_0000.nc"
+        params = xr.load_dataset(param)
+        params["velocity_magnitude"][:] = 3.0 + np.sin(np.arange(T_LEN) / 4.0)
+        params.to_netcdf(param)
+        if key is not None:
+            _edit_config(root, key, 4.0)
+        data = TransitionDataset(root, "test")
+        footprints.append(InletTurbulence.from_dataset(data, 0, seed=1).footprint)
+    torch.testing.assert_close(footprints[1], footprints[0])
+    assert not torch.allclose(footprints[1], footprints[2])
 
 
 def test_warns_without_a_free_inlet_column(tmp_path: Path) -> None:
