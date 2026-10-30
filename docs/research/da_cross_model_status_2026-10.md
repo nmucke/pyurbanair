@@ -1,11 +1,11 @@
 # Cross-model data assimilation: status and next experiments
 
-Status as of 24 October 2026. This is the single entry point for the
+Status as of 30 October 2026. This is the single entry point for the
 data-assimilation / cross-model (uDALES vs PALM) / model-discrepancy line of
 work. It replaces the October notes and the September review, now in
 [docs/archive/](../archive/) (map at the end). The z0 study's detailed results
 stay in [roughness_estimation_2026-10.md](roughness_estimation_2026-10.md).
-Newest results (21–23 Oct) come from the session that ran them; several aren't
+Newest results (21–30 Oct) come from the session that ran them; several aren't
 in a repo note yet and are marked *(session)*.
 
 ## 1. Aim and constraints
@@ -148,13 +148,53 @@ bounded 0.005–0.3 m, updated in bounded log space (#211). Detail:
     inflow angle, and only with the adaptive error does it not hurt higher
     sensors; it is not a transferable parameter. Street-level structural error
     belongs in the observation error.
-15. **Separate wall z0 is possible only in uDALES** *(session)*. uDALES
-    supports z0 per facet type (`factypes.inp`), but in `xie_and_castro` all
-    facets are type 1 and pyudales writes one z0 to all; splitting walls /
-    roofs / ground needs a small pyudales change. PALM without USM/LSM has one
-    z0 for all surfaces; its urban surface model has per-surface z0 but needs
-    radiation and an energy balance, so it isn't used. Only the DA model
-    (uDALES) needs the split.
+15. **Separate wall z0 is possible only in uDALES.** uDALES takes z0 per
+    facet type (`factypes.inp`). Since #227 pyudales takes either
+    `roughness_length` (all facets) or `roughness_length_wall` (vertical
+    facets, |n_z| < 0.5, retyped to their own facet type) +
+    `roughness_length_ground` (ground and roofs) ([pyudales.md](../pyudales.md)).
+    PALM without USM/LSM has one z0 for all surfaces and rejects the split;
+    only the DA model (uDALES) needs it.
+16. **Wall/ground z0 study: the pair doesn't transfer either** *(session,
+    30 Oct; `runs_wallz0`)*. Same setup as item 13 (adaptive error, 6
+    windows, 2 seeds), arms S = inflow + single z0, W = inflow + wall z0 +
+    ground z0 (prior medians 0.05, bounds 0.005–0.6 wall, 0.005–0.3 ground).
+    PALM truths at 10° and 40° (6.0 m/s, z0 0.1); the 40° prior angle is
+    centred on truth − 10° like the 10° runs. Final-window posterior mean ± std:
+
+    | Run | Angle (°) | Speed (m/s) | z0 single | z0 wall | z0 ground |
+    |---|---|---|---|---|---|
+    | Twin (uDALES truth 10°, wall 0.2, ground 0.05), W | 9.9 / 10.1 | 6.03 / 6.05 | – | 0.12 / 0.15 (±0.01) | 0.043 / 0.046 |
+    | PALM 10°, S | 8.2 / 8.8 (±0.8) | 6.04 / 6.00 | 0.19 / 0.18 (±0.02) | – | – |
+    | PALM 10°, W | 8.1 / 9.2 (±0.7) | 6.03 / 5.99 | – | 0.04 / 0.07 (±0.02) | 0.18 / 0.20 (±0.02) |
+    | PALM 40°, S | 39.6 / 41.9 (±1) | 5.53 / 5.45 | 0.027 / 0.016 (±0.006) | – | – |
+    | PALM 40°, W | 40.1 / 42.4 (±1) | 5.48 / 5.55 | – | 0.13 / 0.05 (±0.03) | 0.011 / 0.023 (±0.005) |
+
+    - **Twin:** inflow and ground z0 are recovered; wall z0 is
+      underestimated (0.12–0.15 vs 0.2) but the held-out error is at the
+      noise floor (CRPS of window-mean |U| over the 10 sensors 0.075–0.078,
+      replica 0.092). With a perfect model the pair is identifiable enough.
+    - **Cross-model, the ground z0 carries the single z0's swing:**
+      0.18–0.20 at 10° and 0.011–0.023 at 40° (~10×), while the wall z0 stays
+      small at 10° (0.04–0.07) and is undetermined at 40° (0.05 and 0.13
+      between seeds). The pair is no more transferable than the single z0
+      (item 11).
+    - **W adds nothing over S** on the held-out sensors: CRPS |U| over all
+      10, 10° S 0.13–0.14, W 0.12–0.15 (replica 0.091); 40° S 0.245–0.251,
+      W 0.242–0.244 (replica 0.134). By height the arms differ by less than
+      the seed spread at both angles.
+    - **40° is much harder than 10°.** The inflow is recovered (angle within
+      2°), but at 5.5 m/s, and the error is 2–6× the noise floor at every
+      height except 14 m (CRPS |U| at 2 / 5 / 8 / 14 / 26 m: 0.22–0.27 /
+      0.23–0.27 / 0.39–0.50 / 0.12–0.14 / 0.47–0.56; replica 0.095 / 0.104 /
+      0.088 / 0.183 / 0.130). Updates barely improve on each window's
+      forecast. The adaptive error saturates: ×4.2–4.4 at 2 m, ×10 (the cap)
+      at 8 m, ×8–8.7 at 20 m, vs ×4.6–5.0 at all heights at 10°.
+    - **Verdict:** splitting z0 into wall and ground doesn't give a
+      transferable roughness. The angle dependence is in the structural
+      mismatch (item 11), not in which surfaces carry the roughness; it
+      belongs in the observation error, which at 8–20 m is about twice as
+      large at 40° as at 10°.
 
 ## 4. Ruled out, and why
 
@@ -165,6 +205,7 @@ bounded 0.005–0.3 m, updated in bounded log space (#211). Detail:
 | Tuning parameters without a real-world counterpart until they absorb the mismatch (e.g. c_vreman) | Compensation, not physics; at most a nuisance parameter (item 8) |
 | Case-specific alignment (grid-snapped STL) | Real geometries won't align (§1); used only as a diagnostic |
 | A single z0 as a transferable site property | Swings 8× with the inflow angle (item 11) |
+| A (wall z0, ground z0) pair as a transferable parameterisation | Ground z0 swings ~10× with the angle, wall z0 undetermined, no held-out gain (item 16) |
 | Realisation-noise-only R in cross-model runs | Parameters hit bounds, inflow biased, crashes (item 12) |
 | 20 s bins / raw frames as observations with turbulent inflow | Ensemble collapse (item 9) |
 | Upstream fetch length as a study axis | Not of interest to the aim (user decision) |
@@ -178,14 +219,13 @@ model and ~2 % density drift.
 
 ## 5. Open questions
 
-- Is a (wall z0, ground/roof z0) pair consistent across inflow angles, i.e. a
-  transferable parameterisation where the single z0 isn't?
-- What is the street-level residual left after the walls are matched (SGS,
-  numerics)? Is the SGS constant a sensible nuisance parameter for it?
+- What is the structural residual left (SGS, numerics), and why is it about
+  2× larger at 40° than at 10° (item 16)? Is the SGS constant a sensible
+  nuisance parameter for it?
 - Should the structural error get a spatial correlation? The height-banded
   adaptive inflation does NOT make the held-out predictions calibrated
   (z-score std 3.5–4.9, item 13): how should uncertainty reach unobserved
-  locations? (Deferred until after the wall-z0 runs.)
+  locations? This is next (§6).
 - With real data, the inflation must come from earlier windows or a separate
   period, not from the same experiment's calibration run (the adaptive error
   does this; the offline calibration doesn't).
@@ -194,20 +234,15 @@ model and ~2 % density drift.
 
 ## 6. Immediate experiment plan (priority order)
 
-1. **Separate wall and ground roughness in uDALES** (in progress): either
-   `roughness_length` (all facets) or `roughness_length_wall` (vertical facets)
-   + `roughness_length_ground` (ground and roofs). PALM, the truth, keeps one
-   z0.
-2. **Twin identifiability check**: uDALES truth with different wall and ground
-   z0, DA estimating inflow + both. If they can't be separated with a perfect
-   model, the cross-model test can't be read.
-3. **Cross-model wall/ground test**: PALM truth at 10° and 40°, adaptive error,
-   arms inflow + single z0 vs inflow + wall z0 + ground z0, 2 seeds, window
-   states kept for every seed. Success: the pair agrees across angles, the
-   inflow angle is unbiased, the street-level error is below the single-z0
-   arm's.
-4. **Then** the held-out overconfidence (item 13, §5).
-5. **Later**: the SGS constant as a candidate for the street-level residual
+Done: separate wall/ground roughness (#227), its twin check and the
+cross-model test at 10° and 40° (item 16; the pair doesn't transfer).
+
+1. **The held-out overconfidence** (item 13, §5): how uncertainty reaches
+   unobserved sensors. Every run in `runs_wallz0` and the seed-1 runs in
+   `runs_adaptive_r2` keep `sensor_window_means.nc` (per-member window means
+   of u, v, |U| at all 28 sensors, prior and posterior, plus truth and
+   replica), so this can start offline without rerunning.
+2. **Later**: the SGS constant as a candidate for the street-level residual
    (low priority; ~4–9 % so far); a real-data dry run (deferred by the user).
 
 **Parked** (older review items, not on the current path; revisit if they
@@ -249,15 +284,22 @@ become relevant):
   the z0 runs use `resample_from_successes`.
 - **Outflow.** Check member max speed near the outflow for backflow bursts;
   results before #218 used the 20 m buffer.
-- **Machine.** squamish crashed on 22, 23 (twice) and 24 Oct (attributed to
-  the GPU drivers; IT fix scheduled). Keep runs restartable and don't run GPU
-  jobs on it meanwhile.
+- **Machine.** squamish crashed on 22, 23 (twice) and 24 Oct (GPU drivers).
+  IT fixed it on 30 Oct (Fedora 44, kernel 7.2.13, new driver); no crash
+  since. Keep runs restartable.
+- **Prior.** Centre the inflow-angle prior on the truth case's angle − 10°
+  (the 10° setup's offset) for every truth angle; a prior left at the 10°
+  case's N(0, 10) for a 40° truth biases the posterior angle low.
+- **Disk.** A 32-member, 6-window run with `save_states=prior` writes ~33 GB
+  of window states. Extract the sensor means (and by-height scores) first,
+  then delete them.
 
 ## 8. Where the data lives (local, not in git)
 
-| What | Where | State (24 Oct) |
+| What | Where | State (30 Oct) |
 |---|---|---|
-| Adaptive-error study, complete rerun on dev (40 m buffer) | `/export/scratch2/ntm/runs_adaptive_r2/` | all 6 runs complete (24 Oct); window states for seed 1; `valid_by_height.yaml` per seed-1 run |
+| Wall/ground z0 study (item 16) | `/export/scratch2/ntm/runs_wallz0/` | all 10 runs complete; truths palm40, udales10 (palm10 links to `runs_adaptive_r2`); window states deleted, `sensor_window_means.nc` + `valid_by_height.yaml` per run; `invalid_prior0/` = first 40° runs with the wrong prior |
+| Adaptive-error study, complete rerun on dev (40 m buffer) | `/export/scratch2/ntm/runs_adaptive_r2/` | all 6 runs complete (24 Oct); window states deleted; `sensor_window_means.nc` and `valid_by_height.yaml` per seed-1 run (seed 2 kept no states) |
 | Adaptive-error study, first attempt (20 m buffer, superseded) | `/export/scratch2/ntm/runs_adaptive_r/` | partial (OOM, crash) |
 | z0 regimes (calibrations `C_*`, finals `Z_*` inflow + z0, `T2_*` inflow only) | `/export/scratch2/ntm/runs_z0_regimes/` | Calibrations 10°, 40°, 10° at 4 m/s done; 70° lost. Finals done: Z_a10_s1, Z_a40_s1, T2_a40_s1, T2_a10v4_s1; lost: Z_a10v4_s1, T2_a10_s1; seeds 2–3 pending |
 | First z0 study (small results) | `/export/scratch2/ntm/z0_results_archive/` | complete |
