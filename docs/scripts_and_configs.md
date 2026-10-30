@@ -51,7 +51,7 @@ configs/
   params/                 # static, dynamic, dynamic_sine, dynamic_cosine,
                           #   static_truth, dynamic_truth, surrogate_training_data
   assimilation_settings/  # smoother, analysis, localization, state_reduction, inflation
-  surrogate/              # generate_data, train_*, finetune_stepper, eval,
+  surrogate/              # generate_data, train_*, finetune_*, eval,
                           #   training (shared defaults), architectures
   latent_generator_architecture/  # train_latent_generator's velocity net, one file each
 ```
@@ -212,6 +212,7 @@ example overrides are in [`configs/README.md`](../configs/README.md#neural-surro
 | `../latent_generator_architecture/` | — | top-level group of `train_latent_generator.yaml`: one velocity net per file, each with its own default `name` (`latent_generator_architecture=compact_wide_head`; default `compact_h512`; options in [neural_surrogates.md](neural_surrogates.md) §38) |
 | `train_dft.yaml` | `train.py` | pretrained autoencoder -> stepper (DFT); optional whole-frame `prechunk` copy |
 | `finetune_stepper.yaml` | `train.py` | fine-tune a pretrained stepper, `method: full \| lora` |
+| `finetune_latent_generator.yaml` | `train.py` | fine-tune a trained latent generator (`pretrained_dir`) on new data, `method: full \| lora` |
 | `eval.yaml` | `evaluate_*.py`, `compare_latent_generator_ensembles.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator`, `latent_generator_ensemble`, `latent_generator_ensemble_compare` |
 
 Each training config loads `training.yaml` and overrides only what differs.

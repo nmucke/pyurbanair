@@ -6,7 +6,9 @@ before and after fitting. `TASKS` maps a config's `task` to its builder:
 
   stepper           a next-step model from `architecture`
   autoencoder       the field autoencoder (+ optional discriminator)
-  latent_generator  a flow-matching generator on a frozen autoencoder
+  latent_generator  a flow-matching generator on a frozen autoencoder; from a
+                    trained one's weights with `pretrained_dir` (a fine-tune,
+                    trained fully or through LoRA like finetune_stepper)
   dft               a stepper built around a pretrained autoencoder, trained
                     through LoRA adapters plus `trainable_modules`
   finetune_stepper  a pretrained stepper (also a trained DFT), trained fully
@@ -17,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import pathlib
 from typing import Any, Callable
 
@@ -164,41 +167,69 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
         mlp_ratio=int(model.mlp_ratio),
     )
     cfg.dataset.param_vars = list(train.param_names)
-    cfg.generator = _generator_block(cfg, model, train, ae_dir)
+    generator = _generator_block(cfg, model, train, ae_dir)
+    if cfg.get("pretrained_dir") is not None:
+        # A fine-tune was also trained on its pretrained generator's geometries.
+        pretrained = OmegaConf.load(pathlib.Path(cfg.pretrained_dir) / "config.yaml")
+        supported = generator["physical_schema"]["supported_geometries"]
+        seen = {json.dumps(g, sort_keys=True) for g in supported}
+        old = OmegaConf.to_container(
+            pretrained.generator.physical_schema.supported_geometries
+        )
+        assert isinstance(old, list)
+        supported[:0] = [g for g in old if json.dumps(g, sort_keys=True) not in seen]
+    cfg.generator = generator
 
+    # A fine-tune keeps the latent statistics its generator was trained with.
+    keep_stats = cfg.get("pretrained_dir") is not None and not cfg.get(
+        "recompute_normalization"
+    )
     if root is not None:
         # Exact latent statistics of the whole train split, from the cache.
-        model.set_latent_normalization(
-            *load_latent_stats(root),
-            second_moment=(
-                load_latent_second_moment(root) if model.gaussian_skip else None
-            ),
-        )
+        if not keep_stats:
+            model.set_latent_normalization(
+                *load_latent_stats(root),
+                second_moment=(
+                    load_latent_second_moment(root) if model.gaussian_skip else None
+                ),
+            )
         cfg.dataloader.collate_fn = None  # cached items stack as they are
-        return Setup(
-            model,
-            LatentCacheDataset(root, train),
-            LatentCacheDataset(root, val),
-            {"_recursive_": False, "_convert_": "all"},
-            # The seed the latent_statistics pass would set before fitting.
-            before_fit=lambda trainer: torch.manual_seed(int(cfg.latent_stats.seed)),
+        return _finetune_method(
+            cfg,
+            out_dir,
+            Setup(
+                model,
+                LatentCacheDataset(root, train),
+                LatentCacheDataset(root, val),
+                {"_recursive_": False, "_convert_": "all"},
+                # The seed the latent_statistics pass would set before fitting.
+                before_fit=lambda trainer: torch.manual_seed(
+                    int(cfg.latent_stats.seed)
+                ),
+            ),
         )
 
     def latent_statistics(trainer: Any) -> None:
         # Normalization of the encoder's latents, estimated on training batches.
         torch.manual_seed(int(cfg.latent_stats.seed))
+        if keep_stats:
+            return
         loader = build_loader(cfg, train, train=True)
         model.compute_latent_normalization(
             trainer.prepared_batches(loader),
             max_batches=int(cfg.latent_stats.max_batches),
         )
 
-    return Setup(
-        model,
-        train,
-        val,
-        {"_recursive_": False, "_convert_": "all"},
-        before_fit=latent_statistics,
+    return _finetune_method(
+        cfg,
+        out_dir,
+        Setup(
+            model,
+            train,
+            val,
+            {"_recursive_": False, "_convert_": "all"},
+            before_fit=latent_statistics,
+        ),
     )
 
 
@@ -244,18 +275,7 @@ def _finetune_stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     model.load_state_dict(torch.load(pretrained_dir / "weights.pt", map_location="cpu"))
     if cfg.recompute_normalization:
         model.set_normalization(*get_normalization_stats(train, source_root=source))
-    if cfg.method == "full":
-        return Setup(model, train, val)
-    peft = _with_lora(model, cfg.lora)
-    # Optional modules trained fully next to the adapters (e.g. a DFT's skips).
-    _train_fully(peft, cfg.get("trainable_modules") or [])
-    return Setup(
-        peft,
-        train,
-        val,
-        {"weights_transform": merge_to_state_dict},
-        after_fit=lambda trainer: _save_lora(trainer, peft, out_dir),
-    )
+    return _finetune_method(cfg, out_dir, Setup(model, train, val))
 
 
 TASKS: dict[str, Callable[[DictConfig, pathlib.Path], Setup]] = {
@@ -310,9 +330,18 @@ def prechunked_root(cfg: DictConfig) -> str | None:
 
 
 def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
-    """The generator around its frozen autoencoder, and the train/val data."""
+    """The generator around its frozen autoencoder, and the train/val data.
+
+    With a `pretrained_dir` (a trained generator) its architecture and weights,
+    param normalization included, are the starting point (a fine-tune)."""
     ae_dir = pathlib.Path(cfg.autoencoder_dir)
     ae = OmegaConf.load(ae_dir / "config.yaml")
+    pretrained_dir = cfg.get("pretrained_dir")
+    if pretrained_dir is not None:
+        pretrained = OmegaConf.load(pathlib.Path(pretrained_dir) / "config.yaml")
+        cfg.architecture = pretrained.architecture
+        # Rebuilt from autoencoder_dir (passed below), not the saved kwargs.
+        cfg.architecture.update(skip_pretrained_load=False, ae_kwargs=None)
     # The frozen encoder only understands the autoencoder's inputs.
     cfg.dataset.state_vars = list(ae.dataset.state_vars)
     cfg.dataset.sdf_features = ae.architecture.sdf_features
@@ -325,8 +354,31 @@ def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
         n_params=len(train.param_names),
         pretrained_ae_dir=str(ae_dir),
     )
-    # The frozen autoencoder keeps its own state statistics.
-    model.set_normalization(None, None, *get_param_normalization_stats(train))
+    if pretrained_dir is not None:
+        if model.ae_fingerprint != pretrained.generator.ae_fingerprint:
+            raise ValueError(
+                f"{ae_dir} is not the autoencoder {pretrained_dir} was trained on"
+            )
+        schema = pretrained.generator.physical_schema
+        new = (list(train.param_names), int(train.param_history_steps))
+        old = (list(schema.param_vars), int(schema.param_history_steps))
+        # The frame step to 1 %: float32 time stamps put 5 s frames at 5.0013 s.
+        if new != old or not math.isclose(
+            float(train.history_dt_seconds),
+            float(schema.history_dt_seconds),
+            rel_tol=1e-2,
+        ):
+            raise ValueError(
+                f"the data's parameters, history and frame step {new}, "
+                f"{train.history_dt_seconds} s are not those {pretrained_dir} "
+                f"was trained on: {old}, {schema.history_dt_seconds} s"
+            )
+        weights = pathlib.Path(pretrained_dir) / "weights.pt"
+        model.load_state_dict(torch.load(weights, map_location="cpu"))
+    # A fine-tune keeps the param statistics its generator was trained with.
+    if pretrained_dir is None or cfg.get("recompute_normalization"):
+        # The frozen autoencoder keeps its own state statistics.
+        model.set_normalization(None, None, *get_param_normalization_stats(train))
     model.set_conditioning_schema(train.param_names, float(train.history_dt_seconds))
     return model, train, val
 
@@ -371,6 +423,28 @@ def _inherit_dataset(cfg: DictConfig, pretrained: Any) -> None:
         cfg.dataset.num_history_steps = pretrained.dataset.get("num_history_steps") or 1
 
 
+def _finetune_method(cfg: DictConfig, out_dir: pathlib.Path, setup: Setup) -> Setup:
+    """A fine-tune's `method`: full (absent: train `setup` as built) or lora
+    (freeze the model, train adapters plus optional `trainable_modules`)."""
+    if cfg.get("method", "full") == "full":
+        return setup
+    if cfg.get("pretrained_dir") is None:
+        raise ValueError(f"method: {cfg.method} fine-tunes a pretrained_dir")
+    peft = _with_lora(setup.model, cfg.lora)
+    # Optional modules trained fully next to the adapters (e.g. a DFT's skips).
+    _train_fully(peft, cfg.get("trainable_modules") or [])
+    # The task's before_fit still acts on the base model, which peft wraps.
+    return dataclasses.replace(
+        setup,
+        model=peft,
+        trainer_kwargs={
+            **setup.trainer_kwargs,
+            "weights_transform": merge_to_state_dict,
+        },
+        after_fit=lambda trainer: _save_lora(trainer, peft, out_dir),
+    )
+
+
 def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:
     """Freeze `model` and wrap it with trainable low-rank adapters."""
     model.requires_grad_(False)
@@ -391,10 +465,15 @@ def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:
 
 def _train_fully(peft: Any, modules: Any) -> None:
     """Unfreeze every parameter inside one of `modules` (dotted paths)."""
+    matched = set()
     for name, p in peft.named_parameters():
         path = "." + name.replace("base_model.model.", "") + "."
-        if any(f".{module}." in path for module in modules):
+        hits = {module for module in modules if f".{module}." in path}
+        if hits:
             p.requires_grad_(True)
+            matched |= hits
+    if missing := set(modules) - matched:
+        raise ValueError(f"trainable_modules {sorted(missing)} match no parameter")
 
 
 def _save_lora(trainer: Any, peft: Any, out_dir: pathlib.Path) -> None:

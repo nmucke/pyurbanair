@@ -1,0 +1,26 @@
+# @package _global_
+defaults:
+  - train_latent_generator
+
+name: latent_generator_finetuned
+pretrained_dir: ${paths.weights_dir}/latent_generator
+autoencoder_dir: ${paths.weights_dir}/autoencoder
+recompute_normalization: false
+method: lora
+lora:
+  variant: standard
+  rank: 4
+  alpha: 8
+  dropout: 0.0
+  target_preset: null
+  modules_to_save: []
+  fused_forward: true  # as the real config
+  # The velocity net's Linears (not the frozen autoencoder).
+  target_modules: 'velocity_net\.seqmodel\..*(qkv|proj)'
+trainable_modules: [velocity_skip]
+optimizer:
+  lr: 1.0e-4
+# Pinned: the real config's values change between runs.
+batch_sampler:
+  batch_size: 2
+  cell_budget: 393216

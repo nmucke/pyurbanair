@@ -211,3 +211,36 @@ def test_trainer_fits_an_adaln_generator(tmp_path):
     assert len(history["val"]) == 1
     assert all(torch.isfinite(torch.tensor(v)) for v in history["val"])
     assert not torch.equal(model.velocity_net.out_proj.weight, out_proj)
+
+
+# --------------------------------------------------------------------------- #
+# LoRA fine-tune resume.
+# --------------------------------------------------------------------------- #
+
+
+def test_lora_generator_resumes_from_its_checkpoint(tmp_path):
+    pytest.importorskip("peft")
+    from neural_surrogates.finetuning import inject_lora, merge_to_state_dict
+
+    ae_dir, data_dir = fixture_inputs(tmp_path)
+    model = _model(ae_dir, velocity_conditioning="adaln")
+    train_ds, val_ds = _dataset(data_dir, "train"), _dataset(data_dir, "val")
+    train, val = _loader(train_ds, shuffle=True), _loader(val_ds)
+    model.compute_latent_normalization(
+        _trainer(model, train, val).prepared_batches(train)
+    )
+    model.requires_grad_(False)
+    peft = inject_lora(
+        model, rank=2, alpha=4, target_modules=r"velocity_net\.blocks\.\d+\.attn\.qkv"
+    )
+    kw = dict(
+        weights_path=tmp_path / "out" / "weights.pt",
+        weights_transform=merge_to_state_dict,
+        resume=True,
+    )
+    _trainer(peft, train, val, **kw).fit()
+    # The checkpoint's keys carry peft's prefix; its latent statistics count.
+    saved = torch.load(tmp_path / "out" / "checkpoint.pt")["model"]
+    assert "latent_stats_installed" not in saved
+    history = _trainer(peft, train, val, num_epochs=2, **kw).fit()
+    assert len(history["val"]) == 1  # resumed at epoch 2

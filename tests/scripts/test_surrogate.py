@@ -292,6 +292,127 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
     assert isinstance(model.velocity_net, AdaLNVelocityNet)
 
 
+def _finetune_latent_generator_cfg(
+    tmp_path: pathlib.Path,
+    trained: dict[str, Any],
+    pretrained: pathlib.Path,
+    *overrides: str,
+) -> Any:
+    ae = trained["train_autoencoder"]
+    return compose(
+        "surrogate/finetune_latent_generator",
+        "+test=finetune_latent_generator",
+        f"paths.data_dir={trained['train_latent_generator'].paths.data_dir}",
+        f"autoencoder_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
+        f"pretrained_dir={pretrained}",
+        *overrides,
+        root=tmp_path,
+    )
+
+
+def test_finetune_latent_generator_starts_from_the_pretrained_one(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    lg = trained["train_latent_generator"]
+    pretrained = pathlib.Path(lg.paths.weights_dir) / lg.name
+    before = torch.load(pretrained / "weights.pt")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained, "method=full")
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    state = setup.model.state_dict()
+    assert all(torch.equal(state[k], before[k]) for k in before)
+
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained, "method=full")
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    after = torch.load(model_dir / "weights.pt")
+    for key in ("latent_mean", "latent_std", "param_mean", "param_std"):
+        assert torch.equal(after[key], before[key]), key  # kept, not recomputed
+    assert not all(torch.equal(after[k], before[k]) for k in before)
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    pretrained_cfg = OmegaConf.load(pretrained / "config.yaml")
+    old = pretrained_cfg.generator.physical_schema.supported_geometries
+    supported = saved.generator.physical_schema.supported_geometries
+    assert all(g in supported for g in old)  # still knows its geometries
+    eval_common = load_script("scripts/utils/eval_common.py")
+    eval_common.load_model(model_dir, torch.device("cpu"))  # rebuilds strictly
+
+    # Another autoencoder than the pretrained generator's: refused.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "weights.pt").symlink_to(pretrained / "weights.pt")
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.ae_fingerprint = "0" * 64
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="not the autoencoder"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # Data conditioned on other parameters than the pretrained generator's.
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.physical_schema.param_vars.reverse()
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="parameters, history and frame step"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # A trainable_modules entry that matches nothing.
+    cfg = _finetune_latent_generator_cfg(
+        tmp_path, trained, pretrained, "trainable_modules=[velocity_skp]"
+    )
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="match no parameter"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+
+def test_finetune_latent_generator_through_lora(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    lg = trained["train_latent_generator"]
+    pretrained = pathlib.Path(lg.paths.weights_dir) / lg.name
+    before = torch.load(pretrained / "weights.pt")
+    tasks = load_script("scripts/utils/tasks.py")
+    # From the latent cache: only the adapters and trainable_modules train.
+    cfg = _finetune_latent_generator_cfg(
+        tmp_path, trained, pretrained, f"latent_cache.output_root={tmp_path / 'lat'}"
+    )
+    OmegaConf.set_struct(cfg, False)
+    setup = tasks.TASKS[cfg.task](cfg, tmp_path)
+    assert setup.trainer_kwargs["_recursive_"] is False
+    assert "weights_transform" in setup.trainer_kwargs
+    trainable = [n for n, p in setup.model.named_parameters() if p.requires_grad]
+    lora = [n for n in trainable if ".lora_" in n]
+    assert lora and all(".velocity_net.seqmodel." in n for n in lora)
+    full = [n for n in trainable if ".lora_" not in n]
+    assert full and all(".velocity_skip." in n for n in full)
+    assert not any(".ae." in n for n in trainable)
+    # ... and trains from it.
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert torch.load(pathlib.Path(cfg.paths.weights_dir) / cfg.name / "weights.pt")
+
+    # Encoding every batch (latent statistics before fit) and the export.
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    assert (model_dir / "adapter" / "adapter_config.json").exists()
+    after = torch.load(model_dir / "weights.pt")
+    assert after.keys() == before.keys()  # merged: no peft keys
+    for key in before:
+        if not key.startswith(("velocity_net.seqmodel.", "velocity_skip.")):
+            assert torch.equal(after[key], before[key]), key  # AE, stats, heads
+    assert not all(torch.equal(after[k], before[k]) for k in before)
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    model = instantiate(
+        saved.architecture,
+        n_state_channels=len(saved.generator.physical_schema.state_vars),
+        n_params=len(saved.generator.physical_schema.param_vars),
+        _convert_="all",
+    )
+    model.load_state_dict(after)  # strict, as the generative spin-up loads it
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "option",
     sorted(p.stem for p in (CONFIGS / "latent_generator_architecture").glob("*.yaml")),
