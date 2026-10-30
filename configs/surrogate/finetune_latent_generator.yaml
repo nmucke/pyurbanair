@@ -1,0 +1,35 @@
+# @package _global_
+# Fine-tune a trained latent generator (train_latent_generator.yaml output) on
+# new data: its architecture, weights and normalization are the starting point,
+# the autoencoder stays frozen, the whole velocity net trains. The saved
+# `generator` block records the new data's geometries.
+defaults:
+  - train_latent_generator
+  - _self_
+
+name: best_latent_flow_matching_realistic_ft_barcelona
+# A train_latent_generator.yaml output folder (weights + config).
+pretrained_dir: ${paths.weights_dir}/best_latent_flow_matching_realistic
+# The autoencoder that generator was trained on (its fingerprint is checked).
+autoencoder_dir: ${paths.weights_dir}/tadpole_ae_b_realistic
+# Recompute the param and latent normalization on the new data (false: keep
+# the pretrained generator's, the space its velocity net was trained in).
+recompute_normalization: false
+
+paths:
+  # The new data to fine-tune on.
+  data_dir: ${paths.training_data_dir}/pyudales_barcelona_finetune
+
+trainer:
+  num_epochs: 50
+  patience: 10
+  lr_warmup_epochs: 1
+  lr_min: 1.0e-6
+
+optimizer:
+  lr: 3.0e-5
+
+# As best_latent_flow_matching_realistic was trained.
+batch_sampler:
+  batch_size: 32
+  cell_budget: null

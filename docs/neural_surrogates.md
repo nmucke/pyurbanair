@@ -11,7 +11,7 @@ the scripts and configs are:
 | Step | Script | Config (`configs/`) |
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
-| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
+| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator,finetune_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
 | Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
@@ -2628,6 +2628,22 @@ top-level `grid` is the first one (legacy artifacts have only that).
 Deployment rebuilds with `instantiate(cfg.architecture,
 n_state_channels=len(state_vars), n_params=len(param_vars))` + a strict
 `load_state_dict(weights.pt)` — no AE dir, no data.
+
+**Fine-tuning a trained generator** —
+[finetune_latent_generator.yaml](../configs/surrogate/finetune_latent_generator.yaml)
+(on top of `train_latent_generator.yaml`, default: `best_latent_flow_matching_realistic`
+on `pyudales_barcelona_finetune`). A `pretrained_dir` (a generator output
+folder) makes `task: latent_generator` take that folder's `architecture`
+and start from its `weights.pt`. `autoencoder_dir` must be the autoencoder it was
+trained on: its `weights.pt` sha256 must equal the saved `generator.ae_fingerprint`,
+otherwise the run raises. The pretrained param and latent normalization are kept
+(`recompute_normalization: true` recomputes both from the new data). The
+`generator` block is rebuilt from the new data, so `supported_geometries`
+lists the new corpus's geometries; spin-up refuses geometries outside it.
+The whole velocity net trains (no LoRA). A latent cache works as for training;
+make a new `latent_cache.output_root` for the new data with the same overrides
+and `latent_cache.prepare_only=true`. Without `pretrained_dir` (the default)
+nothing changes.
 
 ### 39. Evaluation and acceptance gate
 

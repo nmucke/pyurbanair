@@ -292,6 +292,57 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
     assert isinstance(model.velocity_net, AdaLNVelocityNet)
 
 
+def _finetune_latent_generator_cfg(
+    tmp_path: pathlib.Path, trained: dict[str, Any], pretrained: pathlib.Path
+) -> Any:
+    ae = trained["train_autoencoder"]
+    return compose(
+        "surrogate/finetune_latent_generator",
+        "+test=finetune_latent_generator",
+        f"paths.data_dir={trained['train_latent_generator'].paths.data_dir}",
+        f"autoencoder_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
+        f"pretrained_dir={pretrained}",
+        root=tmp_path,
+    )
+
+
+def test_finetune_latent_generator_starts_from_the_pretrained_one(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    lg = trained["train_latent_generator"]
+    pretrained = pathlib.Path(lg.paths.weights_dir) / lg.name
+    before = torch.load(pretrained / "weights.pt")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained)
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    state = setup.model.state_dict()
+    assert all(torch.equal(state[k], before[k]) for k in before)
+
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    after = torch.load(model_dir / "weights.pt")
+    for key in ("latent_mean", "latent_std", "param_mean", "param_std"):
+        assert torch.equal(after[key], before[key]), key  # kept, not recomputed
+    assert not all(torch.equal(after[k], before[k]) for k in before)
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    assert saved.generator.physical_schema.supported_geometries
+    eval_common = load_script("scripts/utils/eval_common.py")
+    eval_common.load_model(model_dir, torch.device("cpu"))  # rebuilds strictly
+
+    # Another autoencoder than the pretrained generator's: refused.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "weights.pt").symlink_to(pretrained / "weights.pt")
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.ae_fingerprint = "0" * 64
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="not the autoencoder"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "option",
     sorted(p.stem for p in (CONFIGS / "latent_generator_architecture").glob("*.yaml")),

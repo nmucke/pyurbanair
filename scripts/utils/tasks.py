@@ -6,7 +6,8 @@ before and after fitting. `TASKS` maps a config's `task` to its builder:
 
   stepper           a next-step model from `architecture`
   autoencoder       the field autoencoder (+ optional discriminator)
-  latent_generator  a flow-matching generator on a frozen autoencoder
+  latent_generator  a flow-matching generator on a frozen autoencoder; from a
+                    trained one's weights with `pretrained_dir` (a fine-tune)
   dft               a stepper built around a pretrained autoencoder, trained
                     through LoRA adapters plus `trainable_modules`
   finetune_stepper  a pretrained stepper (also a trained DFT), trained fully
@@ -166,14 +167,19 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     cfg.dataset.param_vars = list(train.param_names)
     cfg.generator = _generator_block(cfg, model, train, ae_dir)
 
+    # A fine-tune keeps the latent statistics its generator was trained with.
+    keep_stats = cfg.get("pretrained_dir") is not None and not cfg.get(
+        "recompute_normalization"
+    )
     if root is not None:
         # Exact latent statistics of the whole train split, from the cache.
-        model.set_latent_normalization(
-            *load_latent_stats(root),
-            second_moment=(
-                load_latent_second_moment(root) if model.gaussian_skip else None
-            ),
-        )
+        if not keep_stats:
+            model.set_latent_normalization(
+                *load_latent_stats(root),
+                second_moment=(
+                    load_latent_second_moment(root) if model.gaussian_skip else None
+                ),
+            )
         cfg.dataloader.collate_fn = None  # cached items stack as they are
         return Setup(
             model,
@@ -187,6 +193,8 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     def latent_statistics(trainer: Any) -> None:
         # Normalization of the encoder's latents, estimated on training batches.
         torch.manual_seed(int(cfg.latent_stats.seed))
+        if keep_stats:
+            return
         loader = build_loader(cfg, train, train=True)
         model.compute_latent_normalization(
             trainer.prepared_batches(loader),
@@ -310,9 +318,18 @@ def prechunked_root(cfg: DictConfig) -> str | None:
 
 
 def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
-    """The generator around its frozen autoencoder, and the train/val data."""
+    """The generator around its frozen autoencoder, and the train/val data.
+
+    With a `pretrained_dir` (a trained generator) its architecture and weights,
+    param normalization included, are the starting point (a fine-tune)."""
     ae_dir = pathlib.Path(cfg.autoencoder_dir)
     ae = OmegaConf.load(ae_dir / "config.yaml")
+    pretrained_dir = cfg.get("pretrained_dir")
+    if pretrained_dir is not None:
+        pretrained = OmegaConf.load(pathlib.Path(pretrained_dir) / "config.yaml")
+        cfg.architecture = pretrained.architecture
+        # Rebuilt from autoencoder_dir (passed below), not the saved kwargs.
+        cfg.architecture.update(skip_pretrained_load=False, ae_kwargs=None)
     # The frozen encoder only understands the autoencoder's inputs.
     cfg.dataset.state_vars = list(ae.dataset.state_vars)
     cfg.dataset.sdf_features = ae.architecture.sdf_features
@@ -325,8 +342,16 @@ def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
         n_params=len(train.param_names),
         pretrained_ae_dir=str(ae_dir),
     )
-    # The frozen autoencoder keeps its own state statistics.
-    model.set_normalization(None, None, *get_param_normalization_stats(train))
+    if pretrained_dir is not None:
+        if model.ae_fingerprint != pretrained.generator.ae_fingerprint:
+            raise ValueError(
+                f"{ae_dir} is not the autoencoder {pretrained_dir} was trained on"
+            )
+        weights = pathlib.Path(pretrained_dir) / "weights.pt"
+        model.load_state_dict(torch.load(weights, map_location="cpu"))
+    if pretrained_dir is None or cfg.get("recompute_normalization"):
+        # The frozen autoencoder keeps its own state statistics.
+        model.set_normalization(None, None, *get_param_normalization_stats(train))
     model.set_conditioning_schema(train.param_names, float(train.history_dt_seconds))
     return model, train, val
 

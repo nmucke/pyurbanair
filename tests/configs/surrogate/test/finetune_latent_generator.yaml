@@ -1,0 +1,14 @@
+# @package _global_
+defaults:
+  - train_latent_generator
+
+name: latent_generator_finetuned
+pretrained_dir: ${paths.weights_dir}/latent_generator
+autoencoder_dir: ${paths.weights_dir}/autoencoder
+recompute_normalization: false
+optimizer:
+  lr: 1.0e-4
+# Pinned: the real config's values change between runs.
+batch_sampler:
+  batch_size: 2
+  cell_budget: 393216
