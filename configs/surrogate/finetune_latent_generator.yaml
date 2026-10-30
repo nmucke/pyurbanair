@@ -1,8 +1,8 @@
 # @package _global_
 # Fine-tune a trained latent generator (train_latent_generator.yaml output) on
 # new data: its architecture, weights and normalization are the starting point,
-# the autoencoder stays frozen. The saved `generator` block records the new
-# data's geometries.
+# the autoencoder stays frozen. The saved `generator` block records the
+# pretrained generator's geometries and the new data's.
 defaults:
   - train_latent_generator
   - _self_
@@ -21,7 +21,7 @@ recompute_normalization: false
 # weights.pt is the merged plain generator either way.
 method: lora
 lora:
-  variant: standard  # standard | balora
+  variant: standard
   rank: 16
   alpha: 32
   dropout: 0.0  # nonzero bypasses fused_forward

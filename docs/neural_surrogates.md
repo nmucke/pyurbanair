@@ -2636,10 +2636,14 @@ on `pyudales_barcelona_finetune`). A `pretrained_dir` (a generator output
 folder) makes `task: latent_generator` take that folder's `architecture`
 and start from its `weights.pt`. `autoencoder_dir` must be the autoencoder it was
 trained on: its `weights.pt` sha256 must equal the saved `generator.ae_fingerprint`,
-otherwise the run raises. The pretrained param and latent normalization are kept
+otherwise the run raises, as it does when the new data's `param_vars`,
+`param_history_steps` or frame step differ from the saved `physical_schema`.
+The pretrained param and latent normalization are kept
 (`recompute_normalization: true` recomputes both from the new data). The
-`generator` block is rebuilt from the new data, so `supported_geometries`
-lists the new corpus's geometries; spin-up refuses geometries outside it.
+`generator` block is rebuilt from the new data, and `supported_geometries`
+lists the pretrained generator's geometries plus the new corpus's; spin-up
+refuses geometries outside them. A `trainable_modules` entry that matches no
+parameter raises.
 `method: full` trains the whole velocity net; `method: lora` (the config's
 default) freezes it and trains low-rank adapters (the `lora:` block, as for
 `finetune_stepper`, §23) plus the modules listed in `trainable_modules`, through

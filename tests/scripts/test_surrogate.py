@@ -330,7 +330,10 @@ def test_finetune_latent_generator_starts_from_the_pretrained_one(
         assert torch.equal(after[key], before[key]), key  # kept, not recomputed
     assert not all(torch.equal(after[k], before[k]) for k in before)
     saved = OmegaConf.load(model_dir / "config.yaml")
-    assert saved.generator.physical_schema.supported_geometries
+    pretrained_cfg = OmegaConf.load(pretrained / "config.yaml")
+    old = pretrained_cfg.generator.physical_schema.supported_geometries
+    supported = saved.generator.physical_schema.supported_geometries
+    assert all(g in supported for g in old)  # still knows its geometries
     eval_common = load_script("scripts/utils/eval_common.py")
     eval_common.load_model(model_dir, torch.device("cpu"))  # rebuilds strictly
 
@@ -344,6 +347,23 @@ def test_finetune_latent_generator_starts_from_the_pretrained_one(
     cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
     OmegaConf.set_struct(cfg, False)
     with pytest.raises(ValueError, match="not the autoencoder"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # Data conditioned on other parameters than the pretrained generator's.
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.physical_schema.param_vars.reverse()
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="parameters, history and frame step"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # A trainable_modules entry that matches nothing.
+    cfg = _finetune_latent_generator_cfg(
+        tmp_path, trained, pretrained, "trainable_modules=[velocity_skp]"
+    )
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="match no parameter"):
         load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
 
 
@@ -368,6 +388,9 @@ def test_finetune_latent_generator_through_lora(
     full = [n for n in trainable if ".lora_" not in n]
     assert full and all(".velocity_skip." in n for n in full)
     assert not any(".ae." in n for n in trainable)
+    # ... and trains from it.
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert torch.load(pathlib.Path(cfg.paths.weights_dir) / cfg.name / "weights.pt")
 
     # Encoding every batch (latent statistics before fit) and the export.
     cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained)

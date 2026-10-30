@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 import pathlib
 from typing import Any, Callable
 
@@ -166,7 +167,18 @@ def _latent_generator(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
         mlp_ratio=int(model.mlp_ratio),
     )
     cfg.dataset.param_vars = list(train.param_names)
-    cfg.generator = _generator_block(cfg, model, train, ae_dir)
+    generator = _generator_block(cfg, model, train, ae_dir)
+    if cfg.get("pretrained_dir") is not None:
+        # A fine-tune was also trained on its pretrained generator's geometries.
+        pretrained = OmegaConf.load(pathlib.Path(cfg.pretrained_dir) / "config.yaml")
+        supported = generator["physical_schema"]["supported_geometries"]
+        seen = {json.dumps(g, sort_keys=True) for g in supported}
+        old = OmegaConf.to_container(
+            pretrained.generator.physical_schema.supported_geometries
+        )
+        assert isinstance(old, list)
+        supported[:0] = [g for g in old if json.dumps(g, sort_keys=True) not in seen]
+    cfg.generator = generator
 
     # A fine-tune keeps the latent statistics its generator was trained with.
     keep_stats = cfg.get("pretrained_dir") is not None and not cfg.get(
@@ -347,8 +359,23 @@ def _latent_generator_inputs(cfg: DictConfig) -> tuple[Any, Any, Any]:
             raise ValueError(
                 f"{ae_dir} is not the autoencoder {pretrained_dir} was trained on"
             )
+        schema = pretrained.generator.physical_schema
+        new = (list(train.param_names), int(train.param_history_steps))
+        old = (list(schema.param_vars), int(schema.param_history_steps))
+        # The frame step to 1 %: float32 time stamps put 5 s frames at 5.0013 s.
+        if new != old or not math.isclose(
+            float(train.history_dt_seconds),
+            float(schema.history_dt_seconds),
+            rel_tol=1e-2,
+        ):
+            raise ValueError(
+                f"the data's parameters, history and frame step {new}, "
+                f"{train.history_dt_seconds} s are not those {pretrained_dir} "
+                f"was trained on: {old}, {schema.history_dt_seconds} s"
+            )
         weights = pathlib.Path(pretrained_dir) / "weights.pt"
         model.load_state_dict(torch.load(weights, map_location="cpu"))
+    # A fine-tune keeps the param statistics its generator was trained with.
     if pretrained_dir is None or cfg.get("recompute_normalization"):
         # The frozen autoencoder keeps its own state statistics.
         model.set_normalization(None, None, *get_param_normalization_stats(train))
@@ -438,10 +465,15 @@ def _with_lora(model: torch.nn.Module, lora: DictConfig) -> Any:
 
 def _train_fully(peft: Any, modules: Any) -> None:
     """Unfreeze every parameter inside one of `modules` (dotted paths)."""
+    matched = set()
     for name, p in peft.named_parameters():
         path = "." + name.replace("base_model.model.", "") + "."
-        if any(f".{module}." in path for module in modules):
+        hits = {module for module in modules if f".{module}." in path}
+        if hits:
             p.requires_grad_(True)
+            matched |= hits
+    if missing := set(modules) - matched:
+        raise ValueError(f"trainable_modules {sorted(missing)} match no parameter")
 
 
 def _save_lora(trainer: Any, peft: Any, out_dir: pathlib.Path) -> None:
