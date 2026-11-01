@@ -1,9 +1,9 @@
 # Estimating wall roughness (z0) in the DA
 
-Current status, conclusions and next experiments of this line of work:
-[da_cross_model_status_2026-10.md](da_cross_model_status_2026-10.md).
+Archived 1 Nov 2026; summary of this line of work:
+[da_cross_model_summary_2026-10.md](../../research/da_cross_model_summary_2026-10.md).
 
-October 2026 · Follows [sgs_correction_assessment_2026-10.md](../archive/research/sgs_correction_assessment_2026-10.md) §6 (directions 3
+October 2026 · Follows [sgs_correction_assessment_2026-10.md](sgs_correction_assessment_2026-10.md) §6 (directions 3
 and 4). Code: PR #208 (`roughness_length` for uDALES and PALM, new sensor
 layout) and PR #211 (log and bounded parameter
 transforms). Runs: small results in `/export/scratch2/ntm/z0_results_archive/`
