@@ -4,9 +4,11 @@ Used by both the smoothing (``smoothing/``) and filtering (``filtering/``)
 packages so neither has to import the other for file handling.
 """
 
+import json
 import os
 import pathlib
 import re
+from typing import Any, Sequence
 
 import netCDF4
 import xarray
@@ -45,12 +47,19 @@ def get_sorted_state_files(results_dir: pathlib.Path) -> list[pathlib.Path]:
     return [file_path for _, file_path in state_files_with_idx]
 
 
-def concat_member_files(files: list[pathlib.Path], out_path: pathlib.Path) -> None:
+def concat_member_files(
+    files: list[pathlib.Path],
+    out_path: pathlib.Path,
+    by_member_attrs: Sequence[str] = (),
+) -> None:
     """Stack per-member state files along a new `ensemble` dim, one at a time.
 
     Same file as `xarray.concat(members, dim="ensemble")` written to NetCDF,
-    without holding the whole ensemble in memory.
+    without holding the whole ensemble in memory. Each JSON global attribute
+    named in `by_member_attrs` is replaced by `<name>_by_member`, the JSON list
+    of every member's value (null where absent), when any member has one.
     """
+    by_member: dict[str, list[Any]] = {name: [] for name in by_member_attrs}
     with netCDF4.Dataset(files[0]) as ref, netCDF4.Dataset(out_path, "w") as out:
         out.setncatts({k: ref.getncattr(k) for k in ref.ncattrs()})
         out.createDimension("ensemble", len(files))
@@ -71,6 +80,14 @@ def concat_member_files(files: list[pathlib.Path], out_path: pathlib.Path) -> No
             with netCDF4.Dataset(path) as src:
                 for name in data_vars:
                     out.variables[name][m, ...] = src.variables[name][...]
+                for name, values in by_member.items():
+                    has = name in src.ncattrs()
+                    values.append(json.loads(src.getncattr(name)) if has else None)
+        for name, values in by_member.items():
+            if any(value is not None for value in values):
+                if name in out.ncattrs():
+                    out.delncattr(name)
+                out.setncattr(f"{name}_by_member", json.dumps(values, sort_keys=True))
 
 
 def last_frames(files: list[pathlib.Path]) -> xarray.Dataset:

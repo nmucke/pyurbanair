@@ -416,7 +416,9 @@ sets it from `assimilation.save_states`) are kept. Every other step's forecast
 is dropped once its Kalman update is computed (not retained in memory, its step
 directory deleted on disk), so the peak does not grow with `num_steps`. The
 kept states are released when the next `_analysis` starts. Each kept state
-keeps its own attrs (e.g. pyudales' per-member `model_discrepancy_by_member`).
+keeps its own attrs (e.g. pyudales' per-member `model_discrepancy_by_member`;
+on disk `save_state` builds it from each member file's attrs named in the
+forward model's `member_attrs`).
 `save_state(step, path)` writes one to NetCDF (on disk streamed member by
 member, so the ensemble is never in memory) and `final_frame()` returns the
 posterior's last frame (on disk read one frame per member); `run_smoother.py`
