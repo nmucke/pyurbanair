@@ -228,7 +228,7 @@ final-window posterior means):
     against about ×4.8 everywhere at 10°.
 - **The first 40° runs were invalid.** Their angle prior was the 10° case's
   N(0, 10), which biased the posterior angle to 34–37°. They were rerun with
-  the prior centred on 30° (`invalid_prior0/`).
+  the prior centred on 30°.
 
 ## 9. Infrastructure and running lessons
 
@@ -307,16 +307,17 @@ final-window posterior means):
 
 | What | Where |
 |---|---|
-| Wall/ground study (G): 10 runs, truths palm40 and udales10 (palm10 links to F); `invalid_prior0/` holds the first 40° runs | `/export/scratch2/ntm/runs_wallz0/` |
+| Wall/ground study (G): 10 runs, truths palm40 and udales10 (palm10 links to F) | `/export/scratch2/ntm/runs_wallz0/` |
 | Adaptive-error study (F), 6 runs, and the PALM 10° truth | `/export/scratch2/ntm/runs_adaptive_r2/` |
-| Adaptive-error first attempt (20 m buffer, superseded) | `/export/scratch2/ntm/runs_adaptive_r/` |
-| z0 regimes (E): inflow-only calibrations, inflow + z0 finals at 10° and 40° | `/export/scratch2/ntm/runs_z0_regimes/` |
+| z0 regimes (E): inflow-only calibrations, inflow + z0 finals at 10° and 40° (truths deleted) | `/export/scratch2/ntm/runs_z0_regimes/` |
 | First z0 study (C, D), small results | `/export/scratch2/ntm/z0_results_archive/` |
 | Shared tools: `px.sh`, `memqueue.sh`, `extract_sensor_means.py` | `/export/scratch2/ntm/shared/` |
 
 Each run keeps its config, parameters, observations, metrics, figures, logs,
 `valid_by_height.yaml` and (G, F seed 1) `sensor_window_means.nc`. The window
-states were deleted after extraction.
+states were deleted after extraction. Superseded data (the 20 m-buffer truths, the
+first adaptive-error attempt, the invalid-prior 40° runs, the parity and
+buffer check runs) was deleted on 1 Nov.
 
 ## Archived notes (detail behind this summary)
 
