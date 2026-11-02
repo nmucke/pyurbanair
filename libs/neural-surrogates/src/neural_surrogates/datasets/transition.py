@@ -119,7 +119,8 @@ class TransitionDataset(Dataset):
     - ``geom_features`` — ``(C, *grid)``  SDF / ∇SDF channels, present only when
       built with a non-``"none"`` ``sdf_features`` mode (``C`` set by that mode);
       one tensor per *unique* mask (computed once at init, see
-      :func:`neural_surrogates.sdf.sdf_features`).
+      :func:`neural_surrogates.sdf.sdf_features`); y-periodic with
+      ``sdf_periodic_y``, for a model whose own SDF wraps in y.
 
     Trajectories may live on different spatial grids (the random-geometry
     training data gives every trajectory its own domain): the geometry, SDF
@@ -169,6 +170,7 @@ class TransitionDataset(Dataset):
         num_history_steps: int = 1,
         sdf_features: bool | str = "none",
         sdf_clamp_cells: float = 32.0,
+        sdf_periodic_y: bool = False,
         param_root: str | Path | None = None,
     ) -> None:
         if pushforward_steps < 1:
@@ -196,6 +198,7 @@ class TransitionDataset(Dataset):
         # dataset.
         self.sdf_feature_mode = normalize_sdf_mode(sdf_features)
         self.sdf_clamp_cells = float(sdf_clamp_cells)
+        self.sdf_periodic_y = bool(sdf_periodic_y)
 
         state_dir = self.root / "state" / split
         param_dir = Path(param_root or root_dir) / "param" / split
@@ -273,6 +276,7 @@ class TransitionDataset(Dataset):
                     g,
                     clamp_cells=self.sdf_clamp_cells,
                     mode=self.sdf_feature_mode,
+                    periodic_y=self.sdf_periodic_y,
                 )
                 for g in self._geometries
             ]

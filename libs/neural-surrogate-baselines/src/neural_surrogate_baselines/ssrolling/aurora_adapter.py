@@ -11,6 +11,12 @@ unpatched; this module maps our fields to its ``Batch`` and back:
   level per cell layer (levels ``1 … nz``); the predicted mask is dropped;
 * surface and static variable: the building-height map, the solid fraction of
   each column (Aurora needs at least one surface variable);
+* the building pathway past the encoder, through forward hooks: the height map,
+  averaged over each token's patch and linearly projected, is the backbone's
+  conditioning field (per token, added to the conditioning vector that drives
+  the adaptive LayerNorm of every Swin block); the 3D solid mask, averaged over
+  each patch per level and projected, is added to the Perceiver decoder's
+  level queries;
 * metadata: pseudo-degrees at a fixed scale (see ``_DEG_PER_CELL``) and a
   constant time and lead time, so they carry no information beyond position.
 
@@ -144,6 +150,18 @@ class UrbanAurora(nn.Module):
                         type(block).forward, block, warped=False
                     )
 
+        # Patch averages of the current batch's height map (B, H/p, W/p) and
+        # solid mask (B, nz, H/p, W/p), set around each Aurora call.
+        self._building: tuple[torch.Tensor, torch.Tensor] | None = None
+        self.height_embed = nn.Linear(1, int(embed_dim))
+        self.solid_embed = nn.Linear(1, self.aurora.decoder.embed_dim)
+        backbone = self.aurora.backbone
+        for layer in (*backbone.encoder_layers, *backbone.decoder_layers):
+            layer.register_forward_pre_hook(self._condition_on_height)
+        self.aurora.decoder.level_decoder.register_forward_pre_hook(
+            self._add_solid_embedding
+        )
+
         # The current batch's inflow embedding, set around each Aurora call.
         self._param_embedding: torch.Tensor | None = None
         if self.n_params > 0:
@@ -182,6 +200,30 @@ class UrbanAurora(nn.Module):
     ) -> torch.Tensor:
         assert self._param_embedding is not None, "call the stepper, not its Aurora"
         return output + self._param_embedding.to(output.dtype)
+
+    def _condition_on_height(self, module: nn.Module, args: tuple) -> tuple:
+        """Swap a Swin layer's conditioning vector ``(B, D)`` for the field
+        ``(B, L, D)``: the vector plus the embedded height of each token's
+        column, the patch averages halved (as Aurora merges patches) to the
+        layer's resolution."""
+        assert self._building is not None, "call the stepper, not its Aurora"
+        x, c, res, *rest = args
+        levels, H, W = res
+        height = self._building[0][:, None]
+        while height.shape[-2:] != (H, W):
+            height = F.avg_pool2d(height, 2, ceil_mode=True)
+        field = self.height_embed(height.flatten(1)[..., None].to(c.dtype))
+        field = field[:, None].expand(-1, levels, -1, -1).flatten(1, 2)
+        return (x, c[:, None] + field, res, *rest)
+
+    def _add_solid_embedding(self, module: nn.Module, args: tuple) -> tuple:
+        """Add the embedded solid fraction of each patch and level to the
+        Perceiver decoder's level queries ``(B * H/p * W/p, nz, D)``."""
+        assert self._building is not None, "call the stepper, not its Aurora"
+        queries, x = args
+        solid = self._building[1].flatten(2).transpose(1, 2)  # (B, L, nz)
+        embed = self.solid_embed(solid.flatten(0, 1)[..., None].to(queries.dtype))
+        return (queries + embed, x)
 
     def _layout(self, x: torch.Tensor) -> torch.Tensor:
         """Our (…, y, x) to Aurora's (…, H, W) and back (its own inverse)."""
@@ -265,10 +307,13 @@ class UrbanAurora(nn.Module):
             self._param_embedding = self.param_embed(
                 (params - self.param_mean) / self.param_std
             )
+        p = self.patch_size
+        self._building = (F.avg_pool2d(height, p), F.avg_pool2d(solid, p))
         try:
             pred = self.aurora(batch)
         finally:
             self._param_embedding = None
+            self._building = None
         # Each variable is (B, 1, nz, H, W): the one predicted time.
         out = torch.stack(
             [pred.atmos_vars[name][:, 0] for name in self._state_names], 1

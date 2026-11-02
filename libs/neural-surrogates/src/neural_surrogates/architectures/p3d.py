@@ -252,6 +252,8 @@ class P3D(nn.Module):
         # so a standard (non-DD) P3D and its existing checkpoints are unaffected.
         self.extra_in_channels = int(extra_in_channels)
         self._periodic = tuple(a in axes for a in ("z", "y", "x"))
+        if self._periodic[1]:
+            self.periodic_y = True  # its own SDF wraps in y too
         self._downsample_factor = _DOWNSAMPLE_FACTOR
 
         # Standardisation statistics (identity until set_normalization is called).

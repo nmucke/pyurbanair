@@ -98,6 +98,18 @@ def test_ssgen_corrects_the_backbone() -> None:
         _tiny(n_levels=NZ + 1)(state, params, geometry)
 
 
+@pytest.mark.parametrize("embed", ["height_embed", "solid_embed"])  # type: ignore[misc]
+def test_the_buildings_reach_the_backbone_and_the_decoder(embed: str) -> None:
+    """Past the encoder, the height map conditions every Swin block and the
+    solid mask the Perceiver decoder's level queries (Park et al. 2026, §II B)."""
+    model = _tiny(ssgen=False)
+    state, params, geometry = _inputs()
+    with torch.no_grad():
+        out = model(state, params, geometry)
+        getattr(model, embed).weight.zero_()  # keep the bias: no geometry left
+        assert not torch.allclose(model(state, params, geometry), out)
+
+
 def test_paper_parameter_counts() -> None:
     """The papers' 451 M model and the size-matched 113 M arm."""
     paper = SSRollingUrbanNet(3, 2, ssgen=False, embed_dim=512, num_heads=16)

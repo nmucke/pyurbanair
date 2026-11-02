@@ -152,6 +152,19 @@ def test_sdf_features_are_cached_per_geometry() -> None:
     assert not torch.equal(model._sdf_features_for(geometry), first)
 
 
+@pytest.mark.parametrize("periodic", [True, False])  # type: ignore[misc]
+def test_the_sdf_wraps_along_a_periodic_y(periodic: bool) -> None:
+    """A building at the y = 0 edge is near the y = ny - 1 edge too."""
+    model = _tiny(periodic_axes=("y",) if periodic else ())
+    geometry = torch.ones(1, NZ, NY, NX)
+    geometry[:, :2, 0:2, 7:13] = 0.0
+    sdf = model._sdf_features_for(geometry)[0, 0, 0, :, 10]
+    if periodic:
+        torch.testing.assert_close(sdf[-1], sdf[2])
+    else:
+        assert sdf[-1] > sdf[2]
+
+
 def test_normalization_round_trip() -> None:
     """With the network's output zeroed, the prediction is the state mean."""
     model = _tiny(n_params=0)

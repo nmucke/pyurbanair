@@ -164,7 +164,10 @@ class LocalFNOStepper(nn.Module):
         def sdf(g: torch.Tensor) -> torch.Tensor:
             # The EDT needs a float32/64 mask (the model may run in bf16).
             return compute_sdf_features(
-                g.float(), clamp_cells=self.sdf_clamp_cells, mode=self.sdf_feature_mode
+                g.float(),
+                clamp_cells=self.sdf_clamp_cells,
+                mode=self.sdf_feature_mode,
+                periodic_y=self.periodic_y,
             )
 
         # An ensemble stacks identical masks: one EDT for all equal members.

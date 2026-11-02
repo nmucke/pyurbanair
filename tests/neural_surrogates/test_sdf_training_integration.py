@@ -85,6 +85,17 @@ def test_dataset_ships_features_when_enabled(data_root: Path) -> None:
     )
 
 
+def test_dataset_ships_y_periodic_features_on_request(data_root: Path) -> None:
+    from neural_surrogates import sdf_features as sf
+
+    ds = _make_ds(data_root, sdf_features="sdf", sdf_periodic_y=True)
+    mask = ds.geometry_for(0)
+    torch.testing.assert_close(
+        ds[0]["geom_features"], sf(mask, mode="sdf", periodic_y=True)
+    )
+    assert not torch.equal(ds[0]["geom_features"], sf(mask, mode="sdf"))
+
+
 def test_dataset_byte_identical_when_disabled(data_root: Path) -> None:
     ds = _make_ds(data_root)  # default sdf_features=False
     item = ds[0]

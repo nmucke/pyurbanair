@@ -24,6 +24,8 @@ lora:
 # Trained fully next to the adapters.
 trainable_modules:
   - param_embed
+  - height_embed
+  - solid_embed
   - ssgen
 optimizer:
   # Adapters start at zero: a larger step than the full fine-tune's 1e-5.

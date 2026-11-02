@@ -84,6 +84,9 @@ with the others below.
 **Model** (their §2.4):
 - **Input:** the two latest frames, the SDF of the buildings (`sdf.sdf_features`
   on the whole domain, mode `sdf`), and the parameters as constant channels.
+  Along an axis in `periodic_axes` the SDF wraps too (y only; the training
+  data's `sdf_periodic_y`, set from `periodic_axes` by `scripts/utils/tasks.py`),
+  so buildings across the seam count.
 - **Network:** pointwise-MLP lifting, `n_layers` Fourier layers
   `v <- σ(M(K v) + W v + b + v)`, pointwise-MLP projection. Width 36, modes
   (z, y, x) = (8, 16, 16).
@@ -159,6 +162,16 @@ Two corrections to the papers' descriptions:
   under prefixed names (`nsb_*`), added only when missing.
 - **Inflow parameters:** an MLP, added to `backbone.time_mlp`'s output (the
   adaptive-LayerNorm conditioning of every Swin block) by a forward hook.
+- **Buildings past the encoder** (paper 1 §II B: the height mesh replaces lead
+  time as the backbone's conditioning field, and the decoder takes the
+  embedded 3D geometry; paper 2: building information in "the encoder,
+  backbone, and decoder"). Forward hooks, as for the inflow parameters:
+  - backbone: the height map, averaged over each patch (and halved per stage
+    as Aurora merges patches), projected by `height_embed` and added per token
+    to the conditioning vector, so every Swin block's adaptive LayerNorm sees
+    its token's column;
+  - decoder: the solid mask, averaged over each patch per level, projected by
+    `solid_embed` and added to the Perceiver decoder's level queries.
 - **Grid:** H and W are padded to a multiple of the patch size and the
   prediction cropped back.
 - **Output:** the next state directly; paper 1 found increments made rollouts
@@ -181,8 +194,14 @@ Two corrections to the papers' descriptions:
 **SSGen** (paper 2 Eqs. 1–8) folds height into channels, so it is built for
 `n_levels` = the corpus' nz (16 in `architectures.yaml`, pyudales_idealized's). It runs on the z-scored, masked
 backbone prediction, and the model adds its output (Eq. 8). Chosen where the
-paper is silent: 8 GroupNorm groups, zero padding. The paper's 9.5 M SSGen
-parameters do not follow from its description; ours has 0.1 M at 96 channels.
+paper is silent: 8 GroupNorm groups, zero padding, a 1×1 gate conv and a
+64-wide head. **Parameter count:** the paper's "9.5 M" (and its 461 M total)
+does not follow from its own description. Counted from Eqs. 1–7 at its
+272 folded channels (4 variables × 68 levels) and `C_e = 64`, SSGen has
+0.21 M; ours has 71 k at 48 channels (3 × 16). Every under-specified choice
+(gate kernel, head width, dense instead of grouped refine convs) moves this by
+less than 0.1 M. Reaching 9.5 M would take `C_e` ≈ 870 instead of 64, so the
+paper's number most likely counts something its text does not describe.
 
 **Training** (paper 2 §II E):
 - `RolloutTransitionDataset` adds the intermediate targets `state_targets`
