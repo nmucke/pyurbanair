@@ -88,11 +88,12 @@ def test_lora_roll3_changes_only_the_adapted_and_listed_weights(
     assert after.keys() == before.keys()
     assert (_model_dir(tl_roll3_lora) / "adapter").is_dir()
     adapted = re.compile(tl_roll3_lora.lora.target_modules + r"\.weight")
+    listed = tuple(f"{name}." for name in tl_roll3_lora.trainable_modules)
     changed = {k for k in before if not torch.equal(before[k], after[k])}
     assert any(adapted.fullmatch(k) for k in changed)
-    assert any(k.startswith(("param_embed.", "ssgen.")) for k in changed)
+    assert any(k.startswith(listed) for k in changed)
     for k in changed:
-        assert adapted.fullmatch(k) or k.startswith(("param_embed.", "ssgen.")), k
+        assert adapted.fullmatch(k) or k.startswith(listed), k
 
 
 def test_the_rebuilt_model_rolls_out(
