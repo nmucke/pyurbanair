@@ -321,30 +321,54 @@ docstring lists every metric and figure.
 | Script | Input | Output |
 |---|---|---|
 | `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, or with `apply: input` only to the frame fed back, off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
-| `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
-| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy, divergence and TKE against lead time, profiles, spectra, velocity PDFs, \|U\|, TKE and statistics slices; `summary.csv` / `summary.tex` |
+| `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (scalars per source, mean and per sample, and the reference scales) and `metrics.nc` (curves against lead time, spectra, PDFs, profiles) |
+| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | the paper figures, PDF and PNG: error growth, ACC, vorticity, TKE / divergence / integral length, pedestrian level, spectra and their ratio map, fluctuation PDFs, profiles, station profiles, horizontal and vertical slices, window statistics, window TKE at `figures.tke_heights` (in units of H); `animation_speed.mp4` and one `animation_tke_z<h>H.mp4` per height |
+| `make_tables.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | `table_{accuracy,physics,cost}.tex` (booktabs, best model in bold, ready to `\input`) and `.csv` |
 
-The metrics, all in m/s on fluid cells:
-- **accuracy against lead time:** RMSE (total and per component), RMSE at
-  `metrics.report_leads` and relative to persistence, and the anomaly
-  correlation (ACC) with its horizon (first lead below `metrics.acc_threshold`);
-- **physical consistency:** each component's spatial std relative to the truth
-  (smoothing), the RMS divergence (with the truth's own as the reference: the
-  cell-centred stencil is not the solver's), the fluid-mean resolved TKE against
-  lead time (total and per component, each source about its own time mean over
-  the rollout: smoothing loses it, divergence grows it), and whether the rollout
-  stays finite;
-- **statistics over the rollout:** RMSE of the time-mean u and resolved-TKE
-  fields, profiles of mean u, TKE and -<u'w'>, spanwise-spectrum band energy in
-  dB (the bands of `scripts/compute_metrics.py`), and the Wasserstein distance
-  of the velocity distributions;
-- **cost:** inference seconds per step and parameter count.
+Each metric is one function in `scripts/utils/surrogate_metrics.py`, unit-tested
+on analytic fields in `tests/scripts/test_surrogate_metrics.py`; the module
+docstrings define every output. `compute_metrics.py` also copies
+`metrics_reference.pdf` (every metric's definition, prebuilt from
+`scripts/surrogate_comparison/metrics_reference.tex`) into every run dir: when a
+metric changes, edit the .tex and rebuild the PDF with `pdflatex` (twice). The metrics are on fluid cells and
+dimensionless per trajectory before they are averaged over trajectories (the
+inflow differs per trajectory): velocities by `u_ref` (the truth's mean u at
+the canopy-top level, the lowest level without buildings), lengths by the mean
+building height `H`, lead time by the truth's integral time scale `T`.
+- **accuracy against lead time:** RMSE and the anomaly correlation (ACC), pooled
+  and per component, at the pedestrian level (`metrics.pedestrian_level`), the
+  vorticity RMSE, and the ACC horizon (first lead below
+  `metrics.acc_threshold`); the tables average them over `t <= h T` for each
+  of `metrics.horizons`;
+- **physics against lead time:** the fluid-mean resolved TKE, the RMS
+  divergence (the truth's own as the reference: the stencil is not the
+  solver's), the spanwise integral length, and the spanwise spectrum of u' and
+  w' at the canopy-top level (dB ratio to the truth, per band and as a map over
+  wavenumber and lead time);
+- **statistics over the rollout:** RMSE of the time-mean u and TKE fields and of
+  the mean u, TKE and -<u'w'> profiles, the Wasserstein distance of the
+  fluctuations, fluctuation PDFs at `metrics.snapshot_leads`;
+- **cost:** parameters, inference time per step and, with
+  `metrics.solver_seconds_per_step`, the speedup over the solver.
 
-**Caveats.** The ACC's reference mean is the truth's mean over the rollout
-window, so it depends on the window's length; so do the TKE curve and slices
-(each source's own mean over its window). `truth_halves` (first half of the
-truth's window against its second half) is a rough noise floor for the
-statistics, meaningful only for long rollouts.
+`display_names` sets the model names in the figures and tables (e.g.
+`'display_names={dft_s: Ours}'`); models keep the order of `models`.
+Keys missing from an older run dir's `config.yaml` come from
+`configs/comparison.yaml`; rerun `compute_metrics.py` on a run dir scored before
+the current `metrics.nc` layout.
+
+**Caveats.** Per-lead fluctuations (ACC, spectra, integral length, PDFs) are
+about the truth's time mean over the rollout window, the same for every
+source; the TKE curve, profiles and statistics use each source's own mean.
+Both depend on the window's length. `truth_halves` in `metrics.yaml` (the
+truth's first half of the window against its second half) is not a noise
+floor when the inflow varies in time: the models share that forcing and can
+beat it. The ACC horizon counts a trajectory that never drops below the
+threshold at the window's end (`acc_horizon_censored`: the fraction that never
+do; the table then marks the mean as a lower bound). `seconds_per_step` is measured on
+`device`: time the models on the GPU (the `cuda` environment) for the cost
+table. On `pyudales_idealized` every trajectory replays one inlet-turbulence
+realization, so a model can score a long ACC horizon by memorizing it.
 
 ### 2.3c Forward-model comparison (`scripts/comparison/`)
 
@@ -389,7 +413,7 @@ wrote.
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
-| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py` and `surrogate_comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
+| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py`, `surrogate_comparison/visualize_comparison.py` and `surrogate_comparison/make_tables.py` on `<paths.results_dir>` (§2.3b) |
 | `compare_models.sh` | `[overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3c) |
 
 ```bash
