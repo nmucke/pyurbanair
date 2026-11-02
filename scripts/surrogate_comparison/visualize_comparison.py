@@ -2,12 +2,14 @@
 
     python scripts/surrogate_comparison/visualize_comparison.py <run dir> [key=value ...]
 
-The overrides are applied to the run's config.yaml (e.g. `figures.sample=1`).
-The run dir is what run_models.py wrote and compute_metrics.py scored. The
-curve figures read metrics.nc only; station_profiles and the slice figures
-read the rollouts of trajectory `figures.sample` and its truth from the
-corpus. Every quantity is dimensionless (velocities / u_ref, lengths / H,
-lead time / T, see docs/plans/implemented/surrogate_comparison_paper_metrics.md).
+The overrides are applied to the run's config.yaml (e.g. `figures.sample=1`;
+eval_common.comparison_config). The run dir is what run_models.py wrote and
+compute_metrics.py scored. The curve figures read metrics.nc only;
+station_profiles and the slice figures read the rollouts of trajectory
+`figures.sample` and its truth from the corpus over metrics.nc's window (its
+`lead` steps), scaled by that sample's reference scales in metrics.nc. Every
+quantity is dimensionless (velocities / u_ref, lengths / H, lead time / T, see
+docs/plans/implemented/surrogate_comparison_paper_metrics.md).
 
 One style for all (STYLE, below): serif 8 pt text, single-column 3.5 in or
 double-column 7.2 in wide, one Okabe-Ito colour per model in models.yaml order
@@ -34,11 +36,14 @@ Outputs, in the run dir, each in every format of `figures.formats`:
                        rows u', v', w', columns the snapshot leads
   profiles             plane-averaged window mean u, TKE and -u'w' vs z / H
   station_profiles     the same window statistics in single columns behind the
-                       most downstream building (lee face + 0.5, 1, 2, 4 x its height)
+                       most downstream building (lee face + 0.5, 1, 2, 4 x its
+                       height); skipped without a building
   slices               |U| / u_ref at the pedestrian level, rows truth + models,
-                       columns the snapshot leads
+                       columns the snapshot leads (those of spectra and pdfs)
   vertical_slices      x-z plane through the most downstream building at lead
-                       `figures.vertical_lead`: u, w / u_ref and omega_y H / u_ref
+                       `figures.vertical_lead` (negative: from the end, as
+                       `metrics.snapshot_leads`): u, w / u_ref and
+                       omega_y H / u_ref; skipped without a building
   statistics_slices    window mean u / u_ref and TKE / u_ref^2 at the pedestrian level
   tke_heights          window resolved TKE / u_ref^2 on horizontal slices at the
                        heights `figures.tke_heights` (units of H), rows truth + models
@@ -72,14 +77,15 @@ from scipy import ndimage
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
-from eval_common import grid_spacing, load_states, open_dataset, speed  # noqa: E402
-from slice_animation import Panel, animate_slices, frame_indices  # noqa: E402
-from surrogate_metrics import (  # noqa: E402
-    interior_cells,
-    reference_scales,
-    tke_field,
-    vorticity,
+from eval_common import (  # noqa: E402
+    comparison_config,
+    grid_spacing,
+    load_states,
+    open_dataset,
+    speed,
 )
+from slice_animation import Panel, animate_slices, frame_indices  # noqa: E402
+from surrogate_metrics import interior_cells, tke_field, vorticity  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # The paper style, shared by every figure
@@ -136,10 +142,7 @@ ZH = r"$z/\overline{H}$"
 
 def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     run_dir = pathlib.Path(run_dir)
-    cfg = OmegaConf.merge(
-        OmegaConf.load(run_dir / "config.yaml"), OmegaConf.from_dotlist(overrides or [])
-    )
-    assert isinstance(cfg, DictConfig)
+    cfg = comparison_config(run_dir, overrides)
     models = dict(yaml.safe_load((run_dir / "models.yaml").read_text()))
     names = dict(cfg.get("display_names") or {})
     styles = {
@@ -172,14 +175,15 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
         }
         for name, fig in figures.items():
             _save(fig, run_dir / name, formats)
-        sample = _load_sample(cfg, run_dir, models)
+        sample = _load_sample(cfg, run_dir, models, metrics)
         if sample is not None:
-            leads = _snapshot_leads(cfg.metrics.snapshot_leads, len(sample["truth"]))
-            vertical = min(int(cfg.figures.vertical_lead), len(sample["truth"]))
+            leads = [int(t) for t in metrics["pdf_lead"].values]
             figures = {
                 "station_profiles": station_profiles_figure(sample, styles),
                 "slices": slices_figure(sample, styles, metrics, leads, cfg),
-                "vertical_slices": vertical_slices_figure(sample, styles, vertical),
+                "vertical_slices": vertical_slices_figure(
+                    sample, styles, int(cfg.figures.vertical_lead)
+                ),
                 "statistics_slices": statistics_slices_figure(sample, styles, cfg),
                 "tke_heights": tke_heights_figure(sample, styles, cfg),
             }
@@ -598,7 +602,10 @@ def station_profiles_figure(sample: dict, styles: dict) -> Figure | None:
     spanwise centre (those inside the domain). The lee face is the footprint's
     largest x: the flow is assumed along +x. Height is z / H, H this sample's
     mean building height; the dotted line is H_b / H. Each panel's x axis
-    follows the truth (_profile_panel)."""
+    follows the truth (_profile_panel). Skipped without a building."""
+    if sample["building"] is None:
+        print("no building in figures.sample: station_profiles skipped")
+        return None
     k_top, y, lee = sample["building"]
     H = sample["refs"]["H"]
     H_b = sample["dz"] * (k_top + 1)
@@ -668,12 +675,13 @@ def slices_figure(
 ) -> Figure | None:
     """|U| / u_ref at the pedestrian level `metrics.pedestrian_level` of
     trajectory `figures.sample`: rows the truth and each model (no
-    persistence), columns the snapshot leads `metrics.snapshot_leads`. One
-    colour scale, 0 to the truth's maximum over the panels: a model above it
-    saturates. Buildings grey; flow from left to right."""
-    if not leads:
-        return None
+    persistence), columns the snapshot leads (metrics.nc `pdf_lead`, the
+    columns of the spectra and PDFs). One colour scale, 0 to the truth's
+    maximum over the panels: a model above it saturates. Buildings grey; flow
+    from left to right. Skipped when the level has no fluid cell."""
     level = int(cfg.metrics.pedestrian_level)
+    if not leads or not _has_fluid(sample, level, "slices"):
+        return None
     u_ref = sample["refs"]["u_ref"]
     rows = {
         s: [speed(f[t - 1])[level] / u_ref for t in leads]
@@ -685,7 +693,7 @@ def slices_figure(
     )
     columns = [
         (
-            _lead_title(metrics, t, fallback=sample["lead_over_T"][t - 1]),
+            _lead_title(metrics, t),
             "viridis",
             mcolors.Normalize(0, vmax),
         )
@@ -704,12 +712,22 @@ def slices_figure(
 
 def vertical_slices_figure(sample: dict, styles: dict, lead: int) -> Figure | None:
     """The x-z plane through the spanwise centre of the most downstream building of
-    trajectory `figures.sample` at lead step `figures.vertical_lead`: columns
+    trajectory `figures.sample` at lead step `figures.vertical_lead` (a negative
+    lead counts from the end, n + 1 + lead, as `metrics.snapshot_leads`;
+    skipped outside 1..n or without a building): columns
     u / u_ref, w / u_ref and the spanwise vorticity omega_y H / u_ref (central
     differences, surrogate_metrics.vorticity; white on the fluid cells next to a
     wall, where they would read solid cells), rows the truth and each model.
     Per column one colour scale from the truth's 1-99 % range (symmetric about 0,
     so reversed flow is blue): a model beyond it saturates."""
+    n = len(sample["truth"])
+    lead = lead if lead > 0 else n + 1 + lead
+    if not 1 <= lead <= n:
+        print(f"figures.vertical_lead not in 1..{n}: vertical_slices skipped")
+        return None
+    if sample["building"] is None:
+        print("no building in figures.sample: vertical_slices skipped")
+        return None
     _, y, _ = sample["building"]
     refs = sample["refs"]
     solid = ~sample["fluid"][:, y]
@@ -750,8 +768,11 @@ def statistics_slices_figure(
     each source about its own time mean over the compared window: columns mean
     u / u_ref and resolved TKE / u_ref^2, rows the truth and each model. Per
     column one scale from the truth (mean u: its 1-99 % range made
-    symmetric about 0; TKE: 0 to its 99th percentile): a model beyond it saturates."""
+    symmetric about 0; TKE: 0 to its 99th percentile): a model beyond it
+    saturates. Skipped when the level has no fluid cell."""
     level = int(cfg.metrics.pedestrian_level)
+    if not _has_fluid(sample, level, "statistics_slices"):
+        return None
     u_ref = sample["refs"]["u_ref"]
     rows = {}
     for source, fields in [("truth", sample["truth"]), *sample["preds"].items()]:
@@ -979,22 +1000,19 @@ def _legend(
     )
 
 
-def _lead_title(
-    metrics: xarray.Dataset, lead: int, fallback: float | None = None
-) -> str:
+def _lead_title(metrics: xarray.Dataset, lead: int) -> str:
     """'t/T = 0.42' for lead step `lead`, from metrics.nc's `lead_over_T`."""
-    value = (
-        float(metrics["lead_over_T"].sel(lead=lead))
-        if int(lead) in metrics.indexes["lead"]
-        else fallback
-    )
+    value = float(metrics["lead_over_T"].sel(lead=lead))
     return rf"$t/\overline{{T}} = {value:.2f}$"
 
 
-def _snapshot_leads(leads: Sequence[int], n: int) -> list[int]:
-    """The lead steps of `metrics.snapshot_leads` within 1..n (-1: n)."""
-    steps = [n if int(t) == -1 else int(t) for t in leads]
-    return list(dict.fromkeys(t for t in steps if 1 <= t <= n))
+def _has_fluid(sample: dict, level: int, figure: str) -> bool:
+    """Whether level `level` of `figures.sample` has a fluid cell; if not, says
+    that `figure` is skipped."""
+    if 0 <= level < len(sample["fluid"]) and sample["fluid"][level].any():
+        return True
+    print(f"no fluid cell at z index {level} of figures.sample: {figure} skipped")
+    return False
 
 
 def _save(fig: Figure | None, stem: pathlib.Path, formats: Sequence[str]) -> None:
@@ -1008,21 +1026,27 @@ def _save(fig: Figure | None, stem: pathlib.Path, formats: Sequence[str]) -> Non
     print(f"  + {stem.name}")
 
 
-def _load_sample(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> dict | None:
-    """Trajectory `figures.sample`: its truth and every model's rollout over the
-    compared window (n = the shortest rollout), (n, 3, nz, ny, nx) each, the
-    fluid mask, grid, reference scales (surrogate_metrics.reference_scales on
-    the window) and the most downstream building (_downstream_building)."""
+def _load_sample(
+    cfg: DictConfig, run_dir: pathlib.Path, models: dict, metrics: xarray.Dataset
+) -> dict | None:
+    """Trajectory `figures.sample`: its truth u, v, w and every model's rollout
+    over metrics.nc's window (n = its `lead` length, the shortest rollout over
+    all models and samples, as compute_metrics.py), (n, 3, nz, ny, nx) each,
+    the fluid mask, grid, this sample's reference scales from metrics.nc
+    (`reference_H`, `reference_u`, `reference_T`, `canopy_level`) and the most
+    downstream building (_downstream_building, None without one)."""
     samples = list(cfg.sample_indices)  # set by run_models.py
     index = int(cfg.figures.sample)
     if not 0 <= index < len(samples):
         print(f"figures.sample={index} not among the {len(samples)} samples: no slices")
         return None
     name_nc = f"sample_{int(samples[index]):04d}.nc"
+    n = int(metrics.sizes["lead"])
     preds = {}
     for label in models:
         with xarray.open_dataset(run_dir / "rollouts" / label / name_nc) as ds:
-            preds[label] = np.stack([ds[v].values for v in VARS], axis=1)
+            window = ds.isel(time=slice(0, n))
+            preds[label] = np.stack([window[v].values for v in VARS], axis=1)
             start, sample = int(ds.attrs["start"]), int(ds.attrs["sample"])
             z, y, x = (ds[d].values.astype(float) for d in ("z", "y", "x"))
     first = next(iter(models))
@@ -1030,13 +1054,19 @@ def _load_sample(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> dict |
     assert isinstance(train_cfg, DictConfig)
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
     fluid = data.geometry_for(sample).numpy().astype(bool)
-    n = min(len(p) for p in preds.values())
     frames = list(range(start, start + n + 1))
     with xarray.open_dataset(data._state_files[sample]) as ds:
         times = ds["time"].values[frames].astype(float)
-    truth = load_states(data, sample, frames[1:])
+    velocity = [list(data.state_vars).index(v) for v in VARS]  # as compute_metrics
+    truth = load_states(data, sample, frames[1:])[:, velocity]
     spacing = grid_spacing(data, sample)  # as compute_metrics.py
-    refs = reference_scales(truth, fluid, spacing, float(np.mean(np.diff(times))))
+    scales = metrics.isel(sample=index)
+    refs = {
+        "H": float(scales["reference_H"]),
+        "u_ref": float(scales["reference_u"]),
+        "T": float(scales["reference_T"]),
+        "k_c": int(scales["canopy_level"]),
+    }
     H = refs["H"]
     half = [s / 2 for s in spacing]
     return {
@@ -1048,7 +1078,6 @@ def _load_sample(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> dict |
         "z": z - z[0] + half[0],  # cell centres above the ground
         "x": x,
         "times": times - times[0],
-        "lead_over_T": (times[1:] - times[0]) / refs["T"],
         "refs": refs,
         "building": _downstream_building(fluid, x, spacing[2]),
         "extent_xy": tuple(
@@ -1063,12 +1092,15 @@ def _load_sample(cfg: DictConfig, run_dir: pathlib.Path, models: dict) -> dict |
 
 def _downstream_building(
     fluid: np.ndarray, x: np.ndarray, dx: float
-) -> tuple[int, int, float]:
+) -> tuple[int, int, float] | None:
     """(top level, spanwise centre index, lee-face x [m]) of the most
     downstream building, so the stations behind it are in its open wake: the
     connected footprint (columns with a solid cell) reaching the largest x
-    (ties: the first in y), its top the highest solid level in it."""
+    (ties: the first in y), its top the highest solid level in it. None when
+    no cell is solid."""
     footprint = (~fluid).any(axis=0)
+    if not footprint.any():
+        return None
     labels, _ = ndimage.label(footprint)
     ys, xs = np.nonzero(footprint)
     first = int(np.argmax(xs))  # np.nonzero is (y, x)-ordered: the first in y
@@ -1079,14 +1111,17 @@ def _downstream_building(
 
 def _animate_speed(
     cfg: DictConfig, run_dir: pathlib.Path, sample: dict, styles: dict
-) -> pathlib.Path:
+) -> pathlib.Path | None:
     """animation_speed.mp4: |U| at the pedestrian level per lead step (thinned
     to `max_frames`): truth and each model on the first row, each model -
     truth on the second. Colour limits are fixed over the whole rollout, the
     models' clipped to 1.5 x the truth's maximum; the error scale is the median
-    model's, so a diverging model saturates rather than washing out the others."""
+    model's, so a diverging model saturates rather than washing out the others.
+    Skipped when the pedestrian level has no fluid cell."""
     opts = cfg.figures.animation
     level = int(cfg.metrics.pedestrian_level)
+    if not _has_fluid(sample, level, "animation_speed"):
+        return None
     n = len(sample["truth"])
     frames = frame_indices(n, int(opts.max_frames))
     fluid = sample["fluid"][level]

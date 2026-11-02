@@ -43,7 +43,9 @@ metrics:
   pedestrian_level: 0              # z index of the pedestrian-level scores and slices
   snapshot_leads: [1, 10, 50, -1]  # lead steps of the PDFs, spectra and slices (-1: last)
   horizons: [1, 5]                 # table lead windows in units of T, plus the whole window
-  max_pdf_values: 200000           # fluctuation values pooled per source and lead for the PDFs / Wasserstein
+  # PDFs: fluid cells per snapshot lead, pooled over the samples (split evenly);
+  # Wasserstein: (lead, cell) draws per sample over the window.
+  max_pdf_values: 200000
   # Solver wall time per output interval [s] for the speedup column; null: no speedup.
   solver_seconds_per_step: null
 

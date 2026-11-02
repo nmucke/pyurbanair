@@ -1,4 +1,4 @@
-"""Helpers shared by the scripts/surrogate/evaluate_*.py scripts.
+"""Helpers shared by the surrogate evaluation and comparison scripts.
 
 Loading a trained model and its data, reading states, sampling and
 reconstructing with a latent generator, and the one figure type they all use:
@@ -224,6 +224,26 @@ def grid_spacing(dataset: Any, traj: int) -> tuple[float, float, float]:
         dims = [d for d in ds[dataset.state_vars[0]].dims if d != "time"]
         dz, dy, dx = (float(np.median(np.diff(ds[d].values))) for d in dims)
     return dz, dy, dx
+
+
+def comparison_config(
+    run_dir: pathlib.Path, overrides: Sequence[str] | None = None
+) -> DictConfig:
+    """A surrogate comparison run dir's config.yaml with `overrides` (dotlist).
+
+    `display_names`, `metrics` and `figures` start from configs/comparison.yaml,
+    so a run dir written before a key existed still scores and draws.
+    """
+    defaults = OmegaConf.load(
+        pathlib.Path(__file__).resolve().parents[2] / "configs" / "comparison.yaml"
+    )
+    cfg = OmegaConf.merge(
+        {key: defaults[key] for key in ("display_names", "metrics", "figures")},
+        OmegaConf.load(pathlib.Path(run_dir) / "config.yaml"),
+        OmegaConf.from_dotlist(list(overrides or [])),
+    )
+    assert isinstance(cfg, DictConfig)
+    return cfg
 
 
 def expand(

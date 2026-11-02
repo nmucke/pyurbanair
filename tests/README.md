@@ -52,6 +52,7 @@ cfg = compose("surrogate/train_stepper", "+test=train_stepper", root=tmp_path)
 | `surrogate/test/generate_data.yaml` | 2 + 1 + 1 trajectories on the case geometry |
 | `surrogate/test/train_*.yaml`, `finetune_stepper.yaml` | one CPU epoch on the synthetic data (`training.yaml`) |
 | `surrogate/test/eval.yaml` | the evaluations of those models |
+| `test/comparison.yaml` | the surrogate comparison of those models on the CPU: every `metrics` / `figures` value its tests check, few PDF values, 4-frame animations |
 | `model/*_tiny.yaml` | each backend on the tiny grid; `neural_surrogate_tiny` runs the trained test surrogates |
 | `model/pyudales_stock.yaml` | `pyudales_tiny` on one rank with Vreman pinned and inlet turbulence and SGS discrepancy off, for the uDALES library tests |
 

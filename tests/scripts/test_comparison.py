@@ -2,7 +2,10 @@
 the tiny trained steppers.
 
 `comparison_run` is one run dir shared by the module: run_models on the tiny
-test split with the tiny Local-FNO (H=2) and DFT (H=1), on the CPU.
+test split with the tiny Local-FNO (H=2) and DFT (H=1), on the CPU;
+`two_sample_run` compares two trajectories with different building heights.
+Every metric and figure setting comes from tests/configs/test/comparison.yaml
+(through the run dir's config.yaml).
 """
 
 from __future__ import annotations
@@ -25,10 +28,11 @@ MODELS = ("local_fno", "dft")
 def run_models(
     session_root: pathlib.Path, run_dir: pathlib.Path, *overrides: str
 ) -> Any:
-    """Compose configs/comparison.yaml and run run_models.py into `run_dir`."""
+    """Compose configs/comparison.yaml with the test overlay and run
+    run_models.py into `run_dir`."""
     cfg = compose(
         "comparison",
-        "device=cpu",
+        "+test=comparison",
         f"paths.results_dir={run_dir}",
         *overrides,
         root=session_root,
@@ -57,6 +61,35 @@ def comparison_run(
 ) -> pathlib.Path:
     run_dir = session_root / "comparison"
     run_models(session_root, run_dir, f"models=[{model_dirs[0]},{model_dirs[1]}]")
+    return run_dir
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def two_sample_run(
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    model_dirs: list[pathlib.Path],
+) -> pathlib.Path:
+    """Both models on train trajectories 0 and 1 of a corpus copy whose
+    trajectory 1 has a building one level taller (H = 3 dz, k_c = 3 against
+    2 dz, 2): the samples have different κ H grids and canopy levels."""
+    corpus = session_root / "two_samples" / training_data.name
+    shutil.copytree(training_data, corpus)
+    path = corpus / "state" / "train" / "sample_0001.nc"
+    state = xarray.load_dataset(path)
+    state["blanking"][:3, 7:13, 7:13] = 1
+    for var in ("u", "v", "w"):
+        state[var] = state[var].where(state["blanking"] == 0, 0.0)
+    state.to_netcdf(path)
+    run_dir = session_root / "comparison_two_samples"
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{model_dirs[0]},{model_dirs[1]}]",
+        f"data_dir={corpus}",
+        "split=train",
+        "sample_indices=[0,1]",
+    )
     return run_dir
 
 
@@ -339,6 +372,7 @@ def compute_metrics(
 
 
 def test_compute_metrics_schema(comparison_run: pathlib.Path) -> None:
+    cfg = OmegaConf.load(comparison_run / "config.yaml")
     metrics, ds = compute_metrics(comparison_run)
     sources = [*MODELS, "persistence"]
     assert list(metrics) == [*sources, "truth", "truth_halves", "reference"]
@@ -362,7 +396,8 @@ def test_compute_metrics_schema(comparison_run: pathlib.Path) -> None:
             assert key in entry
     assert metrics["persistence"]["rmse_vs_persistence"]["mean"] == 1.0
     assert metrics["local_fno"]["n_parameters"] > 0
-    assert "speedup" not in metrics["local_fno"]  # solver_seconds_per_step: null
+    assert cfg.metrics.solver_seconds_per_step is None
+    assert "speedup" not in metrics["local_fno"]
     assert list(metrics["truth"]) == ["integral_length"]
     assert "mean_u_rmse" in metrics["truth_halves"]
     assert "rmse" not in metrics["truth_halves"]
@@ -399,10 +434,74 @@ def test_compute_metrics_schema(comparison_run: pathlib.Path) -> None:
     assert (np.diff(ds.kh) > 0).all()
     assert ds.profile_tke.dims == ("source", "z") and ds.z_over_H.dims == ("z",)
     assert ds.pdf.dims == ("source", "pdf_lead", "var", "bin") and ds.sizes["bin"] == 60
-    assert list(ds.pdf_lead.values) == [1, 8]  # snapshot_leads [1, 10, 50, -1]
+    n = ds.sizes["lead"]
+    leads = {lead if lead > 0 else n + 1 + lead for lead in cfg.metrics.snapshot_leads}
+    assert list(ds.pdf_lead.values) == sorted(leads & set(range(1, n + 1)))
     assert list(ds["var"].values) == ["u", "v", "w"]
     assert np.isfinite(ds.pdf.sel(source="truth")).all()
     assert ds.reference_H.dims == ("sample",) and int(ds.canopy_level[0]) == 2
+
+    # One sample: metrics.nc's curves are its own. Persistence's ACC drops below
+    # the threshold inside the window: an uncensored horizon.
+    acc = ds.acc.sel(source="persistence").values
+    below = np.flatnonzero(acc < cfg.metrics.acc_threshold)
+    assert below.size
+    horizon = metrics["persistence"]["acc_horizon_seconds"]["per_sample"][0]
+    assert horizon == pytest.approx(float(ds.lead_time[below[0]]))
+    assert metrics["persistence"]["acc_horizon_censored"]["per_sample"][0] == 0
+
+
+def test_compute_metrics_two_samples(
+    two_sample_run: pathlib.Path, training_data: pathlib.Path
+) -> None:
+    """Per-sample scores, reference scales and the pooling across samples."""
+    metrics, ds = compute_metrics(two_sample_run)
+    for name in (*MODELS, "persistence"):
+        for key in ("rmse", "acc_horizon_seconds", "wasserstein_u"):
+            assert list(metrics[name][key]["per_sample"]) == [0, 1], (name, key)
+    dz = float(ds.z[1] - ds.z[0])
+    reference = metrics["reference"]
+    assert reference["H"]["per_sample"] == pytest.approx({0: 2 * dz, 1: 3 * dz})
+    assert reference["k_c"]["per_sample"] == {0: 2, 1: 3}
+    assert list(ds.sample.values) == [0, 1]
+    for var in ("reference_H", "reference_u", "reference_T", "canopy_level"):
+        assert ds[var].dims == ("sample",) and np.isfinite(ds[var]).all(), var
+    assert ds.attrs["H_mean"] == pytest.approx(2.5 * dz)
+    np.testing.assert_allclose(ds.z_over_H, ds.z / (2.5 * dz))
+    # The shared κ H bins reach past each sample's own range: below the taller
+    # sample's lowest κ H and above the lower sample's highest.
+    y = xarray.load_dataset(training_data / "state" / "train" / "sample_0000.nc").yt
+    k = 2 * np.pi * np.fft.rfftfreq(len(y), d=float(y[1] - y[0]))[1:]
+    assert ds.kh[0] < k[0] * 3 * dz and ds.kh[-1] > k[-1] * 2 * dz
+    for var in ("spectrum_u", "spectrum_w", "pdf", "tke", "profile_tke"):
+        assert np.isfinite(ds[var].sel(source="truth")).all(), var
+    for name in (*MODELS, "persistence"):
+        assert np.isfinite(ds.pdf.sel(source=name)).all(), name
+        assert np.isfinite(ds.spectrum_u.sel(source=name)).all(), name
+
+
+def test_compute_metrics_refuses_a_pedestrian_level_without_fluid(
+    tmp_path: pathlib.Path, comparison_run: pathlib.Path, training_data: pathlib.Path
+) -> None:
+    path = training_data / "state" / "test" / "sample_0000.nc"
+    with xarray.open_dataset(path) as truth:
+        levels = truth.sizes["zt"]
+    for level in (levels, -1):
+        with pytest.raises(ValueError, match="pedestrian_level"):
+            compute_metrics(comparison_run, f"metrics.pedestrian_level={level}")
+    # A level that is entirely solid.
+    corpus = tmp_path / training_data.name
+    shutil.copytree(training_data, corpus)
+    path = corpus / "state" / "test" / "sample_0000.nc"
+    state = xarray.load_dataset(path)
+    state["blanking"][levels - 1] = 1
+    state.to_netcdf(path)
+    with pytest.raises(ValueError, match="no fluid cell"):
+        compute_metrics(
+            comparison_run,
+            f"data_dir={corpus}",
+            f"metrics.pedestrian_level={levels - 1}",
+        )
 
 
 def test_compute_metrics_exact_cases(
@@ -458,15 +557,9 @@ def test_compute_metrics_exact_cases(
 def test_compute_metrics_visualize_and_tables_write_every_output(
     comparison_run: pathlib.Path,
 ) -> None:
-    overrides = [
-        "figures.sample=0",
-        "figures.vertical_lead=4",
-        "display_names={dft: Ours}",
-    ]
+    cfg = OmegaConf.load(comparison_run / "config.yaml")
     for script in ("compute_metrics", "visualize_comparison", "make_tables"):
-        load_script(f"scripts/surrogate_comparison/{script}.py").run(
-            comparison_run, overrides
-        )
+        load_script(f"scripts/surrogate_comparison/{script}.py").run(comparison_run)
     figures = [
         "rmse",
         "acc",
@@ -484,7 +577,7 @@ def test_compute_metrics_visualize_and_tables_write_every_output(
         "tke_heights",
     ]
     for name in figures:
-        for suffix in ("pdf", "png"):
+        for suffix in cfg.figures.formats:
             path = comparison_run / f"{name}.{suffix}"
             assert path.stat().st_size > 0, path.name
     assert list(comparison_run.glob("animation_tke_z*H.*"))
@@ -492,7 +585,7 @@ def test_compute_metrics_visualize_and_tables_write_every_output(
     for name in ("accuracy", "physics", "cost"):
         tex = (comparison_run / f"table_{name}.tex").read_text()
         assert tex.startswith("\\begin{table}") and "\\label{tab:comparison_" in tex
-        assert "Ours" in tex and "dft" not in tex
+        assert cfg.display_names.dft in tex and "dft" not in tex
         rows = (comparison_run / f"table_{name}.csv").read_text().splitlines()
         assert [r.split(",")[0] for r in rows[1:3]] == list(MODELS)
 

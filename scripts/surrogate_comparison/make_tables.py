@@ -23,7 +23,10 @@ Outputs, in the run dir (the .csv holds the same table at full precision):
     rmse_h<h>, rmse_window  RMSE/u_ref over the fluid cells (metrics.nc `rmse`),
                             RMS over the leads t <= h T-bar for each
                             `metrics.horizons` inside the window, and over the
-                            whole window (cf. metrics.yaml `rmse`)
+                            whole window: the RMS over the leads of the
+                            sample-mean curve, so it differs slightly from
+                            metrics.yaml `rmse` (the mean of the per-sample
+                            window RMS)
     acc_h<h>, acc_window    the anomaly correlation about the truth's time mean
                             (`acc`), mean over the same leads
     acc_horizon             first lead where ACC < `metrics.acc_threshold`, in
@@ -58,12 +61,17 @@ import argparse
 import csv
 import math
 import pathlib
+import sys
 from typing import Any, NamedTuple
 
 import numpy as np
 import xarray
 import yaml
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
+
+from eval_common import comparison_config  # noqa: E402
 
 PERSISTENCE, TRUTH, HALVES = "persistence", "truth", "truth_halves"
 ROW_NAMES = {
@@ -95,10 +103,7 @@ class Column(NamedTuple):
 
 def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     run_dir = pathlib.Path(run_dir)
-    cfg = OmegaConf.merge(
-        OmegaConf.load(run_dir / "config.yaml"), OmegaConf.from_dotlist(overrides or [])
-    )
-    assert isinstance(cfg, DictConfig)
+    cfg = comparison_config(run_dir, overrides)
     scalars = yaml.safe_load((run_dir / "metrics.yaml").read_text())
     with xarray.open_dataset(run_dir / "metrics.nc") as ds:
         metrics = ds.load()

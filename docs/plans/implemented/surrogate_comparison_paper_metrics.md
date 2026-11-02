@@ -3,7 +3,8 @@
 Replaces the outputs of `scripts/surrogate_comparison/compute_metrics.py` and
 `visualize_comparison.py`, and adds `make_tables.py`. Sources: Qin et al. 2025
 (Local-FNO), Park et al. 2026 (3DSwinUrbanNet), Park & Lee 2026
-(SSRollingUrbanNet); PDFs in `docs/papers/`. `run_models.py` is unchanged.
+(SSRollingUrbanNet). `run_models.py` is unchanged. The definitions as built
+are in `scripts/surrogate_comparison/metrics_reference.pdf`.
 
 Goal: every number and figure goes straight into the paper, and each metric is
 one small function that can be reviewed on its own.
@@ -92,14 +93,14 @@ top-level `reference` entry holds per sample H, u_ref, T, k_c, z_c.
 ## Tables (`make_tables.py`, `table_<name>.tex` + `.csv`)
 
 booktabs, a `table` environment with caption and label, ready to `\input`.
-Rows: models in config order (display names), then persistence (and truth or
-truth_halves where it is the reference), separated by `\midrule`. The best
+Rows: models in config order (display names), then persistence (and the truth
+for Λ/H), separated by `\midrule`; `truth_halves` is not tabulated. The best
 model value per column is `\textbf` (min, max, or closest to the truth / to
 0 dB). Fixed decimals per column.
 
-- `accuracy`: RMSE/u_ref and ACC averaged over leads `t ≤ h T̄` for each
+- `accuracy`: RMSE/u_ref (RMS) and ACC (mean) over leads `t ≤ h T̄` for each
   `metrics.horizons` and the whole window; ACC horizon (t/T̄); vorticity RMSE;
-  pedestrian RMSE.
+  pedestrian RMSE. A horizon some sample never drops below is a lower bound (≥).
 - `physics`: mean-u RMSE, TKE RMSE, −u'w' profile RMSE, spectral dB of u' (mid,
   near-cutoff), Λ/H (truth row), W2 of u', divergence ratio.
 - `cost`: parameters (M), ms per step, speedup (if set).
@@ -124,7 +125,8 @@ the panels, panel letters (a), (b), …, light grid, dimensionless axes.
 11. `slices` – |U|/u_ref at `k_p`, rows truth + models, columns the snapshot leads.
 12. `vertical_slices` – x–z plane through the most downstream building of `figures.sample`: u/u_ref, w/u_ref and spanwise vorticity, rows truth + models, at `figures.vertical_lead`.
 13. `statistics_slices` – window mean u/u_ref and TKE/u_ref² at `k_p`.
-14. `animation_speed.mp4` – unchanged (review aid, not a paper figure).
+14. `tke_heights` – window TKE/u_ref² on horizontal slices at `figures.tke_heights` (units of H) of `figures.sample`, rows truth + models.
+15. `animation_speed.mp4` – unchanged (review aid, not a paper figure); `animation_tke_z<h>H.mp4` – the instantaneous TKE at each of those heights.
 
 Dropped: `energy.png` (std ratio), `tke_slices.png`, the raw-velocity PDFs and
 Wasserstein, `rmse_step<k>`, `final_rmse`.
@@ -143,6 +145,7 @@ metrics:
 figures:
   sample: 0
   vertical_lead: 10
+  tke_heights: [0.5, 1.0, 1.5, 2.0]  # in units of H
   formats: [pdf, png]
   animation: {max_frames: 150, fps: 10, dpi: 100}
 ```

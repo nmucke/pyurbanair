@@ -1,0 +1,26 @@
+# @package _global_
+# Surrogate comparison (configs/comparison.yaml) on the CPU, with every metric
+# and figure setting tests/scripts/test_comparison.py relies on (the tiny
+# corpus: 10 frames, so 8 lead steps for the H=2 Local-FNO).
+device: cpu
+split: test
+
+display_names: {dft: Ours}
+
+metrics:
+  acc_threshold: 0.5
+  pedestrian_level: 0
+  snapshot_leads: [1, 4, 50, -1]  # 50 is past the window: PDF leads 1, 4, 8
+  horizons: [1, 2]
+  max_pdf_values: 300  # fewer than the 400 cells of a level
+  solver_seconds_per_step: null
+
+figures:
+  sample: 0
+  vertical_lead: 4
+  tke_heights: [0.5, 1.0, 1.5]
+  formats: [pdf, png]
+  animation:
+    max_frames: 4
+    fps: 2
+    dpi: 50

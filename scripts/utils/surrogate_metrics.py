@@ -71,8 +71,14 @@ def divergence(fields: np.ndarray, spacing: tuple[float, float, float]) -> np.nd
 
 def mean_building_height(fluid: np.ndarray, dz: float) -> float:
     """H [m]: the mean over the columns holding a solid cell of (solid cells in
-    the column) * dz."""
+    the column) * dz. Every metric is scaled by H, so a geometry without
+    buildings is an error."""
     heights = (~fluid).sum(axis=0)
+    if not heights.any():
+        raise ValueError(
+            "the geometry has no solid cell: no mean building height H to "
+            "normalise the metrics by"
+        )
     return float(heights[heights > 0].mean() * dz)
 
 
@@ -133,6 +139,19 @@ def reference_scales(
         "k_c": level,
         "z_c": (level + 0.5) * dz,
     }
+
+
+def acc_horizon(
+    acc_curve: np.ndarray, times: np.ndarray, threshold: float
+) -> tuple[float, bool]:
+    """(horizon [s], censored) of an (n,) ACC curve over lead steps 1..n with
+    `times` (n + 1,) [s] from the start frame: the time of the first lead whose
+    ACC is below `threshold` (or NaN), else the window's last lead time and
+    censored = True."""
+    below = np.flatnonzero(~(np.asarray(acc_curve) >= threshold))
+    if below.size:
+        return float(times[below[0] + 1]), False
+    return float(times[len(acc_curve)]), True
 
 
 def rmse(pred: np.ndarray, truth: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

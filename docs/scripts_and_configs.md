@@ -353,6 +353,9 @@ building height `H`, lead time by the truth's integral time scale `T`.
 
 `display_names` sets the model names in the figures and tables (e.g.
 `'display_names={dft_s: Ours}'`); models keep the order of `models`.
+Keys missing from an older run dir's `config.yaml` come from
+`configs/comparison.yaml`; rerun `compute_metrics.py` on a run dir scored before
+the current `metrics.nc` layout.
 
 **Caveats.** Per-lead fluctuations (ACC, spectra, integral length, PDFs) are
 about the truth's time mean over the rollout window, the same for every
@@ -410,7 +413,7 @@ wrote.
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
-| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py` and `surrogate_comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
+| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py`, `surrogate_comparison/visualize_comparison.py` and `surrogate_comparison/make_tables.py` on `<paths.results_dir>` (§2.3b) |
 | `compare_models.sh` | `[overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3c) |
 
 ```bash

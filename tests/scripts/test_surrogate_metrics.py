@@ -125,6 +125,32 @@ def test_reference_scales_of_a_box() -> None:
     assert ref["T"] == pytest.approx(2.0 * (1 / 8 + 1 / 2))
     with pytest.raises(ValueError, match="canopy"):
         sm.canopy_level(np.zeros_like(fluid))
+    with pytest.raises(ValueError, match="no solid cell"):
+        sm.mean_building_height(np.ones_like(fluid), dz)
+
+
+def test_acc_horizon() -> None:
+    times = np.array([0.0, 0.5, 1.0, 1.5, 2.0])  # start frame, then 4 leads
+    threshold = 0.5
+    # The time of the first lead below the threshold, not the last one above.
+    assert sm.acc_horizon(np.array([0.9, 0.6, 0.4, 0.7]), times, threshold) == (
+        1.5,
+        False,
+    )
+    assert sm.acc_horizon(np.array([0.3, 0.9, 0.9, 0.9]), times, threshold) == (
+        0.5,
+        False,
+    )
+    # NaN (a diverged rollout) counts as below.
+    assert sm.acc_horizon(np.array([0.9, np.nan, np.nan, np.nan]), times, 0.5) == (
+        1.0,
+        False,
+    )
+    # Never below: censored at the window's last lead time.
+    assert sm.acc_horizon(np.array([0.9, 0.8, 0.7, 0.5]), times, threshold) == (
+        2.0,
+        True,
+    )
 
 
 def test_bin_spectrum() -> None:

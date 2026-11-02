@@ -123,7 +123,12 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 import surrogate_metrics as sm  # noqa: E402
-from eval_common import grid_spacing, load_states, open_dataset  # noqa: E402
+from eval_common import (  # noqa: E402
+    comparison_config,
+    grid_spacing,
+    load_states,
+    open_dataset,
+)
 
 PERSISTENCE, TRUTH, HALVES = "persistence", "truth", "truth_halves"
 VELOCITY = ("u", "v", "w")
@@ -142,10 +147,7 @@ STATISTICS = (
 
 def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     run_dir = pathlib.Path(run_dir)
-    cfg = OmegaConf.merge(
-        OmegaConf.load(run_dir / "config.yaml"), OmegaConf.from_dotlist(overrides or [])
-    )
-    assert isinstance(cfg, DictConfig)
+    cfg = comparison_config(run_dir, overrides)
     models = yaml.safe_load((run_dir / "models.yaml").read_text())
     labels = list(models)
     train_cfg = OmegaConf.load(
@@ -155,6 +157,14 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
     samples = [int(s) for s in cfg.sample_indices]  # set by run_models.py
     n = min(_check_rollouts(run_dir, labels, data, s, cfg) for s in samples)
+    pedestrian = int(cfg.metrics.pedestrian_level)
+    for s in samples:
+        fluid = data.geometry_for(s).numpy().astype(bool)
+        if not 0 <= pedestrian < len(fluid) or not fluid[pedestrian].any():
+            raise ValueError(
+                f"metrics.pedestrian_level={pedestrian} has no fluid cell on the "
+                f"{len(fluid)} levels of trajectory {s}"
+            )
     pdf_leads = sorted(
         {lead if lead > 0 else n + 1 + lead for lead in cfg.metrics.snapshot_leads}
         & set(range(1, n + 1))
@@ -162,7 +172,7 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
     ctx = {
         "n": n,
         "pdf_leads": pdf_leads,
-        "pedestrian": int(cfg.metrics.pedestrian_level),
+        "pedestrian": pedestrian,
         "max_values": int(cfg.metrics.max_pdf_values),
         "pdf_share": int(cfg.metrics.max_pdf_values) // len(samples),
     }
@@ -313,7 +323,7 @@ def _score_sample(
 def _read_rollout(path: pathlib.Path, n: int) -> np.ndarray:
     """(n, 3, z, y, x) the first n lead steps of a rollout, as float32."""
     with xarray.open_dataset(path) as ds:
-        return np.stack([ds[v].values[:n] for v in VELOCITY], axis=1, dtype=np.float32)
+        return np.stack([ds[v][:n].values for v in VELOCITY], axis=1, dtype=np.float32)
 
 
 def _pad(curve: np.ndarray, n: int) -> np.ndarray:
@@ -457,9 +467,7 @@ def _scalars(
         truth_divergence = np.mean(curves[TRUTH]["divergence_rms"])
         for name in [*labels, PERSISTENCE]:
             own = curves[name]
-            below = np.flatnonzero(~(own["acc"] >= threshold))
-            # Censored at the window end when ACC never drops below the threshold.
-            horizon = below[0] + 1 if below.size else len(own["acc"])
+            horizon, censored = sm.acc_horizon(own["acc"], score["times"], threshold)
             with np.errstate(all="ignore"):
                 add(
                     name,
@@ -467,8 +475,8 @@ def _scalars(
                         "rmse": sm.window_rms(own["rmse"]),
                         "rmse_vs_persistence": sm.window_rms(own["rmse"])
                         / persistence_rmse,
-                        "acc_horizon_seconds": float(score["times"][horizon]),
-                        "acc_horizon_censored": int(not below.size),
+                        "acc_horizon_seconds": horizon,
+                        "acc_horizon_censored": int(censored),
                         "stable": score["stable"][name],
                         "vorticity_rmse": sm.window_rms(own["vorticity_rmse"]),
                         "rmse_pedestrian": sm.window_rms(own["rmse_pedestrian"]),

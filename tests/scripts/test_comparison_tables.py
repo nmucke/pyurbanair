@@ -95,8 +95,14 @@ def test_tables(tmp_path: pathlib.Path) -> None:
         "truth_halves": {"spectra_db_u_mid": entry(0.2)},
     }
     (tmp_path / "metrics.yaml").write_text(yaml.safe_dump(scalars, sort_keys=False))
+    # Every key make_tables.py reads, so configs/comparison.yaml's values don't matter.
     (tmp_path / "config.yaml").write_text(
-        yaml.safe_dump({"metrics": {"acc_threshold": 0.5, "horizons": [1, 2, 50]}})
+        yaml.safe_dump(
+            {
+                "display_names": {"unstable": "unstable"},
+                "metrics": {"acc_threshold": 0.5, "horizons": [1, 2, 50]},
+            }
+        )
     )
     tables.run(tmp_path, ["display_names={dft_s: Ours}"])
 
