@@ -24,6 +24,7 @@ def local_fno(session_root: pathlib.Path, training_data: pathlib.Path) -> Any:
         "+test=train",
         "trainer.num_epochs=2",
         "trainer.patience=null",
+        "architecture.periodic_axes=[y]",
         root=session_root,
     )
     load_script("scripts/surrogate/train.py").run(cfg)
@@ -71,6 +72,8 @@ def test_finetune_continues_the_pretrained_model(
     )
     assert saved.architecture == pretrained.architecture
     assert saved.dataset.num_history_steps == 2
+    # Both trained on the y-periodic SDF the model computes at inference.
+    assert pretrained.dataset.sdf_periodic_y and saved.dataset.sdf_periodic_y
     with (model_dir / "metrics.csv").open() as f:
         rows = list(csv.DictReader(f))
     assert float(rows[0]["lr"]) == pytest.approx(local_fno_ft.optimizer.lr)

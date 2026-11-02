@@ -200,6 +200,36 @@ def test_simple_conv_and_p3d_equivariant() -> None:
     )
 
 
+def test_p3d_built_periodic_in_y_wraps_its_sdf_and_stays_patchable() -> None:
+    pytest.importorskip("p3d_surrogate")
+    nz, ny, nx = 16, 32, 16
+    mask = _mask(nz, ny, nx)
+    p3d = P3D(
+        n_state_channels=2,
+        n_params=2,
+        size="S",
+        window_size=2,
+        partition_size=1,
+        sdf_features="both",
+        periodic_axes=("y",),
+    ).eval()
+    torch.testing.assert_close(
+        p3d._sdf_features_for(mask[None])[0],
+        sdf_features(mask, clamp_cells=p3d.sdf_clamp_cells, periodic_y=True),
+    )
+
+    def zero_padded_y() -> list[str]:
+        return [
+            name
+            for name, m in p3d.named_modules()
+            if isinstance(m, nn.Conv3d) and m.padding[1] and m.padding_mode == "zeros"
+        ]
+
+    assert zero_padded_y()  # its strided down-convs still zero-pad y
+    make_periodic_y(p3d)
+    assert not zero_padded_y()
+
+
 def _stepper(**kwargs: Any) -> Any:
     pytest.importorskip("diffusers")
     pytest.importorskip("timm")

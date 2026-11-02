@@ -14,8 +14,8 @@ convs (peft's ``lora_A`` conv is patched like its base). Already y-periodic
 parts are left as they are: the baselines built with ``periodic_axes``
 containing ``"y"`` (``periodic_y`` attribute ``True``) are returned unchanged,
 and the convs of ``UNetConvNeXt`` / ``P3D`` built with ``"y"`` in
-``periodic_axes`` are skipped (a ``P3D``'s self-computed SDF still turns
-y-periodic).
+``periodic_axes`` are skipped (such a ``P3D`` already computes a y-periodic
+SDF; its zero-padded convs are still patched).
 
 Raises instead of half-patching: ``UPT`` (point cloud, no y grid),
 ``TadpoleLatentGenerator`` (absolute positions on the latent grid),

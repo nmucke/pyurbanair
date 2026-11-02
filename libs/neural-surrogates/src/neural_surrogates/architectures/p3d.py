@@ -441,7 +441,8 @@ class P3D(nn.Module):
             compute_sdf_features,
             clamp_cells=self.sdf_clamp_cells,
             mode=self.sdf_feature_mode,
-            periodic_y=getattr(self, "periodic_y", False),  # make_periodic_y
+            # Built periodic in y, or patched by make_periodic_y.
+            periodic_y=self._periodic[1] or getattr(self, "periodic_y", False),
         )
         if g.dim() == 3:  # single (z, y, x)
             return sdf(g).unsqueeze(0)

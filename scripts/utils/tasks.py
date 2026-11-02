@@ -45,7 +45,7 @@ from neural_surrogates.training.data_utils import (
     get_normalization_stats,
     get_param_normalization_stats,
 )
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 
 
 @dataclasses.dataclass
@@ -71,6 +71,10 @@ def _stepper(cfg: DictConfig, out_dir: pathlib.Path) -> Setup:
     cfg.dataset.sdf_clamp_cells = cfg.architecture.get(
         "sdf_clamp_cells", cfg.dataset.sdf_clamp_cells
     )
+    # A model built periodic in y computes a y-periodic SDF: train on the same.
+    if "y" in cfg.architecture.get("periodic_axes", ()):
+        with open_dict(cfg):
+            cfg.dataset.sdf_periodic_y = True
     train, val, source = _prechunked_datasets(cfg)
     model = _build_stepper(cfg, train)
     if cfg.init_weights is not None:
@@ -416,6 +420,8 @@ def _inherit_dataset(cfg: DictConfig, pretrained: Any) -> None:
     """Use the pretrained model's inputs: variables, geometry features, history."""
     for key in ("state_vars", "sdf_features", "sdf_clamp_cells"):
         cfg.dataset[key] = pretrained.dataset.get(key)
+    if pretrained.dataset.get("sdf_periodic_y"):
+        cfg.dataset.sdf_periodic_y = True
     if cfg.dataset.get("param_vars") is None:
         cfg.dataset.param_vars = pretrained.dataset.get("param_vars")
     if cfg.dataset.get("num_history_steps") is None:
