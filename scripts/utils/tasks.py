@@ -420,6 +420,8 @@ def _inherit_dataset(cfg: DictConfig, pretrained: Any) -> None:
     """Use the pretrained model's inputs: variables, geometry features, history."""
     for key in ("state_vars", "sdf_features", "sdf_clamp_cells"):
         cfg.dataset[key] = pretrained.dataset.get(key)
+    if pretrained.dataset.get("sdf_periodic_y"):
+        cfg.dataset.sdf_periodic_y = True
     if cfg.dataset.get("param_vars") is None:
         cfg.dataset.param_vars = pretrained.dataset.get("param_vars")
     if cfg.dataset.get("num_history_steps") is None:

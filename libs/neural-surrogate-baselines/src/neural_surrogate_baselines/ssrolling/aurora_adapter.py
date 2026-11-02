@@ -211,6 +211,7 @@ class UrbanAurora(nn.Module):
         levels, H, W = res
         height = self._building[0][:, None]
         while height.shape[-2:] != (H, W):
+            assert height.shape[-1] > W, f"no stage of {tuple(height.shape)} is {res}"
             height = F.avg_pool2d(height, 2, ceil_mode=True)
         field = self.height_embed(height.flatten(1)[..., None].to(c.dtype))
         field = field[:, None].expand(-1, levels, -1, -1).flatten(1, 2)

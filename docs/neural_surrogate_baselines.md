@@ -85,8 +85,10 @@ with the others below.
 - **Input:** the two latest frames, the SDF of the buildings (`sdf.sdf_features`
   on the whole domain, mode `sdf`), and the parameters as constant channels.
   Along an axis in `periodic_axes` the SDF wraps too (y only; the training
-  data's `sdf_periodic_y`, set from `periodic_axes` by `scripts/utils/tasks.py`),
-  so buildings across the seam count.
+  data's `sdf_periodic_y`, set from `periodic_axes` by `scripts/utils/tasks.py`
+  and inherited by fine-tunes), so buildings across the seam count. Models
+  trained before this (no `sdf_periodic_y` in their config.yaml) saw a
+  non-periodic SDF but get a periodic one in forward runs: retrain them.
 - **Network:** pointwise-MLP lifting, `n_layers` Fourier layers
   `v <- σ(M(K v) + W v + b + v)`, pointwise-MLP projection. Width 36, modes
   (z, y, x) = (8, 16, 16).
@@ -172,6 +174,11 @@ Two corrections to the papers' descriptions:
     its token's column;
   - decoder: the solid mask, averaged over each patch per level, projected by
     `solid_embed` and added to the Perceiver decoder's level queries.
+
+  Weights trained before this pathway lack `height_embed` and `solid_embed`
+  and no longer load: retrain them. Per-token conditioning runs each adaptive
+  LayerNorm's modulation on every token instead of once per sample (not
+  benchmarked).
 - **Grid:** H and W are padded to a multiple of the patch size and the
   prediction cropped back.
 - **Output:** the next state directly; paper 1 found increments made rollouts
