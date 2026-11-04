@@ -11,7 +11,7 @@ the scripts and configs are:
 | Step | Script | Config (`configs/`) |
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
-| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator,finetune_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
+| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,continue_dft,train_latent_generator,finetune_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
 | Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
@@ -269,6 +269,14 @@ is the mirror-image *backward* window — see below. Each item is a dict:
 | `params_n`   | `(K, P)`    | inflow params at steps `t, …, t+K-1`; scalar params (e.g. uDALES `pressure_gradient_magnitude`) are broadcast along `time` |
 | `geometry`   | `(*grid,)`  | binary mask: `1` = fluid, `0` = obstacle. The item's *trajectory's* mask; equal masks are content-deduped to one shared tensor at init |
 | `geom_features` | `(C, *grid)` | SDF / ∇SDF channels — present **only** when built with a non-`none` `sdf_features` mode (default `none`); `C` = 1 (`sdf`), 3 (`grad`) or 4 (`both`); one tensor per unique mask |
+
+`RolloutTransitionDataset` (same module) is a `TransitionDataset` whose items
+also carry `state_targets` `(K, C, *grid)`: every intermediate snapshot
+`t+1 … t+K` (`state_next` is the last of them), collated to
+`(B, K, C, *grid)`. It reads the `H + K` contiguous frames `t−H+1 … t+K`
+in one read (against `H + 1`), so `K + H` frames per sample leave disk. It
+serves `Trainer`'s `rollout_loss: sum` (§10) and the SSRollingUrbanNet
+baseline.
 
 The geometry mask is read from each state file's `geometry_var`
 (default `"blanking"`, the obstacle mask every generated corpus carries
@@ -633,8 +641,9 @@ differ.
 is a thin subclass of `BaseTraining`
 ([training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py)).
 `BaseTraining` holds all architecture-agnostic machinery; `Trainer`'s
-only addition is `_final_loss` — a masked element-wise `loss_fn(pred,
-target)` applied to the final rollout step. `PatchTrainer` overrides the
+additions are `_final_loss` — a masked element-wise `loss_fn(pred,
+target)` applied to the final rollout step — and the `rollout_loss` option
+(below), which can supervise every rollout step instead. `PatchTrainer` overrides the
 same hook with the four-term Eq (9) loss instead (see §18).
 
 `BaseTraining.__init__` accepts `model`, `train_loader`, `val_loader`,
@@ -652,6 +661,7 @@ same hook with the four-term Eq (9) loss instead (see §18).
 | `channels_last` | `channels_last_3d` memory layout for faster 3D-conv kernels |
 | `cudnn_benchmark` / `tf32` | CUDA backend tuning (autotuned conv, Ampere TF32). The autotune runs once per new (grid, micro-batch) shape, ~100 conv configurations per grid for the DFT, and is CPU-bound cuDNN plan building while the GPU idles: ~12 s per new grid on an RTX 3090 with the S autoencoder (vs ~0.8 s with it off; `torch.backends.cudnn.benchmark_limit` does not shorten it), ~25 min per job for the 69 realistic grids on the H100. Off, steady-state steps were 4-7% slower, so keep it on for long runs and turn it off for runs shorter than ~8 h (smoke tests) |
 | `pushforward_epochs_per_step` / `pushforward_start_steps` | pushforward-horizon curriculum (see below) |
+| `rollout_loss` | `Trainer` only: `final` (default) supervises the last rollout step only; `sum` every step, needs a `RolloutTransitionDataset` (see **Rollout loss** below) |
 | `lr_warmup_epochs` / `lr_warmup_start` / `lr_min` / `lr_warmup_per_step` | linear warmup → cosine annealing LR schedule; the warmup steps per epoch, or per optimizer step with `lr_warmup_per_step` (default `false`) |
 | `grad_clip_norm` | gradient clipping (`torch.nn.utils.clip_grad_norm_`) |
 | `grad_accum_steps` | micro-batches summed into one optimizer step (default 1); each loss is divided by its group's size, so a step sees the group's mean. The LR schedule steps per epoch, and a per-step warmup counts optimizer steps (`_optimizer_steps_per_epoch()`: `ceil(batches / grad_accum_steps)`, or the batch sizes the sampler draws in that epoch's shuffle, grouped as with `grad_accum_samples`). Not with the AE's discriminator |
@@ -674,6 +684,35 @@ backpropagating through the unroll. With `K=1` (the default) the inner
 loop is skipped and behaviour is identical to one-step training.
 Validation uses the same rollout, so with `K>1` the checkpointed best-val
 model minimises a `K`-step error rather than a one-step error.
+
+**Rollout loss (`rollout_loss`).** With `final` the network is only ever
+supervised `K` steps ahead of a true state, so it learns the conditional
+mean `K` steps ahead, which is smooth (small scales damped after one step).
+`rollout_loss: sum` supervises every step `i = 1 … K` against its own
+target (`state_targets`) and trains on the **mean** of the `K` masked
+per-step losses (a mean, not a sum, so the loss scale and the learning
+rate match `final`'s; the logged `train_loss` is that mean). Gradients:
+the last `g = grad_unroll_steps` steps backpropagate through their chain
+as with `final` (each of their losses through the chain steps before it);
+each of the first `K − g` steps gets the gradient of its own one-step
+loss from its detached input (truncated, as pushforward), so step 1 is
+trained from the true state; every prediction is fed on detached outside
+the chain. During training each early step's loss is backpropagated at
+once (`BaseTraining._backward_part`, which applies the micro-batch's
+accumulation weight and grad scaling), so its graph is freed before the
+next step: the peak memory stays that of the `g`-step chain, as with
+`final`. The compute does not: every step is a forward + backward instead
+of `K − g` `no_grad` forwards, about `3K / (K − g + 3g)` times the model
+work (1.67× at `K = 5`, `g = 2`, with a backward ≈ 2 forwards), plus the
+`K + H` frames read per sample. Each early step has its own autocast
+context, left before its backward; no step runs under `no_grad`, so the
+cast cache cannot be poisoned. `unroll_no_grad_modules` still applies to
+the chain steps but the last. Validation always uses `final` at the
+dataset's horizon, so `val_loss` stays comparable between the two
+settings. The per-step losses are logged as `train_step_<i>` in
+`metrics.csv` and on the epoch line. `sum` with a batch without
+`state_targets` raises. Tests:
+[test_rollout_loss.py](../tests/neural_surrogates/test_rollout_loss.py).
 
 **Pushforward curriculum.** Setting `pushforward_epochs_per_step` enables a
 curriculum that starts the rollout horizon at `pushforward_start_steps`
@@ -780,6 +819,22 @@ pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_
     paths.data_dir=training_data/pylbm_barcelona \
     dataset.pushforward_steps=4 dataset.num_history_steps=3 \
     trainer.num_epochs=20 optimizer.lr=5e-4
+```
+
+[continue_dft.yaml](../configs/surrogate/continue_dft.yaml) continues a
+trained DFT (default `dft_s`) on its own data, training the parameters its
+`train_dft.yaml` run trained: the `finetune_stepper` task with fresh LoRA
+adapters of the same preset and rank on its merged weights (zero at init, so
+training starts from the pretrained model) plus the same
+`trainable_modules`; the optimizer starts fresh. Keep its `lora` and
+`trainable_modules` equal to the pretrained run's. It runs at the full
+horizon from the first epoch with a one-epoch per-step warmup to a constant
+`optimizer.lr` (`lr_min: ${optimizer.lr}`), on a `RolloutTransitionDataset`
+so that `rollout_loss` `final` and `sum` runs read the same data:
+
+```bash
+pixi run -e cuda python scripts/surrogate/train.py --config-name surrogate/continue_dft \
+    name=dft_s_sumloss trainer.rollout_loss=sum trainer.num_epochs=10
 ```
 
 ### 11. Evaluating steppers
@@ -2112,7 +2167,7 @@ unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
 | Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml), [finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml) (§32b) |
 | Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`; §32b: `finetune_stepper`) |
 | `GeometryBranch` (shared with the AE) | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
-| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py), `test_finetune_dft_*` in [tests/scripts/test_surrogate.py](../tests/scripts/test_surrogate.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py), `test_finetune_dft_*` and `test_continue_dft_*` in [tests/scripts/test_surrogate.py](../tests/scripts/test_surrogate.py) |
 
 ---
 

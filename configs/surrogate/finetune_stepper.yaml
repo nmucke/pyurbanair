@@ -38,6 +38,10 @@ trainer:
   pushforward_epochs_per_step: 5
   pushforward_start_steps: 1
   grad_unroll_steps: 2
+  # Which rollout steps the loss supervises: final (the last one only) or sum
+  # (the mean of every step's loss; needs dataset._target_:
+  # neural_surrogates.RolloutTransitionDataset). Validation always uses final.
+  rollout_loss: final
 
 optimizer:
   lr: 5.0e-5

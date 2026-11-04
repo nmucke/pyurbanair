@@ -71,6 +71,10 @@ trainer:
   pushforward_start_steps: 3
   # >= the horizon: backpropagate through every rollout step.
   grad_unroll_steps: ${dataset.pushforward_steps}
+  # Which rollout steps the loss supervises: final (the last one only) or sum
+  # (the mean of every step's loss; needs dataset._target_:
+  # neural_surrogates.RolloutTransitionDataset). Validation always uses final.
+  rollout_loss: final
   # An optimizer step per 8 samples (micro-batches of batch_sampler.batch_size).
   grad_accum_samples: 8
 

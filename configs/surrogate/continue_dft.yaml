@@ -1,0 +1,78 @@
+# @package _global_
+# Continue training a trained DFT stepper (train_dft.yaml output) on its own
+# data, training the same parameters: e.g. to compare training losses
+# (trainer.rollout_loss) from one starting point. The finetune_stepper task as
+# in finetune_dft.yaml: fresh LoRA adapters on the pretrained model's merged
+# weights, plus the trainable_modules. The adapters start at zero, so training
+# starts from the pretrained model; the optimizer state starts fresh.
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts/surrogate/train.py builds.
+task: finetune_stepper
+name: dft_s_continued
+# A train_dft.yaml output folder (weights + config).
+pretrained_dir: ${paths.weights_dir}/dft_s
+
+method: lora
+# `lora` and `trainable_modules` as in the pretrained run (train_dft.yaml), so
+# the same parameters train.
+lora:
+  variant: standard
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  target_preset: tadpole_encdec
+  target_modules: null
+  modules_to_save: []
+  fused_forward: false
+trainable_modules:
+  - subnetwork
+  - latent_residual_scale
+  - skip_mixing
+  - dft.decoder.conv_decoder.scales
+  - dft.decoder.transformer_decoder.scales
+
+# Keep the pretrained model's normalization.
+recompute_normalization: false
+
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 10
+  patience: 10
+  checkpoint_every: 1
+  # final | sum (see train_dft.yaml); the dataset below serves both.
+  rollout_loss: final
+  # The full horizon (dataset.pushforward_steps) from the first epoch.
+  pushforward_epochs_per_step: null
+  grad_unroll_steps: 2
+  # Linear warmup over the first epoch's optimizer steps, then constant.
+  lr_warmup_epochs: 1
+  lr_warmup_per_step: true
+  lr_min: ${optimizer.lr}
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.0
+
+batch_sampler:
+  batch_size: 2
+  cell_budget: 393216
+
+dataloader:
+  num_workers: 16
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+
+dataset:
+  # Every intermediate target, for rollout_loss: sum; final reads the same
+  # data and ignores them.
+  _target_: neural_surrogates.RolloutTransitionDataset
+  # null: take these from the pretrained model.
+  param_vars: null
+  num_history_steps: null
+  pushforward_steps: 5

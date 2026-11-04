@@ -18,6 +18,7 @@ Everything else -- including the pushforward rollout itself -- is shared.
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import math
 import time
@@ -438,6 +439,13 @@ class BaseTraining:
         # the DD loss term breakdown). ``None`` until/unless a subclass sets it
         # inside ``_final_loss``; the generic full-grid trainer leaves it unset.
         self._aux_terms: dict[str, torch.Tensor] | None = None
+        # Set by ``_train_epoch`` for the batch being trained: backpropagates a
+        # part of that batch's loss with its accumulation weight and grad
+        # scaling, so a subclass can free a part of the graph before the rest
+        # of the forward (``Trainer``'s ``rollout_loss="sum"``). The part's
+        # value must still be in the loss ``_forward`` returns, detached.
+        # ``None`` outside training.
+        self._backward_part: Callable[[torch.Tensor], None] | None = None
         # Best (lowest) validation loss seen; exposed for the caller's guarded
         # final export. Initialised here so pre-``fit()`` access is well-defined.
         self.best_val = float("inf")
@@ -775,13 +783,13 @@ class BaseTraining:
         prof = self._profile_tick(None, 0, window) if window is not None else None
         seen = 0
         for i, batch in enumerate(tqdm.tqdm(self.train_loader)):
-            loss = self._forward(batch)
             if target is None:
                 if i % k == 0:
                     group = min(k, n_batches - i) if k > 1 else 1
                     self.optimizer.zero_grad(set_to_none=True)
-                self.scaler.scale(loss / group if group > 1 else loss).backward()
-                step = (i + 1) % k == 0 or i + 1 == n_batches
+                self._backward_part = functools.partial(
+                    self._scaled_backward, group=group
+                )
             else:
                 if seen == 0:
                     self.optimizer.zero_grad(set_to_none=True)
@@ -790,7 +798,14 @@ class BaseTraining:
                 # unscale / clip / step (linear, so fine on still-scaled grads).
                 n_samples = self._batch_samples(batch)
                 seen += n_samples
-                self.scaler.scale(loss * n_samples).backward()
+                self._backward_part = functools.partial(
+                    self._scaled_backward, n_samples=n_samples
+                )
+            loss = self._forward(batch)
+            self._backward_part(loss)
+            if target is None:
+                step = (i + 1) % k == 0 or i + 1 == n_batches
+            else:
                 step = seen >= target or i + 1 == n_batches
                 if step:
                     # One fused launch instead of one per parameter tensor.
@@ -818,10 +833,23 @@ class BaseTraining:
             self._accumulate_terms(term_sums)
             if window is not None:
                 prof = self._profile_tick(prof, n, window)
+        self._backward_part = None
         if prof is not None:  # the epoch ended inside the window
             self._profile_end(prof, n - window[0])  # type: ignore[index]
         self._train_terms = self._mean_terms(term_sums, n)
         return float((total / max(n, 1)).item())
+
+    def _scaled_backward(
+        self, loss: torch.Tensor, group: int = 1, n_samples: int | None = None
+    ) -> None:
+        """Backpropagate a micro-batch's loss, or a part of it, with its
+        accumulation weight (``1 / group``, or ``n_samples``, see
+        ``_train_epoch``) and the grad scaling."""
+        if n_samples is not None:
+            loss = loss * n_samples
+        elif group > 1:
+            loss = loss / group
+        self.scaler.scale(loss).backward()
 
     def _profile_tick(
         self,

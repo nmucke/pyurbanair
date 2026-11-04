@@ -5,7 +5,8 @@ datasets read the same on-disk split:
 
 * :class:`TransitionDataset` -- flattens every trajectory into full-field
   ``(state_n, params_n, geometry) -> state_{n+K}`` one-step / K-step
-  (pushforward-trick) samples.
+  (pushforward-trick) samples; :class:`RolloutTransitionDataset` adds every
+  intermediate target ``state_{n+1} … state_{n+K}``.
 * :class:`PatchTransitionDataset` -- a subclass that instead yields one sample
   *per spatial patch* of a two-level overlapping domain decomposition.
 * :class:`SnapshotDataset` -- single time slices (no next-step target, no
@@ -32,10 +33,14 @@ from neural_surrogates.datasets.snapshot_history import (
     SnapshotHistoryDataset,
     snapshot_history_collate,
 )
-from neural_surrogates.datasets.transition import TransitionDataset
+from neural_surrogates.datasets.transition import (
+    RolloutTransitionDataset,
+    TransitionDataset,
+)
 
 __all__ = [
     "TransitionDataset",
+    "RolloutTransitionDataset",
     "PatchTransitionDataset",
     "TrajectoryBatchSampler",
     "SnapshotDataset",

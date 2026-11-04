@@ -128,8 +128,9 @@ part.
 
 [ssrolling/](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/ssrolling/):
 `aurora_adapter.py` (`UrbanAurora`, the backbone), `ssgen.py`, `model.py`,
-`training.py`; plus `RolloutTransitionDataset` in
-[datasets.py](../libs/neural-surrogate-baselines/src/neural_surrogate_baselines/datasets.py).
+`training.py`; plus `RolloutTransitionDataset`, which lives in neural_surrogates
+([transition.py](../libs/neural-surrogates/src/neural_surrogates/datasets/transition.py),
+also used by `Trainer`'s `rollout_loss: sum`) and is re-exported here.
 
 **3DSwinUrbanNet is Microsoft Aurora.** Paper 1 §II B says it is
 "constructed by modifying ... Aurora". Aurora (pinned `microsoft-aurora ==

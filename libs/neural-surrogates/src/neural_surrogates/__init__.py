@@ -16,6 +16,7 @@ from neural_surrogates.architectures import (
 from neural_surrogates.datasets import (
     LatentCacheDataset,
     PatchTransitionDataset,
+    RolloutTransitionDataset,
     SnapshotDataset,
     SnapshotHistoryDataset,
     TrajectoryBatchSampler,
@@ -47,6 +48,7 @@ from neural_surrogates.training import (
 
 __all__ = [
     "TransitionDataset",
+    "RolloutTransitionDataset",
     "PatchTransitionDataset",
     "TrajectoryBatchSampler",
     "SnapshotDataset",

@@ -237,6 +237,46 @@ def test_finetune_dft_rollout_and_export(
     assert (model_dir / "adapter" / "adapter_config.json").exists()
 
 
+def test_continue_dft_trains_the_pretrained_set_on_every_step(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """continue_dft.yaml trains the parameters train_dft.yaml trained, from its
+    weights, here with rollout_loss: sum at a fixed horizon."""
+    tasks = load_script("scripts/utils/tasks.py")
+    dft = OmegaConf.create(OmegaConf.to_container(trained["train_dft"]))
+    OmegaConf.set_struct(dft, False)
+    names = {
+        n
+        for n, p in tasks.TASKS["dft"](dft, tmp_path / "dft").model.named_parameters()
+        if p.requires_grad
+    }
+    cfg = compose(
+        "surrogate/continue_dft",
+        "+test=continue_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=tmp_path,
+    )
+    OmegaConf.set_struct(cfg, False)
+    setup = tasks.TASKS[cfg.task](cfg, tmp_path / "continued")
+    assert {n for n, p in setup.model.named_parameters() if p.requires_grad} == names
+
+    cfg = compose(
+        "surrogate/continue_dft",
+        "+test=continue_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    with open(model_dir / "metrics.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert [int(row["pushforward_steps"]) for row in rows] == [3, 3]
+    assert {"train_step_1", "train_step_2", "train_step_3"} <= rows[0].keys()
+    assert not any(key.startswith("val_step") for key in rows[0])
+
+
 def _latent_cache_cfg(
     tmp_path: pathlib.Path, trained: dict[str, Any], *overrides: str
 ) -> Any:
