@@ -46,6 +46,8 @@ trainer:
   checkpoint_every: 1
   # final | sum (see train_dft.yaml); the dataset below serves both.
   rollout_loss: final
+  # As in the dft_b run; without it dft_b's batch settings OOM an 80 GB A100.
+  compile_modules: [dft.encoder.conv_encoder, dft.decoder.conv_decoder]
   # The full horizon (dataset.pushforward_steps) from the first epoch.
   pushforward_epochs_per_step: null
   grad_unroll_steps: 2

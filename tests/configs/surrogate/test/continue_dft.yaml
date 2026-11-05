@@ -6,5 +6,6 @@ name: dft_continued
 trainer:
   num_epochs: 2
   rollout_loss: sum
+  compile_modules: null
 dataset:
   pushforward_steps: 3
