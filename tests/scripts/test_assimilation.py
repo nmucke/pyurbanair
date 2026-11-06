@@ -396,6 +396,123 @@ def test_adaptive_error_run(
     )
 
 
+STATISTICS = "observation.types=[bins,tke,spectral]"
+
+
+def test_observation_types_config(tmp_path: pathlib.Path) -> None:
+    """[bins] by default; statistics for the smoother only; bins without an
+    interval is raw."""
+    helpers = load_script("scripts/utils/helper_functions.py")
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
+    assert list(cfg.observation.types) == ["bins"]
+    assert helpers.observation_types(cfg) == ["bins"]
+    no_bins = compose(
+        "assimilation",
+        "+test=assimilation",
+        "observation.aggregation.interval_seconds=null",
+        root=tmp_path,
+    )
+    assert helpers.observation_types(no_bins) == ["raw"]
+    assert helpers.make_aggregation(no_bins) is None
+
+    for types in ("[raw]", "[bins]", "[raw,tke]", "[bins,tke,spectral]", "[spectral]"):
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            f"observation.types={types}",
+            root=tmp_path,
+        )
+        check_config(cfg, "smoother")
+    for workflow in ("filtering", "hybrid"):
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *METHODS[workflow],
+            "observation.types=[raw]",
+            root=tmp_path,
+        )
+        check_config(cfg, workflow)
+
+
+def test_smoother_with_observation_statistics(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Every block is assimilated and labelled; the bins block is the default
+    run's observations bit for bit; metrics read the blocks apart. 8 one-second
+    frames per window: the spectrum is one band of 4 s Welch segments."""
+    window = [
+        "time.simulation_time=8.0",
+        "observation.aggregation.interval_seconds=2.0",
+    ]
+    runs: dict[str, list[str]] = {
+        "default": [],
+        "statistics": [
+            STATISTICS,
+            "observation.spectral.segment_seconds=4.0",
+            "observation.spectral.num_bands=1",
+        ],
+    }
+    run_dirs = {}
+    for name, extra in runs.items():
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *SURROGATE,
+            *surrogate(session_root),
+            *window,
+            *extra,
+            root=tmp_path / name,
+        )
+        run_dirs[name] = _run("smoother", cfg)
+    num_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+    for w in range(2):
+        default = xarray.load_dataset(
+            run_dirs["default"] / f"windows/window_{w}_obs.nc"
+        )
+        stats = xarray.load_dataset(
+            run_dirs["statistics"] / f"windows/window_{w}_obs.nc"
+        )
+        assert "obs_block" not in default
+        blocks = stats.obs_block.values
+        assert list(dict.fromkeys(blocks.tolist())) == ["bins", "tke", "spectral"]
+        assert (blocks == "tke").sum() == (blocks == "spectral").sum() == num_obs
+        bins = stats.isel(observation=blocks == "bins")
+        for name in ("obs", "obs_clean", "obs_std"):
+            np.testing.assert_array_equal(bins[name], default[name])
+        for name in ("obs", "obs_clean", "obs_std", "pred_obs"):
+            assert np.isfinite(stats[name]).all(), name
+        assert (stats.obs_std > 0).all()
+    metrics = yaml.safe_load((run_dirs["statistics"] / "metrics.yaml").read_text())
+    smoother = metrics["observation"]["smoother"]
+    assert set(smoother["data_mismatch_per_block"]) == {"bins", "tke", "spectral"}
+    assert "forecast_rmse" in smoother and "smoother" in metrics["desroziers"]
+    default_metrics = yaml.safe_load((run_dirs["default"] / "metrics.yaml").read_text())
+    assert "data_mismatch_per_block" not in default_metrics["observation"]["smoother"]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("smoother", ["observation.types=[]"], "non-empty list"),
+        ("smoother", ["observation.types=all"], "non-empty list"),
+        ("smoother", ["observation.types=[bins,velocity]"], "choose from"),
+        ("smoother", ["observation.types=[tke,tke]"], "a type twice"),
+        ("smoother", ["observation.types=[raw,bins]"], "both raw and bins"),
+        ("smoother", [STATISTICS, ADAPTIVE], "cannot be used with observation.types"),
+        ("hybrid", [STATISTICS], "for the smoother only"),
+        ("filtering", ["params@prior_params=static", STATISTICS], "smoother only"),
+    ],
+)
+def test_observation_types_rejected(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", "+test=assimilation", *overrides, root=tmp_path)
+    with pytest.raises(ValueError, match=message):
+        check_config(cfg, workflow)
+
+
 def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> None:
     """The Desroziers ratio compares against obs_std_assimilated when saved,
     the observation block against the configured obs_std."""
@@ -417,6 +534,36 @@ def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> N
         assert desroziers["obs_std_used"] == pytest.approx(used)
         assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0) / used)
         assert observation["innovation_chi2_diag"]["mean"] == pytest.approx(4.0)
+
+
+def test_observation_metrics_score_the_velocity_blocks(tmp_path: pathlib.Path) -> None:
+    """With obs_block labels, RMSE and Desroziers read the bins rows alone;
+    O_N reads all rows and each block."""
+    compute_metrics = load_script("scripts/compute_metrics.py")
+    blocks = np.array(["bins", "bins", "tke", "spectral"])
+    pred = np.stack([np.full((4, 2), 2.0), np.full((4, 2), 1.0)])
+    pred[:, 2:] = 100.0  # the statistics rows: far off, in other units
+    ds = xarray.Dataset(
+        {
+            "obs": ("observation", np.zeros(4)),
+            "obs_std": ("observation", np.ones(4)),
+            "pred_obs": (("esmda_step", "observation", "ensemble"), pred),
+            "obs_block": ("observation", blocks),
+        }
+    )
+    ds.to_netcdf(tmp_path / "window_0_obs.nc")
+    observation, desroziers = compute_metrics._observation_metrics(
+        [tmp_path / "window_0_obs.nc"], 1
+    )
+    assert observation["forecast_rmse"]["mean"] == pytest.approx(2.0)
+    assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0))
+    files = [tmp_path / "window_0_obs.nc"]
+    assert compute_metrics._data_mismatch(
+        files, "tke"
+    ) != compute_metrics._data_mismatch(files, "bins")
+    # Statistics alone: no velocity rows, no observation or Desroziers block.
+    ds.assign(obs_block=("observation", ["tke"] * 4)).to_netcdf(tmp_path / "s.nc")
+    assert compute_metrics._observation_metrics([tmp_path / "s.nc"], 1) == ({}, None)
 
 
 def test_truth_from_a_forward_run(
@@ -463,6 +610,55 @@ def test_truth_from_a_forward_run(
 def test_smoother_on_udales(tmp_path: pathlib.Path) -> None:
     cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
     _check_outputs(_run("smoother", cfg))
+
+
+# The smoother on uDALES estimating the SGS offset and the wall roughness from
+# the interval means and the sensors' turbulence statistics. 16 frames of
+# 0.25 s per 4 s window leave the statistics few samples; the
+# spectrum has 2 bands of 1 s Welch segments.
+SGS_ROUGHNESS = [
+    "params@truth_params=sgs_roughness_truth",
+    "params@prior_params=sgs_roughness",
+    "smoothing.smoother=${smoother.static}",
+    "assimilation.params_to_estimate=[sgs_bias_b0,roughness_length]",
+    "assim_model.forward_model.model_discrepancy.enabled=true",
+    "truth_model.forward_model.model_discrepancy.enabled=true",
+    "ensemble.failure.policy=raise",
+    "ensemble.ensemble_size=4",
+    "time.simulation_time=4.0",
+    "time.output_frequency=0.25",
+    "observation.types=[bins,tke,spectral]",
+    "observation.spectral.segment_seconds=1.0",
+    "observation.spectral.num_bands=2",
+]
+
+
+@pytest.mark.integration  # type: ignore[misc]
+def test_smoother_estimates_sgs_and_roughness_on_udales(tmp_path: pathlib.Path) -> None:
+    """All three observation blocks are assimilated and saved; no skill check
+    (the tiny domain need not identify the parameters)."""
+    cfg = compose("assimilation", "+test=assimilation", *SGS_ROUGHNESS, root=tmp_path)
+    load_script("scripts/run_smoother.py").run(cfg)
+    windows = pathlib.Path(cfg.paths.results_dir) / "smoother" / "windows"
+    truth = xarray.load_dataset(windows.parent / "true_params.nc")
+    for w in range(int(cfg.assimilation.num_windows)):
+        obs = xarray.load_dataset(windows / f"window_{w}_obs.nc")
+        assert list(dict.fromkeys(obs.obs_block.values.tolist())) == [
+            "bins",
+            "tke",
+            "spectral",
+        ]
+        for name in ("obs", "obs_clean", "pred_obs"):
+            assert np.isfinite(obs[name]).all(), name
+        assert (obs.obs_std > 0).all()
+        posterior = xarray.load_dataset(windows / f"window_{w}_posterior_params.nc")
+        prior = xarray.load_dataset(windows / f"window_{w}_prior_params.nc")
+        for name in ("sgs_bias_b0", "roughness_length"):
+            assert np.isfinite(posterior[name]).all(), name
+            print(
+                f"window {w} {name}: prior {prior[name].values}, posterior "
+                f"{posterior[name].values}, truth {truth[name].values}"
+            )
 
 
 # Per method: what run_info.yaml names, which decides the observation stages.

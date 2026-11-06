@@ -22,6 +22,7 @@ from data_assimilation.observation_operator import (
     ObservationOperator,
     flatten_observations,
 )
+from data_assimilation.observation_statistics import ObservationStatistics
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -172,33 +173,76 @@ def make_observation_error(cfg: DictConfig) -> ObservationErrorSpec:
     return spec
 
 
-def make_aggregation(cfg: DictConfig) -> AggregateObservations | None:
-    """The observation aggregator, or None to assimilate every frame."""
+OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
+
+
+def observation_types(cfg: DictConfig) -> list[str]:
+    """`observation.types`, [bins] when unset.
+
+    bins without `aggregation.interval_seconds` bins every frame on its own,
+    which is raw, and is returned as raw.
+    """
+    types = list(OmegaConf.select(cfg, "observation.types", default=None) or ["bins"])
     aggregation = cfg.observation.aggregation
     if aggregation is None or aggregation.get("interval_seconds") is None:
-        return None
-    aggregator: AggregateObservations = instantiate(aggregation)
-    # Windows may hold a different number of intervals (e.g. a shorter last one).
-    aggregator.allow_interval_count_change = True
-    return aggregator
+        types = ["raw" if name == "bins" else name for name in types]
+    return types
+
+
+def make_aggregation(
+    cfg: DictConfig,
+) -> AggregateObservations | ObservationStatistics | None:
+    """What turns a window's observed series into the vector the update sees.
+
+    For a single raw or bins type (the default), the interval aggregator, or
+    None to assimilate every frame (raw); otherwise the `ObservationStatistics`
+    of the listed types.
+    """
+    types = observation_types(cfg)
+    aggregator = None
+    if "bins" in types:
+        aggregator = instantiate(cfg.observation.aggregation)
+        # Windows may hold a different number of intervals (e.g. a shorter last one).
+        aggregator.allow_interval_count_change = True
+    if types in (["raw"], ["bins"]):
+        return aggregator
+    options = {
+        name: OmegaConf.to_container(cfg.observation[name], resolve=True)
+        for name in ("tke", "spectral")
+        if name in types
+    }
+    statistics = ObservationStatistics(
+        types=types,
+        aggregation=aggregator,
+        num_sensors=len(cfg.obs.x_points),
+        **options,
+    )
+    statistics.allow_interval_count_change = True
+    return statistics
 
 
 def observe(
     truth: xarray.Dataset,
     operator: Any,
     error: ObservationErrorSpec,
-    aggregation: AggregateObservations | None,
+    aggregation: AggregateObservations | ObservationStatistics | None,
     rng_key: jax.Array,
 ) -> tuple[xarray.DataArray, xarray.DataArray, Any]:
     """Noisy and clean observations of `truth`, plus the resolved error.
 
     Instrument noise is drawn on the raw frames; the resolved error carries the
-    covariance of the (possibly aggregated) observations the update sees.
+    covariance of the (possibly aggregated) observations the update sees. For
+    observation statistics it is block-diagonal, the tke and spectral blocks
+    estimated from the noisy series.
     """
     clean = operator(truth)
-    resolved = error.resolve(clean, operator, aggregation)
     noise = np.asarray(jax.random.normal(rng_key, clean.shape))
-    return clean + resolved.raw_instrument_std * noise, clean, resolved
+    if not isinstance(aggregation, ObservationStatistics):
+        resolved = error.resolve(clean, operator, aggregation)
+        return clean + resolved.raw_instrument_std * noise, clean, resolved
+    raw_std = error.resolve(clean, operator, None).raw_instrument_std
+    noisy = clean + raw_std * noise
+    return noisy, clean, aggregation.resolve_error(noisy, operator, error)
 
 
 def cycle_observations(
@@ -230,12 +274,29 @@ def cycles_to_time(ds: xarray.Dataset, times: np.ndarray) -> xarray.Dataset:
 
 
 def flatten_obs(
-    observations: xarray.DataArray, aggregation: AggregateObservations | None
+    observations: xarray.DataArray,
+    aggregation: AggregateObservations | ObservationStatistics | None,
 ) -> np.ndarray:
-    """Aggregate and flatten observations into the vector the update uses."""
-    if aggregation is not None:
+    """Aggregate and flatten observations into the vector the update uses.
+
+    Observation statistics of an observed series (`observed=True`) carry no
+    instrument-noise bias term; the predictions get it added instead
+    (`set_prediction_noise`). So a clean series' statistics differ from a
+    noisy one's by that bias, by design.
+    """
+    if isinstance(aggregation, ObservationStatistics):
+        observations = aggregation(observations, observed=True)
+    elif aggregation is not None:
         observations = aggregation(observations)
     return np.asarray(flatten_observations(observations))
+
+
+def set_prediction_noise(aggregation: Any, resolved: Any) -> None:
+    """Give observation statistics the raw instrument variance per observation
+    (from their resolved error), which they add to the predicted tke and
+    spectra to match the noisy observed series. No-op otherwise."""
+    if isinstance(aggregation, ObservationStatistics):
+        aggregation.noise_variance = resolved.noise_variance
 
 
 class StridedOperator:
@@ -265,13 +326,21 @@ def save_obs(
     obs_std: np.ndarray,
     pred_obs: list[np.ndarray],
     extra: dict[str, np.ndarray] | None = None,
+    block_slices: dict[str, slice] | None = None,
 ) -> None:
     """One window's observations and predicted observations per update step.
 
     `pred_obs` holds one (observation, ensemble) array per step: the ESMDA
     iterations for a smoother (prior first, posterior last), forecast and
-    analysis for a filter. `extra` adds more per-observation variables.
+    analysis for a filter. `extra` adds more per-observation variables;
+    `block_slices` (observation statistics) labels each observation with its
+    block in `obs_block` (raw, bins, tke, spectral).
     """
+    if block_slices is not None:
+        labels = np.full(np.asarray(obs).size, "", dtype=object)
+        for name, rows in block_slices.items():
+            labels[rows] = name
+        extra = {**(extra or {}), "obs_block": labels.astype(str)}
     xarray.Dataset(
         {
             "obs": ("observation", np.asarray(obs).ravel()),

@@ -19,7 +19,12 @@ Outputs, in `<paths.results_dir>/smoother/`:
             _obs.nc (observations and predicted observations per ESMDA step;
                      obs_std is the configured std; with
                      observation.adaptive_error also obs_std_assimilated, the
-                     inflated std the window used, and obs_error_group)
+                     inflated std the window used, and obs_error_group; with
+                     observation.types other than [bins] or [raw], obs_block
+                     labels each entry raw, bins, tke or spectral; the
+                     predicted tke and spectra include the instrument noise's
+                     bias, which obs_clean (statistics of the clean series)
+                     lacks)
     run_info.yaml also lists the adaptive error's per-window inflation.
 """
 
@@ -57,6 +62,7 @@ from helper_functions import (  # noqa: E402
     parameter_names,
     save_obs,
     save_yaml,
+    set_prediction_noise,
 )
 from inconsistency_check import check_config  # noqa: E402
 
@@ -129,6 +135,11 @@ def run(cfg: DictConfig) -> None:
     for w in tqdm(range(num_windows), desc="windows"):
         start = time.perf_counter()
         obs, obs_clean, resolved = observations[w]
+        # The update's observation vector. Observation statistics are computed
+        # from the observed series here; the predictions get the instrument
+        # noise's bias added to their tke and spectra.
+        flat_obs = flatten_obs(obs, aggregation)
+        set_prediction_noise(aggregation, resolved)
         params.to_netcdf(windows_dir / f"window_{w}_prior_params.nc")
         if hasattr(smoother, "pin_initial_time_point"):
             # Keep time-varying parameters continuous across window boundaries.
@@ -142,7 +153,7 @@ def run(cfg: DictConfig) -> None:
         output = smoother(
             state=state,
             params=params,
-            observations=obs,
+            observations=flat_obs,
             observation_covariance=jnp.asarray(covariance),
             return_params_history=True,
         )
@@ -150,7 +161,6 @@ def run(cfg: DictConfig) -> None:
         del output  # the posterior state is read back with get_state
         posterior_params = params_history.isel(esmda_step=-1)
         posterior_params.to_netcdf(windows_dir / f"window_{w}_posterior_params.nc")
-        flat_obs = flatten_obs(obs, aggregation)
         obs_extra: dict[str, np.ndarray] | None = None
         if adaptive is not None:
             adaptive.record(
@@ -171,6 +181,7 @@ def run(cfg: DictConfig) -> None:
             resolved.std,
             smoother.pred_obs_history,
             obs_extra,
+            getattr(resolved, "block_slices", None),
         )
 
         # Saved ensemble states, one at a time; the next window starts from the

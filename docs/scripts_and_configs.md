@@ -166,8 +166,12 @@ parameter-updating filter modes need inflation or a parameter evolution;
 `assimilate_every_n_step` divides the frames per window;
 `hybrid.likelihood_allocation=shared_budget` needs `filtering.beta > 1`, no
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
-prior parameters; `observation.adaptive_error` is smoother-only; and the
-SGS-discrepancy rules of §1.7.
+prior parameters; `observation.adaptive_error` is smoother-only;
+`observation.types` is a non-empty list of `raw`, `bins`, `tke`, `spectral`
+without both `raw` and `bins`, and its statistics (`tke`, `spectral`) are
+smoother-only (the filter and the hybrid's filter assimilate frame by frame)
+and rule out `observation.adaptive_error` (it pools one kind of observation per
+height band); and the SGS-discrepancy rules of §1.7.
 
 A localized state-bearing smoother is also checked for memory. Its update
 holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as
@@ -268,7 +272,15 @@ All DA run dirs share one layout: `config.yaml`, `run_info.yaml`,
 `windows/window_{w}_{prior,posterior}_{params,state}.nc` plus
 `window_{w}_obs.nc`. The smoother assimilates each window's observations with
 `smoothing.num_steps` ESMDA steps and starts the next window from the
-posterior. `assimilation.save_states` picks the smoother's state files, the
+posterior. `observation.types` picks what it assimilates of each window's
+sensor series: `raw` frames, `bins` (interval means, the default), and the
+turbulence statistics `tke` and `spectral`, stacked in that order with a
+block-diagonal R ([data_assimilation.md](data_assimilation.md) §2). The
+observed statistics are taken from the noisy series as they are and the
+instrument noise's variance is added to the predicted tke and spectra (so
+`obs_clean`, from the clean series, lacks that bias); `window_{w}_obs.nc`
+then labels each entry in `obs_block`, and compute_metrics.py scores the RMSE, chi² and Desroziers on the
+`raw`/`bins` entries only, O_N on all and per block. `assimilation.save_states` picks the smoother's state files, the
 same in memory and on disk: `posterior` (default), `prior` (+
 `window_{w}_prior_state.nc`) or `all` (+ `window_{w}_step_{i}_state.nc` for
 every intermediate ESMDA step). The filter forecasts

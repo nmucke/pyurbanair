@@ -33,6 +33,7 @@ def check_config(cfg: DictConfig, workflow: str) -> None:
     problems = _models(cfg)
     if workflow != "forward":
         problems += _assimilation(cfg)
+        problems += _observation(cfg, workflow)
         problems += _discrepancy(cfg, workflow)
     if workflow in ("smoother", "hybrid"):
         problems += _smoothing(cfg, workflow)
@@ -139,6 +140,48 @@ def _replica(cfg: DictConfig) -> list[str]:
     return []
 
 
+OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
+
+
+def _observation(cfg: DictConfig, workflow: str) -> list[str]:
+    """`observation.types`: a non-empty list; statistics for the smoother only."""
+    types = OmegaConf.select(cfg, "observation.types", default=None)
+    if types is None:
+        return []
+    if isinstance(types, str) or not len(types):
+        return [
+            "observation.types must be a non-empty list of "
+            f"{', '.join(OBSERVATION_TYPES)}, e.g. [bins, tke, spectral]; got "
+            f"{types!r}."
+        ]
+    problems = []
+    unknown = [name for name in types if name not in OBSERVATION_TYPES]
+    if unknown:
+        problems.append(
+            f"observation.types names {unknown}; choose from {list(OBSERVATION_TYPES)}."
+        )
+    if len(set(types)) != len(types):
+        problems.append(f"observation.types lists a type twice: {list(types)}.")
+    if {"raw", "bins"} <= set(types):
+        problems.append(
+            "observation.types cannot hold both raw and bins: they assimilate "
+            "the same frames twice."
+        )
+    statistics = set(types) - {"raw", "bins"}
+    if statistics and workflow != "smoother":
+        problems.append(
+            f"observation.types {sorted(statistics)} are for the smoother only: "
+            f"the {workflow} assimilates frame by frame; use [bins] or [raw]."
+        )
+    if statistics and OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+        problems.append(
+            "observation.adaptive_error pools innovations per height band of one "
+            f"kind of observation: it cannot be used with observation.types "
+            f"{list(types)}; use [bins] or [raw]."
+        )
+    return problems
+
+
 def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:
     problems = []
     s = cfg.smoothing
@@ -207,7 +250,11 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
             "time.simulation_time",
         )
     )
-    interval = OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
+    interval = (
+        OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
+        if _aggregated(cfg)
+        else None
+    )
     frequency = OmegaConf.select(cfg, "time.output_frequency")
     if None in (nx, ny, nz, sensors, states, window) or (interval or frequency) is None:
         return []
@@ -216,7 +263,8 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
     n_aug = 3 * nx * ny * nz
     # One ESMDA update assimilates the whole window at once: every sensor's
     # observed states in every aggregation bin (or output frame), stacked into
-    # one vector (BaseSmoothing._get_observations).
+    # one vector (BaseSmoothing._get_observations). The tke and spectral
+    # rows of observation.types add a few rows per sensor on top.
     n_bins = math.ceil(window / interval) if interval else round(window / frequency)
     n_d = len(sensors) * len(states) * n_bins
     needed = n_aug * n_d**2 * 4
@@ -287,9 +335,7 @@ def _filtering(cfg: DictConfig, workflow: str) -> list[str]:
                 "hybrid.likelihood_allocation must be filter_only or shared_budget."
             )
         if allocation == "shared_budget" and (
-            f.beta <= 1
-            or stride != 1
-            or (cfg.observation.aggregation or {}).get("interval_seconds") is not None
+            f.beta <= 1 or stride != 1 or _aggregated(cfg)
         ):
             problems.append(
                 "hybrid.likelihood_allocation=shared_budget needs filtering.beta > 1, "
@@ -351,6 +397,13 @@ def _discrepancy(cfg: DictConfig, workflow: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Small readers
 # ---------------------------------------------------------------------------
+
+
+def _aggregated(cfg: DictConfig) -> bool:
+    """Whether the observations are binned: bins with an interval_seconds."""
+    interval = (cfg.observation.aggregation or {}).get("interval_seconds")
+    types = OmegaConf.select(cfg, "observation.types", default=None) or ["bins"]
+    return interval is not None and "bins" in types
 
 
 def _physical_memory() -> int:

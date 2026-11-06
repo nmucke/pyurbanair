@@ -18128,6 +18128,7 @@ packages:
   - netcdf4>=1.7.3,<2
   - matplotlib>=3.10.8,<4
   - jax>=0.7.0,<0.8.0
+  - scipy>=1.16.3,<2
   requires_python: '>=3.12,<3.13'
 - pypi: ./libs/evaluation
   name: evaluation

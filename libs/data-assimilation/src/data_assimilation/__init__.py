@@ -40,6 +40,10 @@ from data_assimilation.observation_operator import (
     TemporalObservationOperator,
     flatten_observations,
 )
+from data_assimilation.observation_statistics import (
+    ObservationStatistics,
+    ResolvedStatisticsError,
+)
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
 from data_assimilation.smoothing.esmda import (
@@ -69,12 +73,14 @@ __all__ = [
     "LETKFAnalysis",
     "MultiplicativeInflation",
     "ObservationOperator",
+    "ObservationStatistics",
     "ObservationTSVD",
     "OnlineStateReduction",
     "StreamingStateReduction",
     "ParameterESMDA",
     "ParameterEvolution",
     "RandomWalkEvolution",
+    "ResolvedStatisticsError",
     "RTPP",
     "RTPS",
     "StateESMDA",
