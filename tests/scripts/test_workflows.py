@@ -78,7 +78,6 @@ def test_field_analysis_workflow(
         "field_analysis",
         *overrides,
         "field_analysis=${field_analysis_settings.local}",
-        "field_analysis_settings.local.min_dof=1",
     )
     windows = tmp_path / "neural_surrogate_to_neural_surrogate/smoother/windows"
     assert (windows / "window_1_posterior_forecast_state.nc").exists()

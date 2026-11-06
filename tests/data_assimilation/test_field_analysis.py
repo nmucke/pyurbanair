@@ -47,6 +47,7 @@ def _run(problem, states=None, **options):
     states = np.array(problem["states"] if states is None else states)
 
     def write(index, values):
+        assert values.dtype == states.dtype
         states[index] = values
 
     info = field_analysis(
@@ -178,7 +179,6 @@ def test_local_w_keeps_zero_in_buildings_and_far_cells_bit_identical():
     coords[:5] = sensors[0] + 0.5  # a building next to a sensor
     coords[5:10] = 1e4  # far from every sensor
     updated, info = _run(problem, states, L_r=40.0, L_t=2.0, row_coords=coords)
-    assert updated.dtype == np.float32
     assert np.array_equal(updated[:, :5], states[:, :5])
     assert np.array_equal(updated[:, 5:10], states[:, 5:10])
     assert np.abs(updated - states).max() > 1e-3

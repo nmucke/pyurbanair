@@ -111,7 +111,7 @@ def within_parameter_basis(params: np.ndarray) -> np.ndarray:
     return np.asarray(complete[:, spanned.shape[1] :])
 
 
-@jax.jit
+@jax.jit  # type: ignore[misc, unused-ignore]
 def _coordinates(
     taper: jnp.ndarray,
     gram: jnp.ndarray,
@@ -134,7 +134,7 @@ def _coordinates(
     return root @ basis.T + inverse @ jnp.tensordot(taper, cross, axes=1)
 
 
-@jax.jit
+@jax.jit  # type: ignore[misc, unused-ignore]
 def _local_update(
     rows: jnp.ndarray,
     taper: jnp.ndarray,

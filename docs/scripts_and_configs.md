@@ -256,10 +256,14 @@ per-frame `pred_obs` of the uncorrected forecast, frame times, `obs_x/y/z`,
 the run's overrides so it finds the run dir. It always starts from the frames as
 the model wrote them, so it can be repeated with other settings and never
 corrects twice: `_posterior_forecast_state.nc`, else a run's uncorrected
-`_posterior_state.nc`, which it moves there (it always keeps them). It refuses a
+`_posterior_state.nc`, which it hard-links there (it always keeps them), so a
+failed call leaves every posterior in place and can be repeated. It refuses a
 run that corrected its frames without `keep_forecast`. For a run without
 `field_analysis` it draws the raw frames again from the truth and the run's seed
-and checks them against the saved `window_{w}_obs.nc`. `bash
+and checks them against the saved `window_{w}_obs.nc`. The settings it used are
+`field_analysis_settings` in `run_info.yaml`; `config.yaml` stays the run's. A
+new `run_smoother.py` run in the same dir clears the old `_field_obs.nc` and
+`_posterior_forecast_state.nc`. `bash
 workflows/assimilation_workflow.sh field_analysis <overrides>` runs it and scores
 the run again.
 

@@ -8,9 +8,11 @@ is taken from here and everything else from the run's config.yaml, e.g.
 The same correction as run_smoother.py with `field_analysis` set. It starts from
 the frames as the model wrote them, so it can be repeated with other settings:
 window_{w}_posterior_forecast_state.nc when the run kept it, else the
-_posterior_state.nc of a run without `field_analysis`, which is moved there. A
-run that corrected its frames and did not keep them is refused. The frames as
-the model wrote them are always kept here, whatever `keep_forecast` says.
+_posterior_state.nc of a run without `field_analysis`, which is hard-linked
+there, so a failure leaves every window's posterior in place and a second call
+finishes the job. A run that corrected its frames and did not keep them is
+refused. The frames as the model wrote them are always kept here, whatever
+`keep_forecast` says.
 
 Outputs, in `<paths.results_dir>/smoother/`:
     windows/window_{w}_posterior_state.nc  the corrected frames
@@ -18,7 +20,9 @@ Outputs, in `<paths.results_dir>/smoother/`:
             _field_obs.nc                  what the correction used (kept if
                                            the run wrote it, else rebuilt from
                                            the truth and the run's seed)
-    run_info.yaml                          `field_analysis` per window
+    run_info.yaml                          `field_analysis` per window,
+                                           `field_analysis_settings` as passed
+                                           here (config.yaml keeps the run's)
 """
 
 from __future__ import annotations
@@ -79,15 +83,16 @@ def run(cfg: DictConfig) -> None:
             )
     for w in range(num_windows):
         if not window_file(w, "posterior_forecast_state").exists():
-            window_file(w, "posterior_state").replace(
-                window_file(w, "posterior_forecast_state")
+            window_file(w, "posterior_forecast_state").hardlink_to(
+                window_file(w, "posterior_state")
             )
 
-    if not window_file(0, "field_obs").exists():
+    if not all(window_file(w, "field_obs").exists() for w in range(num_windows)):
         _write_field_observations(run_cfg, run_dir, run_info)
     run_info["field_analysis"] = [
         correct_window(run_cfg, windows_dir, w) for w in range(num_windows)
     ]
+    run_info["field_analysis_settings"] = OmegaConf.to_container(run_cfg.field_analysis)
     save_yaml(run_info, run_dir / "run_info.yaml")
     print(f"Saved outputs in {run_dir}")
 

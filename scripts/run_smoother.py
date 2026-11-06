@@ -91,6 +91,10 @@ def run(cfg: DictConfig) -> None:
     rng_key = jax.random.PRNGKey(da.seed)
 
     out_dir, windows_dir = make_run_dir(cfg, "smoother")
+    # run_field_analysis.py would take a previous run's for this run's.
+    for name in ("field_obs", "posterior_forecast_state"):
+        for stale in windows_dir.glob(f"window_*_{name}.nc"):
+            stale.unlink()
 
     # --- Truth and its observations, one block per window ----------------------
     truth = make_truth(cfg, out_dir)
