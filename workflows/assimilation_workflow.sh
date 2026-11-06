@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Run an assimilation, then compute its metrics and draw its figures.
 #
-#   bash workflows/assimilation_workflow.sh <smoother|filtering|hybrid> [hydra overrides...]
+#   bash workflows/assimilation_workflow.sh <smoother|filtering|hybrid|field_analysis> [hydra overrides...]
 #
 # e.g.
 #   bash workflows/assimilation_workflow.sh smoother params@prior_params=dynamic
 #   bash workflows/assimilation_workflow.sh filtering 'filtering.analysis=${analysis.letkf}'
+#   bash workflows/assimilation_workflow.sh field_analysis 'field_analysis=${field_analysis_settings.local}'
 #
 # Runs scripts/run_<method>.py with the overrides, then compute_metrics.py
-# and visualize_assimilation.py on its run dir, <paths.results_dir>/<method>.
+# and visualize_assimilation.py on its run dir, <paths.results_dir>/<method>
+# (field_analysis corrects a finished smoother run, in .../smoother).
 # Run it inside the dev environment (`pixi shell -e dev`).
 set -euo pipefail
 
-if [[ $# -lt 1 || ! "$1" =~ ^(smoother|filtering|hybrid)$ ]]; then
-    echo "usage: $0 <smoother|filtering|hybrid> [hydra overrides...]" >&2
+if [[ $# -lt 1 || ! "$1" =~ ^(smoother|filtering|hybrid|field_analysis)$ ]]; then
+    echo "usage: $0 <smoother|filtering|hybrid|field_analysis> [hydra overrides...]" >&2
     exit 1
 fi
 method=$1
@@ -24,7 +26,7 @@ script=scripts/run_${method}.py
 
 # The run dir, resolved from the same overrides (Hydra prints the value only).
 results_dir=$(python "$script" "$@" --cfg job --resolve -p paths.results_dir | tail -n 1)
-run_dir=$results_dir/$method
+run_dir=$results_dir/${method/field_analysis/smoother}
 
 python "$script" "$@"
 python scripts/compute_metrics.py "$run_dir"

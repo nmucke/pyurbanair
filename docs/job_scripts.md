@@ -14,7 +14,7 @@ job_scripts/
 ├── snellius/                         # SURF Snellius: partition rome, account tdsei19851
 │   ├── env.sh                        # sourced by every job (see below)
 │   ├── forward_workflow.slurm        # workflows/forward_workflow.sh
-│   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid>
+│   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid|field_analysis>
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true

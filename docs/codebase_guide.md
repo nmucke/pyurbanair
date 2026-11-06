@@ -137,6 +137,7 @@ scripts/                           # Scripts you run; their shared helpers are i
   run_smoother.py                  # ESMDA over consecutive windows
   run_filtering.py                 # Cycled EnKF
   run_hybrid.py                    # Per window: ESMDA params, then filter state
+  run_field_analysis.py            # Correct a finished smoother run's posterior frames
   compute_metrics.py               # metrics.yaml from a finished DA run dir (plain CLI)
   visualize_forward.py, visualize_assimilation.py   # Figures from a run dir (plain CLI)
   surrogate/                       # generate_data.py, train.py, evaluate_*.py

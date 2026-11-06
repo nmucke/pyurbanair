@@ -19,6 +19,7 @@ defaults:
   - assimilation_settings/state_reduction
   - assimilation_settings/inflation
   - assimilation_settings/adaptive_error
+  - assimilation_settings/field_analysis
   - _self_
 
 paths:
@@ -165,6 +166,13 @@ smoothing:
   # final posterior forecast (no extra forward solve, parameters frozen).
   # Requires state_reduction; state-bearing smoothers only.
   final_time_smoothing: false
+
+# Smoother only: correct each window's posterior frames with the raw sensor
+# frames, without further model runs, e.g.
+# 'field_analysis=${field_analysis_settings.local}'
+# (assimilation_settings/field_analysis.yaml). null leaves the posterior as the
+# model wrote it.
+field_analysis: ${field_analysis_settings.none}
 
 # Filtering: the EnsembleKalmanFilter constructor arguments. Read by
 # filtering.yaml and hybrid.yaml. Instantiate `filtering` (the runner adds the

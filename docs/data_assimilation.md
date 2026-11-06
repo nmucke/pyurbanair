@@ -99,6 +99,7 @@ libs/data-assimilation/src/data_assimilation/
   smoothing/
     base.py                 # BaseSmoothing (_forecast_step, _observation_step)
     esmda.py                # all five ESMDA variant classes
+    field_analysis.py       # field_analysis, field_analysis_netcdf (§5a)
   filtering/
     analysis.py             # stochastic_enkf_update (shared with ESMDA),
                             #   AnalysisScheme, StochasticEnKFAnalysis
@@ -372,8 +373,8 @@ method for `log` and `normalize`, where `log` makes it a relative error):
   windows (correlated, few batches).
 - spectral: the scatter of the band PSD over the `K` Welch segments,
   `r_b = std_m(P_m) / (sqrt(K) mean_m(P_m)) * sqrt(1 + 2c(K-1)/K)`, with `c`
-  the squared correlation of adjacent 50%-overlapping Hann segments (~0.167,
-  computed from the window). With `normalize`, the band holding the fraction
+  the squared overlap correlation of adjacent 50%-overlapping Hann windows
+  (`(1/6)**2` ~ 0.028, computed from the window). With `normalize`, the band holding the fraction
   `f_b` of the variance (relative std `r_V`, as for tke) gets
   `r**2 = (1-f_b)**2 r_b**2 + max(r_V**2 - f_b**2 r_b**2, 0)` (bands
   independent). Needs at least two segments.
@@ -677,6 +678,58 @@ selection) feeds the `window_snapshots` basis source for state reduction.
 variants builds `[states_flat | params_array]`, applies the Kalman update
 (global or localized), and splits the result back into updated state and
 updated params.
+
+---
+
+## 5a. Field analysis (optional)
+
+**File:**
+[smoothing/field_analysis.py](../libs/data-assimilation/src/data_assimilation/smoothing/field_analysis.py),
+whose docstring has the formulas. Design:
+[research/multiscale_nested_da.tex](research/multiscale_nested_da.tex), Section 3,
+Eqs. (11) and (12). Untested on real runs: no accuracy claim is made.
+
+After the ESMDA has estimated the parameters and the inflow, `field_analysis`
+(default `null`; `'field_analysis=${field_analysis_settings.local}'`) corrects
+each window's posterior frames with the raw sensor frames. It adds no model run:
+the ESMDA's posterior forecast already runs each member with its own posterior
+parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
+`compute_metrics.py` and `visualize_assimilation.py` score them as the posterior.
+`pred_obs` in `window_{w}_obs.nc` stays that of the uncorrected forecast.
+
+- **Gain.** A deterministic transform that works within the members' parameters:
+  it projects out `[1, parameter anomalies]` (analysis space, every parameter,
+  one row per knot), leaving `nu = J - 1 - p` degrees of freedom. `nu` below
+  `min_dof` raises; `run_smoother.py` checks the prior before the first forecast.
+- **Localization.** `localization_radius` and `localization_time` are
+  Gaspari-Cohn cutoffs (the local option, Eq. 12). Both null is one global `W`
+  from all observations for all frames (the global option, Eq. 11).
+- **Observations.** The raw noisy frames, one per forecast frame, whatever
+  `observation.types` assimilates: never bins, tke or spectra. A truth with
+  another number of frames per window raises. `R` is `observation.error` on the
+  raw frames: instrument plus representation variance, no sampling error (the
+  target is the realised field), and without the adaptive error's inflation
+  (`check_config` warns).
+- **R treats frames as independent.** They are not, so an analysis over several
+  frames can be overconfident; `check_config` warns with the frame count.
+  `window_{w}_field_obs.nc` has `innovation_lag1` per observation, roughly
+  `(1 + r) / (1 - r)` frames per independent sample, `run_info.yaml` its median,
+  and a median above 0.5 is printed. Nothing is corrected for it.
+- **Next window.** It starts from the uncorrected final frame: a localized `W` is
+  not divergence-free, and a restart would need a projection first. Parameters
+  and warm starts are therefore those of a run without the analysis.
+- **Failed members.** `_BaseESMDA.posterior_substitutions` holds the failed
+  slots of the last posterior forecast (failed member -> donor). Without
+  hidden-state replay the saved parameters of such a slot are its own while its
+  field is the donor's, and with replay they are jittered. `run_smoother.py` lists
+  them under `posterior_substitutions` in `run_info.yaml`; the analysis leaves
+  them out of all statistics and does not change them.
+- **Not usable with** the filter, the hybrid (no posterior forecast) or
+  `final_time_smoothing` (`check_config` refuses them).
+
+`scripts/run_field_analysis.py` applies the same helper
+(`helper_functions.correct_window`) to a finished run, see
+[scripts_and_configs.md §2.1](scripts_and_configs.md).
 
 ---
 

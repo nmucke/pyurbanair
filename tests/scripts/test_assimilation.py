@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 from typing import Any
 
 import numpy as np
 import pytest
 import xarray
 import yaml
+from data_assimilation.smoothing.esmda import _BaseESMDA
 from omegaconf import OmegaConf
 
 from tests.conftest import compose, load_script, surrogate
@@ -511,6 +513,252 @@ def test_observation_types_rejected(
     cfg = compose("assimilation", "+test=assimilation", *overrides, root=tmp_path)
     with pytest.raises(ValueError, match=message):
         check_config(cfg, workflow)
+
+
+FIELD_ANALYSIS = [
+    "field_analysis=${field_analysis_settings.local}",
+    "field_analysis_settings.local.localization_radius=10.0",
+    "field_analysis_settings.local.localization_time=1.5",
+    "field_analysis_settings.local.min_dof=1",
+    "ensemble.ensemble_size=12",
+]
+
+
+def _field_run(
+    root: pathlib.Path, session_root: pathlib.Path, *overrides: str
+) -> tuple[Any, pathlib.Path]:
+    """A smoother run of 12 members, its config and run dir."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *SURROGATE,
+        *surrogate(session_root),
+        "ensemble.ensemble_size=12",
+        *overrides,
+        root=root,
+    )
+    load_script("scripts/run_smoother.py").run(cfg)
+    return cfg, pathlib.Path(cfg.paths.results_dir) / "smoother"
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def field_runs(
+    tmp_path_factory: pytest.TempPathFactory,
+    session_root: pathlib.Path,
+    trained: Any,
+) -> dict[str, tuple[Any, pathlib.Path]]:
+    """A run without the field analysis and one with it, keeping the forecast."""
+    return {
+        "plain": _field_run(tmp_path_factory.mktemp("plain"), session_root),
+        "corrected": _field_run(
+            tmp_path_factory.mktemp("corrected"),
+            session_root,
+            *FIELD_ANALYSIS,
+            "field_analysis_settings.local.keep_forecast=true",
+        ),
+    }
+
+
+def _state(run_dir: pathlib.Path, w: int, kind: str = "posterior") -> xarray.Dataset:
+    return xarray.load_dataset(run_dir / f"windows/window_{w}_{kind}_state.nc")
+
+
+def test_field_analysis_off_changes_nothing(field_runs: Any) -> None:
+    """The default writes no new file or run_info key."""
+    _, run_dir = field_runs["plain"]
+    assert {p.name for p in (run_dir / "windows").iterdir()} == {
+        f"window_{w}_{kind}.nc" for w in range(2) for kind in WINDOW_FILES
+    }
+    run_info = yaml.safe_load((run_dir / "run_info.yaml").read_text())
+    assert not {"field_analysis", "posterior_substitutions"} & set(run_info)
+
+
+def test_field_analysis_in_the_run(field_runs: Any) -> None:
+    """Only the saved frames change: each window's forecast, and so the warm
+    start of the next one, is the run's without the analysis. The saved frames
+    are the raw ones whatever Stage 1 assimilated, with the likelihood's R."""
+    cfg, run_dir = field_runs["corrected"]
+    _, plain = field_runs["plain"]
+    num_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+    for w in range(2):
+        forecast = _state(run_dir, w, "posterior_forecast")
+        xarray.testing.assert_identical(forecast, _state(plain, w))
+        corrected = _state(run_dir, w)
+        assert not np.array_equal(corrected.u, forecast.u)
+        assert np.isfinite(corrected.u).all()
+        field_obs = xarray.load_dataset(run_dir / f"windows/window_{w}_field_obs.nc")
+        frames = forecast.sizes["time"]
+        assert field_obs.obs.shape == field_obs.obs_var.shape == (frames, num_obs)
+        assert field_obs.pred_obs.shape == (12, frames, num_obs)
+        np.testing.assert_array_equal(field_obs.time, forecast.time)
+        error = cfg.observation.error
+        np.testing.assert_allclose(
+            field_obs.obs_var, error.instrument_std**2 + error.representation_std**2
+        )
+        assert field_obs.member_mask.all()
+        assert np.isfinite(field_obs.innovation_lag1).all()
+    info = yaml.safe_load((run_dir / "run_info.yaml").read_text())["field_analysis"]
+    assert len(info) == 2 and info[0]["num_members"] == 12
+
+
+def test_field_analysis_is_scored_as_the_posterior(field_runs: Any) -> None:
+    """compute_metrics.py reads the corrected frames as the posterior."""
+    _, run_dir = field_runs["corrected"]
+    load_script("scripts/compute_metrics.py").run(run_dir)
+    assert (run_dir / "metrics.yaml").exists()
+
+
+@pytest.mark.parametrize("source", ["plain", "corrected"])  # type: ignore[misc]
+def test_field_analysis_after_the_run(
+    source: str, field_runs: Any, tmp_path: pathlib.Path
+) -> None:
+    """The script gives the run's frames from a run without the analysis, with
+    the observations drawn again, and repeats on a corrected run, which is not
+    corrected twice."""
+    cfg, run_dir = field_runs[source]
+    copy = tmp_path / "smoother"
+    shutil.copytree(run_dir, copy)
+    settings = field_runs["corrected"][0]
+    script_cfg = OmegaConf.create(
+        {
+            "paths": {"results_dir": str(tmp_path)},
+            "field_analysis": OmegaConf.to_container(
+                settings.field_analysis, resolve=True
+            ),
+        }
+    )
+    load_script("scripts/run_field_analysis.py").run(script_cfg)
+    _, corrected = field_runs["corrected"]
+    for w in range(2):
+        xarray.testing.assert_identical(_state(copy, w), _state(corrected, w))
+        xarray.testing.assert_identical(
+            _state(copy, w, "posterior_forecast"),
+            _state(corrected, w, "posterior_forecast"),
+        )
+        for name in ("obs", "obs_var", "pred_obs", "member_mask"):
+            xarray.testing.assert_identical(
+                xarray.load_dataset(copy / f"windows/window_{w}_field_obs.nc")[name],
+                xarray.load_dataset(corrected / f"windows/window_{w}_field_obs.nc")[
+                    name
+                ],
+            )
+
+
+def test_field_analysis_refuses_frames_already_corrected(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Without keep_forecast only the corrected frames are left."""
+    cfg, run_dir = _field_run(tmp_path, session_root, *FIELD_ANALYSIS)
+    assert not list((run_dir / "windows").glob("*forecast_state.nc"))
+    with pytest.raises(ValueError, match="keep_forecast"):
+        load_script("scripts/run_field_analysis.py").run(cfg)
+
+
+def test_field_analysis_masks_substituted_members(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot substituted in the posterior forecast is recorded, left out of the
+    statistics and left as it is."""
+    forecast_step = _BaseESMDA._forecast_step
+
+    def fail_member_1(self: Any, *args: Any, **kwargs: Any) -> Any:
+        out = forecast_step(self, *args, **kwargs)
+        self.forward_model._last_failure_substitutions = {1: 0}
+        return out
+
+    monkeypatch.setattr(_BaseESMDA, "_forecast_step", fail_member_1)
+    _, run_dir = _field_run(
+        tmp_path,
+        session_root,
+        *FIELD_ANALYSIS,
+        "field_analysis_settings.local.keep_forecast=true",
+    )
+    run_info = yaml.safe_load((run_dir / "run_info.yaml").read_text())
+    assert run_info["posterior_substitutions"] == {0: {1: 0}, 1: {1: 0}}
+    assert run_info["field_analysis"][0]["num_members"] == 11
+    for w in range(2):
+        field_obs = xarray.load_dataset(run_dir / f"windows/window_{w}_field_obs.nc")
+        assert field_obs.member_mask.values.tolist() == [True, False] + [True] * 10
+        forecast = _state(run_dir, w, "posterior_forecast")
+        corrected = _state(run_dir, w)
+        np.testing.assert_array_equal(
+            corrected.u.isel(ensemble=1), forecast.u.isel(ensemble=1)
+        )
+        assert not np.array_equal(corrected.u, forecast.u)
+
+
+def test_field_analysis_needs_degrees_of_freedom(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Refused before the first forecast."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *SURROGATE,
+        *surrogate(session_root),
+        "field_analysis=${field_analysis_settings.local}",
+        root=tmp_path,
+    )
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        load_script("scripts/run_smoother.py").run(cfg)
+    assert not list(
+        (pathlib.Path(cfg.paths.results_dir) / "smoother/windows").iterdir()
+    )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("hybrid", [], "the hybrid has none to correct"),
+        ("filtering", ["params@prior_params=static"], "the filtering has none"),
+        ("smoother", ["smoothing.final_time_smoothing=true"], "final_time_smoothing"),
+        (
+            "smoother",
+            ["field_analysis_settings.local.localization_time=null"],
+            "go together",
+        ),
+        ("smoother", ["field_analysis_settings.local.variables=[pres]"], "subset"),
+        ("smoother", ["field_analysis_settings.local.chunking=0"], "chunking"),
+    ],
+)
+def test_field_analysis_rejected(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "field_analysis=${field_analysis_settings.local}",
+        *overrides,
+        root=tmp_path,
+    )
+    with pytest.raises(ValueError, match=message):
+        check_config(cfg, workflow)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "overrides, message",
+    [
+        ([], "treats them as independent"),
+        ([ADAPTIVE], "adaptive error's inflation"),
+    ],
+)
+def test_field_analysis_warns(
+    overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "field_analysis=${field_analysis_settings.local}",
+        *overrides,
+        root=tmp_path,
+    )
+    with pytest.warns(UserWarning, match=message):
+        check_config(cfg, "smoother")
 
 
 def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> None:

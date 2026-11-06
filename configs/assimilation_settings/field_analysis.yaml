@@ -1,0 +1,34 @@
+# @package field_analysis_settings
+# Stage 2 of docs/research/multiscale_nested_da.tex: correct the smoother's
+# posterior frames with the raw sensor frames, without model runs. Pick one with
+# `field_analysis=${field_analysis_settings.<name>}`; `none` leaves the posterior
+# as the model wrote it. See docs/data_assimilation.md "Field analysis".
+
+none: null
+
+# Eq. (12) of the note: one weight matrix per grid cell and frame.
+local:
+  # Gaspari-Cohn cutoffs: an observation's weight reaches zero this far from a
+  # cell (m) and from a frame (s). Set both, the time about the integral time
+  # scale of the velocity at the sensors, or both null for the global update.
+  localization_radius: 20.0
+  localization_time: 2.0
+  # The fields updated. The state's other variables are kept as they are.
+  variables: [u, v, w]
+  # Also keep the frames as the model wrote them,
+  # windows/window_{w}_posterior_forecast_state.nc.
+  keep_forecast: false
+  # Grid cells whose weight matrices are computed at a time.
+  chunking: 4096
+  # Fewest degrees of freedom of the within-parameter gain,
+  # J - 1 - (parameter rows); below it the run stops.
+  min_dof: 5
+
+# Eq. (11) of the note: one weight matrix for all cells and frames.
+global:
+  localization_radius: null
+  localization_time: null
+  variables: [u, v, w]
+  keep_forecast: false
+  chunking: 4096
+  min_dof: 5

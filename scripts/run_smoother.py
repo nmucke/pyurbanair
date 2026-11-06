@@ -26,6 +26,17 @@ Outputs, in `<paths.results_dir>/smoother/`:
                      bias, which obs_clean (statistics of the clean series)
                      lacks)
     run_info.yaml also lists the adaptive error's per-window inflation.
+
+With `field_analysis` set, each window's posterior frames are corrected with the
+raw sensor frames, without model runs, and _posterior_state.nc holds the
+corrected frames. The next window still starts from the frames the model wrote.
+    windows/window_{w}_field_obs.nc (what the correction used, see
+            helper_functions.field_observations),
+            _posterior_forecast_state.nc (field_analysis.keep_forecast: the
+            frames as the model wrote them)
+    run_info.yaml also lists the slots of failed members of each posterior
+    forecast, which hold a donor's field (the correction leaves them out), and
+    the correction's per-window diagnostics.
 """
 
 from __future__ import annotations
@@ -43,6 +54,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from data_assimilation.adaptive_observation_error import observation_heights
+from data_assimilation.smoothing.field_analysis import within_parameter_basis
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 from tqdm import tqdm
@@ -50,6 +62,9 @@ from tqdm import tqdm
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent / "utils"))
 
 from helper_functions import (  # noqa: E402
+    correct_window,
+    field_observations,
+    field_parameter_rows,
     flatten_obs,
     make_aggregation,
     make_ensemble_model,
@@ -58,11 +73,11 @@ from helper_functions import (  # noqa: E402
     make_run_dir,
     make_truth,
     next_window_params,
-    observe,
     parameter_names,
     save_obs,
     save_yaml,
     set_prediction_noise,
+    window_observations,
 )
 from inconsistency_check import check_config  # noqa: E402
 
@@ -80,19 +95,20 @@ def run(cfg: DictConfig) -> None:
     # --- Truth and its observations, one block per window ----------------------
     truth = make_truth(cfg, out_dir)
     frames_per_window = truth.sizes["time"] // num_windows
+    field_analysis = cfg.get("field_analysis")
     truth_operator = make_observation_operator(cfg, cfg.truth_model.solver_name)
     error = make_observation_error(cfg)
     aggregation = make_aggregation(cfg)
     adaptive = instantiate(cfg.observation.get("adaptive_error"))
-    observations = []
-    for w in range(num_windows):
-        rng_key, key = jax.random.split(rng_key)
-        window_truth = truth.isel(
-            time=slice(w * frames_per_window, (w + 1) * frames_per_window)
-        )
-        observations.append(
-            observe(window_truth, truth_operator, error, aggregation, key)
-        )
+    observations, rng_key = window_observations(
+        truth,
+        frames_per_window,
+        num_windows,
+        truth_operator,
+        error,
+        aggregation,
+        rng_key,
+    )
     truth.close()
 
     # --- Prior and smoother -----------------------------------------------------
@@ -102,6 +118,15 @@ def run(cfg: DictConfig) -> None:
     prior_sampler = instantiate(cfg.prior_params)
     params = prior_sampler.sample(ensemble_size)
     is_dynamic = "time" in params.dims
+    if field_analysis is not None:
+        # Fail here rather than after the first window's forecasts.
+        dof = within_parameter_basis(field_parameter_rows(cfg, params)).shape[1]
+        if dof < field_analysis.min_dof:
+            raise ValueError(
+                f"field_analysis has {dof} degrees of freedom with "
+                f"{ensemble_size} members, below field_analysis.min_dof: use "
+                "more members or estimate fewer parameters."
+            )
 
     selected, global_names, log_names = parameter_names(cfg, params, prior_sampler)
     extra = {"num_time_points": int(params.sizes["time"])} if is_dynamic else {}
@@ -132,6 +157,8 @@ def run(cfg: DictConfig) -> None:
     # --- Window loop --------------------------------------------------------------
     state = None  # window 0 cold-starts
     seconds_per_window = []
+    posterior_substitutions: dict[int, dict[int, int]] = {}
+    field_analysis_info = []
     for w in tqdm(range(num_windows), desc="windows"):
         start = time.perf_counter()
         obs, obs_clean, resolved = observations[w]
@@ -191,6 +218,27 @@ def run(cfg: DictConfig) -> None:
             name = state_names.get(step, f"step_{step}")
             smoother.save_state(step, windows_dir / f"window_{w}_{name}_state.nc")
         state = smoother.final_frame()
+        if smoother.posterior_substitutions:
+            posterior_substitutions[w] = dict(smoother.posterior_substitutions)
+
+        # Corrected after the warm start above is taken: a localised update is
+        # not divergence-free, so a restart from it would need a projection.
+        if field_analysis is not None:
+            posterior = windows_dir / f"window_{w}_posterior_state.nc"
+            forecast = windows_dir / f"window_{w}_posterior_forecast_state.nc"
+            posterior.replace(forecast)
+            field_observations(
+                obs,
+                obs_clean,
+                truth_operator,
+                error,
+                smoother.observation_operator,
+                forecast,
+                smoother.posterior_substitutions,
+            ).to_netcdf(windows_dir / f"window_{w}_field_obs.nc")
+            field_analysis_info.append(correct_window(cfg, windows_dir, w))
+            if not field_analysis.keep_forecast:
+                forecast.unlink()
 
         # Next window's prior: the posterior, extrapolated if time-varying.
         if is_dynamic and w < num_windows - 1:
@@ -205,6 +253,10 @@ def run(cfg: DictConfig) -> None:
     info: dict[str, Any] = {}
     if adaptive is not None:
         info["adaptive_observation_error"] = adaptive.history
+    if posterior_substitutions:
+        info["posterior_substitutions"] = posterior_substitutions
+    if field_analysis is not None:
+        info["field_analysis"] = field_analysis_info
     save_yaml(
         {
             "smoother": type(smoother).__name__,

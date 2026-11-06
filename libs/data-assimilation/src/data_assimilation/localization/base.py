@@ -210,6 +210,31 @@ def taper_inflation(
     return jnp.where(distance <= truncation, inflation, jnp.inf)
 
 
+def gaspari_cohn(distance: jnp.ndarray, cutoff: float) -> jnp.ndarray:
+    """Gaspari & Cohn (1999, Eq. 4.10) taper, ``1`` at 0 and ``0`` from ``cutoff``.
+
+    ``cutoff`` is where the taper reaches zero, i.e. twice the half-width ``c``
+    of the original formula, so ``distance >= cutoff`` is exactly excluded.
+
+    Args:
+        distance: Non-negative distances, any shape.
+        cutoff: Positive support radius, in the units of ``distance``.
+
+    Returns:
+        Taper in ``[0, 1]``, same shape as ``distance``.
+    """
+    r = 2.0 * jnp.abs(distance) / cutoff
+    inner = 1.0 - r**2 * (5.0 / 3.0 - r * (5.0 / 8.0 + r * (0.5 - r / 4.0)))
+    safe_r = jnp.maximum(r, 1.0)  # the outer branch divides by r
+    outer = (
+        4.0
+        - 5.0 * r
+        + r**2 * (5.0 / 3.0 + r * (5.0 / 8.0 - r * (0.5 - r / 12.0)))
+        - 2.0 / (3.0 * safe_r)
+    )
+    return jnp.where(r < 1.0, inner, jnp.where(r < 2.0, jnp.maximum(outer, 0.0), 0.0))
+
+
 class BaseLocalization(ABC):
     """Base class for ESMDA localization strategies."""
 

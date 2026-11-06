@@ -53,6 +53,12 @@ from data_assimilation.smoothing.esmda import (
     StateESMDA,
     TimeVaryingParameterESMDA,
 )
+from data_assimilation.smoothing.field_analysis import (
+    FieldAnalysisInfo,
+    field_analysis,
+    field_analysis_netcdf,
+    global_field_weights,
+)
 
 __all__ = [
     "AdaptiveObservationError",
@@ -66,6 +72,7 @@ __all__ = [
     "DistanceLocalization",
     "ETKFAnalysis",
     "EnsembleKalmanFilter",
+    "FieldAnalysisInfo",
     "FilterResult",
     "FilterSmoothing",
     "FilterSmoothingResult",
@@ -90,6 +97,9 @@ __all__ = [
     "TemperingPolicy",
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
+    "field_analysis",
+    "field_analysis_netcdf",
     "flatten_observations",
+    "global_field_weights",
     "resolve_tempering_policy",
 ]

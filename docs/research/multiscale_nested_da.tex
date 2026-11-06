@@ -38,7 +38,7 @@ fields. These are untested proposals.
 \midrule
 $\bm\theta$ & $b_0, b_1, b_2, z_0$ & constant & static parameters \\
 $\bm x$ & inflow angle and speed (AR2 knots) & $\sim 60$--$200$\,s & slow state \\
-$\bm z$ & velocity field ($\approx 7.7\times10^5$ values) & $\sim 1$\,s & fast state \\
+$\bm z$ & velocity field ($9.6\times10^4$ values, \S\ref{sec:sizes}) & $\sim 1$\,s & fast state \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -169,7 +169,7 @@ statistic over a finite window.
 $\sigma_i^2 + \sigma_r^2$. For bins, the existing propagation applies:
 $\sigma_i^2/m$ for a mean over $m$ frames, and $\sigma_r^2/m$ or $\sigma_r^2$ for
 an independent or persistent representation error. For raw, frames
-$\Delta t = 0.5$\,s apart are treated as independent, although the turbulence
+$\Delta t = 1$\,s apart are treated as independent, although the turbulence
 and representation errors are correlated over seconds. This is the existing
 behaviour, and it makes a raw update overconfident.
 
@@ -208,10 +208,11 @@ it includes the instrument part.
   \begin{equation}
     \sigma_{\bar P} = \frac{\operatorname{std}_m P_m}{\sqrt K}
       \sqrt{1 + 2c\,\frac{K-1}{K}},
-    \qquad c \approx 0.167,
+    \qquad c = \rho^2 \approx 0.028,
   \end{equation}
-  with $c$ the squared correlation of adjacent Hann segments, computed from
-  the window. The window must hold $K \ge 2$ segments. With
+  with $\rho \approx 1/6$ the overlap correlation of adjacent Hann windows, so
+  $c$ is the correlation of adjacent segment periodograms, computed from the
+  window. The window must hold $K \ge 2$ segments. With
   \texttt{normalize}, the relative error of the variance is combined with the
   band's own, weighted by the band's share of the variance.
 \item \textbf{Calibration.} An AR(1) Monte Carlo ($\phi = 0.9$, 120 frames)
@@ -243,14 +244,17 @@ in the block's final (log) units.
   zero in a twin experiment. Set it for a truth from another model or from
   real sensors: a resolved LES misses the subgrid part of the TKE, for
   example.
-\item A fixed \texttt{std} can replace the batch-means estimate, for example
+\item A fixed \texttt{std} can replace the \texttt{auto} estimate, for example
   one calibrated from the replica noise floor of compare\_models.
 \end{itemize}
 
 \paragraph{Caveat: sampling noise is counted twice.} Each member's statistics
 carry their own sampling noise $\eta_j$, which inflates $C_{\bm h\bm h}$ in the
 gain. With $R$ also holding the truth's sampling variance, this noise is
-counted about twice, so the update is conservative. That is the safe side.
+counted about twice in a single update ($N_a = 1$), so the update is
+conservative. That is the safe side. With $N_a > 1$ the factor is not two:
+$R$ enters as $\alpha_a R$, while the members' noise stays unscaled in
+$C_{\bm h\bm h}$.
 
 \paragraph{Carry $\bm\theta$ across windows.} $\bm\theta$ is constant, so its
 posterior from window $w$ is the prior for window $w+1$, while the inflow
@@ -262,118 +266,183 @@ $\tilde\sigma^2 \propto N^{-3/2}$.
 \paragraph{Resolution requirement.} The SGS model acts on wavelengths
 $\lambda \approx 2$--$4\Delta = 4$--$8$\,m. At canopy speeds $U \approx 2$--$5$\,m/s
 this means $f = U/\lambda \approx 0.3$--$1.2$\,Hz. The current output step of
-0.5\,s gives a Nyquist frequency of 1\,Hz, so the band where $b_0, b_1, b_2$
-matter is barely recorded. The sensor time series need a denser output.
+1\,s gives a Nyquist frequency of 0.5\,Hz, so most of the band where
+$b_0, b_1, b_2$ matter is not recorded. The sensor time series need a denser
+output.
 
 \section{Stage 2: localised ensemble smoother on the velocity field}
 
-\subsection{Why no rerun is needed}
+\subsection{No further model run}
 An ensemble smoother updates trajectories that have already been simulated.
+The run it needs already exists: the last forecast of each ESMDA window runs
+every member with its own posterior $(\bm\theta_j, \bm x_j)$, not the posterior
+mean, so the field spread includes parameter uncertainty. Stage 2 corrects those
+saved frames and adds no model run. A run is needed only to forecast beyond the
+window.
+
 With the forecast ensemble $X_f \in \R^{n\times J}$ (all saved frames of all
-members) and observation anomalies $Y \in \R^{d_y\times J}$,
+members) and centred predicted observations $Y \in \R^{d_y\times J}$,
+$Y\bm 1 = 0$, every posterior field is a combination of the member fields.
+
+\paragraph{The gain works within $(\bm\theta, \bm x)$.} The members already
+carry a posterior conditioned on $\bm y$. A cross-member gain would hold the
+between-member part $\operatorname{Cov}(g(\bm\theta,\bm x)\mid\bm y)$ and use
+$\bm y$ a second time on it. Let $P$ project out $[\bm 1,\ \text{parameter
+anomalies}]$, in analysis space and with one row per time knot, and let
+$B \in \R^{J\times\nu}$ be an orthonormal basis of its range, with
+$\nu = J - 1 - p$ and $p$ the rank of the anomalies. Split
+$Y = YBB\T + Y_g$, with $Y_g = Y(I - BB\T)$ the between-member part. With
+$Y_w = R^{-1/2}Y$,
 \begin{equation}
-  X_a = X_f\, W,
-  \qquad
-  W = I_J + \tfrac{1}{J-1}\, Y\T \big(\tfrac{1}{J-1} Y Y\T + R\big)^{-1}
-      \big(\bm y \bm 1\T + E - H X_f\big),
+  X_a = X_f W,
+  \quad
+  W = I + B\big(\sqrt{\nu}\,M^{-1/2} - I\big)B\T
+      + B M^{-1} B\T Y_w\T D_w,
+  \quad
+  M = \nu I + B\T Y_w\T Y_w B,
   \label{eq:es}
 \end{equation}
-where $E$ holds the observation perturbations. $W \in \R^{J\times J}$ depends
-only on observation-space quantities. Each posterior field is a weighted
-combination of the member fields, so no model integration is needed. A run
-is needed only to forecast beyond the window, and there the correction decays
-within seconds.
+with $D_w = R^{-1/2}D$ and $D = (\bm y - \bar{\bm y})\bm 1\T - Y_g$. This is a
+deterministic transform: no observation perturbations are drawn. $D$ moves each
+member to its own conditional mean, so the mean weights differ per member and
+the between-member part is conditioned too. The symmetric square root gives the
+within-parameter anomalies the Kalman covariance, $M^{-1}$ in ensemble
+coordinates. $W \in \R^{J\times J}$ depends only on observation-space
+quantities and $M$ is $\nu\times\nu$ whatever $d_y$ is. $\nu$ must stay
+well above zero: a window's knots and $\bm\theta$ together count towards $p$.
 
-Run the members with their own posterior $(\bm\theta_j, \bm x_j)$ from stage 1,
-not with the posterior mean, so the field spread includes parameter
-uncertainty. That is one ensemble run. Alternatively, put the states in the
-augmented vector of the last ESMDA iteration, which avoids the run but gives
-slightly less consistent states.
+\paragraph{Observations.} The observations are the raw noisy sensor frames, each
+paired with the forecast frame at its time, whatever Stage 1 assimilated. Bins
+are not used, and \texttt{tke} and \texttt{spectral} are excluded: they are not
+linear in the frame. $R$ is diagonal and holds instrument and representation
+variance only. It has no sampling error, because the target is the realised
+field, not a statistic of it.
 
-\paragraph{What the update preserves.} With one global $W$, every linear
+$R$ treats the frames as independent. Turbulence and representation errors
+are correlated over seconds, so an update that uses several frames can be
+overconfident. Whether that matters here is untested. The run saves the lag-1
+autocorrelation of the innovations per observation to show it.
+
+\paragraph{Failed members.} A member that failed in the last forecast holds a
+clone of a donor's field beside its own parameters. Such slots are excluded
+from all statistics, and their columns stay unchanged.
+
+\paragraph{What the update preserves.} The columns of $W$ sum to one, because
+$B\T\bm 1 = 0$: each posterior field is an affine combination of the member
+fields, with weights that can be negative. With one global $W$, every affine
 constraint satisfied by all members is preserved, in particular
-$\nabla\cdot\bm u = 0$ and $\bm u = 0$ inside buildings. With localisation,
-$W$ varies in space and divergence is no longer exactly zero. That is
-acceptable for reconstruction, but a restart needs a projection first. The
-fields never satisfy the nonlinear momentum equation exactly.
+$\nabla\cdot\bm u = 0$ and $\bm u = 0$ inside buildings. With localisation, $W$
+varies in space: a row equal across members stays exact ($\bm u = 0$ in a
+building), but divergence is no longer zero. That is acceptable for
+reconstruction, but a restart needs a projection first. The next window
+therefore starts from the uncorrected final frame. The fields never satisfy the
+nonlinear momentum equation exactly.
 
 \subsection{Dimensionality}
-One window has $n \approx 7.7\times10^5 \times 360 \approx 2.8\times10^8$ values per
-member, about 1.1\,GB in float32, or about 45\,GB for $J = 40$. The smoother
-\eqref{eq:es} never forms the $n\times n$ state covariance. Computing $W$ costs
-$\mathcal O(d_y J^2 + d_y^3)$ and applying it costs $\mathcal O(nJ^2)$, linear
-in $n$. The state is therefore never held in memory:
+\label{sec:sizes}
+The sizes per case, for $u, v, w$ in float32:
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Grid & Values per frame & Frames & Per member & $J = 32$ \\
+\midrule
+$50\times40\times16$ ($\Delta = 2$\,m, committed case) & $9.6\times10^4$ & 300 & 115\,MB & 3.7\,GB \\
+$75\times60\times24$ ($\Delta = 1.33$\,m) & $3.2\times10^5$ & 180 & 233\,MB & 7.5\,GB \\
+Barcelona $224\times224\times32$ ($\Delta = 4$\,m) & $4.8\times10^6$ & 30 & 578\,MB & 18.5\,GB \\
+\bottomrule
+\end{tabular}
+\end{center}
+The output step is 1\,s (10\,s for Barcelona). A 1\,m Xie \& Castro grid would
+have $7.7\times10^5$ values per frame, but no case is configured with it. uDALES
+also saves the pressure, which adds a third to the files.
+
+The smoother \eqref{eq:es} never forms the $n\times n$ state covariance. The
+state is never held in memory:
 \begin{enumerate}
-\item compute $W$ from the observations;
-\item stream the saved frames from disk in chunks, apply $X_a = X_f W$, and
-  write them back.
+\item compute the weights from the observations;
+\item stream the saved frames from disk one at a time, apply them, and write
+  the frames back.
 \end{enumerate}
-Memory is $\mathcal O(J \times \text{chunk})$. This is a natural extension of
-the disk mode of ESMDA's \texttt{save\_states}.
+Memory is $\mathcal O(J \times \text{frame})$. The saved window files of both
+ESMDA save modes have the same layout, so one path serves both.
 
 \paragraph{Localisation as a local analysis.} With $J \approx 40$, spurious
-correlations dominate distant pairs, so localise in space and time. For each
-grid cell $\bm r$ and frame $t$, use only the observations with
-$|\bm r - \bm r_o| < L_r$ and $|t - t_o| < L_t$. That gives a local weight
-matrix
+correlations dominate distant pairs, so localise in space and time. For grid
+cell $\bm r$ and frame $t$, an observation at sensor $\bm r_o$ and frame time
+$t_o$ enters with variance $R_o/\rho$, where
 \begin{equation}
-  W_{\bm r, t} = W\big(Y_{\mathcal L}, R_{\mathcal L}, \bm y_{\mathcal L}\big),
-  \qquad
+  \rho(\bm r, t; \bm r_o, t_o)
+  = \operatorname{GC}(|\bm r - \bm r_o|, L_r)\,
+    \operatorname{GC}(|t - t_o|, L_t),
+  \quad
+  W_{\bm r, t} = W\big(Y, R/\rho, \bm y\big),
+  \quad
   \bm u_a(\bm r, t) = X_f(\bm r, t)\, W_{\bm r,t},
+  \label{eq:local}
 \end{equation}
-with $\mathcal L = \mathcal L(\bm r,t)$ the local observation set, optionally
-tapered (Gaspari--Cohn) in $R_{\mathcal L}$. This is the LETKF form. It needs
-many small $J\times J$ solves, which are independent and streamable, so it
-avoids the in-memory gain matrix behind the $\sim$110\,GB estimate for
-localised state-bearing smoothers in the case config.
+with GC the Gaspari--Cohn taper, zero from its cutoff on. So the local
+observation set is $|\bm r - \bm r_o| < L_r$ and $|t - t_o| < L_t$. The
+observations are single frames, so $|t - t_o|$ is the distance between two
+times. A bin would need the distance to its interval, which is not implemented.
+This is a local form of the transform \eqref{eq:es}, not an LETKF: an LETKF's
+anomalies keep the between-member part, and its mean weights are one vector for
+all members. Each cell costs one $\nu\times\nu$ eigendecomposition. The cells
+are independent and streamable, and because the transform is deterministic,
+neighbouring cells cannot disagree through a sampling draw. This avoids the
+in-memory gain matrix behind the $\sim$110\,GB estimate for localised
+state-bearing smoothers in the case config. With no $L_r$ set, the global
+\eqref{eq:es} applies, with the observations of all frames for every frame.
 
 \paragraph{Time localisation is physically required.} The velocity decorrelates
 over $\tau_{\mathrm{int}} \sim$ seconds. An observation at $t_o$ carries no
 information about frames $|t - t_o| \gg \tau_{\mathrm{int}}$, so
-$L_t = \mathcal O(\tau_{\mathrm{int}})$. This also reduces each local
-observation set to a handful of values.
+$L_t = \mathcal O(\tau_{\mathrm{int}})$. This also keeps each local observation
+set small.
 
 \subsection{Cheaper reduced states}
-If full time-resolved reconstruction is not needed, update a smaller state.
-Both options below reuse \eqref{eq:es}. Only the state and the observation
-operator change.
+\emph{Neither option below is implemented.} Both would reuse \eqref{eq:es}, with
+another state and observation operator.
 
-\paragraph{(a) Window-mean field.} During each forward run, accumulate the
-mean online, so no frames need to be saved:
+\paragraph{(a) Window-mean field (not implemented).} Take the time mean of each
+member's saved frames:
 \begin{equation}
   \bar{\bm u}_j = \frac{1}{T}\int_{t_0}^{t_0+T} \bm u_j(t)\,dt,
   \qquad
   \bar X_f = [\bar{\bm u}_1,\dots,\bar{\bm u}_J] \in \R^{n_s\times J},
-  \quad n_s \approx 7.7\times10^5 .
+  \quad n_s = 9.6\times10^4 .
 \end{equation}
 The observation operator $\bar H$ interpolates the mean field to the sensors,
 and the observations are the window means of the sensor series. The
 update is $\bar X_a = \bar X_f \bar W$.
 \begin{itemize}
-\item \textbf{Cost:} $J n_s$ values, about 120\,MB for $J = 40$, so the state
-  fits in memory. Spatial localisation (Gaspari--Cohn or the LETKF form) is
+\item \textbf{Cost:} $J n_s$ values, about 15\,MB for $J = 40$, so the state
+  fits in memory. Spatial localisation (the form of \eqref{eq:local}) is
   affordable, and no time localisation is needed.
 \item \textbf{Variant:} one mean per observation bin, $K$ fields instead of
   one, with each bin updated only from its own bin observations.
 \item \textbf{Interpretation:} the mean field is roughly a deterministic
   function of the parameters plus sampling noise,
-  $\bar{\bm u}_j \approx g(\bm\theta_j, \bm x_j) + \bm\varepsilon_j$. After the
-  rerun with posterior members, the update therefore mainly corrects
-  structural model error within the span of the ensemble. Its sampling
-  noise is small, so ensemble correlations are more trustworthy than for
-  instantaneous fields.
+  $\bar{\bm u}_j \approx g(\bm\theta_j, \bm x_j) + \bm\varepsilon_j$. The update
+  moves the mean only within the span of the member anomalies, so a structural
+  model error is corrected only as far as it projects on that span, and nothing
+  shows that it does. Nor can $\bm\varepsilon_j$ be assumed small: after stage 1
+  the spread of $g$ is narrow, so $\bm\varepsilon_j$ may be a large share of the
+  anomalies. Whether ensemble correlations are more trustworthy than for
+  instantaneous fields has to be measured.
 \end{itemize}
 
-\paragraph{(b) POD coefficients.} Expand the fluctuations of each member in a
+\paragraph{(b) POD coefficients (not implemented).} Expand the fluctuations of each member in a
 spatial basis $\Phi_r = [\bm\phi_1,\dots,\bm\phi_r]$:
 \begin{equation}
   \bm u_j(t) = \bar{\bm u} + \Phi_r\,\bm a_j(t) + \bm r_j(t),
   \qquad
   \bm a_j(t) = \Phi_r\T D\,\big(\bm u_j(t) - \bar{\bm u}\big),
 \end{equation}
-where $D$ scales the variables (\texttt{variable\_scales}). The state per member
+where $D$ is the diagonal matrix that weights the variables
+(\texttt{variable\_scales}), so the modes are orthonormal in its inner product,
+$\Phi_r\T D\,\Phi_r = I$. The state per member
 becomes $\bm a_j(t_1{:}t_T) \in \R^{rT}$, for example $r = 100$ and
-$T = 360$, giving $3.6\times10^4$ instead of $2.8\times10^8$ values. Per frame, the observation
+$T = 300$, giving $3\times10^4$ instead of $2.9\times10^7$ values. Per frame, the observation
 operator is $H\Phi_r$ applied to the coefficients plus $H(\bar{\bm u} + \bm r_j)$.
 Update each frame's coefficients from the observations within $L_t$
 (time localisation is trivial in this space). Decode only the increment, as
@@ -397,12 +466,13 @@ The choice of basis decides whether this adds anything:
     G\bm v_k = \lambda_k \bm v_k,\quad
     \bm\phi_k = S\bm v_k/\sqrt{\lambda_k}.
   \end{equation}
-  Accumulate $G$ chunk by chunk from the saved frames. With $s = 10$, $M = 1440$
+  Accumulate $G$ chunk by chunk from the saved frames. With $s = 10$ and $J = 32$, $M = 960$
   and $G$ is trivial in size. Truncating to the $r$ energetic modes acts as a
-  \emph{scale filter}: it suppresses small-scale increments, which is where
-  the spurious correlations of a small ensemble live. This substitutes for
-  spatial localisation, which the reduced path in the code does not
-  support.
+  \emph{scale filter}: it suppresses small-scale increments. It is not a
+  substitute for spatial localisation. The energetic modes are global, so a
+  spurious correlation between distant points stays in the update, and the
+  sampling error of the coefficient covariance is unchanged. The reduced path
+  in the code does not support localisation.
 \item \textbf{Constraints are kept exactly.} Every mode is a linear
   combination of snapshots, so the modes are divergence-free and zero inside
   buildings, and so is every decoded increment. This is an advantage over
@@ -412,19 +482,20 @@ The choice of basis decides whether this adds anything:
   update can go but does not add degrees of freedom.
 \end{itemize}
 
-\paragraph{Recommendation.} Start with (a): it is cheapest, needs no saved
-frames, and allows real localisation. Use (b) with a fixed snapshot basis
-only if time-resolved fields are needed, extending the existing
-\texttt{window\_snapshots} path to stream $G$ from disk.
+\paragraph{Status.} What is implemented is the time-resolved smoother,
+\eqref{eq:es} and \eqref{eq:local}. It runs on each window's posterior frames
+inside the smoother, or afterwards on a finished run, and the saved posterior is
+the corrected state. There are no results yet.
 
 \section{Summary and first checks}
 \begin{enumerate}
 \item Joint ESMDA of $(b_0,b_1,b_2,z_0,\bm x)$ against [bin means;
   TI and normalised band spectra], with $R$ from replicas and
   $\bm\theta$ carried across windows.
-\item One rerun of the ensemble with the posterior members.
-\item Streamed, space--time-localised ensemble smoother on the saved velocity
-  fields, using all observations.
+\item The posterior forecast of each ESMDA window, which runs the members with
+  their own posterior: no extra run.
+\item Streamed, space--time-localised ensemble smoother on those frames, using
+  the raw sensor frames.
 \end{enumerate}
 \noindent The main risk is that the SGS terms cannot be identified. Their
 leverage on the sensor statistics may be small. The first checks:
