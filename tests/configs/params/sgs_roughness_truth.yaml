@@ -1,0 +1,27 @@
+# The static truth for params/sgs_roughness.yaml: the same inflow, other
+# sgs_bias_b0 and z0.
+_target_: pyurbanair.static_parameters.ParameterSampler
+_convert_: all
+seed: 0
+parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 5.0
+  pressure_gradient_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0041912
+  roughness_length:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.1
+  sgs_bias_b0:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.3
+  sgs_bias_b1:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b2:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0

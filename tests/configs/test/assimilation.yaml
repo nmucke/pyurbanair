@@ -13,6 +13,25 @@ assimilation:
 observation:
   aggregation:
     interval_seconds: 1.5
+  error:
+    instrument_std: 0.25
+    representation_std: 0.1
+
+field_analysis_settings:
+  local:
+    localization_radius: 10.0
+    localization_time: 1.5
+    variables: [u, v, w]
+    keep_forecast: false
+    chunking: 4096
+    min_dof: 1
+  global:
+    localization_radius: null
+    localization_time: null
+    variables: [u, v, w]
+    keep_forecast: false
+    chunking: 4096
+    min_dof: 1
 
 smoothing:
   num_steps: 1

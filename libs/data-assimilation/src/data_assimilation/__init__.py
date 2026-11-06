@@ -40,6 +40,10 @@ from data_assimilation.observation_operator import (
     TemporalObservationOperator,
     flatten_observations,
 )
+from data_assimilation.observation_statistics import (
+    ObservationStatistics,
+    ResolvedStatisticsError,
+)
 from data_assimilation.reduction import OnlineStateReduction, StreamingStateReduction
 from data_assimilation.smoothing.base import BaseSmoothing
 from data_assimilation.smoothing.esmda import (
@@ -48,6 +52,12 @@ from data_assimilation.smoothing.esmda import (
     StateAndTimeVaryingParameterESMDA,
     StateESMDA,
     TimeVaryingParameterESMDA,
+)
+from data_assimilation.smoothing.field_analysis import (
+    FieldAnalysisInfo,
+    field_analysis,
+    field_analysis_netcdf,
+    global_field_weights,
 )
 
 __all__ = [
@@ -62,6 +72,7 @@ __all__ = [
     "DistanceLocalization",
     "ETKFAnalysis",
     "EnsembleKalmanFilter",
+    "FieldAnalysisInfo",
     "FilterResult",
     "FilterSmoothing",
     "FilterSmoothingResult",
@@ -69,12 +80,14 @@ __all__ = [
     "LETKFAnalysis",
     "MultiplicativeInflation",
     "ObservationOperator",
+    "ObservationStatistics",
     "ObservationTSVD",
     "OnlineStateReduction",
     "StreamingStateReduction",
     "ParameterESMDA",
     "ParameterEvolution",
     "RandomWalkEvolution",
+    "ResolvedStatisticsError",
     "RTPP",
     "RTPS",
     "StateESMDA",
@@ -84,6 +97,9 @@ __all__ = [
     "TemperingPolicy",
     "TemporalObservationOperator",
     "TimeVaryingParameterESMDA",
+    "field_analysis",
+    "field_analysis_netcdf",
     "flatten_observations",
+    "global_field_weights",
     "resolve_tempering_policy",
 ]

@@ -8,6 +8,8 @@ small I/O utilities. Each script keeps its own workflow logic.
 from __future__ import annotations
 
 import pathlib
+import shutil
+from dataclasses import asdict
 from typing import Any
 
 import jax
@@ -15,13 +17,18 @@ import jax.numpy as jnp
 import numpy as np
 import xarray
 import yaml
+from data_assimilation.augmentation import ParamAugmentation
 from data_assimilation.interpolation import interpolate_dataarray_at_points
 from data_assimilation.observation_error import ObservationErrorSpec
 from data_assimilation.observation_operator import (
     AggregateObservations,
     ObservationOperator,
     flatten_observations,
+    sensor_observation_coords,
 )
+from data_assimilation.observation_statistics import ObservationStatistics
+from data_assimilation.parameter_selection import select_parameters
+from data_assimilation.smoothing.field_analysis import field_analysis_netcdf
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
@@ -172,33 +179,100 @@ def make_observation_error(cfg: DictConfig) -> ObservationErrorSpec:
     return spec
 
 
-def make_aggregation(cfg: DictConfig) -> AggregateObservations | None:
-    """The observation aggregator, or None to assimilate every frame."""
+OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
+
+
+def observation_types(cfg: DictConfig) -> list[str]:
+    """`observation.types`, [bins] when unset.
+
+    bins without `aggregation.interval_seconds` bins every frame on its own,
+    which is raw, and is returned as raw.
+    """
+    types = list(OmegaConf.select(cfg, "observation.types", default=None) or ["bins"])
     aggregation = cfg.observation.aggregation
     if aggregation is None or aggregation.get("interval_seconds") is None:
-        return None
-    aggregator: AggregateObservations = instantiate(aggregation)
-    # Windows may hold a different number of intervals (e.g. a shorter last one).
-    aggregator.allow_interval_count_change = True
-    return aggregator
+        types = ["raw" if name == "bins" else name for name in types]
+    return types
+
+
+def make_aggregation(
+    cfg: DictConfig,
+) -> AggregateObservations | ObservationStatistics | None:
+    """What turns a window's observed series into the vector the update sees.
+
+    For a single raw or bins type (the default), the interval aggregator, or
+    None to assimilate every frame (raw); otherwise the `ObservationStatistics`
+    of the listed types.
+    """
+    types = observation_types(cfg)
+    aggregator = None
+    if "bins" in types:
+        aggregator = instantiate(cfg.observation.aggregation)
+        # Windows may hold a different number of intervals (e.g. a shorter last one).
+        aggregator.allow_interval_count_change = True
+    if types in (["raw"], ["bins"]):
+        return aggregator
+    options = {
+        name: OmegaConf.to_container(cfg.observation[name], resolve=True)
+        for name in ("tke", "spectral")
+        if name in types
+    }
+    statistics = ObservationStatistics(
+        types=types,
+        aggregation=aggregator,
+        num_sensors=len(cfg.obs.x_points),
+        **options,
+    )
+    statistics.allow_interval_count_change = True
+    return statistics
 
 
 def observe(
     truth: xarray.Dataset,
     operator: Any,
     error: ObservationErrorSpec,
-    aggregation: AggregateObservations | None,
+    aggregation: AggregateObservations | ObservationStatistics | None,
     rng_key: jax.Array,
 ) -> tuple[xarray.DataArray, xarray.DataArray, Any]:
     """Noisy and clean observations of `truth`, plus the resolved error.
 
     Instrument noise is drawn on the raw frames; the resolved error carries the
-    covariance of the (possibly aggregated) observations the update sees.
+    covariance of the (possibly aggregated) observations the update sees. For
+    observation statistics it is block-diagonal, the tke and spectral blocks
+    estimated from the noisy series.
     """
     clean = operator(truth)
-    resolved = error.resolve(clean, operator, aggregation)
     noise = np.asarray(jax.random.normal(rng_key, clean.shape))
-    return clean + resolved.raw_instrument_std * noise, clean, resolved
+    if not isinstance(aggregation, ObservationStatistics):
+        resolved = error.resolve(clean, operator, aggregation)
+        return clean + resolved.raw_instrument_std * noise, clean, resolved
+    raw_std = error.resolve(clean, operator, None).raw_instrument_std
+    noisy = clean + raw_std * noise
+    return noisy, clean, aggregation.resolve_error(noisy, operator, error)
+
+
+def window_observations(
+    truth: xarray.Dataset,
+    frames_per_window: int,
+    num_windows: int,
+    operator: Any,
+    error: ObservationErrorSpec,
+    aggregation: AggregateObservations | ObservationStatistics | None,
+    rng_key: jax.Array,
+) -> tuple[list[tuple], jax.Array]:
+    """`observe` per window of the smoother, and the advanced key.
+
+    The noise depends only on the key and the frames, so the same call gives a
+    finished run's observations again.
+    """
+    observations = []
+    for w in range(num_windows):
+        rng_key, key = jax.random.split(rng_key)
+        window_truth = truth.isel(
+            time=slice(w * frames_per_window, (w + 1) * frames_per_window)
+        )
+        observations.append(observe(window_truth, operator, error, aggregation, key))
+    return observations, rng_key
 
 
 def cycle_observations(
@@ -230,12 +304,29 @@ def cycles_to_time(ds: xarray.Dataset, times: np.ndarray) -> xarray.Dataset:
 
 
 def flatten_obs(
-    observations: xarray.DataArray, aggregation: AggregateObservations | None
+    observations: xarray.DataArray,
+    aggregation: AggregateObservations | ObservationStatistics | None,
 ) -> np.ndarray:
-    """Aggregate and flatten observations into the vector the update uses."""
-    if aggregation is not None:
+    """Aggregate and flatten observations into the vector the update uses.
+
+    Observation statistics of an observed series (`observed=True`) carry no
+    instrument-noise bias term; the predictions get it added instead
+    (`set_prediction_noise`). So a clean series' statistics differ from a
+    noisy one's by that bias, by design.
+    """
+    if isinstance(aggregation, ObservationStatistics):
+        observations = aggregation(observations, observed=True)
+    elif aggregation is not None:
         observations = aggregation(observations)
     return np.asarray(flatten_observations(observations))
+
+
+def set_prediction_noise(aggregation: Any, resolved: Any) -> None:
+    """Give observation statistics the raw instrument variance per observation
+    (from their resolved error), which they add to the predicted tke and
+    spectra to match the noisy observed series. No-op otherwise."""
+    if isinstance(aggregation, ObservationStatistics):
+        aggregation.noise_variance = resolved.noise_variance
 
 
 class StridedOperator:
@@ -265,13 +356,21 @@ def save_obs(
     obs_std: np.ndarray,
     pred_obs: list[np.ndarray],
     extra: dict[str, np.ndarray] | None = None,
+    block_slices: dict[str, slice] | None = None,
 ) -> None:
     """One window's observations and predicted observations per update step.
 
     `pred_obs` holds one (observation, ensemble) array per step: the ESMDA
     iterations for a smoother (prior first, posterior last), forecast and
-    analysis for a filter. `extra` adds more per-observation variables.
+    analysis for a filter. `extra` adds more per-observation variables;
+    `block_slices` (observation statistics) labels each observation with its
+    block in `obs_block` (raw, bins, tke, spectral).
     """
+    if block_slices is not None:
+        labels = np.full(np.asarray(obs).size, "", dtype=object)
+        for name, rows in block_slices.items():
+            labels[rows] = name
+        extra = {**(extra or {}), "obs_block": labels.astype(str)}
     xarray.Dataset(
         {
             "obs": ("observation", np.asarray(obs).ravel()),
@@ -287,6 +386,129 @@ def save_obs(
             },
         }
     ).to_netcdf(path)
+
+
+# ---------------------------------------------------------------------------
+# Field analysis
+# ---------------------------------------------------------------------------
+
+
+def field_observations(
+    noisy: xarray.DataArray,
+    clean: xarray.DataArray,
+    truth_operator: Any,
+    error: ObservationErrorSpec,
+    operator: Any,
+    forecast_path: pathlib.Path,
+    substitutions: dict[int, int],
+) -> xarray.Dataset:
+    """Everything the field analysis needs of one window but the state.
+
+    `noisy` and `clean` are the window's raw sensor frames, whatever Stage 1
+    assimilated; `operator` reads the assimilation model's frames in
+    `forecast_path` member by member; `substitutions` are the failed members of
+    that forecast. The Dataset holds per frame and observation `obs`,
+    `obs_clean`, `obs_var` (instrument plus representation variance, no
+    aggregation and no sampling error) and `pred_obs` (ensemble, time, obs), per
+    observation its position `obs_x/y/z` and `obs_component`, and per member
+    `member_mask` (False for the slots holding a donor's field).
+
+    `obs_var` treats the frames as independent, which they are not.
+    `innovation_lag1` (obs) measures that: the lag-1 autocorrelation in time of
+    the innovation, about (1 + r) / (1 - r) frames per independent sample.
+    """
+    base = getattr(operator, "observation_operator", operator)
+    with xarray.open_dataset(forecast_path) as state:
+        times = state.time.values
+        member_mask = ~np.isin(np.arange(state.sizes["ensemble"]), list(substitutions))
+        predicted = np.stack(
+            [
+                operator(state[list(base.obs_states)].isel(ensemble=m).load()).values
+                for m in range(state.sizes["ensemble"])
+            ]
+        )
+    if noisy.sizes["time"] != times.size:
+        raise ValueError(
+            f"The truth has {noisy.sizes['time']} frames in a window and the "
+            f"ensemble {times.size}: the field analysis pairs them one to one."
+        )
+    variance = np.asarray(error.resolve(clean, truth_operator, None).covariance_diag)
+    num_obs = noisy.sizes["obs"]
+    coords = sensor_observation_coords(operator, num_obs)
+    innovation = noisy.values - predicted[member_mask].mean(axis=0)
+    innovation = innovation - innovation.mean(axis=0)
+    lag1 = (innovation[:-1] * innovation[1:]).sum(axis=0) / (innovation**2).sum(axis=0)
+    frame = ("time", "obs")
+    return xarray.Dataset(
+        {
+            "obs": (frame, noisy.values),
+            "obs_clean": (frame, clean.values),
+            "obs_var": (frame, variance.reshape(times.size, num_obs)),
+            "pred_obs": (("ensemble", *frame), predicted),
+            "obs_x": ("obs", coords[:, 0]),
+            "obs_y": ("obs", coords[:, 1]),
+            "obs_z": ("obs", coords[:, 2]),
+            "obs_component": (
+                "obs",
+                np.repeat(list(base.obs_states), base.num_sensors),
+            ),
+            "member_mask": ("ensemble", member_mask),
+            "innovation_lag1": ("obs", lag1),
+        },
+        coords={"time": times},
+    )
+
+
+def field_parameter_rows(cfg: DictConfig, params: xarray.Dataset) -> np.ndarray:
+    """(N_p, J) analysis-space rows of every parameter, one per time knot."""
+    log_names = log_space_parameter_names(instantiate(cfg.prior_params))
+    augmentation = ParamAugmentation(params.sizes.get("time"))
+    flat = augmentation.flatten(select_parameters(params, None, log_names))
+    return np.asarray(ParamAugmentation.to_array(flat))
+
+
+def correct_window(
+    cfg: DictConfig, windows_dir: pathlib.Path, w: int
+) -> dict[str, float | int]:
+    """Write window `w`'s corrected frames to its _posterior_state.nc.
+
+    Reads the frames as the model wrote them from _posterior_forecast_state.nc,
+    which is left alone, so a correction can never be applied twice, and
+    window_{w}_field_obs.nc and _posterior_params.nc. Returns the
+    `FieldAnalysisInfo`, plus the median of `innovation_lag1`, for run_info.yaml.
+    """
+    settings = cfg.field_analysis
+    field_obs = xarray.load_dataset(windows_dir / f"window_{w}_field_obs.nc")
+    params = xarray.load_dataset(windows_dir / f"window_{w}_posterior_params.nc")
+    num_frames, num_obs = field_obs.sizes["time"], field_obs.sizes["obs"]
+    coords = np.stack([field_obs[f"obs_{a}"].values for a in "xyz"], axis=1)
+    # The corrected file only replaces the posterior once it is complete.
+    partial = windows_dir / f"window_{w}_posterior_state.nc.partial"
+    shutil.copyfile(windows_dir / f"window_{w}_posterior_forecast_state.nc", partial)
+    info = field_analysis_netcdf(
+        partial,
+        variables=list(settings.variables),
+        pred_obs=field_obs.pred_obs.values.reshape(-1, num_frames * num_obs).T,
+        obs=field_obs.obs.values.ravel(),
+        obs_var=field_obs.obs_var.values.ravel(),
+        obs_time=np.repeat(field_obs.time.values, num_obs),
+        obs_coords=np.tile(coords, (num_frames, 1)),
+        params=field_parameter_rows(cfg, params),
+        member_mask=field_obs.member_mask.values.astype(bool),
+        L_r=settings.localization_radius,
+        L_t=settings.localization_time,
+        min_dof=int(settings.min_dof),
+        chunk_size=int(settings.chunking),
+    )
+    partial.replace(windows_dir / f"window_{w}_posterior_state.nc")
+    lag1 = float(np.nanmedian(field_obs.innovation_lag1.values))
+    if lag1 > 0.5:
+        print(
+            f"Window {w}: the innovations' median lag-1 autocorrelation is "
+            f"{lag1:.2f}, about {(1 + lag1) / (1 - lag1):.1f} frames per "
+            "independent sample: an R of independent frames is overconfident."
+        )
+    return {**asdict(info), "innovation_lag1_median": lag1}
 
 
 # ---------------------------------------------------------------------------

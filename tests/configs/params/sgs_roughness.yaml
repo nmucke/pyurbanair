@@ -1,0 +1,34 @@
+# Static prior that estimates the SGS-discrepancy offset sgs_bias_b0 and the
+# wall roughness z0 on the tiny uDALES run (tests/scripts/test_assimilation.py);
+# the inflow is prescribed. z0 stays below the 1 m tiny grid's wall-distance
+# limit (0.5 m / e), see configs/params/static.yaml.
+_target_: pyurbanair.static_parameters.ParameterSampler
+_convert_: all
+seed: 42
+parameters:
+  inflow_angle:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  velocity_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 5.0
+  pressure_gradient_magnitude:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0041912
+  roughness_length:
+    _target_: pyurbanair.static_parameters.LogNormal
+    median: 0.03
+    log_std: 0.7
+    min: 0.005
+    max: 0.15
+  sgs_bias_b0:
+    _target_: pyurbanair.static_parameters.Normal
+    mean: 0.0
+    std: 0.2
+    min: -1.0
+  sgs_bias_b1:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
+  sgs_bias_b2:
+    _target_: pyurbanair.static_parameters.Constant
+    value: 0.0
