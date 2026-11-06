@@ -26,7 +26,8 @@ algorithms, which would cost $N \times J$ LES runs per step and need a UKF or
 EKF on the turbulent field. Instead there are two stages: a joint ESMDA on
 parameters and inflow against different statistics of the observations,
 followed by a streamed, localised ensemble smoother on the saved velocity
-fields. These are untested proposals.
+fields. Stage 2's local and global updates have had one small twin test
+(Section~\ref{sec:twin}); the rest are untested proposals.
 \end{abstract}
 
 \section{Variables and time scales}
@@ -320,7 +321,8 @@ field, not a statistic of it.
 
 $R$ treats the frames as independent. Turbulence and representation errors
 are correlated over seconds, so an update that uses several frames can be
-overconfident. Whether that matters here is untested. The run saves the lag-1
+overconfident: with AR(1) noise in the twin test of Section~\ref{sec:twin} the
+spread/error ratio at the sensors fell from 0.98 to about 0.72. The run saves the lag-1
 autocorrelation of the innovations per observation to show it.
 
 \paragraph{Failed members.} A member that failed in the last forecast holds a
@@ -398,6 +400,42 @@ over $\tau_{\mathrm{int}} \sim$ seconds. An observation at $t_o$ carries no
 information about frames $|t - t_o| \gg \tau_{\mathrm{int}}$, so
 $L_t = \mathcal O(\tau_{\mathrm{int}})$. This also keeps each local observation
 set small.
+
+\subsection{First twin test}\label{sec:twin}
+One small identical-twin test, uDALES on Xie \& Castro at 2\,m ($50\times40\times16$),
+$J = 32$, two 60\,s windows, one ESMDA step, $p = 6$, $\nu = 25$, four seeds
+varying truth, prior, noise and inlets. There were 18 assimilated sensors and 10
+held-out sensors at least 10\,m from them. The measured integral time was
+$\approx 2.4$\,s. Changes are paired RMSE against the uncorrected forecast, mean
+$\pm$ sd over seeds.
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Update ($L_r$\,m, $L_t$\,s) & Volume $uvw$ & Within 8\,m, $uv$ & Held-out, $uv$ \\
+\midrule
+Global & $+1.5 \pm 0.5\%$ & $-1.9 \pm 0.8\%$ & $-0.4 \pm 1.1\%$ \\
+Local (10, 3) & $-0.9 \pm 0.1\%$ & $-10.3 \pm 0.6\%$ & $0.0\%$ \\
+Local (20, 5) & $-3.1 \pm 0.2\%$ & $-18.4 \pm 0.9\%$ & $-0.5 \pm 0.3\%$ \\
+Local (20, 5), $p = 0$ & $-3.3 \pm 0.2\%$ & $-19.1 \pm 0.9\%$ & $-0.5 \pm 0.3\%$ \\
+Local (20, 5), shuffled $\bm y$ & $+0.5 \pm 0.4\%$ & $+4.0 \pm 1.6\%$ & $0.0 \pm 0.2\%$ \\
+Local (40, 10) & $-3.0 \pm 0.6\%$ & $-17.2 \pm 0.6\%$ & $-3.7 \pm 2.9\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+\item Localisation is essential: the global update worsens the field away from
+  the sensors, in all four seeds.
+\item The local gain sits close to the sensors and has gone by 16\,m. The
+  independent held-out score is much smaller than the near-sensor score.
+\item $w$ barely improves, and (40, 10) worsens it by 2.5\%.
+\item The projection gave no RMSE benefit in the local update here: $p = 0$ was
+  slightly better in all four seeds. In the global update it limits the
+  collapse of the spread (spread/error 0.44 against 0.08).
+\item The local update raises the rms divergence from $10^{-7}$ to about
+  $0.02$\,s$^{-1}$.
+\end{itemize}
 
 \subsection{Cheaper reduced states}
 \emph{Neither option below is implemented.} Both would reuse \eqref{eq:es}, with

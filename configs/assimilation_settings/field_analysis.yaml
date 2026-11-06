@@ -9,10 +9,11 @@ none: null
 # Eq. (12) of the note: one weight matrix per grid cell and frame.
 local:
   # Gaspari-Cohn cutoffs: an observation's weight reaches zero this far from a
-  # cell (m) and from a frame (s). Set both, the time about the integral time
-  # scale of the velocity at the sensors, or both null for the global update.
+  # cell (m) and from a frame (s). Set both, the time about twice the integral
+  # time scale of the velocity at the sensors, or both null for the global
+  # update. See docs/data_assimilation.md for the twin test of these values.
   localization_radius: 20.0
-  localization_time: 2.0
+  localization_time: 5.0
   # The fields updated. The state's other variables are kept as they are.
   variables: [u, v, w]
   # Also keep the frames as the model wrote them,

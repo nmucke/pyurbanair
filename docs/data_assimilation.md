@@ -727,6 +727,14 @@ parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
 - **Not usable with** the filter, the hybrid (no posterior forecast) or
   `final_time_smoothing` (`check_config` refuses them).
 
+**Twin test** (uDALES Xie & Castro at 2 m, J=32, 4 seeds; table in
+`docs/research/multiscale_nested_da.tex`). Use `local`: `global` worsened the
+volume RMSE by 1.5% in all four seeds. `local` with cutoffs 20 m and 5 s (twice
+the measured 2.4 s integral time) improved it by 3.1% and by 18% within 8 m of a
+sensor, gone by 16 m, while time-shuffled observations did not improve it. Held-out
+sensors at least 10 m away gained only 0.5%, `w` barely improved, and the
+projection gave no RMSE benefit. Rms divergence rises to about 0.02 1/s.
+
 `scripts/run_field_analysis.py` applies the same helper
 (`helper_functions.correct_window`) to a finished run, see
 [scripts_and_configs.md §2.1](scripts_and_configs.md).
