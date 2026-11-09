@@ -492,6 +492,10 @@ def test_smoother_with_observation_statistics(
     metrics = yaml.safe_load((run_dirs["statistics"] / "metrics.yaml").read_text())
     smoother = metrics["observation"]["smoother"]
     assert set(smoother["data_mismatch_per_block"]) == {"bins", "tke", "spectral"}
+    assert set(smoother["fit_per_block"]) == {"bins", "tke", "spectral"}
+    assert smoother["fit_per_block"]["bins"]["innovation_chi2_diag"] == (
+        smoother["innovation_chi2_diag"]
+    )
     assert "forecast_rmse" in smoother and "smoother" in metrics["desroziers"]
     default_metrics = yaml.safe_load((run_dirs["default"] / "metrics.yaml").read_text())
     assert "data_mismatch_per_block" not in default_metrics["observation"]["smoother"]
@@ -1109,7 +1113,6 @@ def test_smoother_estimates_sgs_and_roughness_on_udales(tmp_path: pathlib.Path) 
     cfg = compose("assimilation", "+test=assimilation", *SGS_ROUGHNESS, root=tmp_path)
     load_script("scripts/run_smoother.py").run(cfg)
     windows = pathlib.Path(cfg.paths.results_dir) / "smoother" / "windows"
-    truth = xarray.load_dataset(windows.parent / "true_params.nc")
     for w in range(int(cfg.assimilation.num_windows)):
         obs = xarray.load_dataset(windows / f"window_{w}_obs.nc")
         assert list(dict.fromkeys(obs.obs_block.values.tolist())) == [
@@ -1121,13 +1124,8 @@ def test_smoother_estimates_sgs_and_roughness_on_udales(tmp_path: pathlib.Path) 
             assert np.isfinite(obs[name]).all(), name
         assert (obs.obs_std > 0).all()
         posterior = xarray.load_dataset(windows / f"window_{w}_posterior_params.nc")
-        prior = xarray.load_dataset(windows / f"window_{w}_prior_params.nc")
         for name in ("sgs_bias_b0", "roughness_length"):
             assert np.isfinite(posterior[name]).all(), name
-            print(
-                f"window {w} {name}: prior {prior[name].values}, posterior "
-                f"{posterior[name].values}, truth {truth[name].values}"
-            )
 
 
 # Per method: what run_info.yaml names, which decides the observation stages.
