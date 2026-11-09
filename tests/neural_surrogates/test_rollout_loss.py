@@ -140,7 +140,7 @@ def test_final_is_the_default_and_unchanged(k: int, g: int, h: int) -> None:
     assert trainer._aux_terms is None
 
 
-@pytest.mark.parametrize(("k", "g", "h"), [(1, 2, 1), (3, 1, 1), (4, 2, 2)])
+@pytest.mark.parametrize(("k", "g", "h"), [(1, 2, 1), (3, 1, 1), (3, 3, 1), (4, 2, 2)])
 def test_sum_is_the_mean_of_the_step_losses(k: int, g: int, h: int) -> None:
     model = _Linear(h)
     batch = _batch(k, h)

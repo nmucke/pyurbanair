@@ -828,9 +828,10 @@ adapters of the same preset and rank on its merged weights (zero at init, so
 training starts from the pretrained model) plus the same
 `trainable_modules`; the optimizer starts fresh. Keep its `lora` and
 `trainable_modules` equal to the pretrained run's. It compiles the conv stems
-(`trainer.compile_modules`) as the `dft_b` run did: without them `dft_b`'s
-batch settings (`cell_budget=7500000`, horizon 4) run out of memory on an
-80 GB A100. It runs at the full
+(`trainer.compile_modules`) as the `dft_b` run did. With `dft_b`'s batch
+settings (`cell_budget=7500000`) the summed loss ran out of memory on an
+80 GB A100 with and without them (DelftBlue, torch 2.14; see
+[dft_rollout_sum_loss.md](plans/dft_rollout_sum_loss.md)). It runs at the full
 horizon from the first epoch with a one-epoch per-step warmup to a constant
 `optimizer.lr` (`lr_min: ${optimizer.lr}`), on a `RolloutTransitionDataset`
 so that `rollout_loss` `final` and `sum` runs read the same data:

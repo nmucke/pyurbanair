@@ -26,7 +26,7 @@ job_scripts/
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
 │   ├── surrogate_finetune_{dft,ssrolling,local_fno}.slurm # train.py on surrogate/finetune_dft or a baseline fine-tune (GPU)
-│   ├── surrogate_continue_dft.slurm  # train.py on surrogate/continue_dft: continue a trained DFT, e.g. per trainer.rollout_loss (GPU; delftblue only)
+│   ├── surrogate_continue_dft.slurm  # train.py on surrogate/continue_dft: continue a trained DFT, e.g. per trainer.rollout_loss (GPU; H100 on snellius)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
 │   ├── surrogate_evaluate_latent_generator_gpu.slurm # on best_latent_flow_matching_realistic (GPU)
