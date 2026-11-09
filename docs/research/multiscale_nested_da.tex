@@ -1,0 +1,546 @@
+% Multi-scale data assimilation for the LES ensembles: a design note.
+% Build: latexmk -pdf -outdir=<tmp> docs/research/multiscale_nested_da.tex
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+
+\newcommand{\T}{^{\top}}
+\newcommand{\R}{\mathbb{R}}
+
+\title{Multi-scale data assimilation for urban LES:\\
+parameters, inflow and velocity field}
+\author{Design note, pyurbanair}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A three-time-scale design for estimating closure and roughness parameters, the
+time-varying inflow and the velocity field from sensor data, inspired by the
+nested filters of P\'erez-Vieites, Molina-Bulla \& M\'iguez (arXiv:2204.07795).
+It keeps their factorisation of the posterior. It does not adopt their
+algorithms, which would cost $N \times J$ LES runs per step and need a UKF or
+EKF on the turbulent field. Instead there are two stages: a joint ESMDA on
+parameters and inflow against different statistics of the observations,
+followed by a streamed, localised ensemble smoother on the saved velocity
+fields. Stage 2's local and global updates have had one small twin test
+(Section~\ref{sec:twin}); the rest are untested proposals.
+\end{abstract}
+
+\section{Variables and time scales}
+
+\begin{center}
+\begin{tabular}{@{}llll@{}}
+\toprule
+ & Variables & Time scale & Paper's role \\
+\midrule
+$\bm\theta$ & $b_0, b_1, b_2, z_0$ & constant & static parameters \\
+$\bm x$ & inflow angle and speed (AR2 knots) & $\sim 60$--$200$\,s & slow state \\
+$\bm z$ & velocity field ($9.6\times10^4$ values, \S\ref{sec:sizes}) & $\sim 1$\,s & fast state \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The paper factorises the posterior over one window as
+\begin{equation}
+  p(\bm z, \bm x, \bm\theta \mid \bm y)
+  = p(\bm z \mid \bm x, \bm\theta, \bm y)\,
+    p(\bm x \mid \bm\theta, \bm y)\,
+    p(\bm\theta \mid \bm y),
+  \label{eq:factor}
+\end{equation}
+and obtains the likelihood of the slower variables by integrating out the
+faster ones:
+\begin{equation}
+  p(\bm y \mid \bm x, \bm\theta)
+  = \int p(\bm y \mid \bm z, \bm x, \bm\theta)\,
+         p(\bm z \mid \bm x, \bm\theta)\, d\bm z .
+  \label{eq:marginal}
+\end{equation}
+
+\subsection*{Where the LES differs from the paper's model}
+\begin{enumerate}
+\item \textbf{One-way coupling.} In the paper the slow state is driven by the
+  time average of the fast state, $\bm x_t = \bm x_{t-1} + \Delta_x(f_x +
+  g_x(\bar{\bm z}_t))$. The inflow is a boundary condition and nothing in the
+  flow feeds back on it, so $g_x \equiv 0$ and $p(\bm x_t \mid \bm x_{t-1})$
+  is just the AR2 prior.
+\item \textbf{The mean flow is not a state.} It is a statistic of $\bm z$ with
+  no equation of its own, so it is an observable, not a slow state.
+\item \textbf{The fast state cannot be predicted.} Beyond a few seconds the
+  turbulence at the sensors is unpredictable from $(\bm x, \bm\theta)$. A
+  filter on $\bm z$ adds nothing for the slower variables. Only the
+  marginalisation \eqref{eq:marginal} matters, and the ensemble spread
+  approximates it.
+\item \textbf{Cost.} The nested SMC--EnKF--EKF needs $N\times J$ model runs per
+  slow step, and a Jacobian or $2d_z+1$ sigma points on $\bm z$. For the LES,
+  neither is affordable.
+\end{enumerate}
+
+\section{Stage 1: joint ESMDA on parameters and inflow}
+
+\subsection{Observation types}
+All observation types are statistics of the same sensor time series
+$u_{cs}(t_i)$, for velocity component $c$, sensor $s$ and frames
+$i = 1,\dots,n$ with spacing $\Delta t$. The config chooses any non-empty subset
+of them as a list, \texttt{observation.types: [bins, tke, spectral]}. The
+default is \texttt{[bins]}, which reproduces current runs exactly. In the
+observation vector the rows come in the order raw, bins, tke, spectral, and
+within each row the sensor is the innermost index, so localisation and the
+height grouping still apply. This is being implemented on branch
+\texttt{feat/observation-statistics}, in
+\texttt{data\_assimilation.observation\_statistics}.
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Type & Statistic per $(c, s)$ & Informs mainly \\
+\midrule
+raw & every frame $u_{cs}(t_i)$ & state, inflow \\
+bins & interval means $\langle u_{cs}\rangle_k$, $k = 1,\dots,K$ & inflow $\bm x$ \\
+tke & $k_{cs} = \tfrac12 \operatorname{var}_t u_{cs}$ & $\bm\theta$ (closure, $z_0$) \\
+spectral & band-mean PSD $\bar E_{cs}(f_b)$, $b = 1,\dots,B$ & $\bm\theta$ (closure) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent \texttt{raw} and \texttt{bins} cannot be combined, because the bins
+are averages of the same frames and the data would be counted twice.
+\texttt{raw} with \texttt{tke} or \texttt{spectral} is allowed, but partly
+redundant. The TKE of a sensor is the sum of its component entries,
+$k_s = \sum_c k_{cs}$. The TKE stays split by component so that every type has
+the same (component, sensor) layout.
+
+\paragraph{Transforms.} The two turbulence statistics have optional
+transforms:
+\begin{align}
+  \text{tke:}\quad &
+  \tilde k_{cs} = \log \frac{k_{cs}}{\tfrac12 |\bar{\bm U}_s|^2}
+  \quad\text{(normalisation optional, default off)}, \\
+  \text{spectral:}\quad &
+  \tilde E_{cs,b} = \log \frac{\bar E_{cs}(f_b)}{\operatorname{var}_t u_{cs}}
+  \quad\text{(normalisation default on)},
+\end{align}
+where $|\bar{\bm U}_s|^2 = \sum_c \bar u_{cs}^2$ over the observed
+components. The spectrum is a one-sided Welch PSD, averaged over $B$
+log-spaced bands between $f_{\min}$ and the Nyquist frequency.
+\begin{itemize}
+\item Normalising strips the leading-order dependence on the inflow speed.
+  Otherwise TKE $\propto U^2$ would push the closure parameters to absorb inflow
+  errors.
+\item The normalised spectrum observes only the shape of the spectrum.
+\item The logarithm makes the errors closer to Gaussian, and makes a std in
+  log units a relative error.
+\end{itemize}
+
+\paragraph{Update jointly, not in parallel.} The parameters affect both sets of
+statistics: $z_0$ moves the street-level means, and the inflow angle moves
+wakes on and off the sensors. Two separate updates would drop the
+cross-covariance $C_{\bm\theta \bm h_{\mathrm{m}}}$ and its counterparts. Use one
+ESMDA on the augmented vector $\bm m = (\bm\theta, \bm x)$, iterations
+$a = 1,\dots,N_a$ with $\sum_a \alpha_a^{-1} = 1$:
+\begin{equation}
+  \bm m_j^{a+1} = \bm m_j^{a}
+  + C_{\bm m \bm h}\big(C_{\bm h\bm h} + \alpha_a R\big)^{-1}
+    \big(\bm y + \sqrt{\alpha_a}\,\bm\epsilon_j - \bm h(\bm m_j^a)\big),
+\end{equation}
+\begin{equation}
+  \bm h = \begin{pmatrix}\bm h_{\mathrm{bins}}\\ \bm h_{\mathrm{tke}}\\
+    \bm h_{\mathrm{spec}}\end{pmatrix},
+  \quad
+  R = \begin{pmatrix} R_{\mathrm{bins}} & & \\ & R_{\mathrm{tke}} & \\
+    & & R_{\mathrm{spec}}\end{pmatrix}.
+\end{equation}
+$R$ is block-diagonal, one block per chosen type, and each block is diagonal.
+This is justified because the sampling errors of a mean and of a second
+moment of the same series are nearly uncorrelated. The gain then decides which
+statistic informs which parameter. One diagonal block structure across
+spectral bands is an approximation: neighbouring Welch bands are mildly
+correlated.
+
+\subsection{Noise model per observation type}
+There are three error sources: instrument noise $\sigma_i$ (white, per raw
+frame), representation error $\sigma_r$, and the sampling error of a
+statistic over a finite window.
+
+\paragraph{raw and bins (unchanged).} Each frame has variance
+$\sigma_i^2 + \sigma_r^2$. For bins, the existing propagation applies:
+$\sigma_i^2/m$ for a mean over $m$ frames, and $\sigma_r^2/m$ or $\sigma_r^2$ for
+an independent or persistent representation error. For raw, frames
+$\Delta t = 1$\,s apart are treated as independent, although the turbulence
+and representation errors are correlated over seconds. This is the existing
+behaviour, and it makes a raw update overconfident.
+
+\paragraph{tke and spectral: instrument noise is a bias, added to the
+prediction.} White noise adds a known amount to the expected statistics:
+\begin{equation}
+  \mathbb E\big[\operatorname{var}_t(u + \epsilon)\big] = \operatorname{var}_t u + \sigma_i^2,
+  \qquad
+  \mathbb E\big[E_{u+\epsilon}(f)\big] = E_u(f) + 2\sigma_i^2\Delta t .
+\end{equation}
+The observed truth series is noisy and the predictions are not, so the
+bias is added to the \emph{predictions} deterministically, before normalising
+and taking logs. The observed statistics are computed from the noisy series
+as they are. Subtracting the bias from the observations instead would drive
+the noise-dominated high-frequency bands to zero or below, where the log is
+meaningless. With the bias on the prediction side, those bands look the same
+in truth and prediction. They then carry no information but do no harm.
+
+\paragraph{Sampling error.} TKE and spectra over a window of $n$ frames carry
+finite-sample noise. With \texttt{std: auto} this noise is estimated from the
+observed series itself, in linear units, and carried to the row's (log or
+normalised) units by the delta method. It is computed on the noisy series, so
+it includes the instrument part.
+\begin{itemize}
+\item \textbf{tke: Bartlett's formula.} With $\hat\rho(\tau)$ the sample
+  autocorrelation, summed up to its first zero crossing (at most $n/4$ lags),
+  \begin{equation}
+    \frac{\operatorname{Var}\hat\sigma^2}{\sigma^4}
+    \approx \frac{2}{n}\sum_{\tau} \hat\rho(\tau)^2 .
+  \end{equation}
+  With \texttt{normalize}, the error of $|\bar{\bm U}|^2$, from
+  $\operatorname{Var}\bar u = (\sigma^2/n)\sum_\tau\hat\rho(\tau)$, is added in
+  quadrature.
+\item \textbf{spectral: spread over Welch segments.} The window PSD is the
+  mean of $K$ half-overlapping segment periodograms $P_m$, so
+  \begin{equation}
+    \sigma_{\bar P} = \frac{\operatorname{std}_m P_m}{\sqrt K}
+      \sqrt{1 + 2c\,\frac{K-1}{K}},
+    \qquad c = \rho^2 \approx 0.028,
+  \end{equation}
+  with $\rho \approx 1/6$ the overlap correlation of adjacent Hann windows, so
+  $c$ is the correlation of adjacent segment periodograms, computed from the
+  window. The window must hold $K \ge 2$ segments. With
+  \texttt{normalize}, the relative error of the variance is combined with the
+  band's own, weighted by the band's share of the variance.
+\item \textbf{Calibration.} An AR(1) Monte Carlo ($\phi = 0.9$, 120 frames)
+  puts the median estimate at 0.90--1.17 of the true std for the default
+  transforms. Batch means, the first approach tried, were up to 40\% off.
+\item \textbf{Pooling per height.} The estimate is pooled as the median over
+  sensors at the same height (\texttt{pool\_std: height}). This is refused
+  unless \texttt{log} or \texttt{normalize} is on, because absolute TKE levels
+  differ between sensors.
+\end{itemize}
+
+\paragraph{Instrument noise, exactly.} With constant detrending, removing the
+mean also removes some noise from the lowest bins. The predicted noise PSD
+is therefore $2\sigma_i^2\Delta t\,\big(1 - |W_k|^2/(N\textstyle\sum w^2)\big)$
+per Welch bin $k$, with $W$ the DFT of the window: $5/6$ of the flat level at
+bin 1. The observed call stores the spectral setup (frame spacing, segment
+length, bands), and the predictions reuse it. A mismatch in frame count or
+spacing raises an error. A constant observed series, whose logarithm would be
+$-\infty$, is refused.
+
+\paragraph{Total std.} The block std is
+\begin{equation}
+  \sigma = \max\!\Big(\sqrt{\sigma_{\mathrm{samp}}^2 + \sigma_{\mathrm{rep}}^2},\;
+    \sigma_{\mathrm{floor}}\Big),
+\end{equation}
+in the block's final (log) units.
+\begin{itemize}
+\item $\sigma_{\mathrm{rep}}$ (\texttt{representation\_std}, default 0) is
+  zero in a twin experiment. Set it for a truth from another model or from
+  real sensors: a resolved LES misses the subgrid part of the TKE, for
+  example.
+\item A fixed \texttt{std} can replace the \texttt{auto} estimate, for example
+  one calibrated from the replica noise floor of compare\_models.
+\end{itemize}
+
+\paragraph{Caveat: sampling noise is counted twice.} Each member's statistics
+carry their own sampling noise $\eta_j$, which inflates $C_{\bm h\bm h}$ in the
+gain. With $R$ also holding the truth's sampling variance, this noise is
+counted about twice in a single update ($N_a = 1$), so the update is
+conservative. That is the safe side. With $N_a > 1$ the factor is not two:
+$R$ enters as $\alpha_a R$, while the members' noise stays unscaled in
+$C_{\bm h\bm h}$.
+
+\paragraph{Carry $\bm\theta$ across windows.} $\bm\theta$ is constant, so its
+posterior from window $w$ is the prior for window $w+1$, while the inflow
+knots $\bm x$ are re-estimated in each window. Add no random walk on
+$\bm\theta$. If ensemble diversity has to be kept, use a jitter whose
+variance shrinks with the ensemble size, as in the paper's
+$\tilde\sigma^2 \propto N^{-3/2}$.
+
+\paragraph{Resolution requirement.} The SGS model acts on wavelengths
+$\lambda \approx 2$--$4\Delta = 4$--$8$\,m. At canopy speeds $U \approx 2$--$5$\,m/s
+this means $f = U/\lambda \approx 0.3$--$1.2$\,Hz. The current output step of
+1\,s gives a Nyquist frequency of 0.5\,Hz, so most of the band where
+$b_0, b_1, b_2$ matter is not recorded. The sensor time series need a denser
+output.
+
+\section{Stage 2: localised ensemble smoother on the velocity field}
+
+\subsection{No further model run}
+An ensemble smoother updates trajectories that have already been simulated.
+The run it needs already exists: the last forecast of each ESMDA window runs
+every member with its own posterior $(\bm\theta_j, \bm x_j)$, not the posterior
+mean, so the field spread includes parameter uncertainty. Stage 2 corrects those
+saved frames and adds no model run. A run is needed only to forecast beyond the
+window.
+
+With the forecast ensemble $X_f \in \R^{n\times J}$ (all saved frames of all
+members) and centred predicted observations $Y \in \R^{d_y\times J}$,
+$Y\bm 1 = 0$, every posterior field is a combination of the member fields.
+
+\paragraph{The gain works within $(\bm\theta, \bm x)$.} The members already
+carry a posterior conditioned on $\bm y$. A cross-member gain would hold the
+between-member part $\operatorname{Cov}(g(\bm\theta,\bm x)\mid\bm y)$ and use
+$\bm y$ a second time on it. Let $P$ project out $[\bm 1,\ \text{parameter
+anomalies}]$, in analysis space and with one row per time knot, and let
+$B \in \R^{J\times\nu}$ be an orthonormal basis of its range, with
+$\nu = J - 1 - p$ and $p$ the rank of the anomalies. Split
+$Y = YBB\T + Y_g$, with $Y_g = Y(I - BB\T)$ the between-member part. With
+$Y_w = R^{-1/2}Y$,
+\begin{equation}
+  X_a = X_f W,
+  \quad
+  W = I + B\big(\sqrt{\nu}\,M^{-1/2} - I\big)B\T
+      + B M^{-1} B\T Y_w\T D_w,
+  \quad
+  M = \nu I + B\T Y_w\T Y_w B,
+  \label{eq:es}
+\end{equation}
+with $D_w = R^{-1/2}D$ and $D = (\bm y - \bar{\bm y})\bm 1\T - Y_g$. This is a
+deterministic transform: no observation perturbations are drawn. $D$ moves each
+member to its own conditional mean, so the mean weights differ per member and
+the between-member part is conditioned too. The symmetric square root gives the
+within-parameter anomalies the Kalman covariance, $M^{-1}$ in ensemble
+coordinates. $W \in \R^{J\times J}$ depends only on observation-space
+quantities and $M$ is $\nu\times\nu$ whatever $d_y$ is. $\nu$ must stay
+well above zero: a window's knots and $\bm\theta$ together count towards $p$.
+
+\paragraph{Observations.} The observations are the raw noisy sensor frames, each
+paired with the forecast frame at its time, whatever Stage 1 assimilated. Bins
+are not used, and \texttt{tke} and \texttt{spectral} are excluded: they are not
+linear in the frame. $R$ is diagonal and holds instrument and representation
+variance only. It has no sampling error, because the target is the realised
+field, not a statistic of it.
+
+$R$ treats the frames as independent. Turbulence and representation errors
+are correlated over seconds, so an update that uses several frames can be
+overconfident: with AR(1) noise in the twin test of Section~\ref{sec:twin} the
+spread/error ratio at the sensors fell from 0.98 to about 0.72. The run saves the lag-1
+autocorrelation of the innovations per observation to show it.
+
+\paragraph{Failed members.} A member that failed in the last forecast holds a
+clone of a donor's field beside its own parameters. Such slots are excluded
+from all statistics, and their columns stay unchanged.
+
+\paragraph{What the update preserves.} The columns of $W$ sum to one, because
+$B\T\bm 1 = 0$: each posterior field is an affine combination of the member
+fields, with weights that can be negative. With one global $W$, every affine
+constraint satisfied by all members is preserved, in particular
+$\nabla\cdot\bm u = 0$ and $\bm u = 0$ inside buildings. With localisation, $W$
+varies in space: a row equal across members stays exact ($\bm u = 0$ in a
+building), but divergence is no longer zero. That is acceptable for
+reconstruction, but a restart needs a projection first. The next window
+therefore starts from the uncorrected final frame. The fields never satisfy the
+nonlinear momentum equation exactly.
+
+\subsection{Dimensionality}
+\label{sec:sizes}
+The sizes per case, for $u, v, w$ in float32:
+\begin{center}
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Grid & Values per frame & Frames & Per member & $J = 32$ \\
+\midrule
+$50\times40\times16$ ($\Delta = 2$\,m, committed case) & $9.6\times10^4$ & 300 & 115\,MB & 3.7\,GB \\
+$75\times60\times24$ ($\Delta = 1.33$\,m) & $3.2\times10^5$ & 180 & 233\,MB & 7.5\,GB \\
+Barcelona $224\times224\times32$ ($\Delta = 4$\,m) & $4.8\times10^6$ & 30 & 578\,MB & 18.5\,GB \\
+\bottomrule
+\end{tabular}
+\end{center}
+The output step is 1\,s (10\,s for Barcelona). A 1\,m Xie \& Castro grid would
+have $7.7\times10^5$ values per frame, but no case is configured with it. uDALES
+also saves the pressure, which adds a third to the files.
+
+The smoother \eqref{eq:es} never forms the $n\times n$ state covariance. The
+state is never held in memory:
+\begin{enumerate}
+\item compute the weights from the observations;
+\item stream the saved frames from disk one at a time, apply them, and write
+  the frames back.
+\end{enumerate}
+Memory is $\mathcal O(J \times \text{frame})$. The saved window files of both
+ESMDA save modes have the same layout, so one path serves both.
+
+\paragraph{Localisation as a local analysis.} With $J \approx 40$, spurious
+correlations dominate distant pairs, so localise in space and time. For grid
+cell $\bm r$ and frame $t$, an observation at sensor $\bm r_o$ and frame time
+$t_o$ enters with variance $R_o/\rho$, where
+\begin{equation}
+  \rho(\bm r, t; \bm r_o, t_o)
+  = \operatorname{GC}(|\bm r - \bm r_o|, L_r)\,
+    \operatorname{GC}(|t - t_o|, L_t),
+  \quad
+  W_{\bm r, t} = W\big(Y, R/\rho, \bm y\big),
+  \quad
+  \bm u_a(\bm r, t) = X_f(\bm r, t)\, W_{\bm r,t},
+  \label{eq:local}
+\end{equation}
+with GC the Gaspari--Cohn taper, zero from its cutoff on. So the local
+observation set is $|\bm r - \bm r_o| < L_r$ and $|t - t_o| < L_t$. The
+observations are single frames, so $|t - t_o|$ is the distance between two
+times. A bin would need the distance to its interval, which is not implemented.
+This is a local form of the transform \eqref{eq:es}, not an LETKF: an LETKF's
+anomalies keep the between-member part, and its mean weights are one vector for
+all members. Each cell costs one $\nu\times\nu$ eigendecomposition. The cells
+are independent and streamable, and because the transform is deterministic,
+neighbouring cells cannot disagree through a sampling draw. This avoids the
+in-memory gain matrix behind the $\sim$110\,GB estimate for localised
+state-bearing smoothers in the case config. With no $L_r$ set, the global
+\eqref{eq:es} applies, with the observations of all frames for every frame.
+
+\paragraph{Time localisation is physically required.} The velocity decorrelates
+over $\tau_{\mathrm{int}} \sim$ seconds. An observation at $t_o$ carries no
+information about frames $|t - t_o| \gg \tau_{\mathrm{int}}$, so
+$L_t = \mathcal O(\tau_{\mathrm{int}})$. This also keeps each local observation
+set small.
+
+\subsection{First twin test}\label{sec:twin}
+One small identical-twin test, uDALES on Xie \& Castro at 2\,m ($50\times40\times16$),
+$J = 32$, two 60\,s windows, one ESMDA step, $p = 6$, $\nu = 25$, four seeds
+varying truth, prior, noise and inlets. There were 18 assimilated sensors and 10
+held-out sensors at least 10\,m from them. The measured integral time was
+$\approx 2.4$\,s. Changes are paired RMSE against the uncorrected forecast, mean
+$\pm$ sd over seeds.
+
+\begin{center}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+Update ($L_r$\,m, $L_t$\,s) & Volume $uvw$ & Within 8\,m, $uv$ & Held-out, $uv$ \\
+\midrule
+Global & $+1.5 \pm 0.5\%$ & $-1.9 \pm 0.8\%$ & $-0.4 \pm 1.1\%$ \\
+Local (10, 3) & $-0.9 \pm 0.1\%$ & $-10.3 \pm 0.6\%$ & $0.0\%$ \\
+Local (20, 5) & $-3.1 \pm 0.2\%$ & $-18.4 \pm 0.9\%$ & $-0.5 \pm 0.3\%$ \\
+Local (20, 5), $p = 0$ & $-3.3 \pm 0.2\%$ & $-19.1 \pm 0.9\%$ & $-0.5 \pm 0.3\%$ \\
+Local (20, 5), shuffled $\bm y$ & $+0.5 \pm 0.4\%$ & $+4.0 \pm 1.6\%$ & $0.0 \pm 0.2\%$ \\
+Local (40, 10) & $-3.0 \pm 0.6\%$ & $-17.2 \pm 0.6\%$ & $-3.7 \pm 2.9\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+\item Localisation is essential: the global update worsens the field away from
+  the sensors, in all four seeds.
+\item The local gain sits close to the sensors and has gone by 16\,m. The
+  independent held-out score is much smaller than the near-sensor score.
+\item $w$ barely improves, and (40, 10) worsens it by 2.5\%.
+\item The projection gave no RMSE benefit in the local update here: $p = 0$ was
+  slightly better in all four seeds. In the global update it limits the
+  collapse of the spread (spread/error 0.44 against 0.08).
+\item The local update raises the rms divergence from $10^{-7}$ to about
+  $0.02$\,s$^{-1}$.
+\end{itemize}
+
+\subsection{Cheaper reduced states}
+\emph{Neither option below is implemented.} Both would reuse \eqref{eq:es}, with
+another state and observation operator.
+
+\paragraph{(a) Window-mean field (not implemented).} Take the time mean of each
+member's saved frames:
+\begin{equation}
+  \bar{\bm u}_j = \frac{1}{T}\int_{t_0}^{t_0+T} \bm u_j(t)\,dt,
+  \qquad
+  \bar X_f = [\bar{\bm u}_1,\dots,\bar{\bm u}_J] \in \R^{n_s\times J},
+  \quad n_s = 9.6\times10^4 .
+\end{equation}
+The observation operator $\bar H$ interpolates the mean field to the sensors,
+and the observations are the window means of the sensor series. The
+update is $\bar X_a = \bar X_f \bar W$.
+\begin{itemize}
+\item \textbf{Cost:} $J n_s$ values, about 15\,MB for $J = 40$, so the state
+  fits in memory. Spatial localisation (the form of \eqref{eq:local}) is
+  affordable, and no time localisation is needed.
+\item \textbf{Variant:} one mean per observation bin, $K$ fields instead of
+  one, with each bin updated only from its own bin observations.
+\item \textbf{Interpretation:} the mean field is roughly a deterministic
+  function of the parameters plus sampling noise,
+  $\bar{\bm u}_j \approx g(\bm\theta_j, \bm x_j) + \bm\varepsilon_j$. The update
+  moves the mean only within the span of the member anomalies, so a structural
+  model error is corrected only as far as it projects on that span, and nothing
+  shows that it does. Nor can $\bm\varepsilon_j$ be assumed small: after stage 1
+  the spread of $g$ is narrow, so $\bm\varepsilon_j$ may be a large share of the
+  anomalies. Whether ensemble correlations are more trustworthy than for
+  instantaneous fields has to be measured.
+\end{itemize}
+
+\paragraph{(b) POD coefficients (not implemented).} Expand the fluctuations of each member in a
+spatial basis $\Phi_r = [\bm\phi_1,\dots,\bm\phi_r]$:
+\begin{equation}
+  \bm u_j(t) = \bar{\bm u} + \Phi_r\,\bm a_j(t) + \bm r_j(t),
+  \qquad
+  \bm a_j(t) = \Phi_r\T D\,\big(\bm u_j(t) - \bar{\bm u}\big),
+\end{equation}
+where $D$ is the diagonal matrix that weights the variables
+(\texttt{variable\_scales}), so the modes are orthonormal in its inner product,
+$\Phi_r\T D\,\Phi_r = I$. The state per member
+becomes $\bm a_j(t_1{:}t_T) \in \R^{rT}$, for example $r = 100$ and
+$T = 300$, giving $3\times10^4$ instead of $2.9\times10^7$ values. Per frame, the observation
+operator is $H\Phi_r$ applied to the coefficients plus $H(\bar{\bm u} + \bm r_j)$.
+Update each frame's coefficients from the observations within $L_t$
+(time localisation is trivial in this space). Decode only the increment, as
+the existing \texttt{OnlineStateReduction} does:
+\begin{equation}
+  \bm u_{a,j}(t) = \bm u_{f,j}(t) + \Phi_r\,\Delta\bm a_j(t),
+\end{equation}
+so the projection residual $\bm r_j$ is kept unchanged.
+
+The choice of basis decides whether this adds anything:
+\begin{itemize}
+\item \textbf{Ensemble-anomaly basis} (the existing \texttt{svd}, rank
+  $\le J-1$). This spans exactly the space of the global update, so the
+  result is identical to the unlocalised smoother. It saves memory but adds
+  no information.
+\item \textbf{Fixed snapshot basis}, built from the window's frames
+  (the \texttt{window\_snapshots} basis source) or from a long reference run. Use the method of snapshots on
+  $M = JT/s$ frames with stride $s$:
+  \begin{equation}
+    G = S\T D S \in \R^{M\times M},\quad
+    G\bm v_k = \lambda_k \bm v_k,\quad
+    \bm\phi_k = S\bm v_k/\sqrt{\lambda_k}.
+  \end{equation}
+  Accumulate $G$ chunk by chunk from the saved frames. With $s = 10$ and $J = 32$, $M = 960$
+  and $G$ is trivial in size. Truncating to the $r$ energetic modes acts as a
+  \emph{scale filter}: it suppresses small-scale increments. It is not a
+  substitute for spatial localisation. The energetic modes are global, so a
+  spurious correlation between distant points stays in the update, and the
+  sampling error of the coefficient covariance is unchanged. The reduced path
+  in the code does not support localisation.
+\item \textbf{Constraints are kept exactly.} Every mode is a linear
+  combination of snapshots, so the modes are divergence-free and zero inside
+  buildings, and so is every decoded increment. This is an advantage over
+  spatial localisation.
+\item \textbf{Rank is still limited by the ensemble.} The coefficient
+  covariance has rank $\le J-1$ per frame, so the basis restricts where the
+  update can go but does not add degrees of freedom.
+\end{itemize}
+
+\paragraph{Status.} What is implemented is the time-resolved smoother,
+\eqref{eq:es} and \eqref{eq:local}. It runs on each window's posterior frames
+inside the smoother, or afterwards on a finished run, and the saved posterior is
+the corrected state. There are no results yet.
+
+\section{Summary and first checks}
+\begin{enumerate}
+\item Joint ESMDA of $(b_0,b_1,b_2,z_0,\bm x)$ against [bin means;
+  TI and normalised band spectra], with $R$ from replicas and
+  $\bm\theta$ carried across windows.
+\item The posterior forecast of each ESMDA window, which runs the members with
+  their own posterior: no extra run.
+\item Streamed, space--time-localised ensemble smoother on those frames, using
+  the raw sensor frames.
+\end{enumerate}
+\noindent The main risk is that the SGS terms cannot be identified. Their
+leverage on the sensor statistics may be small. The first checks:
+\begin{itemize}
+\item a paired compare\_models run varying $b_0$, to see whether the
+  normalised spectra differ by more than the replica noise;
+\item the posterior/prior spread ratio of each parameter after stage 1.
+\end{itemize}
+
+\end{document}

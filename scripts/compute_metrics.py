@@ -81,7 +81,11 @@ window-indexed ones also list `per_window` values):
                   diagonal innovation chi^2 (~1 when R and the spread are
                   honest); the smoother's normalized data mismatch O_N. A
                   hybrid's smoother stops before the posterior forecast, so
-                  its stage has only O_N.
+                  its stage has only O_N. With observation statistics
+                  (observation.types with tke or spectral) the RMSE, chi^2
+                  and Desroziers use the raw/bins (velocity) observations
+                  only, and are left out without any; O_N covers all of them,
+                  and `data_mismatch_per_block` gives it per type.
   desroziers      per stage with an analysis: the observation error std
                   estimated from the forecast and analysis residuals
                   (Desroziers), the std the run assimilated (obs_std_assimilated
@@ -378,8 +382,21 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
         files = window_files("obs")
         smoother: dict = {}
         if not hybrid:
-            smoother, metrics["desroziers"]["smoother"] = _observation_metrics(files, 1)
+            smoother, desroziers = _observation_metrics(files, 1)
+            if desroziers is not None:
+                metrics["desroziers"]["smoother"] = desroziers
         smoother["data_mismatch"] = _data_mismatch(files)
+        # With observation statistics (observation.types), O_N per block too.
+        with xarray.open_dataset(files[0]) as first:
+            blocks = (
+                list(dict.fromkeys(first.obs_block.values.tolist()))
+                if ("obs_block" in first)
+                else []
+            )
+        if blocks:
+            smoother["data_mismatch_per_block"] = {
+                block: _data_mismatch(files, block) for block in blocks
+            }
         metrics["observation"]["smoother"] = smoother
     if "filter" in run_info:
         metrics["observation"]["filter"], metrics["desroziers"]["filter"] = (
@@ -401,16 +418,34 @@ def _finite(value: float) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def _observation_metrics(files: list[pathlib.Path], n_cycles: int) -> tuple[dict, dict]:
+def _velocity_rows(ds: xarray.Dataset) -> xarray.Dataset:
+    """The observations that are sensor velocities (m/s).
+
+    With observation statistics (an `obs_block` label per observation) these
+    are the raw and bins blocks; the tke and spectral rows are other
+    quantities in other units, scored by O_N only.
+    """
+    if "obs_block" not in ds:
+        return ds
+    return ds.isel(observation=np.isin(ds.obs_block.values, ["raw", "bins"]))
+
+
+def _observation_metrics(
+    files: list[pathlib.Path], n_cycles: int
+) -> tuple[dict, dict | None]:
     """The observation and desroziers blocks of one stage, one value per update.
 
     Each window's observations hold `n_cycles` equal chunks, one per update; its
-    first step is the forecast and its last the analysis.
+    first step is the forecast and its last the analysis. Only the velocity
+    observations count (`_velocity_rows`); with none, both blocks are empty
+    ({} and None).
     """
     fits = []
     obs_std = []
     for path in files:
-        ds = xarray.load_dataset(path)
+        ds = _velocity_rows(xarray.load_dataset(path))
+        if not ds.sizes["observation"]:
+            return {}, None
         obs, std = ds.obs.values, ds.obs_std.values
         pred = ds.pred_obs.transpose("esmda_step", "observation", "ensemble").values
         for chunk in np.split(np.arange(obs.size), n_cycles):
@@ -440,20 +475,24 @@ def _observation_metrics(files: list[pathlib.Path], n_cycles: int) -> tuple[dict
     return observation, desroziers
 
 
-def _data_mismatch(files: list[pathlib.Path]) -> dict | None:
-    """O_N of every ESMDA step's forecast, pooled over the windows."""
+def _data_mismatch(files: list[pathlib.Path], block: str | None = None) -> dict | None:
+    """O_N of every ESMDA step's forecast, pooled over the windows; of the
+    observations labelled `block` in `obs_block` alone when given."""
     per_window = []
     for path in files:
         ds = xarray.load_dataset(path)
+        if block is not None:
+            ds = ds.isel(observation=ds.obs_block.values == block)
         pred = ds.pred_obs.transpose("esmda_step", "observation", "ensemble").values
         per_window.append(
             np.stack([data_mismatch(ds.obs.values, p, ds.obs_std.values) for p in pred])
         )
-    return data_mismatch_summary(
+    summary: dict | None = data_mismatch_summary(
         np.concatenate(per_window, axis=1),  # (step, window * member)
         ds.sizes["observation"],
         per_window=per_window,
     )
+    return summary
 
 
 def _parameter_metrics(

@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
+import sys
 from typing import Any
 
+import netCDF4
 import numpy as np
 import pytest
 import xarray
 import yaml
+from data_assimilation.smoothing.esmda import _BaseESMDA
+from data_assimilation.smoothing.field_analysis import field_analysis_netcdf
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
 from tests.conftest import compose, load_script, surrogate
@@ -396,6 +402,586 @@ def test_adaptive_error_run(
     )
 
 
+STATISTICS = "observation.types=[bins,tke,spectral]"
+
+
+def test_observation_types_config(tmp_path: pathlib.Path) -> None:
+    """[bins] by default; statistics for the smoother only; bins without an
+    interval is raw."""
+    helpers = load_script("scripts/utils/helper_functions.py")
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
+    assert list(cfg.observation.types) == ["bins"]
+    assert helpers.observation_types(cfg) == ["bins"]
+    no_bins = compose(
+        "assimilation",
+        "+test=assimilation",
+        "observation.aggregation.interval_seconds=null",
+        root=tmp_path,
+    )
+    assert helpers.observation_types(no_bins) == ["raw"]
+    assert helpers.make_aggregation(no_bins) is None
+
+    for types in ("[raw]", "[bins]", "[raw,tke]", "[bins,tke,spectral]", "[spectral]"):
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            f"observation.types={types}",
+            root=tmp_path,
+        )
+        check_config(cfg, "smoother")
+    for workflow in ("filtering", "hybrid"):
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *METHODS[workflow],
+            "observation.types=[raw]",
+            root=tmp_path,
+        )
+        check_config(cfg, workflow)
+
+
+def test_smoother_with_observation_statistics(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Every block is assimilated and labelled; the bins block is the default
+    run's observations bit for bit; metrics read the blocks apart. 8 one-second
+    frames per window: the spectrum is one band of 4 s Welch segments."""
+    window = [
+        "time.simulation_time=8.0",
+        "observation.aggregation.interval_seconds=2.0",
+    ]
+    runs: dict[str, list[str]] = {
+        "default": [],
+        "statistics": [
+            STATISTICS,
+            "observation.spectral.segment_seconds=4.0",
+            "observation.spectral.num_bands=1",
+        ],
+    }
+    run_dirs = {}
+    for name, extra in runs.items():
+        cfg = compose(
+            "assimilation",
+            "+test=assimilation",
+            *SURROGATE,
+            *surrogate(session_root),
+            *window,
+            *extra,
+            root=tmp_path / name,
+        )
+        run_dirs[name] = _run("smoother", cfg)
+    num_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+    for w in range(2):
+        default = xarray.load_dataset(
+            run_dirs["default"] / f"windows/window_{w}_obs.nc"
+        )
+        stats = xarray.load_dataset(
+            run_dirs["statistics"] / f"windows/window_{w}_obs.nc"
+        )
+        assert "obs_block" not in default
+        blocks = stats.obs_block.values
+        assert list(dict.fromkeys(blocks.tolist())) == ["bins", "tke", "spectral"]
+        assert (blocks == "tke").sum() == (blocks == "spectral").sum() == num_obs
+        bins = stats.isel(observation=blocks == "bins")
+        for name in ("obs", "obs_clean", "obs_std"):
+            np.testing.assert_array_equal(bins[name], default[name])
+        for name in ("obs", "obs_clean", "obs_std", "pred_obs"):
+            assert np.isfinite(stats[name]).all(), name
+        assert (stats.obs_std > 0).all()
+    metrics = yaml.safe_load((run_dirs["statistics"] / "metrics.yaml").read_text())
+    smoother = metrics["observation"]["smoother"]
+    assert set(smoother["data_mismatch_per_block"]) == {"bins", "tke", "spectral"}
+    assert "forecast_rmse" in smoother and "smoother" in metrics["desroziers"]
+    default_metrics = yaml.safe_load((run_dirs["default"] / "metrics.yaml").read_text())
+    assert "data_mismatch_per_block" not in default_metrics["observation"]["smoother"]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("smoother", ["observation.types=[]"], "non-empty list"),
+        ("smoother", ["observation.types=all"], "non-empty list"),
+        ("smoother", ["observation.types=[bins,velocity]"], "choose from"),
+        ("smoother", ["observation.types=[tke,tke]"], "a type twice"),
+        ("smoother", ["observation.types=[raw,bins]"], "both raw and bins"),
+        ("smoother", [STATISTICS, ADAPTIVE], "cannot be used with observation.types"),
+        ("hybrid", [STATISTICS], "for the smoother only"),
+        ("filtering", ["params@prior_params=static", STATISTICS], "smoother only"),
+    ],
+)
+def test_observation_types_rejected(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose("assimilation", "+test=assimilation", *overrides, root=tmp_path)
+    with pytest.raises(ValueError, match=message):
+        check_config(cfg, workflow)
+
+
+# The settings are in tests/configs/test/assimilation.yaml. On the surrogate the
+# members are nearly a function of their parameters, so these runs barely change
+# a frame: what must move the frames is tested on synthetic windows below.
+FIELD_ANALYSIS = ["field_analysis=${field_analysis_settings.local}"]
+
+
+def _field_run(
+    root: pathlib.Path, session_root: pathlib.Path, *overrides: str
+) -> tuple[Any, pathlib.Path]:
+    """A smoother run of 12 members, its config and run dir."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *SURROGATE,
+        *surrogate(session_root),
+        "ensemble.ensemble_size=12",
+        *overrides,
+        root=root,
+    )
+    load_script("scripts/run_smoother.py").run(cfg)
+    return cfg, pathlib.Path(cfg.paths.results_dir) / "smoother"
+
+
+@pytest.fixture(scope="module")  # type: ignore[misc]
+def field_runs(
+    tmp_path_factory: pytest.TempPathFactory,
+    session_root: pathlib.Path,
+    trained: Any,
+) -> dict[str, tuple[Any, pathlib.Path]]:
+    """A run without the field analysis and one with it, keeping the forecast."""
+    return {
+        "plain": _field_run(
+            tmp_path_factory.mktemp("plain"), session_root, "field_analysis=null"
+        ),
+        "corrected": _field_run(
+            tmp_path_factory.mktemp("corrected"),
+            session_root,
+            *FIELD_ANALYSIS,
+            "field_analysis_settings.local.keep_forecast=true",
+        ),
+    }
+
+
+def _state(run_dir: pathlib.Path, w: int, kind: str = "posterior") -> xarray.Dataset:
+    return xarray.load_dataset(run_dir / f"windows/window_{w}_{kind}_state.nc")
+
+
+def _script_cfg(results_dir: pathlib.Path, settings: Any, **changes: Any) -> Any:
+    """What run_field_analysis.py reads of its own config."""
+    container = OmegaConf.to_container(settings, resolve=True)
+    return OmegaConf.create(
+        {
+            "paths": {"results_dir": str(results_dir)},
+            "field_analysis": {**container, **changes},
+        }
+    )
+
+
+def test_field_analysis_off_changes_nothing(field_runs: Any) -> None:
+    """The default writes no new file or run_info key."""
+    _, run_dir = field_runs["plain"]
+    assert {p.name for p in (run_dir / "windows").iterdir()} == {
+        f"window_{w}_{kind}.nc" for w in range(2) for kind in WINDOW_FILES
+    }
+    run_info = yaml.safe_load((run_dir / "run_info.yaml").read_text())
+    assert not {"field_analysis", "posterior_substitutions"} & set(run_info)
+
+
+def test_field_analysis_in_the_run(field_runs: Any) -> None:
+    """Only the saved frames change: each window's forecast, and so the warm
+    start of the next one, is the run's without the analysis. The saved frames
+    are the raw ones whatever Stage 1 assimilated, with the likelihood's R."""
+    cfg, run_dir = field_runs["corrected"]
+    _, plain = field_runs["plain"]
+    num_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+    for w in range(2):
+        forecast = _state(run_dir, w, "posterior_forecast")
+        xarray.testing.assert_identical(forecast, _state(plain, w))
+        corrected = _state(run_dir, w)
+        assert not np.array_equal(corrected.u, forecast.u)
+        assert np.isfinite(corrected.u).all()
+        field_obs = xarray.load_dataset(run_dir / f"windows/window_{w}_field_obs.nc")
+        frames = forecast.sizes["time"]
+        assert field_obs.obs.shape == field_obs.obs_var.shape == (frames, num_obs)
+        assert field_obs.pred_obs.shape == (12, frames, num_obs)
+        np.testing.assert_array_equal(field_obs.time, forecast.time)
+        # The overlay's 0.25 and 0.1, not shrunk by the 1.5 s bins of Stage 1.
+        np.testing.assert_allclose(field_obs.obs_var, 0.25**2 + 0.1**2)
+        assert field_obs.member_mask.all()
+        assert np.isfinite(field_obs.innovation_lag1).all()
+    info = yaml.safe_load((run_dir / "run_info.yaml").read_text())["field_analysis"]
+    assert len(info) == 2 and info[0]["num_members"] == 12
+
+
+def test_field_analysis_does_not_reach_the_next_window(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: Any,
+    field_runs: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a correction far too big to miss, window 1 is still the run's
+    without the analysis: it starts from the frames the model wrote."""
+    load_script("scripts/run_smoother.py")
+
+    def shifted(path: pathlib.Path, **kwargs: Any) -> Any:
+        info = field_analysis_netcdf(path, **kwargs)
+        with netCDF4.Dataset(path, "r+") as file:
+            file["u"][:] = file["u"][:] + 1.0
+        return info
+
+    monkeypatch.setattr(
+        sys.modules["helper_functions"], "field_analysis_netcdf", shifted
+    )
+    _, run_dir = _field_run(
+        tmp_path,
+        session_root,
+        *FIELD_ANALYSIS,
+        "field_analysis_settings.local.keep_forecast=true",
+    )
+    _, plain = field_runs["plain"]
+    for w in range(2):
+        forecast = _state(run_dir, w, "posterior_forecast")
+        xarray.testing.assert_identical(forecast, _state(plain, w))
+        assert float(abs(_state(run_dir, w).u - forecast.u).min()) > 0.9
+
+
+def test_field_analysis_is_scored_as_the_posterior(
+    field_runs: Any, tmp_path: pathlib.Path
+) -> None:
+    """compute_metrics.py scores _posterior_state.nc, not the forecast beside it."""
+    _, run_dir = field_runs["corrected"]
+    copy = tmp_path / "smoother"
+    shutil.copytree(run_dir, copy)
+    compute_metrics = load_script("scripts/compute_metrics.py").run
+    compute_metrics(copy)
+    before = yaml.safe_load((copy / "metrics.yaml").read_text())
+    shifted = _state(copy, 0)
+    shifted["u"] = shifted.u + 1.0
+    shifted.to_netcdf(copy / "windows/window_0_posterior_state.nc")
+    compute_metrics(copy)
+    after = yaml.safe_load((copy / "metrics.yaml").read_text())
+    score = {
+        name: metrics["field_statistics"]["u"]["posterior"]["rmse"]["per_window"]
+        for name, metrics in (("before", before), ("after", after))
+    }
+    assert score["after"][0] > score["before"][0] + 0.5
+    assert score["after"][1] == score["before"][1]
+
+
+@pytest.mark.parametrize("source", ["plain", "corrected"])  # type: ignore[misc]
+def test_field_analysis_after_the_run(
+    source: str, field_runs: Any, tmp_path: pathlib.Path
+) -> None:
+    """The script gives the run's frames from a run without the analysis, with
+    the observations drawn again, and repeats on a corrected run, which is not
+    corrected twice."""
+    cfg, run_dir = field_runs[source]
+    copy = tmp_path / "smoother"
+    shutil.copytree(run_dir, copy)
+    settings = field_runs["corrected"][0].field_analysis
+    load_script("scripts/run_field_analysis.py").run(_script_cfg(tmp_path, settings))
+    run_info = yaml.safe_load((copy / "run_info.yaml").read_text())
+    assert run_info["field_analysis_settings"] == OmegaConf.to_container(
+        settings, resolve=True
+    )
+    _, corrected = field_runs["corrected"]
+    for w in range(2):
+        xarray.testing.assert_identical(_state(copy, w), _state(corrected, w))
+        xarray.testing.assert_identical(
+            _state(copy, w, "posterior_forecast"),
+            _state(corrected, w, "posterior_forecast"),
+        )
+        for name in ("obs", "obs_var", "pred_obs", "member_mask"):
+            xarray.testing.assert_identical(
+                xarray.load_dataset(copy / f"windows/window_{w}_field_obs.nc")[name],
+                xarray.load_dataset(corrected / f"windows/window_{w}_field_obs.nc")[
+                    name
+                ],
+            )
+
+
+def test_field_analysis_after_the_run_can_be_repeated_after_a_failure(
+    field_runs: Any, tmp_path: pathlib.Path
+) -> None:
+    """A failed call leaves every posterior readable, and the next one finishes
+    the job, also when the first died writing the field observations."""
+    _, plain = field_runs["plain"]
+    cfg, corrected = field_runs["corrected"]
+    copy = tmp_path / "smoother"
+    shutil.copytree(plain, copy)
+    script = load_script("scripts/run_field_analysis.py")
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        script.run(_script_cfg(tmp_path, cfg.field_analysis, min_dof=1000))
+    for w in range(2):
+        xarray.testing.assert_identical(_state(copy, w), _state(plain, w))
+
+    (copy / "windows/window_1_field_obs.nc").unlink()
+    script.run(_script_cfg(tmp_path, cfg.field_analysis))
+    for w in range(2):
+        xarray.testing.assert_identical(_state(copy, w), _state(corrected, w))
+
+
+def test_smoother_run_clears_a_previous_field_analysis(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """run_field_analysis.py must not mistake them for this run's."""
+    cfg = compose("assimilation", "+test=assimilation", *SURROGATE, root=tmp_path)
+    windows = pathlib.Path(cfg.paths.results_dir) / "smoother/windows"
+    windows.mkdir(parents=True)
+    (windows / "window_0_field_obs.nc").touch()
+    (windows / "window_1_posterior_forecast_state.nc").touch()
+    _, run_dir = _field_run(tmp_path, session_root, "field_analysis=null")
+    assert not list((run_dir / "windows").glob("*field_obs.nc"))
+    assert not list((run_dir / "windows").glob("*forecast_state.nc"))
+
+
+@pytest.mark.parametrize("option", ["local", "global"])  # type: ignore[misc]
+def test_correct_window_pairs_frames_members_and_sensors(
+    option: str, tmp_path: pathlib.Path
+) -> None:
+    """On a synthetic window with real spread: the frames written are those of
+    the library fed row by row, one row per (frame, component, sensor)."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "params@prior_params=sgs_roughness",
+        f"field_analysis=${{field_analysis_settings.{option}}}",
+        "field_analysis_settings.local.localization_radius=3.0",
+        root=tmp_path,
+    )
+    rng = np.random.default_rng(0)
+    members, frames, components = 14, 4, 2
+    sensors = np.array([[1.0, 1.0, 1.0], [5.0, 3.0, 1.0], [5.0, 5.0, 3.0]])
+    instantiate(cfg.prior_params).sample(members).to_netcdf(
+        tmp_path / "window_0_posterior_params.nc"
+    )
+    params = xarray.load_dataset(tmp_path / "window_0_posterior_params.nc")
+    axes = {"z": [1.0, 3.0], "y": [1.0, 3.0, 5.0], "x": [1.0, 3.0, 5.0, 7.0]}
+    shape = (members, frames, 2, 3, 4)
+    dims = ("ensemble", "time", "z", "y", "x")
+    times = np.arange(1.0, frames + 1.0)
+    forecast = tmp_path / "window_0_posterior_forecast_state.nc"
+    xarray.Dataset(
+        {name: (dims, rng.normal(size=shape).astype("f4")) for name in "uvw"},
+        coords={"time": times, **axes},
+    ).to_netcdf(forecast)
+    num_obs = components * len(sensors)
+    pred = rng.normal(size=(members, frames, num_obs))
+    obs = rng.normal(size=(frames, num_obs))
+    variance = rng.uniform(0.5, 1.5, (frames, num_obs))
+    mask = np.arange(members) != 3
+    frame = ("time", "obs")
+    xyz = np.tile(sensors, (components, 1))
+    xarray.Dataset(
+        {
+            "obs": (frame, obs),
+            "obs_var": (frame, variance),
+            "pred_obs": (("ensemble", *frame), pred),
+            "obs_x": ("obs", xyz[:, 0]),
+            "obs_y": ("obs", xyz[:, 1]),
+            "obs_z": ("obs", xyz[:, 2]),
+            "member_mask": ("ensemble", mask),
+            "innovation_lag1": ("obs", np.zeros(num_obs)),
+        },
+        coords={"time": times},
+    ).to_netcdf(tmp_path / "window_0_field_obs.nc")
+
+    helper = load_script("scripts/utils/helper_functions.py")
+    helper.correct_window(cfg, tmp_path, 0)
+
+    rows = [(t, o) for t in range(frames) for o in range(num_obs)]
+    settings = cfg.field_analysis
+    expected = tmp_path / "expected.nc"
+    shutil.copyfile(forecast, expected)
+    field_analysis_netcdf(
+        expected,
+        variables=list(settings.variables),
+        pred_obs=np.array([pred[:, t, o] for t, o in rows]),
+        obs=np.array([obs[t, o] for t, o in rows]),
+        obs_var=np.array([variance[t, o] for t, o in rows]),
+        obs_time=np.array([times[t] for t, _ in rows]),
+        obs_coords=np.array([xyz[o] for _, o in rows]),
+        params=helper.field_parameter_rows(cfg, params),
+        member_mask=mask,
+        L_r=settings.localization_radius,
+        L_t=settings.localization_time,
+        min_dof=1,
+    )
+    corrected = xarray.load_dataset(tmp_path / "window_0_posterior_state.nc")
+    xarray.testing.assert_identical(corrected, xarray.load_dataset(expected))
+    before = xarray.load_dataset(forecast)
+    assert float(abs(corrected.u - before.u).max()) > 0.1
+    xarray.testing.assert_identical(
+        corrected.isel(ensemble=3), before.isel(ensemble=3)
+    )
+
+
+def test_field_parameter_rows_are_the_analysis_space(tmp_path: pathlib.Path) -> None:
+    """Log and bounded parameters as analysed, every time knot its own row."""
+    helper = load_script("scripts/utils/helper_functions.py")
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "params@prior_params=sgs_roughness",
+        root=tmp_path,
+    )
+    params = instantiate(cfg.prior_params).sample(6)
+    rows = helper.field_parameter_rows(cfg, params)
+    assert rows.shape == (len(params.data_vars), 6)
+    index = list(params.data_vars).index("roughness_length")
+    low, high = np.log(0.005), np.log(0.15)  # the prior's min and max
+    position = (np.log(params.roughness_length.values) - low) / (high - low)
+    np.testing.assert_allclose(
+        rows[index], np.log(position / (1 - position)), rtol=1e-4
+    )
+
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "params@prior_params=dynamic",
+        root=tmp_path,
+    )
+    params = instantiate(cfg.prior_params).sample(6)
+    rows = helper.field_parameter_rows(cfg, params)
+    knots = params.sizes["time"]
+    assert knots > 1
+    assert rows.shape[0] == sum(
+        knots if "time" in params[name].dims else 1 for name in params.data_vars
+    )
+    first = list(params.data_vars)[0]
+    np.testing.assert_allclose(rows[1], params[first].isel(time=1).values, rtol=1e-5)
+
+
+def test_field_analysis_refuses_frames_already_corrected(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Without keep_forecast only the corrected frames are left."""
+    cfg, run_dir = _field_run(tmp_path, session_root, *FIELD_ANALYSIS)
+    assert not list((run_dir / "windows").glob("*forecast_state.nc"))
+    with pytest.raises(ValueError, match="keep_forecast"):
+        load_script("scripts/run_field_analysis.py").run(cfg)
+
+
+def test_field_analysis_masks_substituted_members(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slot substituted in the posterior forecast is recorded, left out of the
+    statistics and left as it is."""
+    forecast_step = _BaseESMDA._forecast_step
+
+    def fail_member_1(self: Any, *args: Any, **kwargs: Any) -> Any:
+        out = forecast_step(self, *args, **kwargs)
+        self.forward_model._last_failure_substitutions = {1: 0}
+        return out
+
+    monkeypatch.setattr(_BaseESMDA, "_forecast_step", fail_member_1)
+    cfg, run_dir = _field_run(
+        tmp_path,
+        session_root,
+        *FIELD_ANALYSIS,
+        "field_analysis_settings.local.keep_forecast=true",
+    )
+    run_info = yaml.safe_load((run_dir / "run_info.yaml").read_text())
+    assert run_info["posterior_substitutions"] == {0: {1: 0}, 1: {1: 0}}
+    assert run_info["field_analysis"][0]["num_members"] == 11
+    for w in range(2):
+        field_obs = xarray.load_dataset(run_dir / f"windows/window_{w}_field_obs.nc")
+        assert field_obs.member_mask.values.tolist() == [True, False] + [True] * 10
+        forecast = _state(run_dir, w, "posterior_forecast")
+        corrected = _state(run_dir, w)
+        np.testing.assert_array_equal(
+            corrected.u.isel(ensemble=1), forecast.u.isel(ensemble=1)
+        )
+        assert not np.array_equal(corrected.u, forecast.u)
+
+    # Afterwards the slots come from run_info.yaml.
+    for path in (run_dir / "windows").glob("*field_obs.nc"):
+        path.unlink()
+    load_script("scripts/run_field_analysis.py").run(
+        _script_cfg(run_dir.parent, cfg.field_analysis)
+    )
+    for w in range(2):
+        field_obs = xarray.load_dataset(run_dir / f"windows/window_{w}_field_obs.nc")
+        assert field_obs.member_mask.values.tolist() == [True, False] + [True] * 10
+
+
+def test_field_analysis_needs_degrees_of_freedom(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """Refused before the first forecast."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *SURROGATE,
+        *surrogate(session_root),
+        "field_analysis=${field_analysis_settings.local}",
+        "field_analysis_settings.local.min_dof=5",
+        "ensemble.ensemble_size=2",
+        root=tmp_path,
+    )
+    with pytest.raises(ValueError, match="degrees of freedom"):
+        load_script("scripts/run_smoother.py").run(cfg)
+    assert not list(
+        (pathlib.Path(cfg.paths.results_dir) / "smoother/windows").iterdir()
+    )
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "workflow, overrides, message",
+    [
+        ("hybrid", [], "the hybrid has none to correct"),
+        ("filtering", ["params@prior_params=static"], "the filtering has none"),
+        ("smoother", ["smoothing.final_time_smoothing=true"], "final_time_smoothing"),
+        (
+            "smoother",
+            ["field_analysis_settings.local.localization_time=null"],
+            "go together",
+        ),
+        ("smoother", ["field_analysis_settings.local.variables=[pres]"], "subset"),
+        ("smoother", ["field_analysis_settings.local.chunking=0"], "chunking"),
+    ],
+)
+def test_field_analysis_rejected(
+    workflow: str, overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "field_analysis=${field_analysis_settings.local}",
+        *overrides,
+        root=tmp_path,
+    )
+    with pytest.raises(ValueError, match=message):
+        check_config(cfg, workflow)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "overrides, message",
+    [
+        ([], "treats them as independent"),
+        ([ADAPTIVE], "adaptive error's inflation"),
+    ],
+)
+def test_field_analysis_warns(
+    overrides: list[str], message: str, tmp_path: pathlib.Path
+) -> None:
+    check_config = load_script("scripts/utils/inconsistency_check.py").check_config
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "field_analysis=${field_analysis_settings.local}",
+        *overrides,
+        root=tmp_path,
+    )
+    with pytest.warns(UserWarning, match=message):
+        check_config(cfg, "smoother")
+
+
 def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> None:
     """The Desroziers ratio compares against obs_std_assimilated when saved,
     the observation block against the configured obs_std."""
@@ -417,6 +1003,36 @@ def test_desroziers_metric_uses_the_assimilated_std(tmp_path: pathlib.Path) -> N
         assert desroziers["obs_std_used"] == pytest.approx(used)
         assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0) / used)
         assert observation["innovation_chi2_diag"]["mean"] == pytest.approx(4.0)
+
+
+def test_observation_metrics_score_the_velocity_blocks(tmp_path: pathlib.Path) -> None:
+    """With obs_block labels, RMSE and Desroziers read the bins rows alone;
+    O_N reads all rows and each block."""
+    compute_metrics = load_script("scripts/compute_metrics.py")
+    blocks = np.array(["bins", "bins", "tke", "spectral"])
+    pred = np.stack([np.full((4, 2), 2.0), np.full((4, 2), 1.0)])
+    pred[:, 2:] = 100.0  # the statistics rows: far off, in other units
+    ds = xarray.Dataset(
+        {
+            "obs": ("observation", np.zeros(4)),
+            "obs_std": ("observation", np.ones(4)),
+            "pred_obs": (("esmda_step", "observation", "ensemble"), pred),
+            "obs_block": ("observation", blocks),
+        }
+    )
+    ds.to_netcdf(tmp_path / "window_0_obs.nc")
+    observation, desroziers = compute_metrics._observation_metrics(
+        [tmp_path / "window_0_obs.nc"], 1
+    )
+    assert observation["forecast_rmse"]["mean"] == pytest.approx(2.0)
+    assert desroziers["ratio"] == pytest.approx(np.sqrt(2.0))
+    files = [tmp_path / "window_0_obs.nc"]
+    assert compute_metrics._data_mismatch(
+        files, "tke"
+    ) != compute_metrics._data_mismatch(files, "bins")
+    # Statistics alone: no velocity rows, no observation or Desroziers block.
+    ds.assign(obs_block=("observation", ["tke"] * 4)).to_netcdf(tmp_path / "s.nc")
+    assert compute_metrics._observation_metrics([tmp_path / "s.nc"], 1) == ({}, None)
 
 
 def test_truth_from_a_forward_run(
@@ -463,6 +1079,55 @@ def test_truth_from_a_forward_run(
 def test_smoother_on_udales(tmp_path: pathlib.Path) -> None:
     cfg = compose("assimilation", "+test=assimilation", root=tmp_path)
     _check_outputs(_run("smoother", cfg))
+
+
+# The smoother on uDALES estimating the SGS offset and the wall roughness from
+# the interval means and the sensors' turbulence statistics. 16 frames of
+# 0.25 s per 4 s window leave the statistics few samples; the
+# spectrum has 2 bands of 1 s Welch segments.
+SGS_ROUGHNESS = [
+    "params@truth_params=sgs_roughness_truth",
+    "params@prior_params=sgs_roughness",
+    "smoothing.smoother=${smoother.static}",
+    "assimilation.params_to_estimate=[sgs_bias_b0,roughness_length]",
+    "assim_model.forward_model.model_discrepancy.enabled=true",
+    "truth_model.forward_model.model_discrepancy.enabled=true",
+    "ensemble.failure.policy=raise",
+    "ensemble.ensemble_size=4",
+    "time.simulation_time=4.0",
+    "time.output_frequency=0.25",
+    "observation.types=[bins,tke,spectral]",
+    "observation.spectral.segment_seconds=1.0",
+    "observation.spectral.num_bands=2",
+]
+
+
+@pytest.mark.integration  # type: ignore[misc]
+def test_smoother_estimates_sgs_and_roughness_on_udales(tmp_path: pathlib.Path) -> None:
+    """All three observation blocks are assimilated and saved; no skill check
+    (the tiny domain need not identify the parameters)."""
+    cfg = compose("assimilation", "+test=assimilation", *SGS_ROUGHNESS, root=tmp_path)
+    load_script("scripts/run_smoother.py").run(cfg)
+    windows = pathlib.Path(cfg.paths.results_dir) / "smoother" / "windows"
+    truth = xarray.load_dataset(windows.parent / "true_params.nc")
+    for w in range(int(cfg.assimilation.num_windows)):
+        obs = xarray.load_dataset(windows / f"window_{w}_obs.nc")
+        assert list(dict.fromkeys(obs.obs_block.values.tolist())) == [
+            "bins",
+            "tke",
+            "spectral",
+        ]
+        for name in ("obs", "obs_clean", "pred_obs"):
+            assert np.isfinite(obs[name]).all(), name
+        assert (obs.obs_std > 0).all()
+        posterior = xarray.load_dataset(windows / f"window_{w}_posterior_params.nc")
+        prior = xarray.load_dataset(windows / f"window_{w}_prior_params.nc")
+        for name in ("sgs_bias_b0", "roughness_length"):
+            assert np.isfinite(posterior[name]).all(), name
+            print(
+                f"window {w} {name}: prior {prior[name].values}, posterior "
+                f"{posterior[name].values}, truth {truth[name].values}"
+            )
 
 
 # Per method: what run_info.yaml names, which decides the observation stages.

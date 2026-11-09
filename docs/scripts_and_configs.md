@@ -152,8 +152,8 @@ alone, or the pair with a PALM model. With PALM, drop
 
 Each file is mounted at the top level and holds every option of one component
 (`smoother`, `analysis`, `localization`, `state_reduction`, `inflation`,
-`adaptive_error`); the
-`smoothing` / `filtering` slots point at one by interpolation. The options and
+`adaptive_error`, and `field_analysis_settings`); the
+`smoothing` / `filtering` slots and `field_analysis` point at one by interpolation. The options and
 their slots are listed in [`configs/README.md`](../configs/README.md#keys); the
 classes behind them in [data_assimilation.md](data_assimilation.md).
 
@@ -171,8 +171,16 @@ parameter-updating filter modes need inflation or a parameter evolution;
 `assimilate_every_n_step` divides the frames per window;
 `hybrid.likelihood_allocation=shared_budget` needs `filtering.beta > 1`, no
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
-prior parameters; `observation.adaptive_error` is smoother-only; and the
-SGS-discrepancy rules of §1.7.
+prior parameters; `observation.adaptive_error` is smoother-only;
+`observation.types` is a non-empty list of `raw`, `bins`, `tke`, `spectral`
+without both `raw` and `bins`, and its statistics (`tke`, `spectral`) are
+smoother-only (the filter and the hybrid's filter assimilate frame by frame)
+and rule out `observation.adaptive_error` (it pools one kind of observation per
+height band); `field_analysis` is smoother-only, excludes
+`final_time_smoothing` and sets `localization_radius` and `localization_time`
+together (it warns that its `R` treats frames as independent, and that the
+adaptive error's inflation does not reach it); and the SGS-discrepancy rules of
+§1.7.
 
 A localized state-bearing smoother is also checked for memory. Its update
 holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as
@@ -241,6 +249,30 @@ its own workflow logic.
 | `run_smoother.py` | `assimilation.yaml` (`assimilation`, `observation`, `smoothing`) | `<results_dir>/smoother/` |
 | `run_filtering.py` | `assimilation.yaml` (`assimilation`, `observation`, `filtering`) | `<results_dir>/filtering/` |
 | `run_hybrid.py` | `assimilation.yaml` (+ `smoothing`, `hybrid`) | `<results_dir>/hybrid/` |
+| `run_field_analysis.py` | `assimilation.yaml` (`field_analysis`; the rest from the run's `config.yaml`) | `<results_dir>/smoother/`: corrected `window_{w}_posterior_state.nc` of a finished smoother run |
+
+With `field_analysis` set ([data_assimilation.md §5a](data_assimilation.md)),
+`run_smoother.py` corrects each window's posterior frames and also writes
+`window_{w}_field_obs.nc`: the raw frames (`obs`, `obs_clean`), `obs_var`,
+per-frame `pred_obs` of the uncorrected forecast, frame times, `obs_x/y/z`,
+`obs_component`, `member_mask` and `innovation_lag1`. With
+`field_analysis.keep_forecast` it keeps the frames as the model wrote them in
+`window_{w}_posterior_forecast_state.nc`.
+
+`run_field_analysis.py` does the same on a finished run, with no model run. Pass
+the run's overrides so it finds the run dir. It always starts from the frames as
+the model wrote them, so it can be repeated with other settings and never
+corrects twice: `_posterior_forecast_state.nc`, else a run's uncorrected
+`_posterior_state.nc`, which it hard-links there (it always keeps them), so a
+failed call leaves every posterior in place and can be repeated. It refuses a
+run that corrected its frames without `keep_forecast`. For a run without
+`field_analysis` it draws the raw frames again from the truth and the run's seed
+and checks them against the saved `window_{w}_obs.nc`. The settings it used are
+`field_analysis_settings` in `run_info.yaml`; `config.yaml` stays the run's. A
+new `run_smoother.py` run in the same dir clears the old `_field_obs.nc` and
+`_posterior_forecast_state.nc`. `bash
+workflows/assimilation_workflow.sh field_analysis <overrides>` runs it and scores
+the run again.
 
 The forward run covers 1 + `forward.rollout_steps` windows of
 `time.simulation_time`, each starting from the previous window's last state.
@@ -275,7 +307,15 @@ All DA run dirs share one layout: `config.yaml`, `run_info.yaml`,
 `windows/window_{w}_{prior,posterior}_{params,state}.nc` plus
 `window_{w}_obs.nc`. The smoother assimilates each window's observations with
 `smoothing.num_steps` ESMDA steps and starts the next window from the
-posterior. `assimilation.save_states` picks the smoother's state files, the
+posterior. `observation.types` picks what it assimilates of each window's
+sensor series: `raw` frames, `bins` (interval means, the default), and the
+turbulence statistics `tke` and `spectral`, stacked in that order with a
+block-diagonal R ([data_assimilation.md](data_assimilation.md) §2). The
+observed statistics are taken from the noisy series as they are and the
+instrument noise's variance is added to the predicted tke and spectra (so
+`obs_clean`, from the clean series, lacks that bias); `window_{w}_obs.nc`
+then labels each entry in `obs_block`, and compute_metrics.py scores the RMSE, chi² and Desroziers on the
+`raw`/`bins` entries only, O_N on all and per block. `assimilation.save_states` picks the smoother's state files, the
 same in memory and on disk: `posterior` (default), `prior` (+
 `window_{w}_prior_state.nc`) or `all` (+ `window_{w}_step_{i}_state.nc` for
 every intermediate ESMDA step). The filter forecasts

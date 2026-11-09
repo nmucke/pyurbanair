@@ -19,6 +19,7 @@ defaults:
   - assimilation_settings/state_reduction
   - assimilation_settings/inflation
   - assimilation_settings/adaptive_error
+  - assimilation_settings/field_analysis
   - _self_
 
 paths:
@@ -88,12 +89,53 @@ observation:
       obs_z: ${obs.z_points}
       obs_states: ${obs.states}
   # Bin frames into `interval_seconds`-wide intervals and reduce each by `mode`
-  # (mean|median|max|min). null `interval_seconds` -> every frame; set the whole
-  # block to null to switch aggregation off.
+  # (mean|median|max|min). null `interval_seconds` -> every frame (types: raw);
+  # set the whole block to null to switch aggregation off.
   aggregation:
     _target_: data_assimilation.observation_operator.AggregateObservations
     interval_seconds: 20.0
     mode: mean
+  # What to assimilate from each window's sensor series, a non-empty list of
+  #   raw       every frame as it is (no aggregation)
+  #   bins      the interval means of `aggregation` above
+  #   tke       the window's velocity variance per sensor (`tke` below)
+  #   spectral  band energies of each sensor's spectrum (`spectral` below)
+  # e.g. [bins], [raw], [bins, tke, spectral], [tke, spectral]. Not raw and
+  # bins together (the same frames twice). bins with a null interval_seconds
+  # (or aggregation: null) is raw. R is block-diagonal, one block per type.
+  # tke and spectral are smoother-only and rule out adaptive_error.
+  types: [bins]
+  # tke: per component and sensor, half the window's variance of the series
+  # (normalize: divided by half the sensor's squared mean speed), log if `log`.
+  tke:
+    normalize: false
+    log: true
+    # Error std: auto -> the sampling error of the observed series' statistic
+    # (from its autocorrelation, Bartlett; pool_std: height -> the median over
+    # the sensors at one height, needs log or normalize; none -> per sensor),
+    # floored at `std_floor`; or a number in the statistic's (log) units.
+    std: auto
+    std_floor: 0.05
+    pool_std: height
+    # Added in quadrature (same units): the model error of a truth from
+    # another model or real sensors. 0 for an identical-twin run.
+    representation_std: 0.0
+  # spectral: per component and sensor, the mean Welch PSD in `num_bands`
+  # log-spaced bands from f_min to f_max (null -> the lowest resolved
+  # frequency / Nyquist). null `segment_seconds` -> a quarter of the window;
+  # the window must hold at least two segments. normalize divides by the
+  # series variance (the spectral shape only).
+  spectral:
+    segment_seconds: null
+    num_bands: 4
+    f_min: null
+    f_max: null
+    normalize: true
+    log: true
+    std: auto  # sampling error from the spread over the Welch segments
+    std_floor: 0.1
+    pool_std: height
+    representation_std: 0.0
 
   # Physical observation uncertainty. A std is a scalar or a mapping with
   # `default` and optional `height_bands`, `components`, `sensors` overrides.
@@ -124,6 +166,13 @@ smoothing:
   # final posterior forecast (no extra forward solve, parameters frozen).
   # Requires state_reduction; state-bearing smoothers only.
   final_time_smoothing: false
+
+# Smoother only: correct each window's posterior frames with the raw sensor
+# frames, without further model runs, e.g.
+# 'field_analysis=${field_analysis_settings.local}'
+# (assimilation_settings/field_analysis.yaml). null leaves the posterior as the
+# model wrote it.
+field_analysis: ${field_analysis_settings.none}
 
 # Filtering: the EnsembleKalmanFilter constructor arguments. Read by
 # filtering.yaml and hybrid.yaml. Instantiate `filtering` (the runner adds the

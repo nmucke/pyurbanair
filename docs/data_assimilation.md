@@ -80,6 +80,8 @@ libs/data-assimilation/src/data_assimilation/
                             #   AggregateObservations, flatten_observations,
                             #   sensor_observation_coords
   observation_error.py      # ObservationErrorSpec, ResolvedObservationError
+  observation_statistics.py # ObservationStatistics, ResolvedStatisticsError
+                            #   (raw/bins/tke/spectral observation blocks)
   adaptive_observation_error.py  # AdaptiveObservationError (online Desroziers R)
   interpolation.py          # trilinear grid-to-point interpolation
   reduction.py              # OnlineStateReduction, StreamingStateReduction
@@ -97,6 +99,7 @@ libs/data-assimilation/src/data_assimilation/
   smoothing/
     base.py                 # BaseSmoothing (_forecast_step, _observation_step)
     esmda.py                # all five ESMDA variant classes
+    field_analysis.py       # field_analysis, field_analysis_netcdf (§5a)
   filtering/
     analysis.py             # stochastic_enkf_update (shared with ESMDA),
                             #   AnalysisScheme, StochasticEnKFAnalysis
@@ -265,6 +268,142 @@ restores the constructor covariance afterward. The filter's optional
 `(cycles, frames, obs)` or `(cycles, obs)` for single-frame cycles. It validates
 all entries before forecasts and applies the same frame stride as the data.
 The constant constructor covariance remains the default.
+
+### Turbulence-statistics observations
+
+[`observation_statistics.py`](../libs/data-assimilation/src/data_assimilation/observation_statistics.py)
+(`ObservationStatistics`, `ResolvedStatisticsError`). Interval means barely
+constrain the closure (`sgs_bias_b0/b1/b2`) and the wall roughness
+(`roughness_length`); second moments and spectra of the sensor series carry
+more of that information. `ObservationStatistics(types, aggregation=None,
+tke=None, spectral=None, num_sensors=None, noise_variance=None)` assimilates
+any non-empty subset of four statistic blocks of a window's raw sensor series
+`u_cs(t)` (component `c`, sensor `s`):
+
+| Block | Rows | Value per `(c, s)` |
+|---|---|---|
+| `raw` | one per frame | the frames unchanged (no aggregation) |
+| `bins` | one per interval | the `AggregateObservations` mean (`aggregation` required) |
+| `tke` | 1 | `k_cs = 0.5 var_t(u_cs)` (population variance, `ddof=0`) |
+| `spectral` | `num_bands` | mean one-sided Welch PSD in a log-spaced band |
+
+`raw` and `bins` are refused together (the bins are means of the same frames:
+the pair counts the data twice). `tke` and `spectral` may go with `raw`, but
+are then partly redundant with it.
+
+It is a drop-in for `AggregateObservations` as the smoothers'
+`aggregate_observations`: the output keeps the dims `(..., "time", "obs")` with
+the rows stacked along `"time"` in the fixed order raw, bins, tke, spectral; a
+`"block"` coordinate labels each row and `"band_frequency"` holds the band
+centres (Hz; NaN on other rows); tke and spectral rows carry the window's
+first frame time. The `obs` axis keeps the operator's `(component, sensor)`
+layout in every block, so `flatten_observations` works unchanged and
+observation `j` still sits at sensor `j % num_sensors` (distance localization,
+the adaptive error's height groups). `block_slices(observations)` gives each
+block's slice of the flattened vector. The number of rows depends only on the
+window length (bands are fixed), so `C_D` keeps its length across equal
+windows; `allow_interval_count_change` is forwarded to the aggregation.
+
+**tke.** The resolved TKE of a sensor is `sum_c k_cs`; the block keeps the
+per-component entries. Options (defaults): `normalize` (false) divides by
+`0.5 |U_s|**2`, `|U_s|**2 = sum_c mean_t(u_cs)**2` over the observed
+components (the turbulence-intensity form, without the leading dependence on
+the inflow speed; needs `num_sensors`); `log` (true) takes the natural log.
+
+**spectral.** Welch with a Hann window, constant detrend, 50% overlap and
+`segment_seconds` (default a quarter of the window) per segment; the frame
+spacing `dt` is the median spacing, and a spacing more than 10% off it raises
+(uDALES output times jitter slightly). Bands are log-spaced between `f_min`
+(default the first nonzero Welch frequency) and `f_max` (default Nyquist),
+half-open except the last; an empty band or a window shorter than one
+4-frame segment raises. `normalize` (true) divides each band by the series
+variance, so only the spectral shape is observed; `log` (true).
+
+**Instrument noise.** `raw` and `bins` are unchanged (the physical likelihood
+above). For tke and spectral the white instrument noise `sigma**2`
+(`noise_variance`, per obs) biases the statistics of the noisy observed series;
+the bias is put on the prediction side, deterministically, rather than
+subtracted from the observation (a subtraction with clipping makes the
+noise-dominated high bands meaningless under the log):
+
+    predicted variance  = var_t(u_cs) + sigma_cs**2
+    predicted band PSD  = PSD_b + mean over the band's bins k of
+                          2 sigma_cs**2 dt (1 - |W_k|**2 / (N sum_n w_n**2))
+
+before normalisation and log (the normalising variance likewise). The bracket
+is the exact expected Welch level of white noise: the per-segment mean removal
+takes `|W_k|**2 / (N sum w**2)` of the power at bin `k` (`W` the DFT of the
+Hann window `w`, `N` the segment length; 1/6 at the first bin); DC and the
+even-segment Nyquist bin are not doubled. The observed
+statistics are taken as they are: `stats(noisy, observed=True)`. The smoother
+calls the default `observed=False` on everything it is given as a DataArray,
+so the observed vector must be passed pre-flattened,
+`flatten_observations(stats(noisy, observed=True))` (a plain array passes
+`_get_observations` untouched).
+
+An `observed=True` call also fixes the spectral setup (frame count, spacing,
+segments, bands) on the instance; the following predictions reuse it and
+raise when their frame count or median spacing (1%) differ, so a truth at
+another output frequency cannot silently compare different bands. Before any
+observed call a prediction uses its own setup. The scripts therefore compute
+each window's observed vector before that window's update.
+
+**Error.** `resolve_error(noisy, operator, error)` returns a
+`ResolvedStatisticsError`: a block-diagonal, diagonal `C_D`
+(`covariance_diag`, `std`, `times`, `components`, `sensor_indices`,
+`raw_instrument_std`, `provenance` as for `ResolvedObservationError`, plus
+`noise_variance` = the raw instrument variance per obs, `block_slices` and the
+underlying `observation_error`). The raw block is exactly
+`error.resolve(noisy, operator)`, the bins block exactly
+`error.resolve(noisy, operator, aggregation)`. For a tke or spectral block,
+per row and `(c, s)`:
+
+    std = max( sqrt(s**2 + representation_std**2), std_floor )
+
+with `s` the configured float `std`, or, for `std: auto`, the sampling error
+of the observed statistic estimated from the observed series itself (delta
+method for `log` and `normalize`, where `log` makes it a relative error):
+
+- tke: the large-sample (Bartlett) variance of the sample variance of a
+  Gaussian series, `var(s**2) / sigma**4 = (2/T) sum_tau rho(tau)**2`, with the
+  autocorrelation `rho` estimated from the series and summed over `|tau|` up to
+  its first zero crossing (at most `T/4` lags). With `normalize`, the error of
+  `|U_s|**2` from `var(mean) = (sigma**2/T) sum_tau rho(tau)` adds in
+  quadrature. Batch means were tried first and were ~30% too small for short
+  windows (correlated, few batches).
+- spectral: the scatter of the band PSD over the `K` Welch segments,
+  `r_b = std_m(P_m) / (sqrt(K) mean_m(P_m)) * sqrt(1 + 2c(K-1)/K)`, with `c`
+  the squared overlap correlation of adjacent 50%-overlapping Hann windows
+  (`(1/6)**2` ~ 0.028, computed from the window). With `normalize`, the band holding the fraction
+  `f_b` of the variance (relative std `r_V`, as for tke) gets
+  `r**2 = (1-f_b)**2 r_b**2 + max(r_V**2 - f_b**2 r_b**2, 0)` (bands
+  independent). Needs at least two segments.
+
+A Monte Carlo check (AR(1) with `phi = 0.9`, `T = 120` frames, white noise of
+std 0.5, 4000 windows) gives median auto std / true std of 0.90 (tke) and
+1.17, 1.00, 0.92, 0.90 (the four bands) for the defaults; for `T = 600`,
+0.99 and 0.84 to 0.99. Unnormalized bands come out 13-24% small.
+
+With `pool_std: height` (default) the auto `s` is then replaced by its median
+over the sensors at the same height (`obs_z`), per row and component; a sensor
+alone at its height keeps its own. Pooling needs `log` or `normalize` (stds in
+absolute units differ between sensors of different turbulence levels).
+`representation_std` (default 0, the block's final units) adds in quadrature
+to either kind of `s`. Defaults: tke `std_floor` 0.05, spectral 0.1. A
+constant (or non-finite) observed series, for which the statistic is
+undefined, raises.
+
+Caveats:
+
+- Sampling error is counted roughly twice: `R` holds the sampling error of the
+  observed statistics, and each member's predicted statistics carry their own
+  sampling noise, which inflates `C_HH`. The update is conservative.
+- Raw frames are treated as independent (as in the existing likelihood),
+  although turbulence and representation errors correlate over seconds; the
+  tke/spectral auto errors do account for that correlation.
+- The auto errors assume a near-Gaussian, stationary series over the window
+  and treat the rows of a window as independent of each other (the tke row and
+  the bands of one sensor are in fact correlated).
 
 ### Adaptive observation error
 
@@ -541,6 +680,66 @@ selection) feeds the `window_snapshots` basis source for state reduction.
 variants builds `[states_flat | params_array]`, applies the Kalman update
 (global or localized), and splits the result back into updated state and
 updated params.
+
+---
+
+## 5a. Field analysis (optional)
+
+**File:**
+[smoothing/field_analysis.py](../libs/data-assimilation/src/data_assimilation/smoothing/field_analysis.py),
+whose docstring has the formulas. Design:
+[research/multiscale_nested_da.tex](research/multiscale_nested_da.tex), Section 3,
+Eqs. (11) and (12). Untested on real runs: no accuracy claim is made.
+
+After the ESMDA has estimated the parameters and the inflow, `field_analysis`
+(default `null`; `'field_analysis=${field_analysis_settings.local}'`) corrects
+each window's posterior frames with the raw sensor frames. It adds no model run:
+the ESMDA's posterior forecast already runs each member with its own posterior
+parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
+`compute_metrics.py` and `visualize_assimilation.py` score them as the posterior.
+`pred_obs` in `window_{w}_obs.nc` stays that of the uncorrected forecast.
+
+- **Gain.** A deterministic transform that works within the members' parameters:
+  it projects out `[1, parameter anomalies]` (analysis space, every parameter,
+  one row per knot), leaving `nu = J - 1 - p` degrees of freedom. `nu` below
+  `min_dof` raises; `run_smoother.py` checks the prior before the first forecast.
+- **Localization.** `localization_radius` and `localization_time` are
+  Gaspari-Cohn cutoffs (the local option, Eq. 12). Both null is one global `W`
+  from all observations for all frames (the global option, Eq. 11).
+- **Observations.** The raw noisy frames, one per forecast frame, whatever
+  `observation.types` assimilates: never bins, tke or spectra. A truth with
+  another number of frames per window raises. `R` is `observation.error` on the
+  raw frames: instrument plus representation variance, no sampling error (the
+  target is the realised field), and without the adaptive error's inflation
+  (`check_config` warns).
+- **R treats frames as independent.** They are not, so an analysis over several
+  frames can be overconfident; `check_config` warns with the frame count.
+  `window_{w}_field_obs.nc` has `innovation_lag1` per observation, roughly
+  `(1 + r) / (1 - r)` frames per independent sample, `run_info.yaml` its median,
+  and a median above 0.5 is printed. Nothing is corrected for it.
+- **Next window.** It starts from the uncorrected final frame: a localized `W` is
+  not divergence-free, and a restart would need a projection first. Parameters
+  and warm starts are therefore those of a run without the analysis.
+- **Failed members.** `_BaseESMDA.posterior_substitutions` holds the failed
+  slots of the last posterior forecast (failed member -> donor). Without
+  hidden-state replay the saved parameters of such a slot are its own while its
+  field is the donor's, and with replay they are jittered. `run_smoother.py` lists
+  them under `posterior_substitutions` in `run_info.yaml`; the analysis leaves
+  them out of all statistics and does not change them.
+- **Not usable with** the filter, the hybrid (no posterior forecast) or
+  `final_time_smoothing` (`check_config` refuses them).
+
+**Twin test** (uDALES Xie & Castro at 2 m, J=32, 4 seeds; table in
+`docs/research/multiscale_nested_da.tex`). Use `local`: `global` worsened the
+volume RMSE by 1.5% in all four seeds. `local` with cutoffs 20 m and 5 s (twice
+the measured 2.4 s integral time) improved it by 3.1% and by 18% within 8 m of a
+sensor, gone by 16 m, while time-shuffled observations did not improve it. Held-out
+sensors at least 10 m away gained only 0.5%, `w` barely improved, and the
+projection gave no RMSE benefit. Rms divergence rises to about 0.02 1/s.
+
+`scripts/run_field_analysis.py` applies the same helper
+(`helper_functions.correct_window`) to a finished run, see
+[scripts_and_configs.md §2.1](scripts_and_configs.md).
 
 ---
 

@@ -10,6 +10,7 @@ dependencies = [
     "netcdf4>=1.7.3,<2",
     "matplotlib>=3.10.8,<4",
     "jax>=0.7.0,<0.8.0",
+    "scipy>=1.16.3,<2",
 ]
 name = "data_assimilation"
 requires-python = ">= 3.12,<3.13"
@@ -32,6 +33,7 @@ xarray = ">=2025.12.0,<2026"
 netcdf4 = ">=1.7.3,<2"
 numpy = ">=2.3.5,<3"
 matplotlib = ">=3.10.8,<4"
+scipy = ">=1.16.3,<2"
 
 [tool.pixi.pypi-dependencies]
 data-assimilation = { path = "libs/data-assimilation", editable = true }

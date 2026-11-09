@@ -34,6 +34,8 @@ def check_config(cfg: DictConfig, workflow: str) -> None:
     problems = _models(cfg) + _roughness(cfg)
     if workflow != "forward":
         problems += _assimilation(cfg)
+        problems += _observation(cfg, workflow)
+        problems += _field_analysis(cfg, workflow)
         problems += _discrepancy(cfg, workflow)
     if workflow in ("smoother", "hybrid"):
         problems += _smoothing(cfg, workflow)
@@ -168,6 +170,109 @@ def _replica(cfg: DictConfig) -> list[str]:
     return []
 
 
+OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
+
+
+def _observation(cfg: DictConfig, workflow: str) -> list[str]:
+    """`observation.types`: a non-empty list; statistics for the smoother only."""
+    types = OmegaConf.select(cfg, "observation.types", default=None)
+    if types is None:
+        return []
+    if isinstance(types, str) or not len(types):
+        return [
+            "observation.types must be a non-empty list of "
+            f"{', '.join(OBSERVATION_TYPES)}, e.g. [bins, tke, spectral]; got "
+            f"{types!r}."
+        ]
+    problems = []
+    unknown = [name for name in types if name not in OBSERVATION_TYPES]
+    if unknown:
+        problems.append(
+            f"observation.types names {unknown}; choose from {list(OBSERVATION_TYPES)}."
+        )
+    if len(set(types)) != len(types):
+        problems.append(f"observation.types lists a type twice: {list(types)}.")
+    if {"raw", "bins"} <= set(types):
+        problems.append(
+            "observation.types cannot hold both raw and bins: they assimilate "
+            "the same frames twice."
+        )
+    statistics = set(types) - {"raw", "bins"}
+    if statistics and workflow != "smoother":
+        problems.append(
+            f"observation.types {sorted(statistics)} are for the smoother only: "
+            f"the {workflow} assimilates frame by frame; use [bins] or [raw]."
+        )
+    if statistics and OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+        problems.append(
+            "observation.adaptive_error pools innovations per height band of one "
+            f"kind of observation: it cannot be used with observation.types "
+            f"{list(types)}; use [bins] or [raw]."
+        )
+    return problems
+
+
+def _field_analysis(cfg: DictConfig, workflow: str) -> list[str]:
+    """`field_analysis`: the smoother's posterior frames, updated as they are."""
+    settings = OmegaConf.select(cfg, "field_analysis")
+    if settings is None:
+        return []
+    if workflow != "smoother":
+        return [
+            f"field_analysis corrects the smoother's posterior forecast; the "
+            f"{workflow} has none to correct."
+        ]
+    problems = []
+    if cfg.smoothing.final_time_smoothing:
+        problems.append(
+            "field_analysis needs the posterior forecast as the model wrote it: "
+            "it cannot follow smoothing.final_time_smoothing."
+        )
+    unknown = set(settings.variables) - {"u", "v", "w"}
+    if unknown or not len(settings.variables):
+        problems.append(
+            "field_analysis.variables must be a non-empty subset of u, v, w; got "
+            f"{list(settings.variables)}."
+        )
+    for key in ("localization_radius", "localization_time"):
+        if settings[key] is not None and settings[key] <= 0:
+            problems.append(f"field_analysis.{key} must be positive or null.")
+    if (settings.localization_radius is None) != (settings.localization_time is None):
+        problems.append(
+            "field_analysis.localization_radius and localization_time go "
+            "together: both set (local) or both null (global)."
+        )
+    if settings.chunking < 1:
+        problems.append("field_analysis.chunking must be at least 1.")
+    if not problems:
+        _warn_field_analysis_error(cfg)
+    return problems
+
+
+def _warn_field_analysis_error(cfg: DictConfig) -> None:
+    """The per-frame R ignores the correlation between frames: say so."""
+    step = float(cfg.time.output_frequency)
+    window = float(cfg.time.simulation_time)
+    reach = cfg.field_analysis.localization_time
+    span = window if reach is None else min(2.0 * float(reach), window)
+    frames = int(span / step) + 1
+    if frames > 1:
+        warnings.warn(
+            f"field_analysis uses up to {frames} frames per analysis with an R "
+            "that treats them as independent, although their turbulence and "
+            "representation errors are correlated over seconds: the update is "
+            "overconfident by up to that many frames over their effective "
+            "number. See innovation_lag1 in window_*_field_obs.nc.",
+            stacklevel=2,
+        )
+    if OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+        warnings.warn(
+            "field_analysis uses observation.error as configured: the adaptive "
+            "error's inflation does not reach it.",
+            stacklevel=2,
+        )
+
+
 def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:
     problems = []
     s = cfg.smoothing
@@ -236,7 +341,11 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
             "time.simulation_time",
         )
     )
-    interval = OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
+    interval = (
+        OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
+        if _aggregated(cfg)
+        else None
+    )
     frequency = OmegaConf.select(cfg, "time.output_frequency")
     if None in (nx, ny, nz, sensors, states, window) or (interval or frequency) is None:
         return []
@@ -245,7 +354,8 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
     n_aug = 3 * nx * ny * nz
     # One ESMDA update assimilates the whole window at once: every sensor's
     # observed states in every aggregation bin (or output frame), stacked into
-    # one vector (BaseSmoothing._get_observations).
+    # one vector (BaseSmoothing._get_observations). The tke and spectral
+    # rows of observation.types add a few rows per sensor on top.
     n_bins = math.ceil(window / interval) if interval else round(window / frequency)
     n_d = len(sensors) * len(states) * n_bins
     needed = n_aug * n_d**2 * 4
@@ -316,9 +426,7 @@ def _filtering(cfg: DictConfig, workflow: str) -> list[str]:
                 "hybrid.likelihood_allocation must be filter_only or shared_budget."
             )
         if allocation == "shared_budget" and (
-            f.beta <= 1
-            or stride != 1
-            or (cfg.observation.aggregation or {}).get("interval_seconds") is not None
+            f.beta <= 1 or stride != 1 or _aggregated(cfg)
         ):
             problems.append(
                 "hybrid.likelihood_allocation=shared_budget needs filtering.beta > 1, "
@@ -380,6 +488,13 @@ def _discrepancy(cfg: DictConfig, workflow: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Small readers
 # ---------------------------------------------------------------------------
+
+
+def _aggregated(cfg: DictConfig) -> bool:
+    """Whether the observations are binned: bins with an interval_seconds."""
+    interval = (cfg.observation.aggregation or {}).get("interval_seconds")
+    types = OmegaConf.select(cfg, "observation.types", default=None) or ["bins"]
+    return interval is not None and "bins" in types
 
 
 def _physical_memory() -> int:

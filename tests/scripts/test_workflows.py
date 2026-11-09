@@ -61,6 +61,29 @@ def test_assimilation_workflow(
     assert (run_dir / "figures" / "parameter_evolution.png").exists()
 
 
+def test_field_analysis_workflow(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """A finished smoother run corrected afterwards, then scored again."""
+    overrides = [
+        *_overrides(tmp_path, session_root),
+        "+test=assimilation",
+        "model@truth_model=neural_surrogate_tiny",
+        "model@assim_model=neural_surrogate_tiny",
+        "ensemble.ensemble_size=12",
+    ]
+    _workflow("assimilation_workflow.sh", "smoother", *overrides)
+    _workflow(
+        "assimilation_workflow.sh",
+        "field_analysis",
+        *overrides,
+        "field_analysis=${field_analysis_settings.local}",
+    )
+    windows = tmp_path / "neural_surrogate_to_neural_surrogate/smoother/windows"
+    assert (windows / "window_1_posterior_forecast_state.nc").exists()
+    assert (windows / "window_1_field_obs.nc").exists()
+
+
 def test_compare_surrogates_workflow(
     tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
 ) -> None:
