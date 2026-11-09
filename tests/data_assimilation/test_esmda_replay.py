@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 import xarray as xr
+from data_assimilation.io import concat_member_files
 from data_assimilation.smoothing.esmda import ParameterESMDA
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -386,6 +387,33 @@ def test_save_state_and_final_frame_match_get_state(
     xr.testing.assert_identical(
         smoother.final_frame(), expected[smoother.num_steps].isel(time=-1)
     )
+
+
+def test_concat_member_files_keeps_named_attrs_per_member(tmp_path: Path) -> None:
+    """Named per-member JSON attrs become one ``<name>_by_member`` list in member
+    order; without names the file is the plain concat (member 0's attrs)."""
+    values = [{"b": 1.0, "a": "x"}, None, {"b": 2.0}]
+    files = []
+    for m, value in enumerate(values):
+        member = xr.Dataset({"u": ("time", [float(m), m + 0.5])}, attrs={"k": 1})
+        if value is not None:
+            member.attrs["meta"] = json.dumps(value)
+        files.append(tmp_path / f"state_{m}.nc")
+        member.to_netcdf(files[-1])
+    stacked = xr.concat(
+        [xr.load_dataset(f) for f in files], dim="ensemble", join="override"
+    )
+
+    concat_member_files(files, tmp_path / "plain.nc")
+    xr.testing.assert_identical(xr.load_dataset(tmp_path / "plain.nc"), stacked)
+
+    concat_member_files(files, tmp_path / "named.nc", ("meta", "absent"))
+    out = xr.load_dataset(tmp_path / "named.nc")
+    xr.testing.assert_equal(out, stacked)
+    assert out.attrs == {
+        "k": 1,
+        "meta_by_member": json.dumps(values, sort_keys=True),
+    }
 
 
 def test_kept_prior_is_the_post_substitution_forecast(

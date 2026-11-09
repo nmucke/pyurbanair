@@ -54,6 +54,21 @@ parameters:
   #   log_std: 0.7
   #   min: 0.005
   #   max: 0.3
+  # uDALES only: separate z0 for the walls (vertical facets) and the ground
+  # (every horizontal facet: ground and roofs). Both together replace
+  # roughness_length (delete it); PALM raises with them.
+  # roughness_length_wall:
+  #   _target_: pyurbanair.static_parameters.LogNormal
+  #   median: 0.05
+  #   log_std: 0.7
+  #   min: 0.005
+  #   max: 0.3
+  # roughness_length_ground:
+  #   _target_: pyurbanair.static_parameters.LogNormal
+  #   median: 0.05
+  #   log_std: 0.7
+  #   min: 0.005
+  #   max: 0.3
 
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant

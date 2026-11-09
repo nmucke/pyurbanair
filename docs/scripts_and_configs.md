@@ -31,7 +31,7 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Score a noise floor | `assimilation.replica_dir=<forward run dir>`: the truth rerun with another turbulence seed (see below) |
 | Generate surrogate training data | `python scripts/surrogate/generate_data.py` (§2.3) |
 | Train / fine-tune a surrogate | `python scripts/surrogate/train.py --config-name surrogate/<config>` |
-| Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` |
+| Evaluate a surrogate | `python scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py` |
 | Compare several trained surrogates | `bash workflows/compare_surrogates.sh 'models=[dirA,dirB]'` (§2.4) |
 | Compare CFD backends on one case | `bash workflows/compare_models.sh 'models=[pyudales,pypalm]' replicas=2` (§2.3c) |
 | Run the scripts with tiny test configs | `--config-dir tests/configs +test=forward` (see [`tests/README.md`](../tests/README.md)) |
@@ -51,8 +51,9 @@ configs/
   params/                 # static, dynamic, dynamic_sine, dynamic_cosine,
                           #   static_truth, dynamic_truth, surrogate_training_data
   assimilation_settings/  # smoother, analysis, localization, state_reduction, inflation
-  surrogate/              # generate_data, train_*, finetune_stepper, eval,
+  surrogate/              # generate_data, train_*, finetune_*, eval,
                           #   training (shared defaults), architectures
+  latent_generator_architecture/  # train_latent_generator's velocity net, one file each
 ```
 
 ### 1.1 Entry points and `common.yaml`
@@ -139,7 +140,11 @@ update is also bounded: no member ever leaves (min, max)
 ([data_assimilation.md §1](data_assimilation.md)). Keep `max` below the grid's
 wall-distance limit (uDALES reconstructs at e·z0 from the wall: ≲ 0.3 m on the
 2 m xie_and_castro grid). Override e.g.
-`prior_params.parameters.roughness_length.max=0.2`. With PALM, drop
+`prior_params.parameters.roughness_length.max=0.2`. For uDALES the same files
+carry commented `roughness_length_wall` / `roughness_length_ground` blocks:
+both together replace `roughness_length` (walls vs ground and roofs,
+[pyudales.md](pyudales.md) "Roughness"); `check_config` rejects a mix, one
+alone, or the pair with a PALM model. With PALM, drop
 `sgs_constant` from the prior when estimating z0 (the two raise together,
 [pypalm.md](pypalm.md) "Roughness").
 
@@ -147,8 +152,8 @@ wall-distance limit (uDALES reconstructs at e·z0 from the wall: ≲ 0.3 m on th
 
 Each file is mounted at the top level and holds every option of one component
 (`smoother`, `analysis`, `localization`, `state_reduction`, `inflation`,
-`adaptive_error`); the
-`smoothing` / `filtering` slots point at one by interpolation. The options and
+`adaptive_error`, and `field_analysis_settings`); the
+`smoothing` / `filtering` slots and `field_analysis` point at one by interpolation. The options and
 their slots are listed in [`configs/README.md`](../configs/README.md#keys); the
 classes behind them in [data_assimilation.md](data_assimilation.md).
 
@@ -171,7 +176,11 @@ prior parameters; `observation.adaptive_error` is smoother-only;
 without both `raw` and `bins`, and its statistics (`tke`, `spectral`) are
 smoother-only (the filter and the hybrid's filter assimilate frame by frame)
 and rule out `observation.adaptive_error` (it pools one kind of observation per
-height band); and the SGS-discrepancy rules of §1.7.
+height band); `field_analysis` is smoother-only, excludes
+`final_time_smoothing` and sets `localization_radius` and `localization_time`
+together (it warns that its `R` treats frames as independent, and that the
+adaptive error's inflation does not reach it); and the SGS-discrepancy rules of
+§1.7.
 
 A localized state-bearing smoother is also checked for memory. Its update
 holds an `(N_aug, N_d, N_d)` float32 array; `N_aug` is estimated as
@@ -208,9 +217,11 @@ example overrides are in [`configs/README.md`](../configs/README.md#neural-surro
 | `train_stepper.yaml` | `train.py` | next-step stepper; `'architecture=${architectures.<name>}'` |
 | `train_autoencoder.yaml` | `train.py` | field autoencoder (Tadpole); optional `prechunk` re-chunked data copy |
 | `train_latent_generator.yaml` | `train.py` | flow-matching latent initial-field generator; optional precomputed `latent_cache` |
+| `../latent_generator_architecture/` | — | top-level group of `train_latent_generator.yaml`: one velocity net per file, each with its own default `name` (`latent_generator_architecture=compact_wide_head`; default `compact_h512`; options in [neural_surrogates.md](neural_surrogates.md) §38) |
 | `train_dft.yaml` | `train.py` | pretrained autoencoder -> stepper (DFT); optional whole-frame `prechunk` copy |
 | `finetune_stepper.yaml` | `train.py` | fine-tune a pretrained stepper, `method: full \| lora` |
-| `eval.yaml` | `evaluate_*.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator` |
+| `finetune_latent_generator.yaml` | `train.py` | fine-tune a trained latent generator (`pretrained_dir`) on new data, `method: full \| lora` |
+| `eval.yaml` | `evaluate_*.py`, `compare_latent_generator_ensembles.py` | blocks `stepper` (one or several `models`), `autoencoder`, `latent_generator`, `latent_generator_ensemble`, `latent_generator_ensemble_compare` |
 
 Each training config loads `training.yaml` and overrides only what differs.
 Weights go to `<paths.weights_dir>/<name>/`, data to
@@ -238,6 +249,30 @@ its own workflow logic.
 | `run_smoother.py` | `assimilation.yaml` (`assimilation`, `observation`, `smoothing`) | `<results_dir>/smoother/` |
 | `run_filtering.py` | `assimilation.yaml` (`assimilation`, `observation`, `filtering`) | `<results_dir>/filtering/` |
 | `run_hybrid.py` | `assimilation.yaml` (+ `smoothing`, `hybrid`) | `<results_dir>/hybrid/` |
+| `run_field_analysis.py` | `assimilation.yaml` (`field_analysis`; the rest from the run's `config.yaml`) | `<results_dir>/smoother/`: corrected `window_{w}_posterior_state.nc` of a finished smoother run |
+
+With `field_analysis` set ([data_assimilation.md §5a](data_assimilation.md)),
+`run_smoother.py` corrects each window's posterior frames and also writes
+`window_{w}_field_obs.nc`: the raw frames (`obs`, `obs_clean`), `obs_var`,
+per-frame `pred_obs` of the uncorrected forecast, frame times, `obs_x/y/z`,
+`obs_component`, `member_mask` and `innovation_lag1`. With
+`field_analysis.keep_forecast` it keeps the frames as the model wrote them in
+`window_{w}_posterior_forecast_state.nc`.
+
+`run_field_analysis.py` does the same on a finished run, with no model run. Pass
+the run's overrides so it finds the run dir. It always starts from the frames as
+the model wrote them, so it can be repeated with other settings and never
+corrects twice: `_posterior_forecast_state.nc`, else a run's uncorrected
+`_posterior_state.nc`, which it hard-links there (it always keeps them), so a
+failed call leaves every posterior in place and can be repeated. It refuses a
+run that corrected its frames without `keep_forecast`. For a run without
+`field_analysis` it draws the raw frames again from the truth and the run's seed
+and checks them against the saved `window_{w}_obs.nc`. The settings it used are
+`field_analysis_settings` in `run_info.yaml`; `config.yaml` stays the run's. A
+new `run_smoother.py` run in the same dir clears the old `_field_obs.nc` and
+`_posterior_forecast_state.nc`. `bash
+workflows/assimilation_workflow.sh field_analysis <overrides>` runs it and scores
+the run again.
 
 The forward run covers 1 + `forward.rollout_steps` windows of
 `time.simulation_time`, each starting from the previous window's last state.
@@ -309,6 +344,8 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 | `evaluate_stepper.py` | `surrogate/eval` block `stepper` (+ top-level `inlet_turbulence`, `periodic_y`) | rolls one or several steppers out on test trajectories; metrics + figures |
 | `evaluate_autoencoder.py` | `surrogate/eval` block `autoencoder` | reconstruction metrics + figures |
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
+| `evaluate_latent_generator_ensemble.py` | `surrogate/eval` block `latent_generator_ensemble` | generated ensembles vs a solver seed ensemble, per geometry, with noise floors |
+| `compare_latent_generator_ensembles.py` | `surrogate/eval` block `latent_generator_ensemble_compare` | cross-model table, figures and paired differences of those outputs (CPU) |
 
 `scripts/utils/eval_common.py` holds the loading and slice-figure helpers shared by the
 evaluation scripts and `scripts/surrogate_comparison/`. See [neural_surrogates.md](neural_surrogates.md) for the
@@ -324,30 +361,54 @@ docstring lists every metric and figure.
 | Script | Input | Output |
 |---|---|---|
 | `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, or with `apply: input` only to the frame fed back, off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
-| `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (per source, mean and per sample) and `metrics.nc` (curves, profiles, spectra, PDFs) |
-| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | RMSE, ACC, energy, divergence and TKE against lead time, profiles, spectra, velocity PDFs, \|U\|, TKE and statistics slices; `summary.csv` / `summary.tex` |
+| `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (scalars per source, mean and per sample, and the reference scales) and `metrics.nc` (curves against lead time, spectra, PDFs, profiles) |
+| `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | the paper figures, PDF and PNG: error growth, ACC, vorticity, TKE / divergence / integral length, pedestrian level, spectra and their ratio map, fluctuation PDFs, profiles, station profiles, horizontal and vertical slices, window statistics, window TKE at `figures.tke_heights` (in units of H); `animation_speed.mp4` and one `animation_tke_z<h>H.mp4` per height |
+| `make_tables.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | `table_{accuracy,physics,cost}.tex` (booktabs, best model in bold, ready to `\input`) and `.csv` |
 
-The metrics, all in m/s on fluid cells:
-- **accuracy against lead time:** RMSE (total and per component), RMSE at
-  `metrics.report_leads` and relative to persistence, and the anomaly
-  correlation (ACC) with its horizon (first lead below `metrics.acc_threshold`);
-- **physical consistency:** each component's spatial std relative to the truth
-  (smoothing), the RMS divergence (with the truth's own as the reference: the
-  cell-centred stencil is not the solver's), the fluid-mean resolved TKE against
-  lead time (total and per component, each source about its own time mean over
-  the rollout: smoothing loses it, divergence grows it), and whether the rollout
-  stays finite;
-- **statistics over the rollout:** RMSE of the time-mean u and resolved-TKE
-  fields, profiles of mean u, TKE and -<u'w'>, spanwise-spectrum band energy in
-  dB (the bands of `scripts/compute_metrics.py`), and the Wasserstein distance
-  of the velocity distributions;
-- **cost:** inference seconds per step and parameter count.
+Each metric is one function in `scripts/utils/surrogate_metrics.py`, unit-tested
+on analytic fields in `tests/scripts/test_surrogate_metrics.py`; the module
+docstrings define every output. `compute_metrics.py` also copies
+`metrics_reference.pdf` (every metric's definition, prebuilt from
+`scripts/surrogate_comparison/metrics_reference.tex`) into every run dir: when a
+metric changes, edit the .tex and rebuild the PDF with `pdflatex` (twice). The metrics are on fluid cells and
+dimensionless per trajectory before they are averaged over trajectories (the
+inflow differs per trajectory): velocities by `u_ref` (the truth's mean u at
+the canopy-top level, the lowest level without buildings), lengths by the mean
+building height `H`, lead time by the truth's integral time scale `T`.
+- **accuracy against lead time:** RMSE and the anomaly correlation (ACC), pooled
+  and per component, at the pedestrian level (`metrics.pedestrian_level`), the
+  vorticity RMSE, and the ACC horizon (first lead below
+  `metrics.acc_threshold`); the tables average them over `t <= h T` for each
+  of `metrics.horizons`;
+- **physics against lead time:** the fluid-mean resolved TKE, the RMS
+  divergence (the truth's own as the reference: the stencil is not the
+  solver's), the spanwise integral length, and the spanwise spectrum of u' and
+  w' at the canopy-top level (dB ratio to the truth, per band and as a map over
+  wavenumber and lead time);
+- **statistics over the rollout:** RMSE of the time-mean u and TKE fields and of
+  the mean u, TKE and -<u'w'> profiles, the Wasserstein distance of the
+  fluctuations, fluctuation PDFs at `metrics.snapshot_leads`;
+- **cost:** parameters, inference time per step and, with
+  `metrics.solver_seconds_per_step`, the speedup over the solver.
 
-**Caveats.** The ACC's reference mean is the truth's mean over the rollout
-window, so it depends on the window's length; so do the TKE curve and slices
-(each source's own mean over its window). `truth_halves` (first half of the
-truth's window against its second half) is a rough noise floor for the
-statistics, meaningful only for long rollouts.
+`display_names` sets the model names in the figures and tables (e.g.
+`'display_names={dft_s: Ours}'`); models keep the order of `models`.
+Keys missing from an older run dir's `config.yaml` come from
+`configs/comparison.yaml`; rerun `compute_metrics.py` on a run dir scored before
+the current `metrics.nc` layout.
+
+**Caveats.** Per-lead fluctuations (ACC, spectra, integral length, PDFs) are
+about the truth's time mean over the rollout window, the same for every
+source; the TKE curve, profiles and statistics use each source's own mean.
+Both depend on the window's length. `truth_halves` in `metrics.yaml` (the
+truth's first half of the window against its second half) is not a noise
+floor when the inflow varies in time: the models share that forcing and can
+beat it. The ACC horizon counts a trajectory that never drops below the
+threshold at the window's end (`acc_horizon_censored`: the fraction that never
+do; the table then marks the mean as a lower bound). `seconds_per_step` is measured on
+`device`: time the models on the GPU (the `cuda` environment) for the cost
+table. On `pyudales_idealized` every trajectory replays one inlet-turbulence
+realization, so a model can score a long ACC horizon by memorizing it.
 
 ### 2.3c Forward-model comparison (`scripts/comparison/`)
 
@@ -392,7 +453,7 @@ wrote.
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
-| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py` and `surrogate_comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3b) |
+| `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py`, `surrogate_comparison/visualize_comparison.py` and `surrogate_comparison/make_tables.py` on `<paths.results_dir>` (§2.3b) |
 | `compare_models.sh` | `[overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3c) |
 
 ```bash

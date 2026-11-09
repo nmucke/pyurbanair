@@ -34,18 +34,28 @@ inlet_turbulence:
 # (neural_surrogates.periodic.make_periodic_y); no retraining.
 periodic_y: false
 
+# Rollout label -> name in the figures and tables, e.g. {dft_s: Ours}; a label
+# not listed is shown as it is.
+display_names: {}
+
 metrics:
-  report_leads: [1, 10, 50]   # headline RMSE at these lead steps (skipped if beyond the rollout)
-  acc_threshold: 0.5          # ACC horizon: first lead where ACC drops below it
-  max_pdf_values: 200000      # velocity values pooled per model for the PDFs / Wasserstein
+  acc_threshold: 0.5               # ACC horizon: first lead where ACC drops below it
+  pedestrian_level: 0              # z index of the pedestrian-level scores and slices
+  snapshot_leads: [1, 10, 50, -1]  # lead steps of the PDFs, spectra and slices (-1: last)
+  horizons: [1, 5]                 # table lead windows in units of T, plus the whole window
+  # PDFs: fluid cells per snapshot lead, pooled over the samples (split evenly);
+  # Wasserstein: (lead, cell) draws per sample over the window.
+  max_pdf_values: 200000
+  # Solver wall time per output interval [s] for the speedup column; null: no speedup.
+  solver_seconds_per_step: null
 
 figures:
   sample: 0                   # which compared trajectory (index into sample_indices) the slices use
-  level: 2                    # z index of the horizontal slices
-  lead_steps: [1, 10, 50, -1] # columns of slices.png (-1: last)
-  spectra_levels: [2, 8]      # z indices of the spectra
-  # animation_speed.mp4 (.gif without ffmpeg): |U| at `level` over the rollout
-  # of `sample`; null skips it.
+  vertical_lead: 10           # lead step of vertical_slices
+  tke_heights: [0.5, 1.0, 1.5, 2.0]  # heights / H of tke_heights and the TKE animations
+  formats: [pdf, png]
+  # animation_speed.mp4 (.gif without ffmpeg): |U| at the pedestrian level over
+  # the rollout of `sample`; null skips it.
   animation:
     max_frames: 150           # lead steps are thinned evenly to at most this many
     fps: 10

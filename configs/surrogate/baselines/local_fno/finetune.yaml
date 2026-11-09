@@ -1,0 +1,46 @@
+# @package _global_
+# Fine-tune a trained Local-FNO (train.yaml) on new data, every weight with
+# the paper's schedule from a 10x lower learning rate:
+#   python scripts/surrogate/train.py --config-name surrogate/baselines/local_fno/finetune \
+#       pretrained_dir=<model> name=<new name> paths.data_dir=<new corpus>
+# The architecture, inputs and normalisation come from the pretrained model.
+defaults:
+  - /surrogate/training
+  - _self_
+
+task: finetune_stepper
+name: local_fno_ft
+# A train.yaml output folder (weights + config).
+pretrained_dir: ${paths.weights_dir}/local_fno
+# Every weight is trained, starting from the pretrained ones.
+method: full
+recompute_normalization: false
+trainer:
+  _target_: neural_surrogate_baselines.LocalFNOTrainer
+  # Halve the learning rate after every epoch, stop at the first validation
+  # rise, at most 12 epochs, as in train.yaml. A fine-tuning corpus is small,
+  # so an epoch is the whole split.
+  num_epochs: 12
+  patience: 1
+  lr_step_gamma: 0.5
+  epoch_batches: null
+  val_batches: null
+  lr_warmup_epochs: null
+  grad_clip_norm: null
+  pushforward_epochs_per_step: null
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+dataloader:
+  # Whole-frame reads mostly wait on the file system: more workers overlap it.
+  num_workers: 16
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  param_vars: null
+  # null: take these from the pretrained model.
+  num_history_steps: null
+  pushforward_steps: 1

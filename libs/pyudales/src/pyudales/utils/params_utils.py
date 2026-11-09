@@ -16,6 +16,8 @@ INFLOW_PARAM_NAMES = (
     "vertical_inflow_exponent",
     "sgs_constant",
     "roughness_length",
+    "roughness_length_wall",
+    "roughness_length_ground",
 )
 
 

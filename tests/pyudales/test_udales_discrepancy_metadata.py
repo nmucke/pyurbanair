@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 import xarray as xr
+from data_assimilation.io import concat_member_files
 from pyudales.ensemble_forward_model import EnsembleForwardModel
 
 from pyurbanair.base_ensemble_forward_model import BaseEnsembleForwardModel
@@ -93,6 +94,20 @@ def test_disk_metadata_comes_from_saved_states_not_current_sidecars(
     output.to_netcdf(path)
     with xr.open_dataset(path) as stored:
         assert json.loads(stored.attrs["model_discrepancy_by_member"]) == metadata
+
+
+def test_disk_concat_matches_memory_metadata(tmp_path: pathlib.Path) -> None:
+    """ESMDA's on-disk ``save_state`` writes the same attribute string."""
+    ensemble = _make_ensemble(tmp_path)
+    path = tmp_path / "combined.nc"
+    files = [tmp_path / f"state_{index}.nc" for index in range(2)]
+    concat_member_files(files, path, EnsembleForwardModel.member_attrs)
+    with xr.open_dataset(path) as stored:
+        assert "model_discrepancy" not in stored.attrs
+        assert (
+            stored.attrs["model_discrepancy_by_member"]
+            == ensemble.get_states().attrs["model_discrepancy_by_member"]
+        )
 
 
 def test_disabled_ensemble_has_no_new_metadata(

@@ -145,6 +145,25 @@ def test_sgs_constant_skips_a_config_z0_unlike_the_template(
     assert _z0(fm) == "0.05"
 
 
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "params",
+    [
+        {"roughness_length_wall": 0.1, "roughness_length_ground": 0.02},
+        {"roughness_length_wall": 0.1},
+        {"roughness_length": 0.05, "roughness_length_ground": 0.02},
+    ],
+)
+def test_split_roughness_raises(
+    tmp_path: pathlib.Path, params: dict[str, float]
+) -> None:
+    """PALM has one z0: the uDALES wall/ground pair raises, naming
+    roughness_length, before any z0 is written."""
+    fm = _make_model(tmp_path)
+    with pytest.raises(ValueError, match="supports only roughness_length"):
+        _stage(fm, **params)
+    assert _z0(fm) == "0.05"
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_e2e_rougher_surface_slows_the_near_wall_flow(tmp_path: pathlib.Path) -> None:
     """A flat-floor laminar run at two z0: higher z0, lower first-level speed."""

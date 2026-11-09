@@ -30,6 +30,14 @@ parameters:
   # roughness_length:
   #   _target_: pyurbanair.static_parameters.Constant
   #   value: 0.1
+  # uDALES truth only: wall and ground (+ roofs) z0, both instead of
+  # roughness_length (PALM supports one z0).
+  # roughness_length_wall:
+  #   _target_: pyurbanair.static_parameters.Constant
+  #   value: 0.1
+  # roughness_length_ground:
+  #   _target_: pyurbanair.static_parameters.Constant
+  #   value: 0.1
   pressure_gradient_magnitude:
     _target_: pyurbanair.static_parameters.Constant
     value: 0.0041912

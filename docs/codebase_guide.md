@@ -137,6 +137,7 @@ scripts/                           # Scripts you run; their shared helpers are i
   run_smoother.py                  # ESMDA over consecutive windows
   run_filtering.py                 # Cycled EnKF
   run_hybrid.py                    # Per window: ESMDA params, then filter state
+  run_field_analysis.py            # Correct a finished smoother run's posterior frames
   compute_metrics.py               # metrics.yaml from a finished DA run dir (plain CLI)
   visualize_forward.py, visualize_assimilation.py   # Figures from a run dir (plain CLI)
   surrogate/                       # generate_data.py, train.py, evaluate_*.py
@@ -427,6 +428,8 @@ A single-member run drops the `ensemble` dim with `.isel(ensemble=0, drop=True)`
 - `roughness_length` (wall z0, m) is a third knob for the two LES backends:
   uDALES `factypes.inp`, PALM `roughness_length` (raises with `sgs_constant`).
   pylbm ignores it. Default `flow.roughness_length` in `common.yaml`.
+  uDALES alone also takes `roughness_length_wall` + `roughness_length_ground`
+  instead (walls vs ground and roofs; docs/pyudales.md "Roughness").
 
 ### pypalm
 - Lazy-imported. All `pypalm.*` `_target_` blocks live only in

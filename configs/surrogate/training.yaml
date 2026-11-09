@@ -1,7 +1,7 @@
 # @package _global_
 # Training defaults shared by every neural-surrogate training config
 # in this folder (train_stepper, train_autoencoder, train_latent_generator,
-# train_dft, finetune_stepper).
+# train_dft, finetune_stepper, finetune_dft).
 # Not an entry point: each of those lists it first and overrides what differs.
 defaults:
   - /common

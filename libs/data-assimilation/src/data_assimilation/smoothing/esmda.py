@@ -230,6 +230,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         # states are released when the next window starts.
         self.keep_steps: Collection[int] = ()
         self._kept_states: dict[int, xarray.Dataset] = {}
+        # Failed member -> donor of the last window's posterior forecast: those
+        # slots hold the donor's field, not a run with their own parameters.
+        self.posterior_substitutions: dict[int, int] = {}
 
         # Observation-space diagnostics, set by the caller (e.g. run_smoother.py)
         # after construction, same attribute-plumbing pattern as
@@ -451,7 +454,9 @@ smoothing.base.BaseSmoothing`) is applied to the real observations and to
         if not self.forward_model.save_on_disk:
             self._kept_states[step].to_netcdf(path)
         else:
-            concat_member_files(files, path)
+            concat_member_files(
+                files, path, getattr(self.forward_model, "member_attrs", ())
+            )
 
     def final_frame(self) -> xarray.Dataset:
         """The posterior's last time frame (a copy; on disk only that frame is
@@ -768,6 +773,9 @@ sensor_observation_coords` (shared with the filtering package); see its
             # params.
             self._set_step_results_dir(self.num_steps)
             state = self._forecast_step(state=initial_state, params=params)
+            self.posterior_substitutions = dict(
+                getattr(self.forward_model, "_last_failure_substitutions", {})
+            )
             if getattr(self.forward_model, "forecast_window_replay_enabled", False):
                 params = self.forward_model.apply_failure_substitutions_to_params(
                     params

@@ -1,0 +1,10 @@
+# @package _global_
+# Fine-tuning of the tiny Local-FNO (train.yaml), one CPU epoch.
+defaults:
+  - /surrogate/test/training
+
+name: local_fno_ft
+pretrained_dir: ${paths.weights_dir}/local_fno
+trainer:
+  epoch_batches: 2
+  val_batches: 1

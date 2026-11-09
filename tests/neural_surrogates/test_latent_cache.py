@@ -2,7 +2,8 @@
 
 On CPU smoke shapes via the shared fixtures in ``_latent_generator_fixtures``:
 the cache holds exactly what the frozen encoder gives every frame, its train
-statistics match ``compute_latent_normalization``, it resumes and refuses like
+statistics (and the state latents' second moment ``gaussian_skip`` needs)
+match ``compute_latent_normalization``, it resumes and refuses like
 the rechunk cache, a complete cache is validated without the lock (shared,
 read-only), and :class:`LatentCacheDataset` batches through a loader.
 """
@@ -35,6 +36,7 @@ from neural_surrogates import (
     load_latent_stats,
     prepare_latent_cache,
 )
+from neural_surrogates.datasets.latent_cache import load_latent_second_moment
 from torch.utils.data import DataLoader, default_collate
 
 from tests.neural_surrogates._latent_generator_fixtures import (
@@ -202,6 +204,56 @@ def test_train_stats_equal_compute_latent_normalization(prepared):
     model.set_latent_normalization(mean, std)
     assert torch.allclose(model.latent_mean, ref_mean, rtol=1e-5, atol=1e-6)
     assert torch.allclose(model.latent_std, ref_std, rtol=1e-5, atol=1e-6)
+
+
+def test_train_second_moment_gives_the_compute_latent_normalization_gaussian(
+    prepared, tmp_path
+):
+    """The cache's state-latent second moment installs the same Gaussian as
+    ``compute_latent_normalization`` with ``gaussian_skip``; a cache without
+    it (prepared by older code) still serves runs without the skip."""
+    geometry, model, data_dir, _, root = prepared
+
+    def gaussian_model() -> TadpoleLatentGenerator:
+        return TadpoleLatentGenerator(
+            n_state_channels=C,
+            n_params=P,
+            param_history_steps=HP,
+            pretrained_ae_dir=model.pretrained_ae_dir,
+            gaussian_skip=True,
+            gaussian_eig_floor=1e-8,
+            **NET,
+        )
+
+    second = load_latent_second_moment(root)
+    d = model.state_latent_dim
+    assert second.dtype == np.float64 and second.shape == (d, d)
+    frames = _every_frame(data_dir, "train", geometry)
+    ref = gaussian_model()
+    ref.compute_latent_normalization(_batch(frames[i]) for i in range(len(frames)))
+    cached = gaussian_model()
+    cached.set_latent_normalization(*load_latent_stats(root), second_moment=second)
+
+    def cov(m: TadpoleLatentGenerator) -> torch.Tensor:
+        b = m.latent_pca_basis.double()
+        return b @ torch.diag(m.latent_pca_eig.double()) @ b.T
+
+    torch.testing.assert_close(cov(cached), cov(ref), rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(
+        cached.latent_pca_mean, ref.latent_pca_mean, rtol=0.0, atol=1e-5
+    )
+
+    # An older cache: no second moment saved.
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "manifest.json").write_bytes((root / "manifest.json").read_bytes())
+    mean, std = load_latent_stats(root)
+    np.savez(old / "latent_stats.npz", mean=mean, std=std)
+    with pytest.raises(ValueError, match="second moment"):
+        load_latent_second_moment(old)
+    _model(model.pretrained_ae_dir).set_latent_normalization(*load_latent_stats(old))
+    with pytest.raises(ValueError, match="second moment"):
+        gaussian_model().set_latent_normalization(*load_latent_stats(old))
 
 
 def test_dataset_items_collate_and_batch_through_loaders(prepared):

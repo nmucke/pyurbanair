@@ -339,6 +339,45 @@ def test_lora_fused_forward_matches_peft() -> None:
         assert torch.equal(merged_fused[k], v), k
 
 
+def test_subnetwork_lora_preset_targets_and_merges() -> None:
+    """``tadpole_encdec+subnetwork`` adds the subnetwork's transformer Linears
+    (not its FiLM heads) to ``tadpole_encdec``, and the merged export of a
+    trained adapter reproduces the adapted model in a fresh stepper."""
+    finetuning = pytest.importorskip("neural_surrogates.finetuning")
+    m = _stepper(latent_type="mode").eval()
+    m.set_normalization([0, 0, 0], [1, 1, 1], [0, 0], [1, 1])
+    m.requires_grad_(False)
+    encdec = finetuning.resolve_target_modules(m, preset="tadpole_encdec")
+    sub = finetuning.resolve_target_modules(m, preset="tadpole_subnetwork")
+    both = finetuning.resolve_target_modules(m, preset="tadpole_encdec+subnetwork")
+    assert not any(".subnetwork." in n for n in encdec)
+    assert sub and all(n.startswith("dft.subnetwork.seqmodel.") for n in sub)
+    assert {n.rsplit(".", 1)[-1] for n in sub} == {
+        "input_proj",
+        "out_proj",
+        "qkv",
+        "proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    }
+    assert sorted(both) == sorted(encdec + sub)
+
+    peft_model = finetuning.inject_lora(m, rank=4, alpha=8, target_modules=both)
+    with torch.no_grad():  # a "trained" adapter: off the zero fixed point
+        for n, p in peft_model.named_parameters():
+            if "lora_B" in n:
+                p.normal_(std=0.05)
+    state, params, geom = _inputs()
+    fresh = _stepper(latent_type="mode").eval()
+    fresh.load_state_dict(finetuning.merge_to_state_dict(peft_model))
+    with torch.no_grad():
+        out = peft_model.eval()(state, params, geom)
+        assert not torch.allclose(out, fresh._ae_reference_recon(state, geom))
+        merged = fresh(state, params, geom)
+    assert (merged - out).abs().max() <= 1e-4 * out.abs().max()
+
+
 def test_lora_fused_forward_falls_back_with_dropout() -> None:
     """Configurations the merged call cannot express (here LoRA dropout) keep
     PEFT's own forward: the same random output under the same seed."""

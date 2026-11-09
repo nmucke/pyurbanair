@@ -1,0 +1,13 @@
+# @package _global_
+# Compact adaLN trunk at hidden 320 plus a per-token head of width 1024 on
+# concat(hidden, z), with Gaussian skip. 27.56M trainable on the B AE
+# (D = 1536). Plan design A / R1.
+name: latent_generator_compact_wide_head
+architecture:
+  hidden_size: 320
+  n_layers: 6
+  velocity_conditioning: adaln
+  latent_skip: false
+  gaussian_skip: true
+  head_hidden: 1024  # per-token adaLN MLP head width
+  head_layers: 2     # adaLN MLP blocks in that head

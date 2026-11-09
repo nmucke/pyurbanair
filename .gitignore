@@ -48,6 +48,8 @@ geometries/urbantales/processed/
 
 # Figures and animations
 *.pdf
+# ...except the prebuilt metrics reference copied into every comparison run dir.
+!scripts/surrogate_comparison/metrics_reference.pdf
 *.png
 *.mp4
 *.gif

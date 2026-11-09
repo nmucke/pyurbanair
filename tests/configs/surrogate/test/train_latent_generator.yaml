@@ -1,6 +1,9 @@
 # @package _global_
 defaults:
   - training
+  # Pinned: a tiny net below D (768 for the S autoencoder) with the per-channel
+  # skip, whatever the real config's default.
+  - override /latent_generator_architecture: channel_skip_h176
 
 name: latent_generator
 autoencoder_dir: ${paths.weights_dir}/autoencoder
@@ -10,6 +13,8 @@ architecture:
   num_heads: 8
   film_hidden: 128
   mlp_ratio: 4
+  # input_film: a test that picks compact_wide_head or compact_bottleneck must
+  # also set architecture.velocity_conditioning (adaln / adaln_bottleneck).
   velocity_conditioning: input_film
 trainer:
   lr_min: 1.0e-6

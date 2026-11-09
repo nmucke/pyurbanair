@@ -1,0 +1,298 @@
+% The metric definitions of the surrogate comparison, copied into every run dir
+% by compute_metrics.py as metrics_reference.pdf. The code is the source of
+% truth (scripts/utils/surrogate_metrics.py, compute_metrics.py, make_tables.py,
+% visualize_comparison.py): when a metric changes, edit this file and rebuild
+%   pdflatex metrics_reference.tex   (twice), then commit the PDF next to it.
+\documentclass[10pt]{article}
+\usepackage[a4paper,margin=1.5cm,top=1.3cm,bottom=1.6cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage[compact]{titlesec}
+
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{2em}
+\setlength{\parskip}{3pt}
+\setlist{nosep,leftmargin=1.2em}
+\setlist[description]{style=nextline,leftmargin=1.2em,itemsep=3pt,font=\normalfont}
+\renewcommand{\arraystretch}{1.1}
+
+% one metric entry: \metric{yaml/nc names}{table column}
+\newcommand{\metric}[2]{\item[{\texttt{\textbf{#1}}\ifx&#2&\else\quad[table: #2]\fi}]}
+\newcommand{\meas}{\emph{Measures:} }
+\newcommand{\uref}{u_\mathrm{ref}}
+\newcommand{\F}{\mathcal{F}}
+\newcommand{\I}{\mathcal{I}}
+\newcommand{\pred}[1]{\hat{#1}}
+\newcommand{\Tbar}{\bar{T}}
+\DeclareMathOperator*{\mean}{mean}
+
+\title{\vspace{-1.2em}Surrogate comparison: metrics reference}
+\author{}
+\date{\vspace{-3.2em}}
+
+\begin{document}
+\maketitle
+\vspace{-0.5em}
+\noindent Written by \texttt{scripts/surrogate\_comparison/compute\_metrics.py}
+into \texttt{metrics.yaml} (scalars per source: \texttt{\{mean, per\_sample\}})
+and \texttt{metrics.nc} (curves on dims \texttt{source}$\times$\texttt{lead},
+sample means). Each formula is one function in
+\texttt{scripts/utils/surrogate\_metrics.py}; the module docstrings are the
+authority if this sheet and the code ever disagree.
+
+\section*{Conventions}
+\begin{itemize}
+\item \textbf{Fields.} $u_c(\mathbf{x}, t_n)$, $c \in \{u, v, w\}$ the truth
+  (LES), $\pred{u}_c$ a prediction; $n = 1..N$ the lead steps. $\F$: the fluid
+  cells; $\I \subset \F$: the fluid cells whose six face neighbours are fluid
+  (not on the domain edge), where the central differences
+  $(f_{i+1} - f_{i-1})/2h$ of vorticity and divergence read only fluid values.
+\item \textbf{Window.} Lead steps $1..N$, $N$ the shortest rollout of all
+  models and samples (the start frame, lead 0, is not in it).
+\item \textbf{Two means.} $\bar{u}_c(\mathbf{x}) = \frac1N \sum_n u_c(\mathbf{x},
+  t_n)$, the \emph{truth's} per-cell time mean over the window, is the one
+  reference of every per-lead fluctuation (ACC, spectra, $\Lambda_y$, PDFs,
+  $W_2$): the same for every source, so a model is never rewarded for its own
+  drift. The \emph{window statistics} (TKE curve and fields, profiles) use each
+  source's \emph{own} time mean $\langle\cdot\rangle_t$ over the window. Both
+  depend on the window length.
+\item \textbf{Reference scales} (per sample, from the truth window; in
+  \texttt{metrics.yaml} \texttt{reference} and \texttt{metrics.nc}
+  \texttt{reference\_*}, \texttt{canopy\_level}):
+  \begin{itemize}
+  \item $H$: mean building height, the mean over the columns holding a solid
+    cell of (solid cells in the column)$\,\Delta z$.
+  \item $k_c$: canopy-top level, the lowest level with no solid cell;
+    $z_c = (k_c + \tfrac12)\Delta z$ (so $z_c/H$ varies by sample). Spectra,
+    $\Lambda_y$, PDFs and $W_2$ are taken there.
+    $k_p$ = \texttt{metrics.pedestrian\_level} (default 0).
+  \item $\uref$: the plane mean of $\bar{u}_u$ at $k_c$ (all cells fluid).
+  \item $T$: integral time scale of the truth. Per fluid cell and component,
+    $x_t = u_c - \bar{u}_c$, $R(\tau) = \sum_t x_t x_{t+\tau} / \sum_t x_t^2$
+    (biased, not re-centred),
+    $T_\text{cell} = \Delta t\,\bigl(\sum_{\tau=0}^{\tau_0-1} R(\tau) - \tfrac12\bigr)$
+    with $\tau_0$ the first lag where $R \le 0$ (all lags if none): the
+    trapezoid rule for $\int_0^{\tau_0\Delta t} R\,dt$ with $R(\tau_0)$ taken as 0. $T$ = mean over
+    cells and components; $\Delta t$ the mean output interval.
+    $\Tbar$ = mean of $T$ over the samples; lead time is shown as $t/\Tbar$
+    (\texttt{lead\_over\_T}); likewise $\bar H$ for $z/\bar H$.
+  \end{itemize}
+\item \textbf{Nondimensional per sample, then averaged.} Velocities $/\uref$,
+  vorticity and divergence $\times H/\uref$, TKE and stresses $/\uref^2$,
+  lengths $/H$, spectra $E/(\uref^2 H)$ against $\kappa H$. Then a plain mean
+  over the samples (one unstable sample makes a mean NaN).
+\item \textbf{Sources.} Every model; \texttt{persistence} (the start frame
+  repeated: the no-skill baseline, TKE 0); \texttt{truth} (the reference curve
+  where it has one); \texttt{truth\_halves} (window statistics only, see \S3).
+\item \textbf{Unstable rollouts.} From the first non-finite frame on, the
+  curves are NaN; the window statistics are NaN and \texttt{stable} is false.
+\end{itemize}
+
+\section*{1\quad Accuracy vs lead time (\texttt{metrics.nc}; window scalars in \texttt{metrics.yaml})}
+For an unstable rollout the yaml window scalars (window RMS) are NaN, while
+\texttt{acc\_horizon\_seconds} stays finite (the first NaN lead counts as a drop).
+\begin{description}
+\metric{rmse, rmse\_u, rmse\_v, rmse\_w}{RMSE$/\uref$}
+  $\displaystyle \mathrm{RMSE}(n) = \frac{1}{\uref}\Bigl[\frac{1}{3|\F|}\sum_c\sum_{\mathbf{x}\in\F}
+  (\pred{u}_c - u_c)^2\Bigr]^{1/2}$ (pooled), per component without
+  $\sum_c$ and the 3. \meas pointwise error; grows with lead time as the
+  rollout decorrelates. It rewards smoothing: predicting $\bar u$ scores the
+  rms fluctuation, a decorrelated but realistic field $\sqrt2$ times that; a
+  diverging rollout blows it up.
+
+\metric{rmse \textnormal{(yaml)}, rmse\_vs\_persistence}{}
+  $\bigl[\frac1N\sum_n \mathrm{RMSE}(n)^2\bigr]^{1/2}$ per sample; and its
+  ratio to persistence's, per sample, then the mean. \meas $<1$: better than
+  freezing the start frame.
+
+\metric{acc, acc\_u, acc\_v, acc\_w}{ACC}
+  $\displaystyle \mathrm{ACC}(n) = \frac{\sum p' q'}{\sqrt{\sum p'^2 \sum q'^2}}$,
+  $p' = \pred{u}_c - \bar{u}_c$, $q' = u_c - \bar{u}_c$, sums over
+  $\mathbf{x} \in \F$ (and $c$ for the pooled one). \meas phase agreement of
+  the fluctuations, independent of amplitude: 1 perfect, 0 no skill. Smoothing
+  does not hurt it much; a wrong pattern does.
+
+\metric{acc\_horizon\_seconds, acc\_horizon\_censored}{$t_\mathrm{ACC}/\Tbar$}
+  $t_\mathrm{ACC}$: the first lead time where the pooled ACC
+  $<$ \texttt{metrics.acc\_threshold} (default 0.5; a NaN lead counts as a
+  drop); if it never drops, the window's last lead time and
+  \texttt{censored} = 1 (its mean: the censored fraction). \meas predictability
+  horizon; censored values are lower bounds. The table divides the
+  sample-mean seconds by $\Tbar$.
+
+\metric{rmse\_pedestrian, acc\_pedestrian}{$\mathrm{RMSE}_\mathrm{ped}/\uref$}
+  The pooled RMSE and ACC on the fluid cells of level $k_p$ only (ACC about
+  $\bar{u}$ there); yaml: window RMS of the RMSE curve. \meas accuracy where
+  people walk, in the street canyons.
+
+\metric{vorticity\_rmse, vorticity\_rmse\_x/y/z}{$\mathrm{RMSE}_\omega H/\uref$}
+  $(\omega_x,\omega_y,\omega_z) = \nabla\times\mathbf{u}$ by central differences;
+  $\frac{H}{\uref}\bigl[\frac{1}{3|\I|}\sum_c\sum_{\I}(\pred\omega_c - \omega_c)^2\bigr]^{1/2}$
+  (pooled), per component; yaml: \texttt{vorticity\_rmse} only, window RMS. \meas error of the velocity
+  gradients, i.e.\ of the small scales, which RMSE of $\mathbf{u}$ under-weights.
+
+\metric{stable}{}
+  True if the rollout is finite over the whole window (mean: all samples).
+\end{description}
+
+\section*{2\quad Physics vs lead time (\texttt{metrics.nc}, \texttt{truth} too)}
+\begin{description}
+\metric{divergence\_rms;\ divergence\_ratio \textnormal{(yaml)}}{$D/D_\mathrm{truth}$}
+  $D(n) = \frac{H}{\uref}\bigl[\mean_{\I}(\partial_x u + \partial_y v
+  + \partial_z w)^2\bigr]^{1/2}$ by central differences;
+  ratio $= \mean_n \pred D / \mean_n D$ per sample. The stencil is not the
+  solver's, so the truth's $D \ne 0$ is the reference. \meas mass
+  conservation: 1 ideal, $>1$ spurious non-solenoidal noise, $<1$ over-smoothing.
+
+\metric{tke}{}
+  $k(n) = \frac{1}{\uref^2}\,\frac{1}{2|\F|}\sum_c\sum_{\F}\bigl(\pred{u}_c(t_n)
+  - \langle\pred u_c\rangle_t\bigr)^2$, about the source's \emph{own} time mean
+  over its finite frames (persistence: 0). \meas resolved energy content
+  against lead time: a falling curve is energy loss (smoothing), a rising one
+  blow-up; compare with the truth's curve.
+
+\metric{integral\_length}{$\Lambda_y/H$}
+  At $k_c$ on the $y$-lines $\ell$, $u'_\ell(y) = (u - \bar{u}_u)/\uref$
+  with each line's spanwise mean removed per frame (a gust over the whole line
+  would give $R$ a positive floor);
+  $R(m) = \sum_\ell\sum_y u'_\ell(y)\,u'_\ell(y + m\Delta y) / \sum_\ell\sum_y u'^2_\ell$,
+  $y$ periodic; $\Lambda_y = \Delta y\bigl(\sum_{m=0}^{m_0-1}R(m) - \tfrac12\bigr)$,
+  $m_0$ the first lag with $R \le 0$, searched up to $n_y/2$ (all lags up
+  to $n_y/2$ if $R$ never drops to 0): the trapezoid rule for
+  $\int_0^{m_0\Delta y} R\,dy$ with $R(m_0)$ taken as 0; $/H$. yaml: window
+  mean (truth too). \meas size of the energetic eddies: above the truth =
+  too coherent / smoothed, below = noisy.
+
+\metric{spectrum\_u, spectrum\_w}{}
+  Spanwise spectrum at $k_c$ of $u'=(u-\bar u_u)/\uref$ ($w'$), each $y$-line
+  FFT'd as is ($y$ periodic, no window), averaged over the lines:
+  $E(\kappa) = w_\kappa\,|\hat{u}'_\kappa/n_y|^2/\Delta\kappa$,
+  $\kappa = 2\pi/\lambda$ the \emph{angular} wavenumber [rad/m],
+  $\Delta\kappa = 2\pi/(n_y\Delta y)$, $w_\kappa = 2$ (1 at $\kappa=0$ and the
+  even-$n_y$ Nyquist bin), so $\sum E\,\Delta\kappa$ = the variance along $y$;
+  $\kappa = 0$ dropped; stored $/H$ against $\kappa H$. In \texttt{metrics.nc}:
+  binned on 32 shared log-spaced $\kappa H$ bins (mean in a bin, log-$\kappa$
+  interpolation in an empty interior bin, NaN outside a sample's range),
+  averaged over the samples covering the bin (dims
+  \texttt{source}$\times$\texttt{lead}$\times$\texttt{kh}).
+  \meas energy per scale: a drooping tail = small scales lost (smoothing), a
+  raised tail = noise or aliasing.
+
+\metric{spectra\_db\_\{u,w\}\_\{large,mid,near\_cutoff\} \textnormal{(yaml)}}{$E_{u'}$ [dB] mid, near cutoff}
+  Per sample, with $\bar E = \mean_n E(n)$ (unbinned):
+  $10\log_{10}\bigl(\sum_{\kappa\in b}\bar{\pred E} / \sum_{\kappa\in b}\bar E\bigr)$,
+  bands $b$ by wavelength in cells $\lambda/\Delta y = 2\pi/(\kappa\Delta y)$:
+  large $[8,\infty)$, mid $[4,8)$, near\_cutoff $[2,4)$
+  (\texttt{evaluation.turbulence.SPECTRAL\_BANDS}). \meas 0 dB ideal;
+  $-3$ dB = half the energy (smoothing), $+3$ dB = twice (noise).
+\end{description}
+
+\section*{3\quad Window statistics (\texttt{metrics.yaml}; profiles, PDFs in \texttt{metrics.nc})}
+NaN for an unstable rollout. $\langle\cdot\rangle_t$: the source's own window
+mean; primes here are about it.
+\begin{description}
+\metric{mean\_u\_rmse}{RMSE $\bar u/\uref$}
+  $\bigl[\mean_{\F}(\langle\pred u\rangle_t - \langle u\rangle_t)^2\bigr]^{1/2}/\uref$.
+  \meas error of the mean flow field (wakes, recirculation).
+\metric{tke\_rmse}{RMSE $k/\uref^2$}
+  $k(\mathbf{x}) = \tfrac12\sum_c \mathrm{var}_t(u_c)$ (population variance);
+  $\bigl[\mean_{\F}(\pred k - k)^2\bigr]^{1/2}/\uref^2$. \meas where turbulence
+  is produced and how much (shear layers, wakes); a smoothed model
+  under-predicts $k$.
+\metric{profile\_mean\_u, profile\_tke, profile\_uw \textnormal{(nc)};\ profile\_rmse\_\{mean\_u,tke,uw\}}{RMSE $-\langle u'w'\rangle/\uref^2$}
+  Per level $z$: the fluid-plane average (sum over the level's fluid cells /
+  their count) of $\langle u\rangle_t/\uref$, of
+  $\tfrac12\sum_c\langle u_c'^2\rangle_t/\uref^2$ and of
+  $-\langle u'w'\rangle_t/\uref^2$ (\texttt{metrics.nc} dims
+  \texttt{source}$\times$\texttt{z}, sample mean). RMSE: $\bigl[\frac{1}{n_z}
+  \sum_z(\pred q - q)^2\bigr]^{1/2}$ over all $n_z$ levels. \meas the canopy
+  profile; $-\langle u'w'\rangle$ is the momentum flux into the canopy.
+\metric{pdf, pdf\_bin\_centre \textnormal{(nc)}}{}
+  Density of $(\pred u_c - \bar u_c)/\uref$ at $k_c$ at the
+  snapshot leads (\texttt{metrics.snapshot\_leads}, $-1$: the last), on
+  \texttt{max\_pdf\_values} / $n_\text{samples}$ random cells per sample
+  (without replacement; the same for every lead and source), pooled over the
+  samples. Per component 60 bins over the 0.05--99.95 percentile range of the
+  truth's values pooled over all snapshot leads and samples, the same for every
+  source and lead; density = count$/(M\,\Delta b)$, $M$ all values, so values
+  outside fall out but count. \meas turbulence intensity (width), bias
+  (shift) and tails (intermittency) at the canopy top.
+\metric{wasserstein\_u, wasserstein\_v, wasserstein\_w}{$W_2(u')/\uref$}
+  Values $(\pred u_c - \bar u_c)/\uref$ at $k_c$ at $M$ =
+  \texttt{metrics.max\_pdf\_values} random (lead, cell) draws per sample over
+  the window (with replacement), the same draws for every source;
+  $W_2 = \bigl[\frac{1}{99}\sum_i (Q_\text{truth}(p_i) - Q_\text{pred}(p_i))^2\bigr]^{1/2}$,
+  $Q$ the quantile function, $p_i = (i+\frac12)/99$, $i = 0..98$; per sample,
+  then the mean. \meas distance of the
+  one-point distributions (bias + spread + shape) in units of $\uref$; 0 ideal;
+  insensitive to phase errors that ACC/RMSE punish.
+\metric{integral\_length, divergence\_ratio}{}
+  \texttt{integral\_length}: window mean of the \S2 curve;
+  \texttt{divergence\_ratio}: see \S2 (a ratio of window means).
+\metric{truth\_halves}{}
+  The window statistics (\texttt{mean\_u\_rmse} \ldots\ \texttt{wasserstein\_*},
+  incl.\ \texttt{spectra\_db}) of the truth's first half (leads
+  $1..\lfloor N/2\rfloor$) against its second half. \emph{Not a noise
+  floor}: each half has half the frames (about $\sqrt2$ the sampling error of
+  the full window), and when the inflow varies in time the halves differ by
+  that forcing, which a model compared over the same window shares, so a model
+  can beat it. Use it as a rough scale for long rollouts only.
+\end{description}
+
+\section*{4\quad Cost (\texttt{metrics.yaml}, models only, not per sample)}
+\begin{description}
+\metric{seconds\_per\_step, n\_parameters, speedup}{ms / step, Parameters ($10^6$), Speedup}
+  Inference wall time per lead step on the run's \texttt{device} (the first
+  step of each rollout excluded: warm-up) and the parameter count (all
+  parameters of the model) from \texttt{models.yaml}; speedup
+  = \texttt{metrics.solver\_seconds\_per\_step} / \texttt{seconds\_per\_step},
+  only when that is set. Time on the GPU for the cost table.
+\end{description}
+
+\section*{Tables (\texttt{make\_tables.py})}
+\texttt{table\_\{accuracy,physics,cost\}.tex} (booktabs, to \verb|\input|) and
+\texttt{.csv} (full precision). RMSE and ACC columns ``$t \le h\,\Tbar$'' are the
+RMS (RMSE) or mean (ACC) of the \emph{sample-mean} curve over the leads
+$t \le h\,\Tbar$ for each \texttt{metrics.horizons} inside the window, and over
+the whole window (so the window RMSE differs slightly from the yaml
+\texttt{rmse}, a mean of per-sample RMS). \textbf{Bold}: the best model at the
+printed precision (smallest error; largest ACC, $t_\mathrm{ACC}$, speedup;
+closest to 0 dB, to 1, or to the truth's $\Lambda_y/H$; smallest ms/step;
+parameters never bold; ties all bold; persistence and truth never). $\geq$: a lower bound ($t_\mathrm{ACC}$ with
+some sample censored). ``--'': unstable (NaN).
+
+\section*{Figures (\texttt{visualize\_comparison.py})}
+In each of \texttt{figures.formats} (default PDF + PNG); the animations fall
+back to .gif without ffmpeg and are skipped by \texttt{figures.animation: null}.
+
+\noindent\begin{tabularx}{\linewidth}{@{}lX@{}}
+\toprule
+File & Shows \\
+\midrule
+\texttt{rmse} & RMSE$/\uref$ vs $t/\Tbar$: pooled, $u$, $v$, $w$ \\
+\texttt{acc} & ACC vs $t/\Tbar$: pooled, $u$, $v$, $w$; threshold line \\
+\texttt{vorticity} & vorticity RMSE $\times H/\uref$ vs $t/\Tbar$: pooled, $x$, $y$, $z$ \\
+\texttt{physics} & TKE$/\uref^2$, divergence RMS $\times H/\uref$, $\Lambda_y/H$ vs $t/\Tbar$; truth as reference \\
+\texttt{pedestrian} & RMSE$/\uref$ and ACC at $k_p$ vs $t/\Tbar$ \\
+\texttt{spectra} & premultiplied $\kappa E/\uref^2$ vs $\kappa H$ at $k_c$; rows $u'$, $w'$, columns the snapshot leads \\
+\texttt{spectral\_ratio} & $10\log_{10}(E_\text{model}/E_\text{truth})$ of $u'$ over ($\kappa H$, $t/\Tbar$), ratio of the sample-mean spectra; $\pm6$ dB, contours at ratios 0.8, 1.2 \\
+\texttt{pdfs} & densities of $u'$, $v'$, $w'/\uref$ at $k_c$; columns the snapshot leads \\
+\texttt{profiles} & plane-averaged window $\langle u\rangle_t$, TKE, $-\langle u'w'\rangle$ vs $z/\bar H$ \\
+\texttt{station\_profiles} & the same in single columns behind the most downstream building (lee face $+\,0.5, 1, 2, 4\times$ its height) \\
+\texttt{slices} & $|\mathbf{U}|/\uref$ at $k_p$; rows truth + models, columns the snapshot leads \\
+\texttt{vertical\_slices} & $x$--$z$ plane through the most downstream building at \texttt{figures.vertical\_lead}: $u$, $w/\uref$, $\omega_y H/\uref$ \\
+\texttt{statistics\_slices} & window $\langle u\rangle_t/\uref$ and TKE$/\uref^2$ at $k_p$ \\
+\texttt{tke\_heights} & window-averaged resolved TKE $\tfrac12\sum_c\mathrm{var}_t(u_c)/\uref^2$ (each source about its own window mean) on horizontal slices at the heights \texttt{figures.tke\_heights} (in units of $H$); rows truth + models \\
+\texttt{animation\_speed.mp4} & $|\mathbf{U}|$ at $k_p$ vs lead time, truth and models, and model $-$ truth (review aid) \\
+\texttt{animation\_tke\_z<h>H.mp4} & instantaneous resolved TKE $\tfrac12\sum_c(u_c - \langle u_c\rangle_t)^2/\uref^2$ about each source's own window mean, at height $h\,H$ (e.g.\ \texttt{z1p0H}); truth and models side by side \\
+\bottomrule
+\end{tabularx}
+
+\texttt{station\_profiles}, all \texttt{*slices} figures, \texttt{tke\_heights}
+and the animations show trajectory \texttt{figures.sample}; persistence is left
+out of them; model slices
+share the truth's colour scale and saturate. Curves leaving the axis (an
+unstable model) are clipped and marked ``(off scale)''.
+\end{document}

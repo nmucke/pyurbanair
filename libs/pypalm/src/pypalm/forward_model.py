@@ -928,7 +928,21 @@ class ForwardModel(BaseForwardModel):
         prescribed) together with ``sgs_constant`` raises; the model-config
         default is then skipped with a log line, as it would be inert, so an
         ``sgs_constant`` run on a template with another z0 keeps working.
+
+        Separate wall and ground z0 (``roughness_length_wall`` /
+        ``roughness_length_ground``, uDALES) would need PALM's urban surface
+        model, so they raise.
         """
+        split = [
+            name
+            for name in ("roughness_length_wall", "roughness_length_ground")
+            if self._param_value(params, name) is not None
+        ]
+        if split:
+            raise ValueError(
+                f"PALM has one z0 for every surface: it supports only "
+                f"roughness_length, not {split} (uDALES only)."
+            )
         z0 = self._param_value(params, "roughness_length")
         source = "params"
         if z0 is None:

@@ -10,9 +10,16 @@ from typing import Any
 import numpy as np
 import pytest
 import torch
+from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-from tests.conftest import TRAIN_ORDER, compose, inlet_turbulence_corpus, load_script
+from tests.conftest import (
+    CONFIGS,
+    TRAIN_ORDER,
+    compose,
+    inlet_turbulence_corpus,
+    load_script,
+)
 
 
 @pytest.mark.parametrize("name", TRAIN_ORDER)  # type: ignore[misc]
@@ -148,6 +155,88 @@ def test_prechunked_dft_reads_whole_frames_and_source_params(
     assert (model_dir / "weights.pt").exists()
 
 
+def _finetune_dft_cfg(
+    root: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> Any:
+    dft = trained["train_dft"]
+    return compose(
+        "surrogate/finetune_dft",
+        "+test=finetune_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=root,
+    )
+
+
+def test_finetune_dft_trains_adapters_and_skips_only(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    trainable = [n for n, p in setup.model.named_parameters() if p.requires_grad]
+    lora = [n for n in trainable if ".lora_" in n]
+    for part in (".dft.encoder.", ".dft.decoder.", ".dft.subnetwork.seqmodel."):
+        assert any(part in n for n in lora), part
+    assert all(
+        ".dft.encoder." in n or ".dft.decoder." in n or ".seqmodel." in n for n in lora
+    )
+    full = [n for n in trainable if ".lora_" not in n]
+    for module in cfg.trainable_modules:  # every listed module trains, fully
+        params = [n for n, _ in setup.model.named_parameters() if f".{module}" in n]
+        assert params and all(n in full for n in params), module
+    assert all(any(f".{m}" in n for m in cfg.trainable_modules) for n in full)
+    assert not any("geometry_branch" in n or "_film" in n for n in trainable)
+    assert not any(".param_mlp." in n for n in trainable)
+
+
+def test_finetune_dft_rollout_and_export(
+    tmp_path: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from neural_surrogates import Trainer
+    from neural_surrogates.finetuning import resolve_target_modules
+
+    # Every training-mode model call carries gradients: backprop through the
+    # whole rollout.
+    calls: list[bool] = []
+    model_forward = Trainer._model_forward
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self.model.training:
+            calls.append(torch.is_grad_enabled())
+        return model_forward(self, *args, **kwargs)
+
+    monkeypatch.setattr(Trainer, "_model_forward", spy)
+    cfg = _finetune_dft_cfg(tmp_path, training_data, trained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert calls and all(calls)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    with open(model_dir / "metrics.csv") as f:
+        horizons = [int(row["pushforward_steps"]) for row in csv.DictReader(f)]
+    assert horizons == [2, 3]  # the curriculum, up to dataset.pushforward_steps
+
+    # A plain merged dict that rebuilds the architecture from config.yaml alone.
+    dft = trained["train_dft"]
+    before = torch.load(pathlib.Path(dft.paths.weights_dir) / dft.name / "weights.pt")
+    after = torch.load(model_dir / "weights.pt")
+    assert after.keys() == before.keys()
+    eval_common = load_script("scripts/utils/eval_common.py")
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    adapted = resolve_target_modules(model, preset=cfg.lora.target_preset)
+    trained_prefixes = (*adapted, *cfg.trainable_modules)
+    for key in before:  # frozen: neither adapted nor listed
+        if not any(f".{p}." in f".{key}." for p in trained_prefixes):
+            assert torch.equal(after[key], before[key]), key
+    for key in ("dft.subnetwork.seqmodel.input_proj.weight", "dft.decoder"):
+        changed = [k for k in before if k.startswith(key)]
+        assert not all(torch.equal(after[k], before[k]) for k in changed), key
+    assert all(torch.equal(model.state_dict()[k], after[k]) for k in after)
+    assert (model_dir / "adapter" / "adapter_config.json").exists()
+
+
 def _latent_cache_cfg(
     tmp_path: pathlib.Path, trained: dict[str, Any], *overrides: str
 ) -> Any:
@@ -201,6 +290,236 @@ def test_adaln_latent_generator_rebuilds_from_its_config(
     assert saved.architecture.velocity_conditioning == "adaln"
     model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
     assert isinstance(model.velocity_net, AdaLNVelocityNet)
+
+
+def _finetune_latent_generator_cfg(
+    tmp_path: pathlib.Path,
+    trained: dict[str, Any],
+    pretrained: pathlib.Path,
+    *overrides: str,
+) -> Any:
+    ae = trained["train_autoencoder"]
+    return compose(
+        "surrogate/finetune_latent_generator",
+        "+test=finetune_latent_generator",
+        f"paths.data_dir={trained['train_latent_generator'].paths.data_dir}",
+        f"autoencoder_dir={pathlib.Path(ae.paths.weights_dir) / ae.name}",
+        f"pretrained_dir={pretrained}",
+        *overrides,
+        root=tmp_path,
+    )
+
+
+def test_finetune_latent_generator_starts_from_the_pretrained_one(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    lg = trained["train_latent_generator"]
+    pretrained = pathlib.Path(lg.paths.weights_dir) / lg.name
+    before = torch.load(pretrained / "weights.pt")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained, "method=full")
+    OmegaConf.set_struct(cfg, False)
+    setup = load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+    state = setup.model.state_dict()
+    assert all(torch.equal(state[k], before[k]) for k in before)
+
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained, "method=full")
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    after = torch.load(model_dir / "weights.pt")
+    for key in ("latent_mean", "latent_std", "param_mean", "param_std"):
+        assert torch.equal(after[key], before[key]), key  # kept, not recomputed
+    assert not all(torch.equal(after[k], before[k]) for k in before)
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    pretrained_cfg = OmegaConf.load(pretrained / "config.yaml")
+    old = pretrained_cfg.generator.physical_schema.supported_geometries
+    supported = saved.generator.physical_schema.supported_geometries
+    assert all(g in supported for g in old)  # still knows its geometries
+    eval_common = load_script("scripts/utils/eval_common.py")
+    eval_common.load_model(model_dir, torch.device("cpu"))  # rebuilds strictly
+
+    # Another autoencoder than the pretrained generator's: refused.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "weights.pt").symlink_to(pretrained / "weights.pt")
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.ae_fingerprint = "0" * 64
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="not the autoencoder"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # Data conditioned on other parameters than the pretrained generator's.
+    config = OmegaConf.load(pretrained / "config.yaml")
+    config.generator.physical_schema.param_vars.reverse()
+    OmegaConf.save(config, other / "config.yaml")
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, other)
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="parameters, history and frame step"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+    # A trainable_modules entry that matches nothing.
+    cfg = _finetune_latent_generator_cfg(
+        tmp_path, trained, pretrained, "trainable_modules=[velocity_skp]"
+    )
+    OmegaConf.set_struct(cfg, False)
+    with pytest.raises(ValueError, match="match no parameter"):
+        load_script("scripts/utils/tasks.py").TASKS[cfg.task](cfg, tmp_path)
+
+
+def test_finetune_latent_generator_through_lora(
+    tmp_path: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    lg = trained["train_latent_generator"]
+    pretrained = pathlib.Path(lg.paths.weights_dir) / lg.name
+    before = torch.load(pretrained / "weights.pt")
+    tasks = load_script("scripts/utils/tasks.py")
+    # From the latent cache: only the adapters and trainable_modules train.
+    cfg = _finetune_latent_generator_cfg(
+        tmp_path, trained, pretrained, f"latent_cache.output_root={tmp_path / 'lat'}"
+    )
+    OmegaConf.set_struct(cfg, False)
+    setup = tasks.TASKS[cfg.task](cfg, tmp_path)
+    assert setup.trainer_kwargs["_recursive_"] is False
+    assert "weights_transform" in setup.trainer_kwargs
+    trainable = [n for n, p in setup.model.named_parameters() if p.requires_grad]
+    lora = [n for n in trainable if ".lora_" in n]
+    assert lora and all(".velocity_net.seqmodel." in n for n in lora)
+    full = [n for n in trainable if ".lora_" not in n]
+    assert full and all(".velocity_skip." in n for n in full)
+    assert not any(".ae." in n for n in trainable)
+    # ... and trains from it.
+    load_script("scripts/surrogate/train.py").run(cfg)
+    assert torch.load(pathlib.Path(cfg.paths.weights_dir) / cfg.name / "weights.pt")
+
+    # Encoding every batch (latent statistics before fit) and the export.
+    cfg = _finetune_latent_generator_cfg(tmp_path, trained, pretrained)
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    assert (model_dir / "adapter" / "adapter_config.json").exists()
+    after = torch.load(model_dir / "weights.pt")
+    assert after.keys() == before.keys()  # merged: no peft keys
+    for key in before:
+        if not key.startswith(("velocity_net.seqmodel.", "velocity_skip.")):
+            assert torch.equal(after[key], before[key]), key  # AE, stats, heads
+    assert not all(torch.equal(after[k], before[k]) for k in before)
+    saved = OmegaConf.load(model_dir / "config.yaml")
+    model = instantiate(
+        saved.architecture,
+        n_state_channels=len(saved.generator.physical_schema.state_vars),
+        n_params=len(saved.generator.physical_schema.param_vars),
+        _convert_="all",
+    )
+    model.load_state_dict(after)  # strict, as the generative spin-up loads it
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "option",
+    sorted(p.stem for p in (CONFIGS / "latent_generator_architecture").glob("*.yaml")),
+)
+def test_latent_generator_architecture_builds(
+    option: str, tmp_path: pathlib.Path
+) -> None:
+    """Each velocity-net option, made shallow and narrow, builds on a tiny
+    autoencoder and gives a finite velocity of the latent's shape."""
+    pytest.importorskip("diffusers")
+    from tests.neural_surrogates._latent_generator_fixtures import (
+        GRID,
+        HP,
+        NET,
+        C,
+        P,
+        make_ae_export,
+    )
+
+    cfg = compose(
+        "surrogate/train_latent_generator",
+        f"latent_generator_architecture={option}",
+        root=tmp_path,
+    )
+    arch = cfg.architecture
+    tiny = {**NET, "param_history_steps": HP, "max_latent_tokens": None}
+    if arch.hidden_size is not None:
+        tiny["hidden_size"] = 16
+    for key in ("head_hidden", "mlp_hidden"):
+        if key in arch:
+            tiny[key] = 32
+    model = instantiate(
+        OmegaConf.merge(arch, tiny),
+        n_state_channels=C,
+        n_params=P,
+        pretrained_ae_dir=str(make_ae_export(tmp_path)),
+    )
+    assert model.velocity_conditioning == arch.velocity_conditioning
+    assert model.latent_skip == arch.latent_skip
+    assert model.gaussian_skip == arch.gaussian_skip
+    n, d = model.working_latent_dim, model.state_latent_dim
+    model.set_latent_normalization(
+        torch.zeros(n), torch.ones(n), second_moment=torch.eye(d)
+    )
+    cond = model.geometry_condition(torch.ones(*GRID), batch_size=2)
+    z = torch.randn(2, d, *model.latent_grid_for(GRID))
+    with torch.no_grad():
+        v = model.velocity(z, torch.rand(2), torch.randn(2, HP, P), cond)
+    assert v.shape == z.shape and torch.isfinite(v).all()
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "design",
+    [
+        # Design A: narrow adaLN trunk + per-token head, clean-sample prediction.
+        [
+            "architecture.velocity_conditioning=adaln",
+            "+architecture.head_hidden=32",
+            "+architecture.head_layers=1",
+            "+architecture.prediction=data",
+        ],
+        # Design B: D-wide residual stream, narrow attention, shifted time grid.
+        [
+            "architecture.velocity_conditioning=adaln_bottleneck",
+            "+architecture.mlp_hidden=32",
+            "+architecture.time_shift=3.0",
+        ],
+    ],
+    ids=["design_a", "design_b"],
+)
+def test_full_reach_latent_generator_trains_samples_and_evaluates(
+    tmp_path: pathlib.Path, trained: dict[str, Any], design: list[str]
+) -> None:
+    """A sub-D net with the Gaussian skip trains from the cache (which stores
+    the second moment), rebuilds strictly, and goes through the evaluation."""
+    eval_common = load_script("scripts/utils/eval_common.py")
+    cfg = _latent_cache_cfg(
+        tmp_path,
+        trained,
+        "architecture.hidden_size=16",
+        # The Gaussian skip replaces the per-channel latent_skip.
+        "architecture.latent_skip=false",
+        "architecture.gaussian_skip=true",
+        *design,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    model, _ = eval_common.load_model(model_dir, torch.device("cpu"))
+    assert model.gaussian_skip and "gaussian_skip=True" in model.extra_repr()
+    eig = model.latent_pca_eig
+    assert torch.isfinite(eig).all() and float(eig.min()) > 0
+    assert not torch.equal(model.latent_pca_basis, torch.eye(len(eig)))
+
+    ev = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator.model_dir={model_dir}",
+        "latent_generator.max_snapshots=2",
+        "latent_generator.num_steps_sweep=[2]",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(ev)
+    summary = json.loads(
+        (pathlib.Path(ev.latent_generator.output_dir) / "summary.json").read_text()
+    )
+    assert np.isfinite(summary["scalars"]["generated"]["w1"])
+    assert all(np.isfinite(r) for r in summary["latent_spectrum"]["var_ratio"].values())
 
 
 def test_evaluate_stepper(session_root: pathlib.Path, trained: dict[str, Any]) -> None:
@@ -366,6 +685,15 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+    spectrum = summary["latent_spectrum"]
+    assert spectrum["var_ratio"] and all(
+        np.isfinite(r) and r > 0 for r in spectrum["var_ratio"].values()
+    )
+    assert len(spectrum["real_eigenvalues"]) == len(spectrum["generated_variance"])
+    with open(out / "metrics.csv") as f:
+        generated = next(r for r in csv.DictReader(f) if r["source"] == "generated")
+    assert all(f"latent_var_ratio_{b}" in generated for b in spectrum["var_ratio"])
+    assert (out / "latent_spectrum.png").exists()
 
 
 def test_evaluate_latent_generator_decode_modes_and_samplers(
@@ -379,6 +707,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         "latent_generator.output_dir=" + str(session_root / "lg_eval_variants"),
         "latent_generator.decode_modes=[local,halo,global]",
         "latent_generator.samplers=[euler,heun]",
+        "latent_generator.num_steps=5",
         "latent_generator.max_snapshots=6",
         "latent_generator.max_internal_batchsize=2",
         root=session_root,
@@ -387,6 +716,7 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
     load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
     out = pathlib.Path(cfg.latent_generator.output_dir)
     summary = json.loads((out / "summary.json").read_text())
+    assert summary["num_steps"] == 5
     others = [m for m in ("local", "halo", "global") if m != trained_mode]
     assert summary["decode_modes"] == others
     expected = {f"{k}_decode_{m}" for m in others for k in ("generated", "ae_recon")}
@@ -411,6 +741,122 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
         assert (out / name).exists(), name
 
 
+def _synthetic_seed_ensemble(corpus: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
+    """A seed ensemble of the synthetic corpus's test trajectory 0 in
+    generate_data.py's layout: member 0 is frame 0, the others frame 0 plus
+    noise in the fluid. Member 5 is missing, as in the real ensemble, so the
+    7 members also exercise the odd split-half path."""
+    import xarray
+
+    rng = np.random.default_rng(0)
+    frame = xarray.load_dataset(corpus / "state" / "test" / "sample_0000.nc")
+    params = xarray.load_dataset(corpus / "param" / "test" / "sample_0000.nc")
+    fluid = frame.blanking.values == 0
+    for d in ("state", "param"):
+        (dest / d / "sample_0000").mkdir(parents=True)
+    for member in (0, 1, 2, 3, 4, 6, 7):
+        state = frame.isel(time=[0])
+        if member:
+            for v in ("u", "v", "w"):
+                noise = rng.normal(0, 0.3, state[v].shape) * fluid
+                state[v] = state[v] + noise.astype(np.float32)
+        state.attrs.update(geometry="tiny", reference_sample=0, member=member)
+        name = f"member_{member:04d}.nc"
+        state.to_netcdf(dest / "state" / "sample_0000" / name)
+        params.isel(time=[0]).to_netcdf(dest / "param" / "sample_0000" / name)
+    OmegaConf.save(
+        OmegaConf.create(
+            {"data": {"seed_ensemble": {"reference_dir": str(corpus), "split": "test"}}}
+        ),
+        dest / "config.yaml",
+    )
+    return dest
+
+
+def test_evaluate_latent_generator_ensemble_and_compare(
+    session_root: pathlib.Path, trained: dict[str, Any], training_data: pathlib.Path
+) -> None:
+    """Every source and floor per geometry, member 0 matches frame 0, the noise
+    depends only on (seed, sample, draw); the comparison pairs two runs."""
+    ensemble = _synthetic_seed_ensemble(training_data, session_root / "seed_ensemble")
+    script = load_script("scripts/surrogate/evaluate_latent_generator_ensemble.py")
+    outputs = []
+    for batch in (4, 2):
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"latent_generator_ensemble.ensemble_dir={ensemble}",
+            "latent_generator_ensemble.output_dir="
+            + str(session_root / f"lg_ensemble_eval_b{batch}"),
+            f"latent_generator_ensemble.batch_size={batch}",
+            root=session_root,
+        )
+        script.run(cfg)
+        outputs.append(pathlib.Path(cfg.latent_generator_ensemble.output_dir))
+    out = outputs[0]
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["member0_max_abs_diff"] == 0.0
+    assert summary["member0_rms_diff_over_median_pair"] == 0.0
+    geometry = summary["per_geometry"]["sample_0000"]
+    assert geometry["n_real"] == 7 and geometry["geometry"] == "tiny"
+    scalars = geometry["scalars"]
+    assert set(scalars) == {
+        "real",
+        "ae_recon",
+        "generated",
+        "generated_shuffled_params",
+    }
+    for key in ("crps_ratio", "spread_ratio", "energy_distance_rel", "rank_outer"):
+        assert np.isfinite(scalars["generated"][key]), key
+    assert np.isfinite(scalars["real"]["energy_distance_rel_half"])
+    assert np.isfinite(scalars["real"]["spread_ratio_half_std"])
+    assert scalars["real"]["zero_variance_cells"] == 0
+    assert "w1_points_half_u" in scalars["ae_recon"]
+    assert any(k.startswith("latent_var_ratio_") for k in scalars["generated"])
+    agg = summary["aggregate"]["generated"]["crps_ratio"]
+    assert agg["n"] == 1 and agg["mean"] == pytest.approx(
+        scalars["generated"]["crps_ratio"]
+    )
+    with open(out / "metrics.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert {(r["geometry"], r["source"]) for r in rows} >= {
+        ("sample_0000", "generated"),
+        ("mean", "generated"),
+        ("mean", "real"),
+    }
+    arrays = np.load(out / "arrays" / "sample_0000.npz")
+    nz = len(arrays["height_m"])
+    assert arrays["generated.spread_ratio_profile"].shape == (3, nz)
+    assert arrays["real.rank_counts"].shape == (3, 4)
+    for name in ("spread_ratio_profiles.png", "rank_histograms.png"):
+        assert (out / name).exists(), name
+    assert (out / "std_maps_sample_0000.png").exists()
+    # Per-draw noise: the batch size does not change the draws.
+    other = json.loads((outputs[1] / "summary.json").read_text())
+    other_gen = other["per_geometry"]["sample_0000"]["scalars"]["generated"]
+    assert other_gen["crps"] == pytest.approx(scalars["generated"]["crps"], rel=1e-4)
+
+    compare = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator_ensemble_compare.eval_dirs=[{outputs[0]},{outputs[1]}]",
+        "latent_generator_ensemble_compare.tags=[b4,b2]",
+        "latent_generator_ensemble_compare.reference=b4",
+        "latent_generator_ensemble_compare.output_dir="
+        + str(session_root / "lg_ensemble_compare"),
+        root=session_root,
+    )
+    load_script("scripts/surrogate/compare_latent_generator_ensembles.py").run(compare)
+    cmp_out = pathlib.Path(compare.latent_generator_ensemble_compare.output_dir)
+    table = (cmp_out / "comparison.md").read_text()
+    assert "| b2 |" in table and "| floor |" in table
+    with open(cmp_out / "paired_differences.csv") as f:
+        diffs = {r["metric"]: float(r["mean"]) for r in csv.DictReader(f)}
+    assert diffs["crps_ratio"] == pytest.approx(0.0, abs=1e-4)
+    for name in ("spread_ratio_profiles.png", "rank_histograms.png", "scores.png"):
+        assert (cmp_out / name).exists(), name
+
+
 @pytest.mark.integration  # type: ignore[misc]
 def test_generate_data(tmp_path: pathlib.Path) -> None:
     cfg = compose("surrogate/generate_data", "+test=generate_data", root=tmp_path)
@@ -420,3 +866,196 @@ def test_generate_data(tmp_path: pathlib.Path) -> None:
         s: len(list((out / "state" / s).glob("*.nc"))) for s in ("train", "val", "test")
     }
     assert counts == {"train": 2, "val": 1, "test": 1}
+
+
+@pytest.mark.parametrize("enabled", [True, False])  # type: ignore[misc]
+def test_generate_data_records_the_inlet_turbulence_timeline(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    """Samples run back to back on one model, which continues its clock: each
+    state records its inlet turbulence seed and the driver record its run
+    started at (InletTurbulence replays them); nothing without the knob."""
+    import xarray
+
+    script = load_script("scripts/surrogate/generate_data.py")
+    cfg = compose(
+        "surrogate/generate_data", "+test=generate_data", "data.seed=2", root=tmp_path
+    )
+
+    class FakeModel:
+        def __init__(self, experiment_dir: pathlib.Path) -> None:
+            self.inlet_turbulence: dict[str, Any] = {
+                "enabled": enabled,
+                "time_step": 0.5,
+            }
+            self._elapsed_time = 0.0
+            self.dirs = type(
+                "Dirs", (), {"experiment_dir": experiment_dir, "experiment_name": "999"}
+            )()
+
+        def __call__(self, state: Any, params: xarray.Dataset) -> xarray.Dataset:
+            self._elapsed_time += 25.0  # spin-up + simulation
+            times = np.array([5.0, 10.0])
+            return xarray.Dataset({"u": ("time", times)}, coords={"time": times})
+
+    def make_model(cfg: Any, geometry: Any, spinup: float) -> FakeModel:
+        experiment_dir = tmp_path / "scratch"
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return FakeModel(experiment_dir)
+
+    def save(cfg: Any, model: Any, state: Any, params: Any, sp: Any, pp: Any) -> None:
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        state.to_netcdf(sp)
+
+    monkeypatch.setattr(script, "_make_model", make_model)
+    monkeypatch.setattr(script, "_save", save)
+    script.run(cfg)
+
+    out = pathlib.Path(cfg.paths.results_dir)
+    files = [("train", 0), ("train", 1), ("val", 0), ("test", 0)]
+    for member, (split, index) in enumerate(files):
+        attrs = xarray.load_dataset(
+            out / "state" / split / f"sample_{index:04d}.nc"
+        ).attrs
+        if enabled:
+            assert attrs["inlet_turbulence_seed"] == 2 * 100_003 + member
+            assert attrs["inlet_turbulence_start_record"] == 50 * member
+        else:
+            assert "inlet_turbulence_seed" not in attrs
+            assert "inlet_turbulence_start_record" not in attrs
+
+
+def _seed_ensemble_corpus(root: pathlib.Path) -> pathlib.Path:
+    """A reference corpus as the archived generator wrote it: two test samples."""
+    import xarray
+
+    (root / "state" / "test").mkdir(parents=True)
+    (root / "param" / "test").mkdir(parents=True)
+    (root / "geometries").mkdir()
+    fields = "split,sample,stl_file,nx,ny,nz,lx_domain_m,ly_domain_m,lz_domain_m"
+    rows = [
+        f"{fields},x0_domain_m,y0_domain_m",
+        "train,0000,a.stl,16,16,8,64,64,32,-8,-8",
+    ]
+    for i, (stl, spinup) in enumerate([("b.stl", 20.0), ("c.stl", 30.0)]):
+        rows.append(f"test,{i:04d},{stl},16,32,8,64,128,32,-8,-16")
+        (root / "geometries" / stl).touch()
+        state = xarray.Dataset(attrs={"spinup_time_s": spinup})
+        state.to_netcdf(root / "state" / "test" / f"sample_{i:04d}.nc")
+        times = np.arange(0.0, 20.0, 5.0, dtype=np.float32)
+        xarray.Dataset(
+            {"inflow_angle": ("time", np.full(4, 10.0 * i))},
+            coords={"time": times},
+        ).to_netcdf(root / "param" / "test" / f"sample_{i:04d}.nc")
+    (root / "geometries.csv").write_text("\n".join(rows) + "\n")
+    return root
+
+
+def test_seed_ensemble_reads_the_reference_samples(tmp_path: pathlib.Path) -> None:
+    script = load_script("scripts/surrogate/generate_data.py")
+    ref = _seed_ensemble_corpus(tmp_path / "ref")
+    cfg = compose(
+        "surrogate/generate_seed_ensemble",
+        "+test=generate_seed_ensemble",
+        f"data.seed_ensemble.reference_dir={ref}",
+        root=tmp_path,
+    )
+    refs = script._references(cfg.data.seed_ensemble)
+    assert [(r.index, r.geometry.stl.name, r.spinup) for r in refs] == [
+        (0, "b.stl", 20.0),
+        (1, "c.stl", 30.0),
+    ]
+    assert refs[0].geometry.bounds == ((-8.0, 56.0), (-16.0, 112.0), (0.0, 32.0))
+    assert (refs[0].geometry.nx, refs[0].geometry.ny) == (16, 32)
+    cfg.data.seed_ensemble.samples = [1]
+    assert [r.index for r in script._references(cfg.data.seed_ensemble)] == [1]
+    cfg.data.seed_ensemble.samples = [5]
+    with pytest.raises(ValueError, match="only"):
+        script._references(cfg.data.seed_ensemble)
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "vary", [["initial_condition"], ["initial_condition", "inlet_turbulence"]]
+)
+def test_seed_ensemble_varies_only_the_chosen_seeds(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, vary: list[str]
+) -> None:
+    """Each member is a cold start on a fresh clock with its own seeds; member 0
+    keeps the reference's, and rerunning skips what is on disk."""
+    import xarray
+
+    script = load_script("scripts/surrogate/generate_data.py")
+    ref = _seed_ensemble_corpus(tmp_path / "ref")
+    cfg = compose(
+        "surrogate/generate_seed_ensemble",
+        "+test=generate_seed_ensemble",
+        f"data.seed_ensemble.reference_dir={ref}",
+        f"data.seed_ensemble.vary=[{','.join(vary)}]",
+        root=tmp_path,
+    )
+    runs: list[dict[str, Any]] = []
+
+    class FakeModel:
+        def __init__(self, experiment_dir: pathlib.Path) -> None:
+            self.inlet_turbulence: dict[str, Any] = {"seed": None}
+            self._elapsed_time = 0.0
+            self.dirs = type(
+                "Dirs", (), {"experiment_dir": experiment_dir, "experiment_name": "999"}
+            )()
+            (experiment_dir / "namoptions.999").write_text("&RUN\nirandom = 43\n/\n")
+
+        def __call__(self, state: Any, params: xarray.Dataset) -> xarray.Dataset:
+            from pyudales.utils.namoptions_utils import NamoptionsFile
+
+            namoptions = NamoptionsFile(self.dirs.experiment_dir / "namoptions.999")
+            runs.append(
+                {
+                    "state": state,
+                    "clock": self._elapsed_time,
+                    "irandom": int(str(namoptions.get_value("RUN", "irandom"))),
+                    "inlet_seed": self.inlet_turbulence["seed"],
+                    "angle": float(params.inflow_angle[0]),
+                }
+            )
+            self._elapsed_time += 25.0  # a cold start advances the clock
+            times = np.array([5.0, 10.0])
+            return xarray.Dataset({"u": ("time", times)}, coords={"time": times})
+
+    def make_model(cfg: Any, geometry: Any, spinup: float) -> FakeModel:
+        experiment_dir = tmp_path / "scratch" / geometry.stl.stem
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        return FakeModel(experiment_dir)
+
+    def save(cfg: Any, model: Any, state: Any, params: Any, sp: Any, pp: Any) -> None:
+        for path in (sp, pp):
+            path.parent.mkdir(parents=True, exist_ok=True)
+        state.to_netcdf(sp)
+        params.to_netcdf(pp)
+
+    monkeypatch.setattr(script, "_make_model", make_model)
+    monkeypatch.setattr(script, "_save", save)
+    script.run(cfg)
+
+    out = pathlib.Path(cfg.paths.results_dir)
+    assert len(runs) == 6
+    assert all(r["state"] is None and r["clock"] == 0.0 for r in runs)
+    assert [r["angle"] for r in runs] == [0.0] * 3 + [10.0] * 3
+    # runs[0:3] are sample 0's members, runs[3:6] sample 1's.
+    for member0 in (runs[0], runs[3]):
+        assert member0["irandom"] == 43 and member0["inlet_seed"] is None
+    others = runs[1:3] + runs[4:6]
+    # Every varied (sample, member) pair has its own seeds.
+    assert len({r["irandom"] for r in others} | {43}) == 5
+    inlet_seeds = [r["inlet_seed"] for r in others]
+    if "inlet_turbulence" in vary:
+        assert None not in inlet_seeds and len(set(inlet_seeds)) == 4
+    else:
+        assert inlet_seeds == [None] * 4
+    state = xarray.open_dataset(out / "state" / "sample_0001" / "member_0002.nc")
+    assert state.sizes["time"] == 1 and float(state.time[0]) == 10.0
+    assert state.attrs["member"] == 2 and state.attrs["spinup_time_s"] == 30.0
+    assert (out / "param" / "sample_0001" / "member_0002.nc").exists()
+
+    runs.clear()
+    script.run(cfg)
+    assert runs == []

@@ -1,0 +1,11 @@
+# @package _global_
+# The DFT B sub-network width (hidden 176) with the diagonal latent skip for
+# full reach. 5.5M trainable on the B AE (D = 1536). PR #221's former default,
+# kept to reproduce it.
+name: latent_generator_s_h176
+architecture:
+  hidden_size: 176
+  n_layers: 6
+  velocity_conditioning: adaln
+  latent_skip: true  # v += (a(tau) + Linear(t_emb)) * z_tau
+  gaussian_skip: false

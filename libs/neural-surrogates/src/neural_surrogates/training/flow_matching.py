@@ -229,7 +229,11 @@ class LatentFlowMatchingTrainer(BaseTraining):
         ckpt_path = self._checkpoint_path()
         if self.resume and ckpt_path is not None and ckpt_path.exists():
             saved = torch.load(ckpt_path, map_location="cpu")["model"]
-            flag = saved.get("latent_stats_installed")
+            # By suffix: under PEFT the key is base_model.model.latent_stats_installed.
+            flag = next(
+                (v for k, v in saved.items() if k.endswith("latent_stats_installed")),
+                None,
+            )
             if flag is None or not bool(flag):
                 raise RuntimeError(
                     f"checkpoint {ckpt_path} carries no installed latent "

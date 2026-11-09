@@ -11,8 +11,8 @@ the scripts and configs are:
 | Step | Script | Config (`configs/`) |
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
-| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,train_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
-| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator}.py` | `surrogate/eval.yaml`, one block per script |
+| Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,train_latent_generator,finetune_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
+| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
 Each script's module docstring lists its options and outputs. `train.py` builds
@@ -156,6 +156,49 @@ pixi run -e dev python scripts/surrogate/generate_data.py model=pypalm \
   ([job_scripts.md](job_scripts.md)).
 - **`ncpu` must divide every `nx`** for pypalm/pyudales (slab decomposition).
   Pool `nx` are multiples of 16, so `ncpu` ∈ {1, 2, 4, 8, 16} always works.
+
+### 3a. Seed ensembles of an existing corpus
+
+`data.seed_ensemble` (uDALES only; preset
+[configs/surrogate/generate_seed_ensemble.yaml](../configs/surrogate/generate_seed_ensemble.yaml))
+makes many spun-up states per geometry, to compare a generative model's
+samples with the solver's spread at fixed forcing. Every member reruns one
+sample of the corpus at `reference_dir` (its `split`, all or `samples`) from a
+cold start, with the sample's geometry and grid (`geometries.csv`), spin-up
+(`spinup_time_s`) and parameter file, and keeps the one frame
+`output_frequency` after the spin-up: the reference's first frame. Only the
+seeds named in `vary` change between members:
+
+- `initial_condition`: `&RUN irandom`, the seed of uDALES's ±`randu` noise on
+  the initial velocity (otherwise 43 in every run);
+- `inlet_turbulence`: the synthetic inlet seed.
+
+Both are digests of (`seed`, sample, member), so member *m* of one sample does
+not share its seeds with member *m* of another.
+
+Member 0 keeps the reference's seeds (`irandom` 43, the inlet seed derived
+from `experiment_name`), so it reproduces the reference frame up to round-off.
+Each member resets the solver clock, so all start on the reference's first
+inlet record. The preset pins the settings `pyudales_realistic` was generated
+with where today's defaults differ (`sgs_constant` 0.24, inlet length scales
+48/24/24 m, interior nudging, no outflow buffer, `model_discrepancy` off).
+Output: `state/sample_XXXX/member_YYYY.nc` (one frame, seeds in the attrs) and
+the matching `param/sample_XXXX/member_YYYY.nc`. Sharding runs every
+`num_shards`-th (sample, member) pair; `surrogate_generate_seed_ensemble.slurm`
+is a SLURM array over them ([job_scripts.md](job_scripts.md)).
+
+**About `training_data/pyudales_realistic_seed_ensemble`** (2026-10): it was
+made by an older version of this code. Its `irandom` takes the same 63 values
+in every sample, and its inlet seed is the member index. The seeds are still
+unique within each sample, and member *m* of one geometry is uncorrelated with
+member *m* of another. Its member 0 does **not** reproduce the reference frame
+0 (fluid RMS difference in u 0.02–0.72 m/s, 3–53 % of the distance between two
+members), although the solver is deterministic, so some setting differs from
+the corpus run. Members are labelled t = 5 s with the t = 5 s parameter row,
+while the reference labels the same frame t = 0 with row 0 (at most 0.55° and
+0.02 m/s apart). sample_0004 lacks member 59 and sample_0006 member 40. The
+§39a evaluation conditions on `params_hist_for(traj, 0)` and only reports the
+member-0 difference.
 
 ### 4. The parameter sampler
 
@@ -795,21 +838,35 @@ building-free columns upstream of the first building; obstacle cells are never
 touched. The corpus must have been generated with inlet turbulence: the
 generator settings are read from its `config.yaml`
 (`model.forward_model.inlet_turbulence`, `nudging_config.profile_config`,
-`experiment_name`, `training_data.output_frequency`) and the spin-up from each
-state file's `spinup_time_s`; anything missing raises. `run_models.py` keeps the
-forcing out of `seconds_per_step` and records it in `models.yaml` and each
+`experiment_name`, `training_data.output_frequency` or `time.output_frequency`)
+and the spin-up from each state file's `spinup_time_s`; anything missing
+raises. A fresh `seed` starts its stream at record 0. `run_models.py` keeps
+the forcing out of `seconds_per_step` and records it in `models.yaml` and each
 rollout's `inlet_turbulence_seed` attr (`truth` or the seed);
 `evaluate_stepper.py`'s `rollout_seconds` includes it.
 
 Known limitations: `seed: null` places frame `t` at solver time
 `spinup + output_frequency * (t + 1)` on the truth's driver-record timeline.
-That holds for test/val samples and single-sample train geometries; the second
-sample of a repeated train geometry continued the solver clock, so its forcing
-does not match its truth (it is still a valid realization). Only corpora of the
-archived generator (`training_data.output_frequency` in their config.yaml, as
-`pyudales_idealized`/`_realistic`) are supported: `scripts/surrogate/generate_data.py`
-seeds per sample and runs samples back to back on one model without storing
-the seed or record offset, so `from_dataset` raises on its corpora.
+Two corpus layouts:
+
+- The archived generator's (`training_data.output_frequency` in config.yaml,
+  as `pyudales_idealized`/`_realistic`): seeded by the config's
+  `inlet_turbulence.seed` or the experiment name, every trajectory from driver
+  record 0. That holds for test/val samples and single-sample train
+  geometries; the second sample of a repeated train geometry continued the
+  solver clock, so its forcing does not match its truth (it is still a valid
+  realization).
+- `scripts/surrogate/generate_data.py`'s (`time.output_frequency`): it seeds
+  each sample (`data.seed * 100003 + member`, the member counting train, val,
+  test in order) and runs the samples of a geometry back to back on one model,
+  whose clock runs on, so a later sample's turbulence starts mid-history and a
+  rerun after a crash restarts the clock. Each state file records both:
+  `inlet_turbulence_seed` and `inlet_turbulence_start_record` (the global
+  driver record the run started at). `seed: null` replays them and raises
+  without them; a fresh `seed` needs neither. Corpora generated before these
+  attrs existed (`pyudales_barcelona_finetune` and `_test`) had them written
+  afterwards from their `hydra/generate_data/*/*/generate_data.log`
+  (`global record N), ... seed=S`).
 
 #### Inference-time y-periodicity
 
@@ -1300,9 +1357,10 @@ matching; it is not limited to `weights_transform` runs.
    keep the pretrained ones.
 3. `method: full` trains every weight from there. `method: lora` freezes the
    model and `inject_lora`s the `lora:` block (`variant`, `rank`, `alpha`,
-   `dropout`, `target_preset`, `target_modules`, `modules_to_save`); the
-   optimizer gets only the trainable (adapter) parameters and the trainer
-   `weights_transform=merge_to_state_dict`.
+   `dropout`, `target_preset`, `target_modules`, `modules_to_save`) and
+   unfreezes the optional `trainable_modules` (dotted module paths, trained
+   fully; absent: none); the optimizer gets only the trainable parameters and
+   the trainer `weights_transform=merge_to_state_dict`.
 4. After `fit()` (LoRA): `save_adapter` → `<name>/adapter/`, then overwrite
    `weights.pt` with the merged plain dict (and `best_val.json`) **only when
    `trainer.restored_best_weights`**, else keep the trainer's on-disk best
@@ -1340,7 +1398,7 @@ fine-tune data (that *is* the domain the fine-tuned model targets).
 | `resolve_target_modules` / presets / `all_adaptable_module_names` | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
 | `weights_transform` hook + resume-safe best-val restore | [training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py) |
 | Shared loader + normalization helpers | [training/data_utils.py](../libs/neural-surrogates/src/neural_surrogates/training/data_utils.py) |
-| Config | [configs/surrogate/finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml) |
+| Config | [configs/surrogate/finetune_stepper.yaml](../configs/surrogate/finetune_stepper.yaml), [finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml) (§32b) |
 | Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: finetune_stepper`) |
 | Tests | [test_lora_finetuning.py](../tests/neural_surrogates/test_lora_finetuning.py), [test_base_training_weights_transform.py](../tests/neural_surrogates/test_base_training_weights_transform.py) |
 
@@ -1921,6 +1979,96 @@ convs). The 1×1×1 convs (`to_latent`, `linear_conv`) and the `cpb_mlp`
 positional-bias net are excluded for the same merge-safety / dead-capacity reasons
 as the P3D presets.
 
+### 32b. Fine-tuning a trained DFT — `finetune_dft.yaml`
+
+`train.py --config-name surrogate/finetune_dft`
+([finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml)) adapts an
+already-trained DFT (a §32 export, e.g. `dft_b`) to new data. It is the
+`finetune_stepper` task (§23) with a DFT `pretrained_dir`: the architecture,
+the merged `weights.pt` and the normalization buffers come from the DFT, whose
+saved architecture already has `skip_pretrained_load: true`, so no autoencoder
+dir is read. The task then freezes everything, injects fresh LoRA on
+`dft.encoder` / `dft.decoder` and the latent subnetwork
+(`lora.target_preset: tadpole_encdec+subnetwork`, below) and trains
+`trainable_modules` fully. The export is §33's: `weights.pt` merges the new
+adapters into the DFT and loads into a fresh stepper from `config.yaml`.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `pretrained_dir` | `${paths.weights_dir}/dft_b` | the trained DFT (not the autoencoder) |
+| `paths.data_dir` | `${paths.training_data_dir}/pyudales_barcelona_finetune` | the new data (`dataset.root_dir`) |
+| `lora.*` | rank 32, alpha 64, `tadpole_encdec+subnetwork`, `fused_forward: true` | adapters on the AE encoder/decoder and the subnetwork's transformer (`tadpole_encdec`: encoder/decoder only) |
+| `trainable_modules` | `skip_mixing`, `dft.decoder.{conv,transformer}_decoder.scales`, `latent_residual_scale` | trained fully: the skip and mixer connections |
+| `recompute_normalization` | `false` | keep the DFT's stats (its frozen encoder and subnetwork were trained with them) |
+| `dataset.pushforward_steps` | 5 | final rollout horizon |
+| `trainer.pushforward_start_steps` / `pushforward_epochs_per_step` | 3 / 3 | curriculum: horizon 3, 4, 5 |
+| `trainer.grad_unroll_steps` | `${dataset.pushforward_steps}` | ≥ the horizon: backprop through every step |
+| `trainer.activation_checkpoint_modules` | the conv blocks | memory, see below |
+| `trainer.compile_modules` | the conv stems | as the `dft_b` run |
+| `batch_sampler.batch_size` / `trainer.grad_accum_samples` | 1 / 8 | one sample per micro-batch, a step per 8 samples |
+| `optimizer.lr` | `1e-4` | per-step warmup over epoch 0, then cosine |
+
+**Skip and mixer connections.** The modules that carry the encoder features
+past the latent bottleneck: `skip_mixing` (the zero-init pointwise state
+mixers on the skips, §31; 77 k parameters at size B), the γ gates of the
+encoder→decoder skips (`dft.decoder.conv_decoder.scales`,
+`dft.decoder.transformer_decoder.scales`, 2 + 2 scalars) and
+`latent_residual_scale` (the gate of the latent residual around the
+subnetwork, 1 scalar). Frozen: the base weights under the adapters, the
+subnetwork's param FiLM (`param_mlp`) and geometry FiLM (`geom_film`), and
+the `geometry_branch`; list e.g. `subnetwork.param_mlp` to train the param
+FiLM fully. At size B (`dft_b`, 46.6 M base parameters) this trains 4.57 M:
+3.67 M encoder/decoder LoRA, 0.82 M subnetwork LoRA (of its 4.7 M), 77 k
+skip mixing and 5 gates. Entries that match nothing are skipped silently, so
+check the `parameters trained` line `train.py` prints.
+
+**Subnetwork LoRA presets** ([targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py)):
+`tadpole_subnetwork` selects the subnetwork transformer's Linears
+(`seqmodel.input_proj` / `out_proj`, each layer's `attn.qkv` / `attn.proj` and
+`mlp.{gate,up,down}_proj`); `tadpole_encdec+subnetwork` is the union with
+`tadpole_encdec` (unchanged, what `train_dft.yaml` uses). The conditioning
+heads are left out: `geom_film` is a 1×1×1 conv (not mergeable, §21) and
+`param_mlp`'s first Linear has only P (3) inputs, fewer than the rank, so a
+LoRA there is no low-rank update.
+
+**Full backpropagation through the rollout.** The trainer runs the first
+`K - g` steps of a horizon-`K` rollout under `no_grad`, with
+`g = min(grad_unroll_steps, K)` (`BaseTraining._forward` in
+[training/base.py](../libs/neural-surrogates/src/neural_surrogates/training/base.py)), so `grad_unroll_steps` ≥ the final
+horizon gives `g = K` at every curriculum stage. Gradients still pass through
+the frozen modules of earlier steps to reach their adapters.
+
+**Memory (estimated, not measured).** Every grad step keeps its activations,
+encoder and decoder ~98 % of them, the subnetwork < 1 % (so its adapters
+cost no noticeable memory); freezing modules saves only their weight
+gradients and optimizer state. From the H100 model of the B DFT (fused LoRA + compile:
+≈ 0.5 GB + 8.9 GB per Mcell and sample for 2 grad steps,
+[dft_training_speed_handover.md](plans/dft_training_speed_handover.md)), 5
+grad steps take ≈ 22 GB per Mcell and sample: ≈ 36 GB for one 32×224×224
+sample (1.6 Mcell), ≈ 30 GB with the default conv-block checkpointing (−18 %,
+~−10 % samples/s), ≈ 20 GB checkpointing all four stages
+(`[dft.encoder.conv_encoder, dft.encoder.transformer_encoder,
+dft.decoder.transformer_decoder, dft.decoder.conv_decoder]`, about −65 %,
++30–50 % step time). Hence one sample per micro-batch: two fit an 80 GB A100
+with conv-block checkpointing (≈ 60 GB), a 40 GB A100 takes one. Not the vendored
+skip wrappers' `use_checkpoint` (reentrant: drops the encoder LoRA gradients,
+see the handover).
+
+**Measured** (`dft_b` on pyudales_barcelona_finetune, one DelftBlue A100 80 GB
+PCIe, horizon 5, conv-block checkpointing, batch 1): 28.7 GB peak (nvidia-smi),
+1.14 s per sample at 98 % device busy, so ~44 min per 2300-sample epoch at the
+final horizon. The first step spends ~2.5 min compiling.
+
+```bash
+pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/finetune_dft \
+    pretrained_dir=model_weights/dft_b name=dft_b_ft_barcelona \
+    paths.data_dir=training_data/pyudales_barcelona_finetune \
+    prechunk.output_root=<whole-frame copy>
+```
+
+On the clusters: `job_scripts/{delftblue,snellius}/surrogate_finetune_dft.slurm`
+(these defaults; `prechunk.output_root` as for §32, resubmit to resume).
+
 ### 33. ESMDA deploy + artifact layout
 
 The export is the standard plan-01 shape, so
@@ -1960,11 +2108,11 @@ unaffected. Deterministic rollouts use `latent_type="mode"` (the default).
 | `TadpoleTimeStepper` / `ParamConditionedSubnetwork` | [architectures/tadpole_stepper.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_stepper.py) |
 | Vendored `TadpoleDFT` + downstream sub-network | [architectures/_tadpole/model/dft.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/model/dft.py), [.../architecture/downstream/](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole/architecture/downstream/) |
 | Shared field IO mixin | [architectures/_tadpole_field_io.py](../libs/neural-surrogates/src/neural_surrogates/architectures/_tadpole_field_io.py) |
-| `tadpole_encdec` LoRA preset | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
-| Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml) |
-| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`) |
+| `tadpole_encdec` / `tadpole_subnetwork` / `tadpole_encdec+subnetwork` LoRA presets | [finetuning/targets.py](../libs/neural-surrogates/src/neural_surrogates/finetuning/targets.py) |
+| Config | [configs/surrogate/train_dft.yaml](../configs/surrogate/train_dft.yaml), [finetune_dft.yaml](../configs/surrogate/finetune_dft.yaml) (§32b) |
+| Run script | [scripts/surrogate/train.py](../scripts/surrogate/train.py) (`task: dft`; §32b: `finetune_stepper`) |
 | `GeometryBranch` (shared with the AE) | [architectures/tadpole_geometry_branch.py](../libs/neural-surrogates/src/neural_surrogates/architectures/tadpole_geometry_branch.py) |
-| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py) |
+| Tests | [test_ae_to_timestepper.py](../tests/neural_surrogates/test_ae_to_timestepper.py), [test_tadpole_stepper_geometry_branch.py](../tests/neural_surrogates/test_tadpole_stepper_geometry_branch.py), `test_finetune_dft_*` in [tests/scripts/test_surrogate.py](../tests/scripts/test_surrogate.py) |
 
 ---
 
@@ -2107,7 +2255,8 @@ that projection's columns, `aᵀ v = aᵀ bias` — so the ODE could only *trans
 those components of its Gaussian initialisation, never remove their noise or
 learn their conditional distribution (equal input/output widths do not resolve
 this). Here `hidden_size: null` resolves to `D`, rounded **up** to a multiple of
-`num_heads`, and an explicit value below `D` is rejected. The build is
+`num_heads`, and an explicit value below `D` is rejected (unless
+`latent_skip` or a full-reach knob is set: "Compact velocity nets" below). The build is
 `ParamConditionedSubnetwork(in_dim=D, n_params=Hp*P + time_embed_dim,
 n_layers=4, num_heads=8, hidden_size=h, param_conditioning="film",
 geom_cond_dim=G)`; the output projection keeps its zero initialisation — the
@@ -2116,6 +2265,22 @@ and the conditioning layers (parameter FiLM, geometry FiLM) start receiving
 gradients once it has moved (the unit test asserts exactly this order). This
 removes a structural blocker, not a guarantee of sample quality; report the
 actual `count_parameters()` (also in `extra_repr`), not the paper's figure.
+
+**Latent skip (`latent_skip: true`) — a DFT-width net.** With
+`z_tau = (1-tau) z0 + tau z1` and `z0, z1 ~ N(0, I)` the exact velocity is
+`a(tau) z_tau`, `a(tau) = (2tau-1) / (tau² + (1-tau)²)` (`_gaussian_flow_coeff`;
+`a(0) = -1`, `a(1) = 1`): the full-rank part of the velocity on z-scored
+latents. `latent_skip` adds `v += (a(tau) + Linear(t_emb)) ⊙ z_tau` per latent
+channel outside the transformer (`velocity_skip`, zero-initialised, reading the
+sinusoidal tau tail of the conditioning vector), like the DFT's
+`latent_residual_scale * z` residual, so at init the model *is* the Gaussian
+velocity and the transformer only learns the low-rank remainder. It lifts the
+`hidden_size >= D` rule: `latent_generator_architecture=channel_skip_h176`
+(§38; the default before the compact nets) runs the DFT B width (`hidden_size:
+176`, 8 heads of 22, `n_layers: 6`, `mlp_ratio: 4`, `film_hidden: 256`, adaLN:
+5.5M trainable on the B AE, versus 246.7M for `full_width`). `latent_skip: false`
+(the model default, and absent in older artifacts) builds no extra module, so
+old weights load strictly.
 
 The conditioning vector is `concat(z-scored params_hist.flatten (Hp*P),
 sinusoidal embedding of tau (time_embed_dim, even))`, fed to the sub-network's
@@ -2149,6 +2314,66 @@ and the precision policy are shared. For `D = h = 1536`, 6 layers,
 236.4 M for `input_film` (`G = 1536`); the modulation costs ~1.2 M per block
 because `c` is `film_hidden` wide, not `h`. A config without the key builds
 `input_film`, so existing artifacts rebuild and load unchanged.
+
+**Compact velocity nets with full latent reach** (plan
+[latent_generator_compact_full_reach](plans/implemented/latent_generator_compact_full_reach.md)).
+The full-width rule above makes the net cost ~H² with H = D: 177–241 M
+parameters for the B AE (`D = 1536`). Why a uniformly narrower net does not
+work, measured on the `pyudales_realistic` test split (B AE):
+
+* **The latent is high-dimensional.** PCA of the z-scored per-token latents:
+  the top 176 components hold 37% of the variance, 90% needs 859 and 99%
+  needs 1140; the eigenvalues sit on a plateau near 1 from ~30 to ~1000, and
+  ~400 directions fall below 0.1 (down to ~1e-7).
+* **The decoder uses ~1100–1300 directions.** Real latents cut to their top-k
+  components and decoded: relative L2 error 7.9× the AE's at k = 176, 2.3× at
+  1024, 1.08× at 1280. `w` lives mostly in the mid- and low-variance
+  directions; filling the unreached ones with unit noise (what a confined
+  generator does) gives ~6× the real divergence.
+* **A narrow output projection caps quality, not training.** A 176-wide net
+  (5.5 M) plateaus at val loss 1.29 from epoch 20; even a perfect generator in
+  its trained output span would decode at ~6× the AE error. Width alone does
+  not pass W1 either: the 177 M adaLN model passes profile, divergence and
+  diversity but has W1 0.093 against a bound of 0.016.
+* **A Gaussian alone fails, but gets the small scales right.** Tokens drawn
+  iid from the full-covariance `N(μ, Σ)` and decoded fail profile, W1 and
+  divergence (it is unconditional), yet on `w` its W1 (0.045) beats the 177 M
+  model's (0.086): the trained net gets the low-variance directions wrong.
+
+So the output path must reach all ~1300 useful directions with context, while
+attention (the H² part) can stay narrow. The knobs below do that; each is
+absent by default, builds nothing then, and old artifacts load strictly. The
+config group `latent_generator_architecture` (§38) packages the tested
+combinations; its default `compact_h512` is H 512 + `gaussian_skip`.
+`hidden_size < D` is accepted only together with one of `head_hidden`,
+`adaln_bottleneck`, `gaussian_skip` or `latent_skip`. Only the first two let
+the conditioning reach every direction; the skips are fixed per-token flows.
+`gaussian_skip` and `latent_skip` are mutually exclusive (every
+`latent_generator_architecture` option, §38, sets both explicitly), and
+`latent_skip` requires `prediction: velocity`.
+
+| Knob | What it builds | Use |
+|---|---|---|
+| `gaussian_skip: true` (`gaussian_eig_floor`, default `1e-4`) | buffers `latent_pca_basis` (D×D), `latent_pca_eig`, `latent_pca_mean` of the z-scored state latents, filled with the latent statistics (from the raw second moment, one float64 pass: `compute_latent_normalization`, or the latent cache's per-file outer-product sums — a cache prepared before this knob lacks them and must be re-prepared); 0 trainable parameters | always with a sub-D net: the untrained model already samples `N(μ, Σ)` with the right variance in every direction |
+| `head_hidden: W`, `head_layers` (design A, `adaln` only) | a per-token head on `concat(h, z_τ)`: `Linear(H+D → W)`, `head_layers` adaLN MLP blocks at width W, LayerNorm, zero-init `Linear(W → D)`, added to the output projection | narrow trunk (e.g. H 320, 6 layers) + wide head (W 1536, 2 layers): ~19 M |
+| `velocity_conditioning: adaln_bottleneck`, `mlp_hidden: M` (design B) | `AdaLNBottleneckVelocityNet`: a D-wide residual stream; per block `LN → Linear(D→H) → attention at H → Linear(H→D)` and a per-token `D → M → D` MLP, both zero-init and gated, adaLN at width D | H 256, 4 layers, M 512: 24.1 M (6 layers: 34.4 M); every block can write any direction with spatial context |
+| `prediction: data` | the net predicts the clean sample `x̂`; `v = (x̂ − z_τ) / max(1 − τ, 0.05)`; the loss stays the v-MSE, so val losses compare | narrow nets [Li & He 2025] |
+| `time_shift: α` | training draws `σ = 1 − τ` uniformly and warps it, `σ' = ασ / (1 + (α−1)σ)`; `sample()` steps on the same warped grid | α ≈ 3–10 for ~5e5 latent values per sample [RAE; SD3] |
+
+**The Gaussian skip.** With `P`, `λ`, `μ` the buffers, `y = Pᵀ(z_τ − τμ)` and
+`m = Pᵀμ`, the exact flow-matching velocity of a per-token Gaussian
+`N(μ, P diag(λ) Pᵀ)` under `z_τ = (1−τ) z₀ + τ z₁` is
+
+`v_G = P (m + c(τ) ⊙ y)`,  `c_j(τ) = (τλ_j − (1−τ)) / (τ²λ_j + (1−τ)²)`,
+
+and the model returns `v = v_G + net(...)`. It has no `1/(1−τ)` singularity,
+`c_j` is the plain rectified-flow coefficient where `λ_j = 1`, and since the
+net's output starts at zero the untrained model *is* the Gaussian. With
+`prediction: data` the skip is `x̂_G = μ + P diag(g) y`,
+`g_j = τλ_j / (τ²λ_j + (1−τ)²)`. Cost: two D×D matmuls per token per
+evaluation. The Gaussian is iid over tokens: spatial structure and the
+conditioning still come from the net. `evaluate_latent_generator.py`'s latent
+spectrum (§39) shows per eigen-band whether a model gets the variance right.
 
 **Flow objective.** `forward(state, params_hist, geometry, geom_features=None,
 *, generator=None)` encodes the normalised target `z1`, draws `z0 ~ N(0, I)`
@@ -2297,13 +2522,46 @@ estimated on exactly what the objective later encodes.
 ```bash
 pixi run -e dev python scripts/surrogate/train.py --config-name surrogate/train_latent_generator \
     autoencoder_dir=model_weights/tadpole_ae_s paths.data_dir=training_data/pyudales_idealized \
-    'dataset.param_vars=[inflow_angle,velocity_magnitude]' name=latent_generator_s
+    'dataset.param_vars=[inflow_angle,velocity_magnitude]' \
+    latent_generator_architecture=compact_wide_head
 ```
+
+**Velocity-net architecture.** The config group
+[latent_generator_architecture/](../configs/latent_generator_architecture/)
+picks the velocity net (`latent_generator_architecture=<option>`; default
+`compact_h512`). Each option sets its own default run `name` (so switching
+never resumes another net's checkpoint; `name=` on the CLI still wins) and all
+of `hidden_size`, `n_layers`, `velocity_conditioning`, `latent_skip` and
+`gaussian_skip`, plus its own extras; the base config keeps only the shared
+keys. Trainable parameters on the B AE (D = 1536):
+
+| Option | Net | Params | Default `name` |
+|---|---|---|---|
+| `compact_h512` (default) | uniform H 512, 6 layers, adaLN + Gaussian skip | 31.96M | `latent_generator_compact_h512` |
+| `compact_wide_head` | design A: H 320, 6 layers + head W 1024 × 2, Gaussian skip | 27.56M | `latent_generator_compact_wide_head` |
+| `compact_bottleneck` | design B: `adaln_bottleneck`, H 256, 4 layers, `mlp_hidden` 512, Gaussian skip | 26.75M | `latent_generator_compact_bottleneck` |
+| `channel_skip_h176` | H 176, 6 layers, `latent_skip` (PR #221's former default) | 5.5M | `latent_generator_s_h176` |
+| `full_width` | `hidden_size` = D, adaLN, no skip (not the 177M run's shared settings) | 246.7M | `latent_generator_full_width` |
+
+`gaussian_eig_floor`, `prediction` and `time_shift` stay outside the group
+(absent = off; add them as `+architecture.<key>=...`). `compact_h512` is the
+default because on `pyudales_realistic` it gave the best samples of the compact
+nets (W1 0.042 vs 0.093 for the 177M adaLN, better profiles), though none
+passed the W1 check; `prediction: data` and `time_shift` did not help
+([plans/latent_generator_compact_full_reach.md](plans/implemented/latent_generator_compact_full_reach.md) §3, Phase 2 results).
+The seed-ensemble evaluation (§39a) confirms it: `compact_h512` ties with its
+`prediction: data` variant and beats the other compact nets
+([research/latent_generator_final_2026-10.md](research/latent_generator_final_2026-10.md)).
+
+**Default trained generator.** That `compact_h512` run (plan R3, trained as
+`lg_b_realistic_h512_l6`) is `model_weights/best_latent_flow_matching_realistic`:
+the default `model_dir` of the `latent_generator` and
+`latent_generator_ensemble` eval blocks and of the latent generator eval jobs.
 
 | Block | Contents |
 |---|---|
 | `autoencoder_dir` | the AE export (needs a geometry path, §36) |
-| `architecture` | `TadpoleLatentGenerator`: `param_history_steps: 12` (`Hp`), `hidden_size: null` (→ `D`), `n_layers`, `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `velocity_conditioning: adaln` (or `input_film`, §36; absent → `input_film`), `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096` |
+| `architecture` | `TadpoleLatentGenerator`, shared keys: `param_history_steps: 12` (`Hp`), `num_heads`, `time_embed_dim`, `film_hidden`, `mlp_ratio`, `use_checkpoint`, `normalize`, `num_sampling_steps: 50`, `latent_eps`, `max_latent_tokens: 4096`. The group above adds `hidden_size` (`null` → `D`; below `D` needs `latent_skip`, `gaussian_skip`, `head_hidden` or `adaln_bottleneck`), `n_layers`, `velocity_conditioning` (`adaln`, `adaln_bottleneck` or `input_film`, §36; absent → `input_film`), `latent_skip`, `gaussian_skip` and the design knobs |
 | `dataset` | `SnapshotHistoryDataset`: `param_vars` (the ordered conditioning schema — include *every* varying forcing parameter needed to distinguish target states), `param_history_steps: ${architecture.param_history_steps}`, `constant_prehistory: true`, `cadence_rtol: 0.1` |
 | `latent_cache` | `output_root: null` (a dir: train on precomputed latents, below), `prepare_only: false` |
 | `latent_stats` | `max_batches: 50` train batches, `seed: 0` (without a cache) |
@@ -2385,6 +2643,40 @@ Deployment rebuilds with `instantiate(cfg.architecture,
 n_state_channels=len(state_vars), n_params=len(param_vars))` + a strict
 `load_state_dict(weights.pt)` — no AE dir, no data.
 
+**Fine-tuning a trained generator** —
+[finetune_latent_generator.yaml](../configs/surrogate/finetune_latent_generator.yaml)
+(on top of `train_latent_generator.yaml`, default: `best_latent_flow_matching_realistic`
+on `pyudales_barcelona_finetune`). A `pretrained_dir` (a generator output
+folder) makes `task: latent_generator` take that folder's `architecture`
+and start from its `weights.pt`. `autoencoder_dir` must be the autoencoder it was
+trained on: its `weights.pt` sha256 must equal the saved `generator.ae_fingerprint`,
+otherwise the run raises, as it does when the new data's `param_vars`,
+`param_history_steps` or frame step differ from the saved `physical_schema`.
+The pretrained param and latent normalization are kept
+(`recompute_normalization: true` recomputes both from the new data). The
+`generator` block is rebuilt from the new data, and `supported_geometries`
+lists the pretrained generator's geometries plus the new corpus's; spin-up
+refuses geometries outside them. A `trainable_modules` entry that matches no
+parameter raises.
+`method: full` trains the whole velocity net; `method: lora` (the config's
+default) freezes it and trains low-rank adapters (the `lora:` block, as for
+`finetune_stepper`, §23) plus the modules listed in `trainable_modules`, through
+the same code path (`_finetune_method` in
+[tasks.py](../scripts/utils/tasks.py)). There is no LoRA preset for
+`TadpoleLatentGenerator`: `lora.target_modules` is a regex over the velocity
+net's Linears and must not match the frozen autoencoder (the trainer refuses
+trainable AE parameters). The config adapts the attention and MLP Linears of the
+adaLN blocks (rank 16, fused) and trains `velocity_net.cond_mlp` and
+`velocity_net.geom_proj` fully; another `velocity_conditioning` needs its own
+regex. The latent statistics act on the base model, and
+`weights.pt` is the merged plain state dict, so the spin-up rebuilds and
+strictly loads it as any trained generator; the adapters go to `adapter/`
+(LoRA deltas only, without the `trainable_modules`: `weights.pt` is the
+fine-tune). `method: lora` without `pretrained_dir` raises. A latent cache works as for training;
+make a new `latent_cache.output_root` for the new data with the same overrides
+and `latent_cache.prepare_only=true`. Without `pretrained_dir` (the default)
+nothing changes.
+
 ### 39. Evaluation and acceptance gate
 
 **Statistical acceptance precedes assimilation** (plan 07 §3): a low flow
@@ -2409,7 +2701,9 @@ spread over the trajectories) under matched geometry and history:
   `generated_<sampler>_steps<k>` for samplers other than `sampler` (the
   main samples' sampler, default `euler`). `step_sweep` rows in
   `summary.json` record `sampler`, `num_steps` and `nfe`; `step_sweep.png`
-  plots against NFE, one line per sampler;
+  plots against NFE, one line per sampler. `num_steps` sets the main
+  samples' step count (`null`: the model's `generator.sampling.num_steps`);
+  Heun at 25 steps beat Euler at 50 (equal NFE) on the three realistic nets compared (R1–R3);
 * with `decode_modes` (e.g. `[local, halo, global]`, halo from
   `decode_halo_size`, default the AE's), per mode that differs from the trained
   policy: `generated_decode_<mode>` (the same noise seeds — so the same latents
@@ -2421,7 +2715,7 @@ spread over the trajectories) under matched geometry and history:
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
-    latent_generator.model_dir=model_weights/latent_generator_s \
+    latent_generator.model_dir=model_weights/latent_generator_compact_wide_head \
     latent_generator.rollout_stepper_dir=model_weights/dft_s
 ```
 
@@ -2450,16 +2744,129 @@ The real pairwise spread (so the diversity ratio) and the Reynolds stresses
 need several snapshots **per grid**: with one per grid (e.g. `max_snapshots: 8`
 over 7 test grids) they are NaN, a gate failure; the default is 64.
 
+**Latent spectrum** (`latent_spectrum: true`, the default; one extra encoder
+pass). The physical metrics cannot say *which latent directions* a generator
+gets wrong. `ge.latent_spectrum` fits the PCA basis (centred covariance) of
+the real snapshots' normalised per-token state latents (`encode_latents(...).z`,
+padding tokens included) and measures the generated latents' variance along
+the same directions. Per eigen-band (components 1–32, 33–256, 257–768,
+769–1024, 1025–D, cut at `D`) the **geometric mean** of generated / real
+variance becomes `latent_var_ratio_<lo>_<hi>` on the `generated` row of
+`metrics.csv` and in `summary.json` (`latent_spectrum`, with both full
+spectra); `latent_spectrum.png` plots them. The geometric mean keeps the
+near-empty tail (real variance down to ~1e-7) from being swamped by the band's
+largest directions. A ratio well above 1 in the tail bands is the signature of
+a velocity net that cannot reach those directions (§36, "Compact velocity
+nets"). The generated latents are the sampled ones, before decoding
+(`sample(..., return_latents=True)`; `"latents": "sampled"`).
+
 Outputs in `latent_generator.output_dir`: `summary.json`, `metrics.csv`,
 `states_*.png`, `profiles.png`, `histograms.png`, `spectra.png`,
-`divergence.png`, `step_sweep.png` and `rollout_transients.png` (with a
-rollout stepper).
+`divergence.png`, `step_sweep.png`, `latent_spectrum.png` and
+`rollout_transients.png` (with a rollout stepper).
 
 The metric functions are pure numpy over `(N, C, nz, ny, nx)` stacks and a
 fluid mask — no Hydra, no files, no model — so each is unit-tested on analytic
 fields. They deliberately do not import `libs/evaluation`: that library is a
 leaf the *scripts* depend on, while `neural_surrogates` declares only numpy /
 xarray / torch.
+
+### 39a. Against the solver's seed ensemble
+
+The held-out snapshots of §39 mix geometries, parameters and time, so their
+"real" distribution is a mixture and nothing tests the *conditional*
+p(x | geometry, parameters) the generator samples. A seed ensemble (§3a) is
+that conditional: per test geometry, 63–64 spun-up states with the geometry,
+parameters and spin-up of test trajectory XXXX (`state/sample_XXXX/
+member_YYYY.nc`), differing only in their seeds, at the reference's first
+frame. Its generator conditioning is `params_hist_for(traj, 0)` (the first
+parameter row repeated, `constant_prehistory`).
+[scripts/surrogate/evaluate_latent_generator_ensemble.py](../scripts/surrogate/evaluate_latent_generator_ensemble.py)
+(block `latent_generator_ensemble` of [eval.yaml](../configs/surrogate/eval.yaml))
+compares, one geometry at a time:
+
+* `real` — the members, read like the corpus loader reads a frame, on the
+  reference corpus's test split (`data_dir`, or the ensemble's own
+  `data.seed_ensemble.reference_dir`). Each member's `reference_sample`,
+  `geometry` and obstacle mask are checked against the trajectory;
+* `ae_recon` — each member through the frozen AE (the decoder floor);
+* `generated` — `num_draws` (64) draws, Heun 25 steps by default;
+* `generated_shuffled_params` — `probe_draws` (16) draws with the next test
+  trajectory's t = 0 history: does the ensemble respond to the parameters?
+
+Draw `k`'s initial noise is drawn on the CPU from a seed that depends only on
+(`seed`, sample, `k`) (`sample(initial_noise=...)`), so it does not depend on
+the batch size or device, every model sees the same noise (common random
+numbers: paired model differences) and probe draw `k` reuses draw `k`'s noise.
+
+**Metrics** (`generator_evaluation`, per geometry and variable, fluid cells).
+With 64 vs 64 samples every distance has a finite-sample size, so each one is
+an unbiased estimator (0 or 1 when the distributions agree) or reported next
+to a **split-half floor**: the metric between disjoint random halves of the
+members (`num_splits` splits, `split_half_floor`), with the source's value at
+the same size (a half-size subset of the source against the other half).
+
+| Metric | Function | Reads |
+|---|---|---|
+| `bias_raw/debiased/standardised` | `mean_bias` | `mean (mu_S - mu_R)^2`, minus its noise `var_S/n_S + var_R/n_R`, over `mean var_R` |
+| `spread_ratio`, `spread_corr`, `spread_log_rms` | `spread` | `sqrt(sum var_S / sum var_R)` (global and per height); correlation of the sigma maps; RMS of `log(sigma_S/sigma_R)` |
+| `crps`, `crps_ratio` | `fair_crps` | fair CRPS at `num_points` fixed fluid cells (`select_points`), each member as truth, over the leave-one-out CRPS of the members (1 = the solver) |
+| `rank_chi2`, `rank_outer` | `rank_histogram` | randomised ranks in `rank_bins` bins: U shape = under-dispersed, hump = over-dispersed; outer-bin mass, flat `2/rank_bins` |
+| `energy_distance(_rel)` | `rms_distances`, `energy_distance` | U-statistic energy distance of the whole fields (RMS over u, v, w and fluid cells), relative to the members' mean pairwise distance |
+| `w1_points_half` | `pointwise_w1` | per-point marginal W1 at matched size |
+| `diversity_ratio` | from `rms_distances` | mean pairwise distance of S over that of R |
+| physics | `profiles`, `spectra`, `reynolds_stresses`, `divergence`, `compare_to_real` | like-for-like now: one geometry and forcing |
+| `latent_var_ratio_*` | `latent_spectrum` | generated vs encoded-member latent variance per eigen-band |
+
+The `real` row of the outputs holds the floors (leave-one-out CRPS and rank
+histogram, split-half `*_half` values and their `*_half_std`); `*_half` on a
+source row is the matched-size value. `ae_recon` is paired with the members
+(member `i` is the reconstruction of truth `i`): it is never scored against
+its own truth (`exclude_self`, `paired`, `diff_var`). Aggregates are the mean
+over geometries with a geometry-bootstrap 95 % CI (`bootstrap_ci`).
+
+Member 0 keeps the reference's seeds, so it *should* reproduce frame 0 of the
+reference trajectory. This is checked, not assumed, and only reported:
+`summary.json` records `member0_check` per geometry (per variable the max and
+RMS difference over fluid cells and the RMS over the median distance between
+two members, plus the member's parameters minus the history's last row), and
+the maxima `member0_max_abs_diff` / `member0_rms_diff_over_median_pair`.
+
+About 0.01–0.1 % of the fluid cells (enclosed courtyards) are exactly constant
+across the members. They are left out of the sigma-map correlation and the log
+ratio (`spread`), and the fixed points are drawn only where the members vary
+(`zero_variance_cells` on the `real` row). The split-half floors use
+`num_splits` (200) splits for the cheap metrics (energy distance from the
+distance matrix, per-point W1) and `num_field_splits` (16) for the full-field
+spread and bias. With ~1 M fluid cells per field these sampling floors are tiny
+(10-geometry null std ≈ 0.0015 in spread ratio, 0.0002 in CRPS ratio), so the
+geometry-bootstrap CI of the paired model differences is what decides; the
+comparison bolds the differences whose CI excludes 0.
+
+Outputs in `output_dir` (default `<model_dir>/eval_seed_ensemble`):
+`summary.json`, `metrics.csv` (geometry × source, plus `mean` rows),
+`arrays/sample_XXXX.npz` (per-height spread ratio and standardised bias, rank
+counts, sigma maps at z index nz/4), `spread_ratio_profiles.png`,
+`rank_histograms.png`, `std_maps_sample_XXXX.png`.
+[scripts/surrogate/compare_latent_generator_ensembles.py](../scripts/surrogate/compare_latent_generator_ensembles.py)
+(block `latent_generator_ensemble_compare`, CPU) reads several of them and
+writes `comparison.csv`, `comparison.md` (generated per model, the AE row and
+the floors), `paired_differences.csv` (model minus `reference` per geometry,
+bootstrap CI) and `spread_ratio_profiles.png`, `rank_histograms.png`,
+`scores.png`, `paired_differences.png`.
+
+```bash
+pixi run -e dev python scripts/surrogate/evaluate_latent_generator_ensemble.py \
+    latent_generator_ensemble.model_dir=model_weights/best_latent_flow_matching_realistic \
+    latent_generator_ensemble.ensemble_dir=training_data/pyudales_realistic_seed_ensemble
+pixi run -e dev python scripts/surrogate/compare_latent_generator_ensembles.py \
+    'latent_generator_ensemble_compare.eval_dirs=[model_weights/lg_a,model_weights/lg_b]'
+```
+
+On DelftBlue, `surrogate_evaluate_latent_generator_ensemble.slurm` is an array
+over the compact generators and `surrogate_compare_latent_generator_ensembles.slurm`
+compares them ([job_scripts.md](job_scripts.md)). Plan:
+[latent_generator_seed_ensemble_eval.md](plans/implemented/latent_generator_seed_ensemble_eval.md).
 
 ### 40. Deployment: `spinup_source: generative`
 
@@ -2581,6 +2988,8 @@ asserting a generator call per cold forecast, and a real trained (tiny)
 | Acceptance metrics (pure numpy) | [generator_evaluation.py](../libs/neural-surrogates/src/neural_surrogates/generator_evaluation.py) |
 | Acceptance config | [configs/surrogate/eval.yaml](../configs/surrogate/eval.yaml) (block `latent_generator`) |
 | Acceptance script | [scripts/surrogate/evaluate_latent_generator.py](../scripts/surrogate/evaluate_latent_generator.py) |
+| Seed-ensemble evaluation and comparison | [evaluate_latent_generator_ensemble.py](../scripts/surrogate/evaluate_latent_generator_ensemble.py), [compare_latent_generator_ensembles.py](../scripts/surrogate/compare_latent_generator_ensembles.py) (blocks `latent_generator_ensemble`, `latent_generator_ensemble_compare`) |
+| Shared eval helpers (`load_latent_generator`, `generator_samples`, `ae_reconstruct`, `encoded_latent_moments`) | [scripts/utils/eval_common.py](../scripts/utils/eval_common.py) |
 | `GenerativeSpinup` (deploy loader/sampler) | [generative_spinup.py](../libs/neural-surrogates/src/neural_surrogates/generative_spinup.py) |
 | Forward-model / ensemble integration | [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py), [ensemble_forward_model.py](../libs/neural-surrogates/src/neural_surrogates/ensemble_forward_model.py) |
 | Deploy config block | [configs/model/neural_surrogate.yaml](../configs/model/neural_surrogate.yaml) (`forward_model.generative_spinup`) |

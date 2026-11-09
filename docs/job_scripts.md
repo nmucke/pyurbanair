@@ -14,8 +14,9 @@ job_scripts/
 ├── snellius/                         # SURF Snellius: partition rome, account tdsei19851
 │   ├── env.sh                        # sourced by every job (see below)
 │   ├── forward_workflow.slurm        # workflows/forward_workflow.sh
-│   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid>
+│   ├── assimilation_workflow.slurm   # workflows/assimilation_workflow.sh <smoother|filtering|hybrid|field_analysis>
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
+│   ├── surrogate_generate_seed_ensemble.slurm # generate_data.py on surrogate/generate_seed_ensemble (array)
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
@@ -24,11 +25,15 @@ job_scripts/
 │   ├── compare_models.slurm          # workflows/compare_models.sh 'models=[pyudales,pypalm]'
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
+│   ├── surrogate_finetune_{dft,ssrolling,local_fno}.slurm # train.py on surrogate/finetune_dft or a baseline fine-tune (GPU)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
-│   ├── surrogate_evaluate_latent_generator_gpu.slurm # on latent_generator_b_realistic (GPU)
+│   ├── surrogate_evaluate_latent_generator_gpu.slurm # on best_latent_flow_matching_realistic (GPU)
+│   ├── surrogate_evaluate_latent_generator_ensemble.slurm # vs the seed ensemble, array over the models (GPU)
+│   ├── surrogate_compare_latent_generator_ensembles.slurm # compare_latent_generator_ensembles.py on their outputs
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
-└── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files
+└── delftblue/                        # TU Delft DelftBlue: compute-p1/p2, account innovation; same files, plus
+    └── surrogate_finetune_barcelona.sh # bash: the Barcelona copy, then the three fine-tunes after it
 ```
 
 Each job is an `#SBATCH` header, `source job_scripts/<machine>/env.sh` and one
@@ -40,7 +45,7 @@ cleans the per-job solver scratch, sets the MPI options for PALM's nested
 
 | Machine | `paths.results_root` | Scratch (`paths.scratch.<machine>`) |
 |---|---|---|
-| snellius | `/projects/prjs2075/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
+| snellius | `/projects/prjs2304/urbanair` | `/scratch-shared/$USER/urbanair_temp/$SLURM_JOB_ID` |
 | delftblue | `/projects/urbanair` | `/scratch/$USER/urbanair_temp/$SLURM_JOB_ID` |
 
 Locally there is no job script: run the script or `workflows/*.sh` directly.
@@ -74,11 +79,24 @@ its own `paths.results_root`, or the outputs collide:
 ```bash
 for n in 32 64 96; do
   sbatch job_scripts/snellius/assimilation_workflow.slurm smoother ensemble.ensemble_size=$n \
-    paths.results_root=/projects/prjs2075/urbanair/ens$n
+    paths.results_root=/projects/prjs2304/urbanair/ens$n
 done
 for i in 0 1 2 3; do
   sbatch job_scripts/snellius/surrogate_generate_data.slurm data.sharding.num_shards=4 data.sharding.shard_index=$i
 done
+```
+
+`surrogate_generate_seed_ensemble.slurm` is a SLURM array instead: task `i`
+of `N` passes `data.sharding.num_shards=N data.sharding.shard_index=i`, so
+`--array=0-15` splits the runs over 16 tasks.
+
+`surrogate_evaluate_latent_generator_ensemble.slurm` is an array over the
+compact latent generators: task `i` evaluates model `i` of the list in the
+script (`--array=2` is R3 alone); the compare job then waits on the array:
+
+```bash
+jid=$(sbatch --parsable job_scripts/delftblue/surrogate_evaluate_latent_generator_ensemble.slurm)
+sbatch --dependency=afterok:${jid} job_scripts/delftblue/surrogate_compare_latent_generator_ensembles.slurm
 ```
 
 ## Example: ESMDA from a loaded ground truth
@@ -91,7 +109,7 @@ bounds and sensors:
 sbatch job_scripts/snellius/assimilation_workflow.slurm smoother \
   model@truth_model=pyudales model@assim_model=pylbm \
   params@truth_params=dynamic_truth params@prior_params=dynamic 'smoothing.smoother=${smoother.dynamic}' \
-  assimilation.truth_dir=/projects/prjs2075/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
+  assimilation.truth_dir=/projects/prjs2304/urbanair/ground_truth_pyudales_wide/pyudales_time_varying \
   assimilation.num_windows=6 assimilation.ensemble_save_on_disk=true \
   domain.nx=50 time.output_frequency=2.0 time.spinup_time=50.0 \
   ensemble.ensemble_size=96 smoothing.num_steps=3 'smoothing.localization=${localization.none}'
@@ -122,10 +140,13 @@ prechunk.output_root=<copy>` makes its copy; train with the same two
 overrides. A job cut off at its time limit resumes where it stopped when
 resubmitted. The copy takes about 1.5 min per 700 MB trajectory (about 13 h
 for the 520-file corpus); the DFT's whole-frame copy about half that, using up
-to about 1 GB of memory. The DFT has its own whole-frame copy: start the
-arguments with `--config-name surrogate/train_dft` (the last one wins, and
-`key=value` overrides must all come after it) and give it its own
-`prechunk.output_root`. Without the CPU job the GPU job makes
+to about 1 GB of memory. The DFT, the steppers and the baselines (also their
+fine-tunes) share one whole-frame copy, separate from the autoencoder's tiles:
+start the arguments with `--config-name surrogate/train_dft` (the last one
+wins, and `key=value` overrides must all come after it) and give it its own
+`prechunk.output_root`. The copy holds every state variable and frame and does
+not depend on the model's inputs, history or rollout length, but its manifest
+pins the resolved source: train with the same `paths.data_dir`. Without the CPU job the GPU job makes
 the copy itself; with a complete copy it only validates it in seconds, so once
 the copy exists submit the GPU command alone. **Resuming:** submit the same GPU command again. It
 continues from `checkpoint.pt` (`trainer.resume: true`), so `num_epochs` is
@@ -157,10 +178,11 @@ The flow-matching generator on the realistic corpus, trained on a cache of the
 frozen autoencoder's latents (`latent_cache`, see
 [neural_surrogates.md](neural_surrogates.md) §38). First one GPU job encodes
 every train/val frame, then the training reads the latents instead of the
-states and skips the encoder:
+states and skips the encoder. `latent_generator_architecture` picks the
+velocity net (options in §38) and with it the default run `name`:
 
 ```bash
-args=(name=latent_generator_b_realistic_adaln
+args=(latent_generator_architecture=compact_h512  # sets name=latent_generator_compact_h512
   paths.weights_dir=/projects/urbanair/model_weights
   paths.data_dir=/projects/urbanair/training_data/pyudales_realistic
   autoencoder_dir=/projects/urbanair/model_weights/tadpole_ae_b_realistic
@@ -224,9 +246,10 @@ memory.
 - **DelftBlue:** OpenMPI 4 takes `rmaps_base_oversubscribe` instead (and
   does need `osc=pt2pt`, set in its activation script). Each job
   builds LBM in a private copy (`PYLBM_LBM_PATH`) so concurrent jobs don't
-  clobber the source tree. When the arguments mention `pypalm`, `env.sh`
-  drops PALM's stale CMake caches and nvhpc's compiler variables, so PALM is
-  built with conda's gfortran.
+  clobber the source tree. Unless the arguments mention `pylbm` (the only
+  build that wants nvfortran), `env.sh` drops nvhpc's compiler variables, so
+  PALM and uDALES are built with conda's gfortran and MPI; jobs whose arguments
+  mention `pypalm` also drop PALM's stale CMake caches.
 - The MPI `pml`/`btl` settings live in `activation_scripts/*_activation.sh`.
 - **DelftBlue OpenMPI:** the `delftblue` env pins OpenMPI below 5: 5.0.x
   segfaults uDALES in `MPI_Finalize` (exit 139 after a clean run).

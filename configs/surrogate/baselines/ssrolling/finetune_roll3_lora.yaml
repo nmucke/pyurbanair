@@ -1,0 +1,30 @@
+# @package _global_
+# finetune_roll3.yaml through LoRA instead of every weight: the pretrained
+# model is frozen, low-rank adapters train on the Swin blocks' Linears and the
+# small inflow embedding and SSGen head train fully. weights.pt is the merged
+# plain model, adapter/ the adapters (as finetune_stepper.yaml).
+#   python scripts/surrogate/train.py --config-name surrogate/baselines/ssrolling/finetune_roll3_lora
+defaults:
+  - finetune_roll3
+  - _self_
+
+name: ssrolling_tl_roll3_lora
+method: lora
+lora:
+  variant: standard
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  target_preset: null
+  # attn.qkv, attn.proj, mlp.fc1, mlp.fc2 of every backbone Swin block (365 M
+  # of the 452 M weights); Aurora's own LoRA (lora_qkv, lora_proj) stays frozen.
+  target_modules: '.*backbone\.(encoder|decoder)_layers\.\d+\.blocks\.\d+\.(attn\.(qkv|proj)|mlp\.fc[12])'
+  modules_to_save: []
+  fused_forward: true
+# Trained fully next to the adapters.
+trainable_modules:
+  - param_embed
+  - ssgen
+optimizer:
+  # Adapters start at zero: a larger step than the full fine-tune's 1e-5.
+  lr: 1.0e-4

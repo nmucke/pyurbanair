@@ -860,8 +860,8 @@ inflation_factors`, exactly as it does for the stochastic localized update, and
     2. **Skip the blocks with no active observation.** Their transform is
        provably the identity, so their rows are returned *bit-identical* rather
        than recomputed — which a ``mean + (row - mean)`` round trip would not
-       be in float32. Nothing in this package is jitted, so the partition is a
-       plain host-side NumPy mask.
+       be in float32. This analysis is not jitted, so the partition is a plain
+       host-side NumPy mask.
     3. **Never assemble an ``N_e x N_e`` transform.** Weights are kept in the
        factored ``(V, scale, wbar)`` form of :class:`ObservationTransform`:
        ``N_e*r + N_e + r = 662`` floats per block at the shape above against

@@ -14,9 +14,12 @@ Layout under the cache root (``<stem>`` is the state file's ``sample_XXXX``)::
                              branch output (G, Zl, Yl, Xl) or, without a
                              branch, the geometry latents (D_geom, Zl, Yl, Xl)
     <split>/<stem>.sums.npz  float64 per-channel ``sum`` / ``sumsq`` of the
-                             working latents over all frames, and their ``count``
+                             working latents over all frames, their ``count``,
+                             and ``outer``: the (D, D) sum of the state
+                             latents' outer products
     latent_stats.npz         float64 ``mean`` / ``std`` of the working latents
-                             over every train frame (std not floored)
+                             over every train frame (std not floored) and the
+                             state latents' ``second_moment`` E[x x^T]
     manifest.json            AE fingerprint, sources, encode settings, progress
 
 Like :func:`~neural_surrogates.datasets.rechunk.prepare_rechunked_dataset`,
@@ -147,8 +150,11 @@ def _encode_trajectory(
         shape=(frames, model.state_latent_dim, *latent_grid),
     )
     n_work = model.working_latent_dim
+    d = model.state_latent_dim
     total = torch.zeros(n_work, dtype=torch.float64)
     total_sq = torch.zeros_like(total)
+    # On the device: D x D x tokens per frame is the costly part.
+    outer = torch.zeros(d, d, dtype=torch.float64, device=device)
     count = 0
     with xr.open_dataset(path, cache=False) as ds:
         # Read whole source time chunks: a frame-by-frame read decompresses
@@ -178,6 +184,8 @@ def _encode_trajectory(
                 w64 = work.cpu().to(torch.float64)
                 total += w64.sum(dim=(0, 2, 3, 4))
                 total_sq += (w64 * w64).sum(dim=(0, 2, 3, 4))
+                tokens = z_raw[0].to(torch.float64).reshape(d, -1)
+                outer += tokens @ tokens.T
                 count += w64.shape[2] * w64.shape[3] * w64.shape[4]
     latents.flush()
     del latents
@@ -187,6 +195,7 @@ def _encode_trajectory(
         sum=total.numpy(),
         sumsq=total_sq.numpy(),
         count=np.int64(count),
+        outer=outer.cpu().numpy(),
     )
     return frames
 
@@ -309,19 +318,32 @@ def prepare_latent_cache(
             if split == "train":
                 train_sum = np.zeros(model.working_latent_dim)
                 train_sq = np.zeros_like(train_sum)
+                d = model.state_latent_dim
+                # None once a file predates the outer-product sums (a cache
+                # resumed across versions): then no second moment is saved.
+                train_outer: np.ndarray | None = np.zeros((d, d))
                 count = 0
                 for path in base._state_files:
                     with np.load(directory / f"{path.stem}.sums.npz") as sums:
                         train_sum += sums["sum"]
                         train_sq += sums["sumsq"]
                         count += int(sums["count"])
+                        if train_outer is not None and "outer" in sums:
+                            train_outer += sums["outer"]
+                        else:
+                            train_outer = None
                 mean = train_sum / count
                 std = np.sqrt(np.maximum(train_sq / count - mean * mean, 0.0))
                 if not (np.isfinite(mean).all() and np.isfinite(std).all()):
                     raise ValueError(
                         "Latent statistics are not finite; check the AE/data"
                     )
-                _save_npz(output / _STATS, mean=mean, std=std)
+                extra = (
+                    {}
+                    if train_outer is None
+                    else {"second_moment": train_outer / count}
+                )
+                _save_npz(output / _STATS, mean=mean, std=std, **extra)
                 _LOG.info("Latent statistics over %d train latent cells", count)
         manifest["complete"] = True
         _save_manifest(output, manifest)
@@ -336,6 +358,23 @@ def load_latent_stats(root: str | Path) -> tuple[np.ndarray, np.ndarray]:
     _read_complete_manifest(root)
     with np.load(root / _STATS) as stats:
         return stats["mean"], stats["std"]
+
+
+def load_latent_second_moment(root: str | Path) -> np.ndarray:
+    """float64 ``E[x x^T]`` ``(D, D)`` of the raw state latents over every
+    train frame (what ``gaussian_skip`` needs). Raises for a cache prepared
+    before the outer-product sums were stored."""
+    root = Path(root)
+    _read_complete_manifest(root)
+    with np.load(root / _STATS) as stats:
+        if "second_moment" not in stats:
+            raise ValueError(
+                f"Latent cache {root} has no state-latent second moment (it was "
+                "prepared before the outer-product sums were stored), which "
+                "gaussian_skip needs; prepare a new cache under a new output_root."
+            )
+        second_moment: np.ndarray = stats["second_moment"]
+        return second_moment
 
 
 class LatentCacheDataset(Dataset):

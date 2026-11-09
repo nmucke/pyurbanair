@@ -25,15 +25,17 @@ from pyurbanair.config.discrepancy import (
 )
 
 WORKFLOWS = ("forward", "smoother", "filtering", "hybrid")
+SPLIT_ROUGHNESS = ("roughness_length_wall", "roughness_length_ground")
 
 
 def check_config(cfg: DictConfig, workflow: str) -> None:
     if workflow not in WORKFLOWS:
         raise ValueError(f"workflow must be one of {WORKFLOWS}, got {workflow!r}")
-    problems = _models(cfg)
+    problems = _models(cfg) + _roughness(cfg)
     if workflow != "forward":
         problems += _assimilation(cfg)
         problems += _observation(cfg, workflow)
+        problems += _field_analysis(cfg, workflow)
         problems += _discrepancy(cfg, workflow)
     if workflow in ("smoother", "hybrid"):
         problems += _smoothing(cfg, workflow)
@@ -87,6 +89,34 @@ def _models(cfg: DictConfig) -> list[str]:
     return problems
 
 
+def _roughness(cfg: DictConfig) -> list[str]:
+    """roughness_length, or both split z0s (uDALES only), per params sampler."""
+    problems = []
+    for role, block in (
+        ("model", "params"),
+        ("truth_model", "truth_params"),
+        ("assim_model", "prior_params"),
+    ):
+        model, sampler = cfg.get(role), cfg.get(block)
+        if model is None or sampler is None:
+            continue
+        names = _param_names(sampler)
+        split = sorted(names & set(SPLIT_ROUGHNESS))
+        if not split:
+            continue
+        if "roughness_length" in names or len(split) == 1:
+            problems.append(
+                f"{block}: set either roughness_length or both "
+                "roughness_length_wall and roughness_length_ground."
+            )
+        if model.name == "pypalm":
+            problems.append(
+                f"{block}: {split} need uDALES; {role} is PALM, which supports "
+                "only roughness_length."
+            )
+    return problems
+
+
 def _solver_nx(fm: DictConfig) -> int:
     """Grid points along x the solver runs on: ``nx`` plus any outflow buffer.
 
@@ -106,7 +136,7 @@ def _assimilation(cfg: DictConfig) -> list[str]:
     da = cfg.assimilation
     if da.num_windows < 1:
         problems.append("assimilation.num_windows must be at least 1.")
-    unknown = set(da.params_to_estimate or []) - _prior_names(cfg)
+    unknown = set(da.params_to_estimate or []) - _param_names(cfg.prior_params)
     if unknown:
         problems.append(
             f"assimilation.params_to_estimate names {sorted(unknown)}, which "
@@ -182,6 +212,67 @@ def _observation(cfg: DictConfig, workflow: str) -> list[str]:
             f"{list(types)}; use [bins] or [raw]."
         )
     return problems
+
+
+def _field_analysis(cfg: DictConfig, workflow: str) -> list[str]:
+    """`field_analysis`: the smoother's posterior frames, updated as they are."""
+    settings = OmegaConf.select(cfg, "field_analysis")
+    if settings is None:
+        return []
+    if workflow != "smoother":
+        return [
+            f"field_analysis corrects the smoother's posterior forecast; the "
+            f"{workflow} has none to correct."
+        ]
+    problems = []
+    if cfg.smoothing.final_time_smoothing:
+        problems.append(
+            "field_analysis needs the posterior forecast as the model wrote it: "
+            "it cannot follow smoothing.final_time_smoothing."
+        )
+    unknown = set(settings.variables) - {"u", "v", "w"}
+    if unknown or not len(settings.variables):
+        problems.append(
+            "field_analysis.variables must be a non-empty subset of u, v, w; got "
+            f"{list(settings.variables)}."
+        )
+    for key in ("localization_radius", "localization_time"):
+        if settings[key] is not None and settings[key] <= 0:
+            problems.append(f"field_analysis.{key} must be positive or null.")
+    if (settings.localization_radius is None) != (settings.localization_time is None):
+        problems.append(
+            "field_analysis.localization_radius and localization_time go "
+            "together: both set (local) or both null (global)."
+        )
+    if settings.chunking < 1:
+        problems.append("field_analysis.chunking must be at least 1.")
+    if not problems:
+        _warn_field_analysis_error(cfg)
+    return problems
+
+
+def _warn_field_analysis_error(cfg: DictConfig) -> None:
+    """The per-frame R ignores the correlation between frames: say so."""
+    step = float(cfg.time.output_frequency)
+    window = float(cfg.time.simulation_time)
+    reach = cfg.field_analysis.localization_time
+    span = window if reach is None else min(2.0 * float(reach), window)
+    frames = int(span / step) + 1
+    if frames > 1:
+        warnings.warn(
+            f"field_analysis uses up to {frames} frames per analysis with an R "
+            "that treats them as independent, although their turbulence and "
+            "representation errors are correlated over seconds: the update is "
+            "overconfident by up to that many frames over their effective "
+            "number. See innovation_lag1 in window_*_field_obs.nc.",
+            stacklevel=2,
+        )
+    if OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+        warnings.warn(
+            "field_analysis uses observation.error as configured: the adaptive "
+            "error's inflation does not reach it.",
+            stacklevel=2,
+        )
 
 
 def _smoothing(cfg: DictConfig, workflow: str) -> list[str]:
@@ -424,8 +515,8 @@ def _dynamic(sampler: DictConfig) -> bool:
     return "seconds_per_knot" in sampler
 
 
-def _prior_names(cfg: DictConfig) -> set[str]:
+def _param_names(sampler: DictConfig) -> set[str]:
     names: set[str] = set()
     for block in ("parameters", "external_parameters", "static_parameters"):
-        names |= set(cfg.prior_params.get(block) or {})
+        names |= set(sampler.get(block) or {})
     return names

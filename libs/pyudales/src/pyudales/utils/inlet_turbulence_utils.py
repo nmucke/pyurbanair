@@ -444,6 +444,12 @@ def _sample_schedule(
 # --- Orchestration -----------------------------------------------------------
 
 
+def window_start_record(window_start_time: float, time_step: float) -> int:
+    """The global driver record a run starting at ``window_start_time`` begins
+    at: its turbulence continues the stream from there."""
+    return int(round(max(0.0, window_start_time) / time_step))
+
+
 def apply_inlet_turbulence(
     params: xarray.Dataset,
     dirs: DirectoryPaths,
@@ -518,7 +524,7 @@ def apply_inlet_turbulence(
 
     seed = resolved["seed"]
     seed = derive_seed(dirs.experiment_name) if seed is None else int(seed)
-    start_index = int(round(max(0.0, window_start_time) / time_step))
+    start_index = window_start_record(window_start_time, time_step)
 
     u_plane, v_plane, w_plane = build_driver_planes(
         jtot=jtot,

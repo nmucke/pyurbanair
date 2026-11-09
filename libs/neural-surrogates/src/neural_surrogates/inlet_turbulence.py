@@ -12,15 +12,20 @@ The fluctuations come from the same generator, seed and global record indices
 as the uDALES run (``seed=None``), so a rollout and its truth share the forcing;
 an integer seed draws a fresh realization per trajectory instead. Frame ``t``
 of a corpus trajectory sits at solver time ``spinup + output_frequency * (t + 1)``
-(the forward model drops the spinup frames and relabels). That holds for every
-trajectory run on its own; the second sample of a repeated train geometry
-continued the first one's solver clock, so its records are offset (not handled).
+(the forward model drops the spinup frames and relabels).
 
-Only corpora of the archived generator
-(``scripts/neural_surrogate/generate_random_geometries_training_data.py``,
-``training_data.output_frequency`` in their config.yaml) are supported:
-``scripts/surrogate/generate_data.py`` seeds per sample and runs samples back
-to back on one model, and stores neither the seed nor the record offset.
+Two corpus layouts are read:
+  * the archived generator's
+    (``scripts/neural_surrogate/generate_random_geometries_training_data.py``,
+    ``training_data.output_frequency`` in config.yaml): seeded by the config's
+    ``inlet_turbulence.seed`` or the experiment name, every trajectory starting
+    at global record 0. The second sample of a repeated train geometry
+    continued the first one's solver clock, so its records are offset (not
+    handled).
+  * ``scripts/surrogate/generate_data.py``'s (``time.output_frequency``): it
+    seeds per sample and runs samples back to back on one model, whose clock
+    runs on, so each state file carries its ``inlet_turbulence_seed`` and the
+    global record its run started at, ``inlet_turbulence_start_record``.
 """
 
 from __future__ import annotations
@@ -75,7 +80,7 @@ class InletTurbulence:
             sample: Trajectory index in ``data``.
             seed: ``None`` replays the truth run's own realization; an integer
                 draws a fresh one, ``derive_seed(f"{seed}_{split}_{sample}")``,
-                on the same record timeline.
+                from its own record 0.
         """
         from omegaconf import OmegaConf
         from pyudales.utils.inflow_utils import angle_to_velocity
@@ -110,15 +115,25 @@ class InletTurbulence:
                 "generated with it."
             )
         turb = resolve_inlet_turbulence_config(turb)
-        output_frequency = OmegaConf.select(cfg, "training_data.output_frequency")
+        # The archived generator's layout, else generate_data.py's (`time`).
+        archived = OmegaConf.select(cfg, "training_data.output_frequency") is not None
+        timeline = "training_data" if archived else "time"
+        output_frequency = OmegaConf.select(cfg, f"{timeline}.output_frequency")
         if output_frequency is None:
             raise ValueError(
-                f"{config_path} has no training_data.output_frequency: only corpora "
-                "of the archived generator record the timeline the forcing needs "
-                "(scripts/surrogate/generate_data.py stores no per-sample seed or "
-                "record offset)."
+                f"{config_path} has neither training_data.output_frequency nor "
+                "time.output_frequency, so its frames cannot be placed on the "
+                "solver's driver-record timeline."
             )
         output_frequency = float(output_frequency)
+        spk = OmegaConf.select(
+            cfg,
+            (
+                "training_data.params_sampler.seconds_per_knot"
+                if archived
+                else "time.seconds_per_knot"
+            ),
+        )
         profile_config = OmegaConf.select(
             cfg, "model.forward_model.nudging_config.profile_config"
         )
@@ -126,17 +141,35 @@ class InletTurbulence:
             profile_config = OmegaConf.to_container(profile_config)
 
         with xr.open_dataset(data._state_files[sample]) as ds:
-            spinup = ds.attrs.get("spinup_time_s")
+            attrs = dict(ds.attrs)
             zt, yt, xt, stamps = (
                 np.asarray(ds[c].values, dtype=float)
                 for c in ("zt", "yt", "xt", "time")
             )
-        if spinup is None:
+        if attrs.get("spinup_time_s") is None:
             raise ValueError(
                 f"{data._state_files[sample]} has no 'spinup_time_s' attr, so its "
                 "frames cannot be placed on the solver's driver-record timeline."
             )
-        spinup = float(spinup)
+        spinup = float(attrs["spinup_time_s"])
+        if not archived and seed is None:
+            missing = {
+                "inlet_turbulence_seed",
+                "inlet_turbulence_start_record",
+            } - set(attrs)
+            if missing:
+                raise ValueError(
+                    f"{data._state_files[sample]} has no {sorted(missing)} attrs: "
+                    "scripts/surrogate/generate_data.py seeds every sample and "
+                    "runs them back to back on one solver clock, so the truth's "
+                    "realization is only known from them."
+                )
+        # A fresh seed is a fresh stream: its own record 0, whatever the corpus.
+        start_record = (
+            0
+            if seed is not None
+            else int(attrs.get("inlet_turbulence_start_record", 0))
+        )
         n_frames, nz, ny = len(stamps), len(zt), len(yt)
         dz, dy, dx = zt[1] - zt[0], yt[1] - yt[0], xt[1] - xt[0]
         if not all(np.allclose(np.diff(c), d) for c, d in ((zt, dz), (yt, dy))):
@@ -167,7 +200,6 @@ class InletTurbulence:
         # series (which is those knots interpolated onto the frame stamps):
         # recover them exactly by least squares on the hat functions.
         simulation_time = n_frames * output_frequency
-        spk = OmegaConf.select(cfg, "training_data.params_sampler.seconds_per_knot")
         knots = (
             stamps
             if spk is None
@@ -198,6 +230,8 @@ class InletTurbulence:
         all_times = driver_time_grid(spinup + simulation_time, time_step, CASE_DTMAX)
         if seed is not None:
             seed = derive_seed(f"{seed}_{data.split}_{sample}")
+        elif not archived:
+            seed = int(attrs["inlet_turbulence_seed"])
         elif turb["seed"] is not None:
             seed = int(turb["seed"])
         else:  # as apply_inlet_turbulence: the member's experiment name
@@ -210,7 +244,7 @@ class InletTurbulence:
             seed = derive_seed(str(expnr))
         fluct = filtered_fluctuations(
             seed=seed,
-            start_index=first,
+            start_index=start_record + first,
             times=record_times,
             speed=np.interp(all_times, knot_times, knot_speed),
             n_z=nz,

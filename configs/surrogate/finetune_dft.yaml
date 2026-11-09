@@ -1,0 +1,96 @@
+# @package _global_
+# Fine-tune a trained DFT stepper (train_dft.yaml output) on new data: LoRA
+# adapters on its autoencoder encoder/decoder and its latent subnetwork, the
+# skip and mixer connections trained fully, the rest frozen. The architecture,
+# its weights and normalization come from the pretrained model (the
+# finetune_stepper task, as finetune_stepper.yaml).
+# Shared training defaults: training.yaml. The `trainer`, `optimizer`,
+# `batch_sampler`, `dataloader` and `dataset` blocks below override them key by key.
+defaults:
+  - training
+  - _self_
+
+# Which model scripts/surrogate/train.py builds.
+task: finetune_stepper
+name: dft_b_ft_barcelona
+# A train_dft.yaml output folder (weights + config), not the autoencoder.
+pretrained_dir: ${paths.weights_dir}/dft_b
+
+method: lora
+lora:
+  variant: standard  # standard | balora
+  rank: 32
+  alpha: 64
+  dropout: 0.0
+  # dft.encoder / dft.decoder and the subnetwork's transformer Linears (not
+  # its param/geometry FiLM heads); tadpole_encdec: encoder/decoder only.
+  target_preset: tadpole_encdec+subnetwork
+  target_modules: null
+  modules_to_save: []
+  fused_forward: true  # one call with the merged weight W + s*B@A (same function, faster)
+# Trained fully next to the adapters: the skip and mixer connections, i.e.
+# the skip-mixing adapters, the gamma gates of the encoder->decoder skips and
+# the gate of the latent residual around the subnetwork. Everything else stays
+# frozen; e.g. add `subnetwork.param_mlp` to also train the param FiLM fully.
+trainable_modules:
+  - skip_mixing
+  - dft.decoder.conv_decoder.scales
+  - dft.decoder.transformer_decoder.scales
+  - latent_residual_scale
+
+# Recompute the normalization on the new data (false: keep the pretrained
+# model's, which its frozen encoder and subnetwork were trained with).
+recompute_normalization: false
+
+paths:
+  # The new data to fine-tune on.
+  data_dir: ${paths.training_data_dir}/pyudales_barcelona_finetune
+
+trainer:
+  _target_: neural_surrogates.Trainer
+  num_epochs: 30
+  patience: 10
+  compile_dynamic: null
+  compile_modules: [dft.encoder.conv_encoder, dft.decoder.conv_decoder]
+  # Memory. Every rollout step carries gradients, so the activations of all
+  # of them are kept: about 4.5 GB per Mcell and sample per step for size B
+  # (fused LoRA + compile), i.e. ~36 GB for one 32x224x224 sample at horizon 5
+  # (measured with the conv blocks below checkpointed: 28.7 GB on an A100).
+  # Checkpointing the conv blocks takes ~18 % off for ~10 % time; all four
+  # stages ([dft.encoder.conv_encoder, dft.encoder.transformer_encoder,
+  # dft.decoder.transformer_decoder, dft.decoder.conv_decoder]) about two
+  # thirds for ~+30-50 % time. null: off.
+  activation_checkpoint_modules:
+    - dft.encoder.conv_encoder.conv_encoder.blocks.*
+    - dft.decoder.conv_decoder.conv_decoder.blocks.*
+  lr_warmup_epochs: 1
+  lr_warmup_per_step: true
+  # Rollout curriculum: horizon 3, one step longer every
+  # pushforward_epochs_per_step epochs, up to dataset.pushforward_steps.
+  pushforward_epochs_per_step: 3
+  pushforward_start_steps: 3
+  # >= the horizon: backpropagate through every rollout step.
+  grad_unroll_steps: ${dataset.pushforward_steps}
+  # An optimizer step per 8 samples (micro-batches of batch_sampler.batch_size).
+  grad_accum_samples: 8
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 0.0
+
+batch_sampler:
+  batch_size: 1
+  cell_budget: null
+
+dataloader:
+  num_workers: 16
+  collate_fn:
+    _target_: neural_surrogates.datasets.transition.transition_collate
+    _partial_: true
+
+dataset:
+  _target_: neural_surrogates.TransitionDataset
+  # null: take these from the pretrained model.
+  param_vars: null
+  num_history_steps: null
+  pushforward_steps: 5
