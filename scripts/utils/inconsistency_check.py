@@ -17,6 +17,7 @@ import warnings
 from typing import Any
 
 import xarray
+from data_assimilation.observation_statistics import STATISTIC_TYPES
 from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import (
@@ -140,9 +141,6 @@ def _replica(cfg: DictConfig) -> list[str]:
     return []
 
 
-OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
-
-
 def _observation(cfg: DictConfig, workflow: str) -> list[str]:
     """`observation.types`: a non-empty list; statistics for the smoother only."""
     types = OmegaConf.select(cfg, "observation.types", default=None)
@@ -151,14 +149,14 @@ def _observation(cfg: DictConfig, workflow: str) -> list[str]:
     if isinstance(types, str) or not len(types):
         return [
             "observation.types must be a non-empty list of "
-            f"{', '.join(OBSERVATION_TYPES)}, e.g. [bins, tke, spectral]; got "
+            f"{', '.join(STATISTIC_TYPES)}, e.g. [bins, tke, spectral]; got "
             f"{types!r}."
         ]
     problems = []
-    unknown = [name for name in types if name not in OBSERVATION_TYPES]
+    unknown = [name for name in types if name not in STATISTIC_TYPES]
     if unknown:
         problems.append(
-            f"observation.types names {unknown}; choose from {list(OBSERVATION_TYPES)}."
+            f"observation.types names {unknown}; choose from {list(STATISTIC_TYPES)}."
         )
     if len(set(types)) != len(types):
         problems.append(f"observation.types lists a type twice: {list(types)}.")
@@ -250,23 +248,24 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
             "time.simulation_time",
         )
     )
-    interval = (
-        OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
-        if _aggregated(cfg)
-        else None
-    )
+    interval = OmegaConf.select(cfg, "observation.aggregation.interval_seconds")
     frequency = OmegaConf.select(cfg, "time.output_frequency")
-    if None in (nx, ny, nz, sensors, states, window) or (interval or frequency) is None:
+    if None in (nx, ny, nz, sensors, states, window, frequency):
         return []
     # A lower bound: u, v, w on the grid (any other state field or parameter
     # rows only add).
     n_aug = 3 * nx * ny * nz
     # One ESMDA update assimilates the whole window at once: every sensor's
-    # observed states in every aggregation bin (or output frame), stacked into
-    # one vector (BaseSmoothing._get_observations). The tke and spectral
-    # rows of observation.types add a few rows per sensor on top.
-    n_bins = math.ceil(window / interval) if interval else round(window / frequency)
-    n_d = len(sensors) * len(states) * n_bins
+    # observed states, stacked into one vector (BaseSmoothing._get_observations),
+    # with per sensor and state the rows of each observation.types entry.
+    types = OmegaConf.select(cfg, "observation.types", default=None) or ["bins"]
+    rows_per_type = {
+        "raw": round(window / frequency),
+        "bins": math.ceil(window / interval) if interval else round(window / frequency),
+        "tke": 1,
+        "spectral": OmegaConf.select(cfg, "observation.spectral.num_bands", default=1),
+    }
+    n_d = len(sensors) * len(states) * sum(rows_per_type.get(t, 0) for t in types)
     needed = n_aug * n_d**2 * 4
     available = _physical_memory()
     message = (

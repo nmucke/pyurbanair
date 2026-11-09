@@ -76,11 +76,6 @@ def test_bins_only_reproduces_aggregation_and_error_exactly() -> None:
     reference = spec.resolve(raw, _operator(), AggregateObservations(25.0))
     np.testing.assert_array_equal(resolved.covariance_diag, reference.covariance_diag)
     np.testing.assert_array_equal(resolved.std, reference.std)
-    np.testing.assert_array_equal(
-        resolved.raw_instrument_std, reference.raw_instrument_std
-    )
-    np.testing.assert_array_equal(resolved.times, reference.times)
-    assert resolved.sensor_indices == reference.sensor_indices
     assert resolved.provenance == reference.provenance
 
 
@@ -95,9 +90,6 @@ def test_raw_only_reproduces_the_unaggregated_path_exactly() -> None:
     resolved = stats.resolve_error(raw, _operator(), spec)
     reference = spec.resolve(raw, _operator(), None)
     np.testing.assert_array_equal(resolved.covariance_diag, reference.covariance_diag)
-    np.testing.assert_array_equal(
-        resolved.raw_instrument_std, reference.raw_instrument_std
-    )
     assert resolved.block_slices == {"raw": slice(0, raw.size)}
 
 
@@ -180,14 +172,14 @@ def test_a_sinusoid_dominates_its_band() -> None:
     dt, frames = 0.5, 2048
     stats = _spectral(normalize=False, log=False, num_bands=4)
     times = dt * np.arange(frames)
+    rng = np.random.default_rng(3)
     out = stats(
         xr.DataArray(
-            np.zeros((frames, 6)), dims=("time", "obs"), coords={"time": times}
+            rng.normal(size=(frames, 6)), dims=("time", "obs"), coords={"time": times}
         )
     )
     centres = out.band_frequency.values
     # A sine at the centre of band 2, plus a little noise.
-    rng = np.random.default_rng(3)
     values = np.sin(2 * np.pi * centres[2] * times)[:, None] + 0.01 * rng.normal(
         size=(frames, 6)
     )
@@ -305,7 +297,7 @@ def test_auto_std_shrinks_with_the_window_and_floors_apply() -> None:
     np.testing.assert_allclose(floored.std[floored.block_slices["tke"]], 5.0)
     np.testing.assert_allclose(floored.std[floored.block_slices["spectral"]], 0.3)
     assert "tke(std=auto" in floored.provenance
-    assert floored.times.size * 6 == floored.covariance_diag.size
+    assert floored.covariance_diag.size == 6 * (1 + 4)  # tke + 4 bands
 
 
 def _pooled_operator() -> ObservationOperator:
@@ -353,7 +345,8 @@ def test_representation_std_adds_in_quadrature() -> None:
 
 def test_auto_std_matches_the_monte_carlo_sampling_error() -> None:
     """Default tke and spectral rows of a red (AR(1)) series plus white noise:
-    the median auto std is close to the spread over independent windows."""
+    the median auto std is sqrt(2) (observed plus predicted sampling error)
+    times the spread over independent windows."""
     stats = ObservationStatistics(
         ["tke", "spectral"], tke={"std_floor": 0.0}, spectral={"std_floor": 0.0}
     )
@@ -366,7 +359,7 @@ def test_auto_std_matches_the_monte_carlo_sampling_error() -> None:
     auto = np.stack(
         [stats.resolve_error(w, _operator(), spec).std for w in windows[:100]]
     )
-    ratio = np.median(auto, axis=0) / values.std(axis=0)
+    ratio = np.median(auto, axis=0) / (np.sqrt(2.0) * values.std(axis=0))
     assert np.all((0.7 < ratio) & (ratio < 1.3)), ratio
 
 
@@ -397,6 +390,17 @@ def test_predictions_reuse_the_observed_bands() -> None:
     # A new observed window resets the bands.
     stats(_series(399), observed=True)
     assert stats(_series(399)).sizes["time"] == 4
+
+
+def test_a_constant_predicted_series_is_rejected() -> None:
+    """A member with a dead sensor (zeros, no noise) has no tke or spectrum:
+    raise rather than log a floored zero."""
+    raw = _series(400)
+    raw[:, 4] = 0.0
+    for types in (["tke"], ["spectral"]):
+        stats = ObservationStatistics(types)
+        with pytest.raises(ValueError, match="constant or non-finite"):
+            stats(raw)
 
 
 def test_a_constant_observed_series_is_rejected() -> None:

@@ -23,10 +23,7 @@ from typing import Any, Callable, Mapping, Sequence, cast
 
 import numpy as np
 import xarray
-from data_assimilation.observation_error import (
-    ObservationErrorSpec,
-    ResolvedObservationError,
-)
+from data_assimilation.observation_error import ObservationErrorSpec
 from data_assimilation.observation_operator import AggregateObservations
 from scipy import signal
 
@@ -144,10 +141,16 @@ def _sampling_errors(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _with_noise(value: np.ndarray, noise: np.ndarray | None) -> np.ndarray:
-    """Add an expected white-noise contribution, guarded positive."""
+    """Add an expected white-noise contribution; the result must be positive
+    (a constant or non-finite series has no tke or spectrum to compare)."""
     if noise is not None:
         value = value + noise
-    return np.maximum(value, _TINY)
+    if not np.all(value > 0):
+        raise ValueError(
+            "A tke or spectral statistic is undefined: a constant or non-finite "
+            "series (e.g. a failed member or a sensor inside a building)."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -166,28 +169,18 @@ class _SpectralSetup:
 
 @dataclass(frozen=True)
 class ResolvedStatisticsError:
-    """Block-diagonal error of one window's statistics (drop-in for
-    :class:`~data_assimilation.observation_error.ResolvedObservationError`).
+    """Block-diagonal error of one window's statistics.
 
     ``covariance_diag`` follows the flattened layout of
     :class:`ObservationStatistics` (rows raw, bins, tke, spectral, sensor
-    innermost); ``times`` labels its rows and ``components``/``sensor_indices``
-    one row, as for the plain resolved error. ``raw_instrument_std`` is the
-    raw-frame instrument std used to draw synthetic noise and
-    ``noise_variance`` its per-observation variance (what
-    :attr:`ObservationStatistics.noise_variance` should be set to).
-    ``observation_error`` is the underlying resolved error of the raw frames
-    (or of the bins with ``bins``).
+    innermost). ``noise_variance`` is the per-observation raw-frame instrument
+    variance (what :attr:`ObservationStatistics.noise_variance` should be set
+    to).
     """
 
     covariance_diag: np.ndarray
-    raw_instrument_std: np.ndarray
     noise_variance: np.ndarray
-    times: np.ndarray
-    components: tuple[str, ...]
-    sensor_indices: tuple[int, ...]
     block_slices: dict[str, slice]
-    observation_error: ResolvedObservationError
     provenance: str
 
     @property
@@ -227,8 +220,8 @@ class ObservationStatistics:
     segments) for the following predictions, which must have the same frame
     count and spacing; before any observed call a prediction uses its own.
 
-    ``std``, ``pool_std``, ``representation_std`` and ``std_floor`` set the tke and spectral error blocks, see
-    :meth:`resolve_error`.
+    ``std``, ``pool_std``, ``representation_std`` and ``std_floor`` set the
+    tke and spectral error blocks, see :meth:`resolve_error`.
 
     Args:
         types: Non-empty subset of ``("raw", "bins", "tke", "spectral")``;
@@ -670,13 +663,16 @@ class ObservationStatistics:
 
             sqrt(s**2 + representation_std**2), floored at std_floor,
 
-        with ``s`` the configured float ``std``, or, for ``"auto"``, the
-        sampling error of the observed statistic estimated from the series
-        itself (tke: Bartlett's formulas with the series' autocorrelation;
-        spectral: the scatter of the Welch segments, see ``_spectral_std``);
-        with ``pool_std:
-        height`` the auto ``s`` is then replaced by its median over the
-        sensors at the same height (per row and component).
+        with ``s`` the configured float ``std``, or, for ``"auto"``,
+        ``sqrt(2)`` times the sampling error of the observed statistic
+        estimated from the series itself (tke: Bartlett's formulas with the
+        series' autocorrelation; spectral: the scatter of the Welch segments,
+        see ``_spectral_std``): the observed and the predicted statistic each
+        carry one. With ``pool_std: height`` the auto ``s`` is then replaced
+        by its median over the sensors at the same height (per row and
+        component). The blocks are diagonal: the sampling errors of nearby
+        sensors, of u, v, w and of a sensor's tke and low bands are in fact
+        correlated, which this does not model.
         """
         resolved = error.resolve(observations, operator, self.aggregation)
         num_obs = observations.sizes["obs"]
@@ -689,29 +685,28 @@ class ObservationStatistics:
         setup = self._spectral_setup(times) if "spectral" in self.types else None
 
         variances = []
-        row_times = []
         if "raw" in self.types or "bins" in self.types:
             variances.append(resolved.covariance_diag)
-            row_times.append(resolved.times)
         descriptions = []
         for block, rows, sampling_std, frequency in self._statistic_rows(setup):
             options = self.tke if block == "tke" else self.spectral
             num_rows = frequency.size
             # A constant series (no turbulence, no noise) has no defined
-            # statistic; the prediction-side guard would make it log(tiny).
-            statistic = rows(values, None)
-            linear = np.exp(statistic) if options["log"] else statistic
-            bad = ~np.isfinite(statistic) | ~(linear > _TINY)
-            bad |= ~(values.var(axis=0) > 0)[None, :]
+            # statistic: name the first such obs.
+            bad = ~(np.isfinite(values).all(axis=0) & (values.var(axis=0) > 0))
             if bad.any():
-                j = int(np.nonzero(bad.any(axis=0))[0][0])
+                j = int(np.nonzero(bad)[0][0])
                 raise ValueError(
                     f"The observed {block} statistic of obs {j} (sensor "
                     f"{j % num_sensors}) is undefined: a constant or non-finite "
                     "series."
                 )
             if options["std"] == "auto":
-                std = sampling_std(values)
+                # The predicted statistic has its own sampling error, which the
+                # ensemble spread misses when the members share one turbulence
+                # realisation (common initial state and inflow): R = S_obs +
+                # S_pred, about twice the observed series' sampling variance.
+                std = np.sqrt(2.0) * sampling_std(values)
                 if options["pool_std"] == "height":
                     heights = getattr(base, "obs_z", None)
                     if heights is None:  # index-based: equal index, equal height
@@ -726,7 +721,6 @@ class ObservationStatistics:
             if not np.all(np.isfinite(std)) or np.any(std <= 0):
                 raise ValueError(f"{block} error must be finite and positive.")
             variances.append(np.square(std).reshape(-1))
-            row_times.append(np.full(num_rows, times[0]))
             descriptions.append(
                 f"{block}(std={options['std']},pool={options['pool_std']},"
                 f"representation={options['representation_std']},"
@@ -735,15 +729,11 @@ class ObservationStatistics:
             )
         provenance = resolved.provenance
         if descriptions:
-            provenance += "+statistics.v2:" + ",".join(descriptions)
+            provenance += "+statistics.v3:" + ",".join(descriptions)
         return ResolvedStatisticsError(
             covariance_diag=np.concatenate(variances),
-            raw_instrument_std=resolved.raw_instrument_std,
+            # The instrument std is constant in time (ObservationErrorSpec).
             noise_variance=np.asarray(resolved.raw_instrument_variance[0]),
-            times=np.concatenate(row_times),
-            components=resolved.components,
-            sensor_indices=resolved.sensor_indices,
             block_slices=self.block_slices(observations),
-            observation_error=resolved,
             provenance=provenance,
         )

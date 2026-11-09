@@ -349,19 +349,22 @@ each window's observed vector before that window's update.
 
 **Error.** `resolve_error(noisy, operator, error)` returns a
 `ResolvedStatisticsError`: a block-diagonal, diagonal `C_D`
-(`covariance_diag`, `std`, `times`, `components`, `sensor_indices`,
-`raw_instrument_std`, `provenance` as for `ResolvedObservationError`, plus
-`noise_variance` = the raw instrument variance per obs, `block_slices` and the
-underlying `observation_error`). The raw block is exactly
+(`covariance_diag`, `std`, `provenance`, plus `noise_variance` = the raw
+instrument variance per obs, and `block_slices`). The raw block is exactly
 `error.resolve(noisy, operator)`, the bins block exactly
 `error.resolve(noisy, operator, aggregation)`. For a tke or spectral block,
 per row and `(c, s)`:
 
     std = max( sqrt(s**2 + representation_std**2), std_floor )
 
-with `s` the configured float `std`, or, for `std: auto`, the sampling error
-of the observed statistic estimated from the observed series itself (delta
-method for `log` and `normalize`, where `log` makes it a relative error):
+with `s` the configured float `std`, or, for `std: auto`, `sqrt(2)` times the
+sampling error of the observed statistic estimated from the observed series
+itself (delta method for `log` and `normalize`, where `log` makes it a
+relative error). The `sqrt(2)`: the innovation holds the sampling error of
+the observed and of the predicted statistic, and the ensemble spread misses
+the latter when the members share one turbulence realisation (the same
+initial state and inflow; ESMDA reruns every iteration from them), so
+`R = S_obs + S_pred ~ 2 S`. The single-series estimates:
 
 - tke: the large-sample (Bartlett) variance of the sample variance of a
   Gaussian series, `var(s**2) / sigma**4 = (2/T) sum_tau rho(tau)**2`, with the
@@ -379,9 +382,13 @@ method for `log` and `normalize`, where `log` makes it a relative error):
   independent). Needs at least two segments.
 
 A Monte Carlo check (AR(1) with `phi = 0.9`, `T = 120` frames, white noise of
-std 0.5, 4000 windows) gives median auto std / true std of 0.90 (tke) and
-1.17, 1.00, 0.92, 0.90 (the four bands) for the defaults; for `T = 600`,
-0.99 and 0.84 to 0.99. Unnormalized bands come out 13-24% small.
+std 0.5, 4000 windows) gives median single-series estimate / true std of 0.90
+(tke) and 1.17, 1.00, 0.92, 0.90 (the four bands) for the defaults; for
+`T = 600`, 0.99 and 0.84 to 0.99. Unnormalized bands come out 13-24% small.
+The tke estimate falls short when the window spans few integral times (the
+truncated sample autocorrelation underestimates `sum rho**2`): `log var` of
+an AR(1) gives 0.77 at `phi = 0.97` and 0.71 at `phi = 0.99` for `T = 120`
+(0.92 and 0.80 for `T = 600`). Raise `std_floor` for such windows.
 
 With `pool_std: height` (default) the auto `s` is then replaced by its median
 over the sensors at the same height (`obs_z`), per row and component; a sensor
@@ -389,20 +396,25 @@ alone at its height keeps its own. Pooling needs `log` or `normalize` (stds in
 absolute units differ between sensors of different turbulence levels).
 `representation_std` (default 0, the block's final units) adds in quadrature
 to either kind of `s`. Defaults: tke `std_floor` 0.05, spectral 0.1. A
-constant (or non-finite) observed series, for which the statistic is
-undefined, raises.
+constant (or non-finite) series, observed or predicted (a failed member, a
+sensor inside a building), has no statistic and raises.
 
 Caveats:
 
-- Sampling error is counted roughly twice: `R` holds the sampling error of the
-  observed statistics, and each member's predicted statistics carry their own
-  sampling noise, which inflates `C_HH`. The update is conservative.
+- The blocks are diagonal, but the sampling errors are correlated across
+  nearby sensors (eddies larger than the window raise or lower every sensor's
+  variance together), across u, v, w and between a sensor's tke row and low
+  bands. Many correlated rows count as independent evidence, so the posterior
+  of the parameters they inform is overconfident. Check `fit_per_block`
+  (`compute_metrics.py`) and widen `std_floor` or `representation_std` when a
+  block's chi^2 or Desroziers ratio is well above 1.
+- If the members' turbulence realisations are in fact independent, their
+  sampling noise also inflates `C_HH` and the `sqrt(2)` counts it twice: the
+  update is then conservative.
 - Raw frames are treated as independent (as in the existing likelihood),
   although turbulence and representation errors correlate over seconds; the
   tke/spectral auto errors do account for that correlation.
-- The auto errors assume a near-Gaussian, stationary series over the window
-  and treat the rows of a window as independent of each other (the tke row and
-  the bands of one sensor are in fact correlated).
+- The auto errors assume a near-Gaussian, stationary series over the window.
 
 ### Adaptive observation error
 

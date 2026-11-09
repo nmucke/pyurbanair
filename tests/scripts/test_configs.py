@@ -318,6 +318,26 @@ def test_check_config_guards_localized_update_memory(
             module.check_config(cfg, "smoother")
 
 
+def test_memory_guard_counts_the_rows_of_each_observation_type(
+    tmp_path: pathlib.Path, monkeypatch: Any
+) -> None:
+    """[tke, spectral] with 4 bands is 5 rows per obs, not one per frame:
+    N_d = 4 * 2 * 5 = 40, so 7200 * 40**2 * 4 bytes = 46 MB fits in 100 MB
+    (the 10 bins of [bins] need 184 MB)."""
+    module = load_script("scripts/utils/inconsistency_check.py")
+    monkeypatch.setattr(module, "_physical_memory", lambda: int(100e6))
+    overrides = [
+        *LOCALIZED_STATE_SMOOTHER,
+        "observation.types=[tke,spectral]",
+        "observation.spectral.num_bands=4",
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        module.check_config(
+            compose("assimilation", *overrides, root=tmp_path), "smoother"
+        )
+
+
 def test_check_config_skips_memory_guard_for_parameter_smoother(
     tmp_path: pathlib.Path, monkeypatch: Any
 ) -> None:

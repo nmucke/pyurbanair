@@ -173,9 +173,6 @@ def make_observation_error(cfg: DictConfig) -> ObservationErrorSpec:
     return spec
 
 
-OBSERVATION_TYPES = ("raw", "bins", "tke", "spectral")
-
-
 def observation_types(cfg: DictConfig) -> list[str]:
     """`observation.types`, [bins] when unset.
 

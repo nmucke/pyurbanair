@@ -217,6 +217,11 @@ it includes the instrument part.
 \item \textbf{Calibration.} An AR(1) Monte Carlo ($\phi = 0.9$, 120 frames)
   puts the median estimate at 0.90--1.17 of the true std for the default
   transforms. Batch means, the first approach tried, were up to 40\% off.
+  For windows of few integral times the TKE estimate falls short (0.71 at
+  $\phi = 0.99$).
+\item \textbf{Observed plus predicted.} The block uses $\sqrt2$ times this
+  estimate: the predicted statistic has its own sampling error, which the
+  spread misses when the members share one turbulence realisation.
 \item \textbf{Pooling per height.} The estimate is pooled as the median over
   sensors at the same height (\texttt{pool\_std: height}). This is refused
   unless \texttt{log} or \texttt{normalize} is on, because absolute TKE levels
@@ -243,14 +248,18 @@ in the block's final (log) units.
   zero in a twin experiment. Set it for a truth from another model or from
   real sensors: a resolved LES misses the subgrid part of the TKE, for
   example.
-\item A fixed \texttt{std} can replace the batch-means estimate, for example
+\item A fixed \texttt{std} can replace the auto estimate, for example
   one calibrated from the replica noise floor of compare\_models.
 \end{itemize}
 
-\paragraph{Caveat: sampling noise is counted twice.} Each member's statistics
-carry their own sampling noise $\eta_j$, which inflates $C_{\bm h\bm h}$ in the
-gain. With $R$ also holding the truth's sampling variance, this noise is
-counted about twice, so the update is conservative. That is the safe side.
+\paragraph{Caveat: correlated sampling errors.} $R$ is diagonal, but the
+sampling errors of nearby sensors, of $u, v, w$ and of a sensor's TKE and low
+bands are correlated: eddies larger than the window move them together. The
+correlated rows then count as independent evidence, and the posterior of
+$\bm\theta$ is overconfident. The first ESMDA tests show this when TKE is
+assimilated (spread 0.003--0.008 in $b_0$ against errors up to 0.065). A
+full or low-rank block estimated over windows of a long reference series
+would capture it.
 
 \paragraph{Carry $\bm\theta$ across windows.} $\bm\theta$ is constant, so its
 posterior from window $w$ is the prior for window $w+1$, while the inflow

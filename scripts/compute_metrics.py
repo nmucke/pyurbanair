@@ -85,7 +85,9 @@ window-indexed ones also list `per_window` values):
                   (observation.types with tke or spectral) the RMSE, chi^2
                   and Desroziers use the raw/bins (velocity) observations
                   only, and are left out without any; O_N covers all of them,
-                  and `data_mismatch_per_block` gives it per type.
+                  and `data_mismatch_per_block` gives it per type, as
+                  `fit_per_block` does the chi^2 and Desroziers ratio (which
+                  check each type's R).
   desroziers      per stage with an analysis: the observation error std
                   estimated from the forecast and analysis residuals
                   (Desroziers), the std the run assimilated (obs_std_assimilated
@@ -397,6 +399,10 @@ def run(run_dir: pathlib.Path, overrides: list[str] | None = None) -> None:
             smoother["data_mismatch_per_block"] = {
                 block: _data_mismatch(files, block) for block in blocks
             }
+            if not hybrid:
+                smoother["fit_per_block"] = {
+                    block: _block_fit(files, block) for block in blocks
+                }
         metrics["observation"]["smoother"] = smoother
     if "filter" in run_info:
         metrics["observation"]["filter"], metrics["desroziers"]["filter"] = (
@@ -418,32 +424,44 @@ def _finite(value: float) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def _velocity_rows(ds: xarray.Dataset) -> xarray.Dataset:
-    """The observations that are sensor velocities (m/s).
+def _block_rows(ds: xarray.Dataset, blocks: tuple[str, ...]) -> xarray.Dataset:
+    """The observations of `blocks`, all without an `obs_block` label.
 
-    With observation statistics (an `obs_block` label per observation) these
-    are the raw and bins blocks; the tke and spectral rows are other
-    quantities in other units, scored by O_N only.
+    By default the sensor velocities (m/s): with observation statistics these
+    are the raw and bins blocks, the tke and spectral rows being other
+    quantities in other units.
     """
     if "obs_block" not in ds:
         return ds
-    return ds.isel(observation=np.isin(ds.obs_block.values, ["raw", "bins"]))
+    return ds.isel(observation=np.isin(ds.obs_block.values, list(blocks)))
+
+
+def _block_fit(files: list[pathlib.Path], block: str) -> dict | None:
+    """The unit-free innovation chi^2 and Desroziers ratio of one block, which
+    check that block's R."""
+    observation, desroziers = _observation_metrics(files, 1, (block,))
+    if desroziers is None:
+        return None
+    return {
+        "innovation_chi2_diag": observation["innovation_chi2_diag"],
+        "desroziers_ratio": desroziers["ratio"],
+    }
 
 
 def _observation_metrics(
-    files: list[pathlib.Path], n_cycles: int
+    files: list[pathlib.Path], n_cycles: int, blocks: tuple[str, ...] = ("raw", "bins")
 ) -> tuple[dict, dict | None]:
     """The observation and desroziers blocks of one stage, one value per update.
 
     Each window's observations hold `n_cycles` equal chunks, one per update; its
-    first step is the forecast and its last the analysis. Only the velocity
-    observations count (`_velocity_rows`); with none, both blocks are empty
-    ({} and None).
+    first step is the forecast and its last the analysis. Only the observations
+    of `blocks` count (`_block_rows`, by default the velocities); with none,
+    both blocks are empty ({} and None).
     """
     fits = []
     obs_std = []
     for path in files:
-        ds = _velocity_rows(xarray.load_dataset(path))
+        ds = _block_rows(xarray.load_dataset(path), blocks)
         if not ds.sizes["observation"]:
             return {}, None
         obs, std = ds.obs.values, ds.obs_std.values
