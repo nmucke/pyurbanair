@@ -318,6 +318,13 @@ def test_check_config_guards_localized_update_memory(
             module.check_config(cfg, "smoother")
 
 
+def test_config_check_lists_the_library_observation_types() -> None:
+    from data_assimilation.observation_statistics import STATISTIC_TYPES
+
+    module = load_script("scripts/utils/inconsistency_check.py")
+    assert module.STATISTIC_TYPES == STATISTIC_TYPES
+
+
 def test_memory_guard_counts_the_rows_of_each_observation_type(
     tmp_path: pathlib.Path, monkeypatch: Any
 ) -> None:

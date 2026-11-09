@@ -17,7 +17,6 @@ import warnings
 from typing import Any
 
 import xarray
-from data_assimilation.observation_statistics import STATISTIC_TYPES
 from omegaconf import DictConfig, OmegaConf
 
 from pyurbanair.config.discrepancy import (
@@ -139,6 +138,11 @@ def _replica(cfg: DictConfig) -> list[str]:
             "simulation_time)."
         ]
     return []
+
+
+# Mirrors data_assimilation.observation_statistics.STATISTIC_TYPES (a test checks
+# they agree): this module also runs in environments without data_assimilation.
+STATISTIC_TYPES = ("raw", "bins", "tke", "spectral")
 
 
 def _observation(cfg: DictConfig, workflow: str) -> list[str]:
