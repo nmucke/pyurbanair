@@ -389,8 +389,9 @@ class ObservationStatistics:
     they are; the predictions instead get the expected white-noise
     contribution of ``noise_variance`` added before normalisation and log
     (tke variance ``+ (T - B) / T sigma**2`` for ``T`` frames in ``B`` bins,
-    one without ``bins``; band PSD ``+`` the exact Welch level of white
-    noise), so both sides carry the same bias. The noise is independent
+    one without ``bins``, as for the spectral normalising variance; band PSD
+    ``+`` the exact Welch level of white noise), so both sides carry the same
+    bias. The noise is independent
     between components, so the stress covariance gets nothing; with
     ``normalize`` its denominator's variances get the tke term. ``raw`` and
     ``bins`` are never changed.
@@ -501,11 +502,21 @@ class ObservationStatistics:
         self, observations: xarray.DataArray
     ) -> tuple[tuple[int, ...], ...] | None:
         """Frame ids of the ``bins`` intervals (``None`` without bins): the
-        tke fluctuations are taken about these means."""
+        tke fluctuations are taken about these means. Bins of one frame each
+        leave no fluctuation at all and are refused."""
         if self.aggregation is None:
             return None
         bins = self.aggregation.bins(observations, allow_interval_count_change=True)
-        return tuple(bin_.frame_ids for bin_ in bins)
+        partition = tuple(bin_.frame_ids for bin_ in bins)
+        if all(len(frame_ids) == 1 for frame_ids in partition):
+            raise ValueError(
+                "tke and stress with bins need bins of more than one frame: every "
+                f"{self.aggregation.interval_seconds:g} s bin holds a single frame "
+                "(the interval is not longer than the output spacing), so every "
+                "fluctuation about the bin means is zero. Lengthen the "
+                "aggregation interval or drop bins."
+            )
+        return partition
 
     def _tke(
         self,
@@ -586,13 +597,14 @@ class ObservationStatistics:
     ) -> np.ndarray:
         """``(..., T, O)`` frames -> ``(..., 1, P * S)`` stress row. The noise
         is independent between components: only the normalising variances
-        get it (as the tke row does)."""
+        get it (as the tke row does). The variances are checked with or
+        without ``normalize``: a constant or non-finite series has no stress."""
         residual, noise_factor = _fluctuations(values, partition)
         first, second = self._by_pair(residual)
         stress = np.mean(first * second, axis=-2)
+        noise = None if noise is None else noise_factor * noise
+        variance = _with_noise(np.mean(residual**2, axis=-2), noise)
         if self.stress["normalize"]:
-            noise = None if noise is None else noise_factor * noise
-            variance = _with_noise(np.mean(residual**2, axis=-2), noise)
             var_a, var_b = self._by_pair(variance)
             stress = stress / np.sqrt(var_a * var_b)
         return stress[..., None, :]
@@ -744,7 +756,12 @@ class ObservationStatistics:
         band_noise = None if noise is None else setup.noise_factors[:, None] * noise
         bands = _with_noise(bands, band_noise)
         if self.spectral["normalize"]:
-            bands = bands / _with_noise(values.var(axis=-2), noise)[..., None, :]
+            # The population variance about the window mean, with its exact
+            # (T - 1) / T share of the noise (as the tke row).
+            residual, noise_factor = _fluctuations(values, None)
+            noise = None if noise is None else noise_factor * noise
+            variance = _with_noise(np.mean(residual**2, axis=-2), noise)
+            bands = bands / variance[..., None, :]
         if self.spectral["log"]:
             bands = np.log(bands)
         return cast(np.ndarray, bands)
@@ -1000,8 +1017,8 @@ class ObservationStatistics:
         ``sqrt(2)`` times the sampling error of the observed statistic
         estimated from the series itself (tke: the variance of a quadratic
         form with the fluctuations' autocorrelation, see
-        ``_residual_sampling_error``; stress: Bartlett on the influence
-        series, see ``_stress_std``; spectral: the scatter of the Welch
+        ``_residual_sampling_error``; stress: the Gaussian (Isserlis)
+        moments of the pair's quadratic forms, see ``_stress_std``; spectral: the scatter of the Welch
         segments, see ``_spectral_std``): the observed and the predicted
         statistic each carry one. With ``pool_std: height`` the auto ``s`` is then replaced
         by its median over the sensors at the same height (per row and

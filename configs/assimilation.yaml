@@ -107,6 +107,13 @@ observation:
   # block-diagonal, one block per type. tke, stress and spectral are
   # smoother-only; with adaptive_error each of their rows gets its own
   # inflation.
+  # Typical choices, as command-line overrides:
+  #   inflow only:        'observation.types=[bins]'
+  #   + roughness:        'observation.types=[bins,tke,stress]'
+  #   + SGS constant:     'observation.types=[bins,tke,stress,spectral]'
+  #   vertical flux u'w': add w, 'obs.states=[u,v,w]'
+  #   truth from another model or real sensors, also:
+  #     'observation.adaptive_error=${adaptive_error.desroziers}'
   types: [bins]
   # tke: per component and sensor, half the mean square of the fluctuations
   # about the window mean, or with bins about each bin's mean (the variation
@@ -116,9 +123,11 @@ observation:
   tke:
     normalize: true
     log: true
-    # Error std: auto -> the sampling error of the observed series' statistic
-    # (from its autocorrelation, Bartlett; pool_std: height -> the median over
-    # the sensors at one height, needs log or normalize; none -> per sensor),
+    # Error std: auto -> the Gaussian sampling error of the observed series'
+    # statistic (a quadratic form in the fluctuations' autocovariance; with
+    # normalize plus Bartlett's error of the mean; pool_std: height -> the
+    # median over the sensors at one height, needs log or normalize; none ->
+    # per sensor),
     # floored at `std_floor`; or a number in the statistic's (log) units.
     std: auto
     std_floor: 0.05

@@ -513,6 +513,65 @@ def test_a_constant_observed_series_is_rejected() -> None:
             )
 
 
+@pytest.mark.parametrize("bins", [False, True])  # type: ignore[misc]
+def test_a_constant_or_nan_member_has_no_unnormalized_stress(bins: bool) -> None:
+    """The covariance needs no variance, but a constant or NaN series still
+    has no stress: raise, as with normalize (with bins a NaN is refused
+    earlier, by the aggregation)."""
+    stats = ObservationStatistics(
+        ["bins", "stress"] if bins else ["stress"],
+        AggregateObservations(25.0) if bins else None,
+        stress={"normalize": False, "pool_std": "none"},
+        num_sensors=_NUM_SENSORS,
+    )
+    for dead in (0.0,) if bins else (0.0, np.nan):
+        raw = _series(400)
+        raw[:, 4] = dead
+        with pytest.raises(ValueError, match="constant or non-finite"):
+            stats(raw)
+
+
+@pytest.mark.parametrize("types", [["bins", "tke"], ["bins", "stress"]])  # type: ignore[misc]
+def test_bins_of_one_frame_each_are_rejected_early(types: list[str]) -> None:
+    """An interval not longer than the output spacing leaves every fluctuation
+    zero: a clear error from the call and from resolve_error, not the
+    constant-series one. A single one-frame last bin is fine."""
+    stats = ObservationStatistics(
+        types, AggregateObservations(0.5), num_sensors=_NUM_SENSORS
+    )
+    raw = _series(200)  # 0.5 s frames
+    with pytest.raises(ValueError, match="single frame"):
+        stats(raw)
+    with pytest.raises(ValueError, match="single frame"):
+        stats.resolve_error(raw, _operator(), ObservationErrorSpec(0.1))
+
+    stats = ObservationStatistics(
+        types, AggregateObservations(25.0), num_sensors=_NUM_SENSORS
+    )
+    raw = _series(201)  # four 50-frame bins and a last one of one frame
+    assert [len(b) for b in stats._partition(raw) or ()] == [50] * 4 + [1]
+    assert np.isfinite(flatten_observations(stats(raw))).all()
+    resolved = stats.resolve_error(raw, _operator(), ObservationErrorSpec(0.1))
+    assert np.isfinite(resolved.covariance_diag).all()
+
+
+def test_predicted_spectral_normaliser_takes_the_exact_noise_share() -> None:
+    """The normalising variance is the population variance about the window
+    mean, which keeps (T - 1) / T of the white-noise variance (exact for a
+    short window, as the tke row)."""
+    noise = np.array([0.5, 0.5, 1.0, 0.2, 0.2, 2.0])
+    raw = _red_series(40, seed=3)
+    options = {"segment_seconds": 4.0, "num_bands": 2, "log": False}
+    normalized = _spectral(**options)
+    normalized.noise_variance = noise
+    unnormalized = _spectral(**options, normalize=False)
+    unnormalized.noise_variance = noise
+    variance = raw.values.var(axis=0) + (40 - 1) / 40 * noise
+    np.testing.assert_allclose(
+        normalized(raw).values * variance, unnormalized(raw).values, rtol=1e-12
+    )
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "kwargs, match",
     [

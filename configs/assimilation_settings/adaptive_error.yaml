@@ -10,9 +10,11 @@ none: null
 # previous windows' innovations (window 0's only for window 1), per sensor
 # height, sets an inflation of the configured variance (`observation.error`,
 # which is then the floor at min_inflation 1). With observation statistics
-# (`observation.types`) every statistic row (tke, each spectral band) is pooled
-# apart from the bins and from each other. From innovations only, so it
-# applies to real observations.
+# (`observation.types`) every statistic row (tke, stress, each spectral band) is pooled
+# apart from the bins and from each other. Their groups are small, so the
+# floor at min_inflation 1 biases the inflation up (1.06-1.17 at the right
+# error; memory: null or wider height_bands reduce it). From innovations only,
+# so it applies to real observations.
 desroziers:
   _target_: data_assimilation.adaptive_observation_error.AdaptiveObservationError
   _convert_: all

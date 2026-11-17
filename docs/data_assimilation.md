@@ -368,8 +368,9 @@ with `normalize` the two variances in its denominator get the tke term:
     predicted band PSD  = PSD_b + mean over the band's bins k of
                           2 sigma_cs**2 dt (1 - |W_k|**2 / (N sum_n w_n**2))
 
-before normalisation and log (the spectral normalising variance gets
-`var_t(u_cs) + sigma_cs**2`). For `T` frames in `B` bins (`B = 1` without
+before normalisation and log (the spectral normalising variance, the
+population variance about the window mean, gets
+`var_t(u_cs) + (T - 1) / T sigma_cs**2`, the tke term with `B = 1`). For `T` frames in `B` bins (`B = 1` without
 `bins`) the first is the exact expectation: removing the mean of `n` frames
 removes `1/n` of their white-noise variance. The bracket
 is the exact expected Welch level of white noise: the per-segment mean removal
@@ -478,7 +479,10 @@ binds only for long, nearly perfectly correlated windows; in m2/s2 without
 `normalize`, set it to the flow), spectral 0.1. Stress pools per pair
 instead of per component and its `pool_std: height` needs `normalize`. A
 constant (or non-finite) series, observed or predicted (a failed member, a
-sensor inside a building), has no statistic and raises.
+sensor inside a building), has no statistic and raises. So do tke and stress
+with `bins` of one frame each (an interval not longer than the output
+spacing leaves no fluctuation about the bin means); a short last bin of one
+frame among longer ones is fine.
 
 Caveats:
 
@@ -561,7 +565,14 @@ height and row of every entry from the `ResolvedStatisticsError`
 in the narrower stress row), so a new block gets its own groups unchanged. A statistic group holds one entry
 per component and sensor at its height per window, a bins group that many
 per bin: its estimate is noisy (few ratios per window), so `max_inflation`
-and `memory` (or wider `height_bands`) matter more there.
+and `memory` (or wider `height_bands`) matter more there. It is also biased
+upward: `min_inflation` 1 clips a small group's mean ratio from below, so the
+mean std inflation exceeds 1 even when the configured error is right (with
+`obs.states` [u, v] a stress group has one ratio per sensor at its height per
+window). A Monte Carlo with chi-squared(1) ratios gave 1.17 for one ratio in
+one window, 1.08 for one ratio pooled over nine windows, 1.11 for four and
+1.06 for twenty ratios in one window. The result is conservative; pooling
+over more windows (`memory: null`) or wider `height_bands` reduces it.
 The tke and spectral rows are in log units by default, stress a correlation
 coefficient: their inflation scales the sampling std (plus
 `representation_std`) of `observation.tke` / `observation.stress` /
