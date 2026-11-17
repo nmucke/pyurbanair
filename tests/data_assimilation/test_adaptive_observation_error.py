@@ -3,17 +3,23 @@
 A linear-Gaussian toy, cycled like the parameter-only smoother over windows:
 the true observation error is k times the configured one (k per height group),
 and the adaptive option must recover k, bring the Desroziers ratio back to ~1
-and the posterior back to calibrated within a few windows.
+and the posterior back to calibrated within a few windows. With observation
+statistics every statistic row is a group of its own.
 """
 
 import logging
 import warnings
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from data_assimilation.adaptive_observation_error import AdaptiveObservationError
+from data_assimilation.adaptive_observation_error import (
+    AdaptiveObservationError,
+    observation_heights,
+    observation_rows,
+)
 from data_assimilation.filtering.analysis import stochastic_enkf_update
 
 HEIGHTS = np.repeat([2.0, 8.0, 20.0], 12)  # three groups of 12 observations
@@ -23,21 +29,28 @@ N_PARAMS, N_E, N_STEPS, N_WINDOWS = 3, 64, 4, 6
 
 
 def _cycle(
-    adaptive: AdaptiveObservationError | None, seed: int, num_windows: int = N_WINDOWS
+    adaptive: AdaptiveObservationError | None,
+    seed: int,
+    num_windows: int = N_WINDOWS,
+    heights: np.ndarray = HEIGHTS,
+    true_factor: np.ndarray = TRUE_FACTOR,
+    rows: np.ndarray | None = None,
 ) -> dict:
     """One toy run: per window the ratio of the Desroziers std to the std used,
     and the posterior z-scores of the true parameters."""
     rng = np.random.default_rng(seed)
     key = jax.random.PRNGKey(seed)
-    H = 0.5 * rng.standard_normal((HEIGHTS.size, N_PARAMS))
+    H = 0.5 * rng.standard_normal((heights.size, N_PARAMS))
     truth = rng.standard_normal(N_PARAMS)
     members = rng.standard_normal((N_PARAMS, N_E))
-    configured = np.full(HEIGHTS.size, STD**2)
+    configured = np.full(heights.size, STD**2)
     ratio, z = [], []
     for _ in range(num_windows):
-        y = H @ truth + STD * TRUE_FACTOR * rng.standard_normal(HEIGHTS.size)
+        y = H @ truth + STD * true_factor * rng.standard_normal(heights.size)
         used = (
-            configured if adaptive is None else adaptive.variance(configured, HEIGHTS)
+            configured
+            if adaptive is None
+            else adaptive.variance(configured, heights, rows)
         )
         forecast = H @ members
         for _ in range(N_STEPS):
@@ -54,7 +67,7 @@ def _cycle(
             )
         analysis = H @ members
         if adaptive is not None:
-            adaptive.record(y, forecast, analysis, configured, HEIGHTS)
+            adaptive.record(y, forecast, analysis, configured, heights, rows)
         cross = (y - forecast.mean(1)) * (y - analysis.mean(1))
         ratio.append(np.sqrt(np.mean(cross / used)))
         z.append((members.mean(1) - truth) / members.std(1, ddof=1))
@@ -205,3 +218,96 @@ def test_height_bands_group_and_must_cover_every_sensor() -> None:
         )
     with pytest.raises(ValueError, match="initial_inflation"):
         AdaptiveObservationError(initial_inflation=0.5)
+
+
+def _statistics_layout(num_sensors: int, sensor_heights: np.ndarray) -> SimpleNamespace:
+    """A resolved statistics error laid out by hand (sensor innermost): two
+    components; bins (3 rows), tke (1 row), spectral (2 bands) of
+    ``2 * num_sensors`` entries per row, and a ``stress`` row of one entry per
+    sensor (one component pair), fewer than ``2 * num_sensors``."""
+    rows = {"bins": 3, "tke": 1, "spectral": 2, "stress": 1}
+    per_row = {"bins": 2, "tke": 2, "spectral": 2, "stress": 1}
+    slices, start = {}, 0
+    for block, count in rows.items():
+        size = count * per_row[block] * num_sensors
+        slices[block] = slice(start, start + size)
+        start += size
+    return SimpleNamespace(
+        covariance_diag=np.full(start, STD**2), block_slices=slices, block_rows=rows
+    )
+
+
+def test_statistic_rows_are_grouped_apart() -> None:
+    operator = SimpleNamespace(obs_z=np.array([2.0, 2.0, 20.0]))
+    resolved = _statistics_layout(3, operator.obs_z)
+    heights = observation_heights(resolved, operator)
+    rows = observation_rows(resolved)
+    assert rows is not None and heights.size == rows.size == 39
+    # Entry j is sensor j % 3 in every block, the stress row included.
+    np.testing.assert_array_equal(heights, np.tile([2.0, 2.0, 20.0], 13))
+    assert (
+        rows.tolist()
+        == ([""] * 18 + ["tke"] * 6 + ["spectral[0]"] * 6 + ["spectral[1]"] * 6)
+        + ["stress"] * 3
+    )
+    ids, names = AdaptiveObservationError().groups(heights, rows)
+    # The bins keep the height groups and names of a run without statistics.
+    assert names[:2] == AdaptiveObservationError().groups(heights)[1]
+    assert names == [
+        "z=2",
+        "z=20",
+        "tke z=2",
+        "tke z=20",
+        "spectral[0] z=2",
+        "spectral[0] z=20",
+        "spectral[1] z=2",
+        "spectral[1] z=20",
+        "stress z=2",
+        "stress z=20",
+    ]
+    np.testing.assert_array_equal(ids[:18], np.tile([0, 0, 1], 6))
+    np.testing.assert_array_equal(ids[18:24], np.tile([2, 2, 3], 2))
+    np.testing.assert_array_equal(ids[24:30], [4, 4, 5] * 2)
+    np.testing.assert_array_equal(ids[30:36], [6, 6, 7] * 2)
+    np.testing.assert_array_equal(ids[-3:], [8, 8, 9])
+    # Height bands split the statistic rows the same way.
+    banded = AdaptiveObservationError(
+        height_bands=[{"min_z": 0.0, "max_z": 10.0}, {"min_z": 10.0, "max_z": 40.0}]
+    )
+    assert banded.groups(heights, rows)[1][-2:] == [
+        "stress z=[0,10)",
+        "stress z=[10,40)",
+    ]
+    # Without statistics there are no rows: the plain height groups.
+    plain = SimpleNamespace(sensor_indices=(0, 1, 2), times=np.zeros(2))
+    assert observation_rows(plain) is None
+    np.testing.assert_array_equal(
+        observation_heights(plain, operator), np.tile([2.0, 2.0, 20.0], 2)
+    )
+
+
+def test_inflation_recovers_the_factors_per_statistic_row() -> None:
+    """The bins are consistent; tke, the two spectral bands and the stress row
+    carry an error 3, 1.5, 4 and 2 times the configured one, at both
+    heights. Each group must recover its own factor."""
+    operator = SimpleNamespace(obs_z=np.repeat([2.0, 20.0], 6))
+    resolved = _statistics_layout(12, operator.obs_z)
+    heights = observation_heights(resolved, operator)
+    rows = observation_rows(resolved)
+    assert rows is not None
+    factors = {"": 1.0, "tke": 3.0, "spectral[0]": 1.5, "spectral[1]": 4.0}
+    factors["stress"] = 2.0
+    true_factor = np.array([factors[r] for r in rows])
+    final = []
+    for seed in range(6):
+        adaptive = AdaptiveObservationError(initial_inflation=1.0)
+        _cycle(adaptive, seed, 8, heights, true_factor, rows)
+        names = adaptive.history[-1]["groups"]
+        final.append(adaptive.inflation(names))
+    estimate = dict(zip(names, np.mean(final, axis=0)))
+    for name, value in estimate.items():
+        row = name.rpartition(" ")[0]
+        if row:
+            assert value == pytest.approx(factors[row], rel=0.15), name
+        else:  # the bins: consistent, floored at 1
+            assert 1.0 <= value < 1.15, name

@@ -211,7 +211,7 @@ def make_aggregation(
         return aggregator
     options = {
         name: OmegaConf.to_container(cfg.observation[name], resolve=True)
-        for name in ("tke", "spectral")
+        for name in ("tke", "stress", "spectral")
         if name in types
     }
     statistics = ObservationStatistics(
@@ -235,8 +235,8 @@ def observe(
 
     Instrument noise is drawn on the raw frames; the resolved error carries the
     covariance of the (possibly aggregated) observations the update sees. For
-    observation statistics it is block-diagonal, the tke and spectral blocks
-    estimated from the noisy series.
+    observation statistics it is block-diagonal, the tke, stress and spectral
+    blocks estimated from the noisy series.
     """
     clean = operator(truth)
     noise = np.asarray(jax.random.normal(rng_key, clean.shape))
@@ -320,8 +320,8 @@ def flatten_obs(
 
 def set_prediction_noise(aggregation: Any, resolved: Any) -> None:
     """Give observation statistics the raw instrument variance per observation
-    (from their resolved error), which they add to the predicted tke and
-    spectra to match the noisy observed series. No-op otherwise."""
+    (from their resolved error), which they add to the predicted tke, stress
+    and spectra to match the noisy observed series. No-op otherwise."""
     if isinstance(aggregation, ObservationStatistics):
         aggregation.noise_variance = resolved.noise_variance
 
@@ -361,7 +361,7 @@ def save_obs(
     iterations for a smoother (prior first, posterior last), forecast and
     analysis for a filter. `extra` adds more per-observation variables;
     `block_slices` (observation statistics) labels each observation with its
-    block in `obs_block` (raw, bins, tke, spectral).
+    block in `obs_block` (raw, bins, tke, stress, spectral).
     """
     if block_slices is not None:
         labels = np.full(np.asarray(obs).size, "", dtype=object)

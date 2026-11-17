@@ -403,6 +403,7 @@ def test_adaptive_error_run(
 
 
 STATISTICS = "observation.types=[bins,tke,spectral]"
+STRESS = "observation.types=[bins,tke,stress,spectral]"
 
 
 def test_observation_types_config(tmp_path: pathlib.Path) -> None:
@@ -422,14 +423,32 @@ def test_observation_types_config(tmp_path: pathlib.Path) -> None:
     assert helpers.observation_types(no_bins) == ["raw"]
     assert helpers.make_aggregation(no_bins) is None
 
-    for types in ("[raw]", "[bins]", "[raw,tke]", "[bins,tke,spectral]", "[spectral]"):
+    for types in (
+        "[raw]",
+        "[bins]",
+        "[raw,tke]",
+        "[bins,tke,spectral]",
+        "[spectral]",
+        "[bins,tke,stress,spectral]",
+    ):
         cfg = compose(
             "assimilation",
             "+test=assimilation",
             f"observation.types={types}",
+            "obs.states=[u,v]",
             root=tmp_path,
         )
         check_config(cfg, "smoother")
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        "observation.types=[stress]",
+        "obs.states=[u,v,w]",
+        root=tmp_path,
+    )
+    check_config(cfg, "smoother")
+    stress = helpers.make_aggregation(cfg)
+    assert stress.types == ("stress",) and stress.stress["normalize"]
     for workflow in ("filtering", "hybrid"):
         cfg = compose(
             "assimilation",
@@ -441,8 +460,17 @@ def test_observation_types_config(tmp_path: pathlib.Path) -> None:
         check_config(cfg, workflow)
 
 
+#: Statistic blocks of the smoother runs; obs.states is [u, v], so the stress
+#: row holds one pair per sensor, narrower than the (component, sensor) axis.
+STATISTIC_BLOCKS = [["bins", "tke", "spectral"], ["bins", "tke", "stress", "spectral"]]
+
+
+@pytest.mark.parametrize("blocks", STATISTIC_BLOCKS)  # type: ignore[misc]
 def test_smoother_with_observation_statistics(
-    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+    blocks: list[str],
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: Any,
 ) -> None:
     """Every block is assimilated and labelled; the bins block is the default
     run's observations bit for bit; metrics read the blocks apart. 8 one-second
@@ -450,11 +478,12 @@ def test_smoother_with_observation_statistics(
     window = [
         "time.simulation_time=8.0",
         "observation.aggregation.interval_seconds=2.0",
+        "obs.states=[u,v]",
     ]
     runs: dict[str, list[str]] = {
         "default": [],
         "statistics": [
-            STATISTICS,
+            f"observation.types=[{','.join(blocks)}]",
             "observation.spectral.segment_seconds=4.0",
             "observation.spectral.num_bands=1",
         ],
@@ -471,7 +500,8 @@ def test_smoother_with_observation_statistics(
             root=tmp_path / name,
         )
         run_dirs[name] = _run("smoother", cfg)
-    num_obs = len(cfg.obs.states) * len(cfg.obs.x_points)
+    num_sensors = len(cfg.obs.x_points)
+    num_obs = len(cfg.obs.states) * num_sensors
     for w in range(2):
         default = xarray.load_dataset(
             run_dirs["default"] / f"windows/window_{w}_obs.nc"
@@ -480,25 +510,103 @@ def test_smoother_with_observation_statistics(
             run_dirs["statistics"] / f"windows/window_{w}_obs.nc"
         )
         assert "obs_block" not in default
-        blocks = stats.obs_block.values
-        assert list(dict.fromkeys(blocks.tolist())) == ["bins", "tke", "spectral"]
-        assert (blocks == "tke").sum() == (blocks == "spectral").sum() == num_obs
-        bins = stats.isel(observation=blocks == "bins")
+        labels = stats.obs_block.values
+        assert list(dict.fromkeys(labels.tolist())) == blocks
+        assert (labels == "tke").sum() == (labels == "spectral").sum() == num_obs
+        # One pair (u, v) per sensor, sensor innermost.
+        assert (labels == "stress").sum() == ("stress" in blocks) * num_sensors
+        assert labels.size == (
+            default.sizes["observation"]
+            + 2 * num_obs
+            + ("stress" in blocks) * num_sensors
+        )
+        bins = stats.isel(observation=labels == "bins")
         for name in ("obs", "obs_clean", "obs_std"):
             np.testing.assert_array_equal(bins[name], default[name])
         for name in ("obs", "obs_clean", "obs_std", "pred_obs"):
             assert np.isfinite(stats[name]).all(), name
         assert (stats.obs_std > 0).all()
+        if "stress" in blocks:  # correlation coefficients
+            stress = stats.isel(observation=labels == "stress")
+            assert (np.abs(stress.obs) <= 1).all()
+            assert (np.abs(stress.pred_obs) <= 1).all()
     metrics = yaml.safe_load((run_dirs["statistics"] / "metrics.yaml").read_text())
     smoother = metrics["observation"]["smoother"]
-    assert set(smoother["data_mismatch_per_block"]) == {"bins", "tke", "spectral"}
-    assert set(smoother["fit_per_block"]) == {"bins", "tke", "spectral"}
+    assert set(smoother["data_mismatch_per_block"]) == set(blocks)
+    assert set(smoother["fit_per_block"]) == set(blocks)
     assert smoother["fit_per_block"]["bins"]["innovation_chi2_diag"] == (
         smoother["innovation_chi2_diag"]
     )
     assert "forecast_rmse" in smoother and "smoother" in metrics["desroziers"]
     default_metrics = yaml.safe_load((run_dirs["default"] / "metrics.yaml").read_text())
     assert "data_mismatch_per_block" not in default_metrics["observation"]["smoother"]
+
+
+@pytest.mark.parametrize("blocks", STATISTIC_BLOCKS)  # type: ignore[misc]
+def test_adaptive_error_with_observation_statistics(
+    blocks: list[str],
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    trained: Any,
+) -> None:
+    """Every statistic row gets its own inflation per height, the bins keep
+    the plain height groups; each window assimilates the inflation its
+    history lists. 3 windows of 8 one-second frames; two spectral bands."""
+    cfg = compose(
+        "assimilation",
+        "+test=assimilation",
+        *SURROGATE,
+        *surrogate(session_root),
+        "time.simulation_time=8.0",
+        "assimilation.num_windows=3",
+        "obs.states=[u,v]",
+        "obs.z_points=[3.0,6.0,3.0,6.0]",  # two height groups
+        "observation.aggregation.interval_seconds=2.0",
+        f"observation.types=[{','.join(blocks)}]",
+        "observation.spectral.segment_seconds=4.0",
+        "observation.spectral.num_bands=2",
+        ADAPTIVE,
+        "adaptive_error.desroziers.initial_inflation=2.0",
+        root=tmp_path,
+    )
+    load_script("scripts/utils/inconsistency_check.py").check_config(cfg, "smoother")
+    load_script("scripts/run_smoother.py").run(cfg)
+    run_dir = pathlib.Path(cfg.paths.results_dir) / "smoother"
+    history = yaml.safe_load((run_dir / "run_info.yaml").read_text())[
+        "adaptive_observation_error"
+    ]
+    assert [h["window"] for h in history] == [0, 1, 2]
+    levels = ["z=3", "z=6"]
+    rows = ["", "tke ", "stress " if "stress" in blocks else None]
+    rows += ["spectral[0] ", "spectral[1] "]
+    groups = [f"{row}{level}" for row in rows if row is not None for level in levels]
+    assert all(h["groups"] == groups for h in history)
+    # Window 2 pools window 1's ratios only (window 0's set window 1).
+    estimate = [1.0 if e is None else e for e in history[1]["window_estimate"]]
+    np.testing.assert_allclose(history[2]["inflation"], np.clip(estimate, 1.0, 10.0))
+    for w, entry in enumerate(history):
+        ds = xarray.load_dataset(run_dir / f"windows/window_{w}_obs.nc")
+        names = np.array(groups)[ds.obs_error_group.values]
+        # Each entry's group is its block's (bins: a plain height group).
+        assert names.size == ds.sizes["observation"]
+        for block, prefix in (
+            ("bins", "z="),
+            ("tke", "tke z="),
+            ("stress", "stress z="),
+            ("spectral", "spec"),
+        ):
+            in_block = names[ds.obs_block.values == block]
+            assert in_block.size or block not in blocks, block
+            assert all(n.startswith(prefix) for n in in_block), block
+        # The stress entries: one per sensor, at its height (sensor innermost).
+        stress = names[ds.obs_block.values == "stress"]
+        if "stress" in blocks:
+            assert stress.tolist() == [f"stress {z}" for z in ("z=3", "z=6") * 2]
+        # The std assimilated is the configured one times the group's inflation.
+        ratio = ds.obs_std_assimilated / ds.obs_std
+        for g, factor in enumerate(entry["inflation"]):
+            np.testing.assert_allclose(ratio[ds.obs_error_group == g], factor)
+    assert history[0]["inflation"] == pytest.approx([2.0] * len(groups))
 
 
 @pytest.mark.parametrize(  # type: ignore[misc]
@@ -509,7 +617,13 @@ def test_smoother_with_observation_statistics(
         ("smoother", ["observation.types=[bins,velocity]"], "choose from"),
         ("smoother", ["observation.types=[tke,tke]"], "a type twice"),
         ("smoother", ["observation.types=[raw,bins]"], "both raw and bins"),
-        ("smoother", [STATISTICS, ADAPTIVE], "cannot be used with observation.types"),
+        (
+            "smoother",
+            ["observation.types=[bins,stress]", "obs.states=[u]"],
+            "needs two or three obs.states",
+        ),
+        ("filtering", ["params@prior_params=static", STRESS], "smoother only"),
+        ("hybrid", [STATISTICS, ADAPTIVE], "adaptive_error is for the smoother"),
         ("hybrid", [STATISTICS], "for the smoother only"),
         ("filtering", ["params@prior_params=static", STATISTICS], "smoother only"),
     ],
@@ -816,9 +930,7 @@ def test_correct_window_pairs_frames_members_and_sensors(
     xarray.testing.assert_identical(corrected, xarray.load_dataset(expected))
     before = xarray.load_dataset(forecast)
     assert float(abs(corrected.u - before.u).max()) > 0.1
-    xarray.testing.assert_identical(
-        corrected.isel(ensemble=3), before.isel(ensemble=3)
-    )
+    xarray.testing.assert_identical(corrected.isel(ensemble=3), before.isel(ensemble=3))
 
 
 def test_field_parameter_rows_are_the_analysis_space(tmp_path: pathlib.Path) -> None:

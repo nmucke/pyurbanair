@@ -2,22 +2,28 @@
 
 Besides the raw frames (``raw``) and their interval means (``bins``, an
 :class:`AggregateObservations`), a window's sensor series carries second
-moments (``tke``) and spectra (``spectral``) that constrain closure and
-roughness parameters which the means barely see. :class:`ObservationStatistics`
-maps a raw ``(..., "time", "obs")`` series to the chosen statistics, stacked
-along ``"time"`` in the fixed order raw, bins, tke, spectral, and
+moments (``tke``, the variances, and ``stress``, the covariances between
+components) and spectra (``spectral``) that constrain closure and roughness
+parameters which the means barely see. :class:`ObservationStatistics` maps a
+raw ``(..., "time", "obs")`` series to the chosen statistics, stacked along
+``"time"`` in the fixed order raw, bins, tke, stress, spectral, and
 :meth:`ObservationStatistics.resolve_error` gives the matching block-diagonal
 (diagonal) observation error. ``raw`` and ``bins`` are refused together: the
-bins are means of the same frames, so the pair counts the data twice. ``tke``
-and ``spectral`` are allowed with ``raw`` but are partly redundant with it.
+bins are means of the same frames, so the pair counts the data twice. The
+statistics are allowed with ``raw`` but are partly redundant with it.
 
-Every block keeps the ``(component, sensor)`` layout of the observation
-operator on the ``obs`` axis, so the sensor stays the innermost axis of the
-flattened vector (observation ``j`` sits at sensor ``j % num_sensors``) and
-distance localization and the adaptive observation error carry over. See
-``docs/data_assimilation.md`` (§2, Turbulence-statistics observations).
+Every block keeps the sensor as the innermost axis of the ``obs`` axis: the
+``(component, sensor)`` layout of the observation operator, and for
+``stress`` ``(pair, sensor)``. With two components there is one pair, so the
+stress row fills only the first ``num_sensors`` slots; a boolean
+``slot_used`` coordinate marks the rest, which ``flatten_observations`` drops.
+Observation ``j`` of the flattened vector thus sits at sensor
+``j % num_sensors``, and distance localization and the adaptive observation
+error carry over. See ``docs/data_assimilation.md`` (§2,
+Turbulence-statistics observations).
 """
 
+import itertools
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence, cast
 
@@ -25,14 +31,22 @@ import numpy as np
 import xarray
 from data_assimilation.observation_error import ObservationErrorSpec
 from data_assimilation.observation_operator import AggregateObservations
-from scipy import signal
+from scipy import linalg, signal
 
 #: Statistic types in output order.
-STATISTIC_TYPES = ("raw", "bins", "tke", "spectral")
+STATISTIC_TYPES = ("raw", "bins", "tke", "stress", "spectral")
 
 _TKE_DEFAULTS: dict[str, Any] = {
-    "normalize": False,
+    "normalize": True,
     "log": True,
+    "std": "auto",
+    "std_floor": 0.05,
+    "pool_std": "height",
+    "representation_std": 0.0,
+}
+#: No ``log``: the stresses are signed.
+_STRESS_DEFAULTS: dict[str, Any] = {
+    "normalize": True,
     "std": "auto",
     "std_floor": 0.05,
     "pool_std": "height",
@@ -104,10 +118,14 @@ def _options(
     if options["pool_std"] not in ("height", "none"):
         raise ValueError(f"{name}.pool_std must be 'height' or 'none'.")
     options["normalize"] = bool(options["normalize"])
-    options["log"] = bool(options["log"])
-    if options["pool_std"] == "height" and not (options["log"] or options["normalize"]):
+    if "log" in defaults:
+        options["log"] = bool(options["log"])
+    if options["pool_std"] == "height" and not (
+        options.get("log") or options["normalize"]
+    ):
+        needs = "log or normalize" if "log" in defaults else "normalize"
         raise ValueError(
-            f"{name}.pool_std 'height' needs log or normalize: stds in absolute "
+            f"{name}.pool_std 'height' needs {needs}: stds in absolute "
             "units differ between sensors of different turbulence levels."
         )
     return options
@@ -140,14 +158,159 @@ def _sampling_errors(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(log_variance_std), np.asarray(mean_variance)
 
 
+def _fluctuations(
+    values: np.ndarray, partition: Sequence[Sequence[int]] | None
+) -> tuple[np.ndarray, float]:
+    """Fluctuations of ``(..., T, O)`` frames about the means of a partition.
+
+    ``partition`` lists the frame ids of every bin (``None``: one bin, the
+    whole window); each frame has its bin's arithmetic mean removed. Returns
+    the ``(..., T, O)`` residual series and the fraction of a white noise's
+    variance that ``mean_t(residual**2)`` keeps, ``(T - B) / T`` for ``B``
+    bins (removing a mean of ``n`` frames removes ``1 / n`` of their noise
+    variance).
+    """
+    num_frames = values.shape[-2]
+    if partition is None:
+        partition = [range(num_frames)]
+    residual = np.empty_like(values)
+    for frame_ids in partition:
+        ids = list(frame_ids)
+        residual[..., ids, :] = values[..., ids, :] - values[..., ids, :].mean(
+            axis=-2, keepdims=True
+        )
+    return residual, (num_frames - len(partition)) / num_frames
+
+
+def _residual_sampling_error(
+    residual: np.ndarray, partition: Sequence[Sequence[int]] | None
+) -> np.ndarray:
+    """Relative std of ``mean_t(residual**2)`` per column of a ``(T, O)``
+    residual series from :func:`_fluctuations` with the same ``partition``.
+
+    The fluctuations' autocovariance ``gamma`` is the residual's (as in
+    :func:`_sampling_errors`, kept up to its first non-positive lag) plus the
+    variance ``m`` the removed bin means took out of it,
+    ``m = sum_b n_b m_b / T`` with ``m_b = sum_tau (1 - |tau| / n_b)
+    gamma(tau) / n_b`` (linear in ``m``: solved in closed form). With
+    ``Sigma`` the Toeplitz matrix of ``gamma`` and ``Q`` the bin-mean removal,
+    the quadratic form ``mean_t(residual**2)`` of a Gaussian process has
+
+        var / mean**2 = 2 tr((Q Sigma)**2) / tr(Q Sigma)**2.
+
+    Plain Bartlett on the residual (whose autocorrelation the mean removal
+    shortens) underestimates the error once the bins span a few correlation
+    times.
+    """
+    num_frames, num_obs = residual.shape
+    if partition is None:
+        partition = [range(num_frames)]
+    spectrum = np.abs(np.fft.rfft(residual, n=2 * num_frames, axis=0)) ** 2
+    max_lag = max(num_frames // 4, 2)
+    autocovariance = np.fft.irfft(spectrum, axis=0)[:max_lag] / num_frames
+    keep = np.cumprod(autocovariance > 0, axis=0).astype(bool)
+    lags = np.arange(max_lag)[:, None]
+    weighted = np.zeros(num_obs)
+    weights = np.zeros(num_obs)
+    for frame_ids in partition:
+        n = len(frame_ids)
+        w = np.where(keep, np.clip(1.0 - lags / n, 0.0, None), 0.0)
+        w[1:] *= 2.0  # +-tau
+        weighted += np.sum(w * autocovariance, axis=0)
+        weights += np.sum(w, axis=0)
+    removed = weighted / np.maximum(num_frames - weights, 1.0)
+    gamma = np.zeros((num_frames, num_obs))
+    gamma[:max_lag] = np.where(keep, autocovariance + removed, 0.0)
+    relative = np.empty(num_obs)
+    for j in range(num_obs):
+        q_sigma = _fluctuations(linalg.toeplitz(gamma[:, j]), partition)[0]
+        relative[j] = np.sqrt(2.0 * np.sum(q_sigma * q_sigma.T)) / max(
+            float(np.trace(q_sigma)), _TINY
+        )
+    return relative
+
+
+def _pair_sampling_moments(
+    first: np.ndarray, second: np.ndarray, partition: Sequence[Sequence[int]] | None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Expectation and covariance of ``(mean_t(a' b'), mean_t(a'**2),
+    mean_t(b'**2))`` for the ``(T,)`` fluctuations ``a'``, ``b'`` of two
+    components from :func:`_fluctuations` with the same ``partition``.
+
+    The two-component generalisation of :func:`_residual_sampling_error`:
+    the auto- and cross-covariances ``gamma_ik(tau) = cov(x_i(t), x_k(t +
+    tau))`` are the residual's sample ones plus the (cross-)variance the
+    removed bin means took out (solved the same way), kept up to the first
+    non-positive lag of the autocovariances (the cross-covariance up to the
+    shorter of the two). With ``Sigma_ik`` their Toeplitz matrices and ``Q``
+    the bin-mean removal, Isserlis' theorem for a Gaussian process gives
+    ``E mean_t(x_i x_j) = tr(Q Sigma_ij) / T`` and
+
+        cov(mean_t(x_i x_j), mean_t(x_k x_l))
+            = (tr(Q Sigma_ik Q Sigma_lj) + tr(Q Sigma_il Q Sigma_kj)) / T**2.
+    """
+    num_frames = first.size
+    if partition is None:
+        partition = [range(num_frames)]
+    spectra = np.fft.rfft(np.stack([first, second], axis=1), n=2 * num_frames, axis=0)
+    max_lag = max(num_frames // 4, 2)
+    # lagged[tau, i, k] = mean_t x_i(t) x_k(t + tau), tau >= 0.
+    lagged = (
+        np.fft.irfft(np.conj(spectra)[:, :, None] * spectra[:, None, :], axis=0)[
+            :max_lag
+        ]
+        / num_frames
+    )
+    keep_auto = np.cumprod(np.diagonal(lagged, axis1=1, axis2=2) > 0, axis=0)
+    keep = (keep_auto[:, :, None] * keep_auto[:, None, :]).astype(bool)
+    # Both signs of every lag: tau and -tau (lag 0 once).
+    two_sided = lagged + lagged.transpose(0, 2, 1)
+    two_sided[0] /= 2.0
+    lags = np.arange(max_lag)[:, None, None]
+    sides = np.where(lags > 0, 2.0, 1.0)
+    weighted = np.zeros((2, 2))
+    weights = np.zeros((2, 2))
+    for frame_ids in partition:
+        w = np.where(keep, np.clip(1.0 - lags / len(frame_ids), 0.0, None), 0.0)
+        weighted += np.sum(w * two_sided, axis=0)
+        weights += np.sum(w * sides, axis=0)
+    removed = weighted / np.maximum(num_frames - weights, 1.0)
+    gamma = np.zeros((num_frames, 2, 2))
+    gamma[:max_lag] = np.where(keep, lagged + removed, 0.0)
+    # q[i][k] = Q Sigma_ik, Sigma_ik[t, s] = gamma_ik(s - t).
+    q = [
+        [
+            _fluctuations(linalg.toeplitz(gamma[:, k, i], gamma[:, i, k]), partition)[0]
+            for k in range(2)
+        ]
+        for i in range(2)
+    ]
+
+    def trace(x: np.ndarray, y: np.ndarray) -> float:
+        return float(np.sum(x * y.T))
+
+    mean = np.array([np.trace(q[0][1]), np.trace(q[0][0]), np.trace(q[1][1])])
+    v_ab = trace(q[0][0], q[1][1]) + trace(q[0][1], q[0][1])
+    covariance = np.array(
+        [
+            [v_ab, 2 * trace(q[0][0], q[0][1]), 2 * trace(q[0][1], q[1][1])],
+            [0.0, 2 * trace(q[0][0], q[0][0]), 2 * trace(q[0][1], q[1][0])],
+            [0.0, 0.0, 2 * trace(q[1][1], q[1][1])],
+        ]
+    )
+    covariance = np.triu(covariance) + np.triu(covariance, 1).T
+    return mean / num_frames, covariance / num_frames**2
+
+
 def _with_noise(value: np.ndarray, noise: np.ndarray | None) -> np.ndarray:
     """Add an expected white-noise contribution; the result must be positive
-    (a constant or non-finite series has no tke or spectrum to compare)."""
+    (a constant or non-finite series has no tke, stress or spectrum to
+    compare)."""
     if noise is not None:
         value = value + noise
     if not np.all(value > 0):
         raise ValueError(
-            "A tke or spectral statistic is undefined: a constant or non-finite "
+            "A tke, stress or spectral statistic is undefined: a constant or non-finite "
             "series (e.g. a failed member or a sensor inside a building)."
         )
     return value
@@ -172,8 +335,8 @@ class ResolvedStatisticsError:
     """Block-diagonal error of one window's statistics.
 
     ``covariance_diag`` follows the flattened layout of
-    :class:`ObservationStatistics` (rows raw, bins, tke, spectral, sensor
-    innermost). ``noise_variance`` is the per-observation raw-frame instrument
+    :class:`ObservationStatistics` (rows raw, bins, tke, stress, spectral,
+    sensor innermost). ``noise_variance`` is the per-observation raw-frame instrument
     variance (what :attr:`ObservationStatistics.noise_variance` should be set
     to).
     """
@@ -181,6 +344,8 @@ class ResolvedStatisticsError:
     covariance_diag: np.ndarray
     noise_variance: np.ndarray
     block_slices: dict[str, slice]
+    #: Rows of each block (its slice holds a multiple of num_sensors per row).
+    block_rows: dict[str, int]
     provenance: str
 
     @property
@@ -198,10 +363,21 @@ class ObservationStatistics:
 
     - ``raw``: the frames unchanged (no aggregation);
     - ``bins``: the ``aggregation`` interval means;
-    - ``tke``: one row, ``k_cs = 0.5 var_t(u_cs)`` (population variance,
-      ``ddof=0``); the resolved TKE of sensor ``s`` is ``sum_c k_cs``.
-      Options ``normalize`` (divide by ``0.5 |U_s|**2``,
-      ``|U_s|**2 = sum_c mean_t(u_cs)**2``; needs ``num_sensors``), ``log``;
+    - ``tke``: one row, ``k_cs = 0.5 mean_t(u'_cs**2)`` with ``u'`` the
+      fluctuation about the window mean (the population variance,
+      ``ddof=0``), or with ``bins`` about the mean of each bin's frames (the
+      arithmetic mean whatever the aggregation ``mode``): the variation
+      between the bin means is what the bins observe, so it is left out. The
+      resolved TKE of sensor ``s`` is ``sum_c k_cs``. Options ``normalize``
+      (default; divide by ``0.5 |U_s|**2``, ``|U_s|**2 = sum_c
+      mean_t(u_cs)**2`` over the window; needs ``num_sensors``), ``log``;
+    - ``stress``: one row, per pair ``(a, b)`` of observed components (in
+      operator order: (0, 1), (0, 2), (1, 2)) and sensor ``s`` the covariance
+      ``mean_t(u'_as u'_bs)`` of the tke fluctuations (the same partition).
+      Option ``normalize`` (default): the correlation coefficient, divided by
+      ``sqrt(mean_t(u'_as**2) mean_t(u'_bs**2))``. Needs ``num_sensors`` and
+      two or three components; with two the row is narrower than ``obs``
+      (``slot_used``);
     - ``spectral``: one row per band, the mean one-sided Welch PSD (Hann
       window, constant detrend, 50% overlap) in ``num_bands`` log-spaced bands
       between ``f_min`` (default the first nonzero Welch frequency) and
@@ -212,29 +388,33 @@ class ObservationStatistics:
     Instrument noise: the observed (noisy) series' statistics are taken as
     they are; the predictions instead get the expected white-noise
     contribution of ``noise_variance`` added before normalisation and log
-    (variance ``+ sigma**2``, band PSD ``+`` the exact Welch level of white
-    noise), so both sides carry the same bias. ``raw`` and ``bins`` are never
-    changed.
+    (tke variance ``+ (T - B) / T sigma**2`` for ``T`` frames in ``B`` bins,
+    one without ``bins``; band PSD ``+`` the exact Welch level of white
+    noise), so both sides carry the same bias. The noise is independent
+    between components, so the stress covariance gets nothing; with
+    ``normalize`` its denominator's variances get the tke term. ``raw`` and
+    ``bins`` are never changed.
 
     An ``observed=True`` call fixes the spectral bands (frame count, spacing,
     segments) for the following predictions, which must have the same frame
     count and spacing; before any observed call a prediction uses its own.
 
     ``std``, ``pool_std``, ``representation_std`` and ``std_floor`` set the
-    tke and spectral error blocks, see :meth:`resolve_error`.
+    tke, stress and spectral error blocks, see :meth:`resolve_error`.
 
     Args:
-        types: Non-empty subset of ``("raw", "bins", "tke", "spectral")``;
-            ``raw`` and ``bins`` are mutually exclusive.
+        types: Non-empty subset of ``("raw", "bins", "tke", "stress",
+            "spectral")``; ``raw`` and ``bins`` are mutually exclusive.
         aggregation: The interval aggregation, required with ``bins`` and
             ignored without.
         tke: ``tke`` options (``None``: defaults).
         spectral: ``spectral`` options (``None``: defaults).
-        num_sensors: Sensors per component, required by the tke ``normalize``
-            option to sum the components of a sensor.
+        num_sensors: Sensors per component, required by ``stress`` and the
+            tke ``normalize`` option to tell the components of a sensor.
         noise_variance: Raw-frame instrument variance, a scalar or one value
-            per obs (``None`` or 0: no noise), added to the predicted tke and
-            spectral statistics.
+            per obs (``None`` or 0: no noise), added to the predicted tke,
+            stress and spectral statistics.
+        stress: ``stress`` options (``None``: defaults).
     """
 
     def __init__(
@@ -245,6 +425,7 @@ class ObservationStatistics:
         spectral: Mapping[str, Any] | None = None,
         num_sensors: int | None = None,
         noise_variance: np.ndarray | float | None = None,
+        stress: Mapping[str, Any] | None = None,
     ) -> None:
         if isinstance(types, str):
             raise ValueError("types must be a list of statistic types.")
@@ -270,6 +451,7 @@ class ObservationStatistics:
         self.aggregation = aggregation if "bins" in self.types else None
         self._allow_interval_count_change = False
         self.tke = _options(tke, _TKE_DEFAULTS, "tke")
+        self.stress = _options(stress, _STRESS_DEFAULTS, "stress")
         self.spectral = _options(spectral, _SPECTRAL_DEFAULTS, "spectral")
         num_bands = int(self.spectral["num_bands"])
         if num_bands != self.spectral["num_bands"] or num_bands < 1:
@@ -283,6 +465,8 @@ class ObservationStatistics:
         self.num_sensors = None if num_sensors is None else int(num_sensors)
         if "tke" in self.types and self.tke["normalize"] and self.num_sensors is None:
             raise ValueError("tke.normalize requires num_sensors.")
+        if "stress" in self.types and self.num_sensors is None:
+            raise ValueError("stress requires num_sensors.")
         self.noise_variance = noise_variance
         #: Spectral setup of the last observed series, reused by predictions.
         self._observed_setup: _SpectralSetup | None = None
@@ -313,22 +497,45 @@ class ObservationStatistics:
         speed2 = np.square(per_component).sum(axis=-2, keepdims=True)
         return np.broadcast_to(speed2, per_component.shape).reshape(mean.shape)
 
-    def _tke(self, values: np.ndarray, noise: np.ndarray | None) -> np.ndarray:
+    def _partition(
+        self, observations: xarray.DataArray
+    ) -> tuple[tuple[int, ...], ...] | None:
+        """Frame ids of the ``bins`` intervals (``None`` without bins): the
+        tke fluctuations are taken about these means."""
+        if self.aggregation is None:
+            return None
+        bins = self.aggregation.bins(observations, allow_interval_count_change=True)
+        return tuple(bin_.frame_ids for bin_ in bins)
+
+    def _tke(
+        self,
+        values: np.ndarray,
+        noise: np.ndarray | None,
+        partition: Sequence[Sequence[int]] | None,
+    ) -> np.ndarray:
         """``(..., T, O)`` frames -> ``(..., 1, O)`` tke row."""
-        tke = 0.5 * _with_noise(values.var(axis=-2), noise)
+        residual, noise_factor = _fluctuations(values, partition)
+        noise = None if noise is None else noise_factor * noise
+        tke = 0.5 * _with_noise(np.mean(residual**2, axis=-2), noise)
         if self.tke["normalize"]:
             tke = tke / np.maximum(0.5 * self._speed2(values.mean(axis=-2)), _TINY)
         if self.tke["log"]:
             tke = np.log(tke)
         return tke[..., None, :]
 
-    def _tke_std(self, values: np.ndarray) -> np.ndarray:
+    def _tke_std(
+        self, values: np.ndarray, partition: Sequence[Sequence[int]] | None
+    ) -> np.ndarray:
         """Sampling std of the tke row of one ``(T, O)`` series: the relative
-        std of the window variance (:func:`_sampling_errors`), with
+        std of the residual variance (:func:`_residual_sampling_error`), with
         ``normalize`` that of ``|U_s|**2`` added (independent components,
-        ``var |U|**2 = sum_c 4 mean_c**2 var(mean_c)``), times the row value
+        ``var |U|**2 = sum_c 4 mean_c**2 var(mean_c)``, Bartlett's
+        ``var(mean_c)`` from :func:`_sampling_errors`), times the row value
         unless it is a log (delta method)."""
-        relative, mean_variance = _sampling_errors(values)
+        relative = _residual_sampling_error(
+            _fluctuations(values, partition)[0], partition
+        )
+        mean_variance = _sampling_errors(values)[1]
         if self.tke["normalize"]:
             mean = values.mean(axis=0)
             speed2 = self._speed2(mean)
@@ -338,8 +545,82 @@ class ObservationStatistics:
             )
         std = relative[None, :]
         if not self.tke["log"]:
-            std = std * self._tke(values, None)[0]
+            std = std * self._tke(values, None, partition)[0]
         return std
+
+    # ------------------------------------------------------------------
+    # stress
+    # ------------------------------------------------------------------
+
+    def _pairs(self, num_obs: int) -> tuple[np.ndarray, np.ndarray]:
+        """Component ids ``(a, b)`` of every stress pair, in operator order."""
+        num_sensors = cast(int, self.num_sensors)
+        num_components, remainder = divmod(num_obs, num_sensors)
+        if remainder:
+            raise ValueError("Observation count is not a multiple of num_sensors.")
+        if not 2 <= num_components <= 3:
+            raise ValueError(
+                f"stress needs two or three observed velocity components (got "
+                f"{num_components}): it is the covariance between components."
+            )
+        pairs = np.array(list(itertools.combinations(range(num_components), 2)))
+        return pairs[:, 0], pairs[:, 1]
+
+    def _by_pair(self, array: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """``(..., O)`` -> the ``(..., P * S)`` entries of the components
+        ``a`` and ``b`` of every pair, sensor innermost."""
+        a, b = self._pairs(array.shape[-1])
+        per_component = array.reshape(
+            *array.shape[:-1], -1, cast(int, self.num_sensors)
+        )
+        shape = (*array.shape[:-1], -1)
+        return per_component[..., a, :].reshape(shape), per_component[
+            ..., b, :
+        ].reshape(shape)
+
+    def _stress(
+        self,
+        values: np.ndarray,
+        noise: np.ndarray | None,
+        partition: Sequence[Sequence[int]] | None,
+    ) -> np.ndarray:
+        """``(..., T, O)`` frames -> ``(..., 1, P * S)`` stress row. The noise
+        is independent between components: only the normalising variances
+        get it (as the tke row does)."""
+        residual, noise_factor = _fluctuations(values, partition)
+        first, second = self._by_pair(residual)
+        stress = np.mean(first * second, axis=-2)
+        if self.stress["normalize"]:
+            noise = None if noise is None else noise_factor * noise
+            variance = _with_noise(np.mean(residual**2, axis=-2), noise)
+            var_a, var_b = self._by_pair(variance)
+            stress = stress / np.sqrt(var_a * var_b)
+        return stress[..., None, :]
+
+    def _stress_std(
+        self, values: np.ndarray, partition: Sequence[Sequence[int]] | None
+    ) -> np.ndarray:
+        """Sampling std of the stress row of one ``(T, O)`` series, from the
+        Gaussian moments of :func:`_pair_sampling_moments`: the covariance's
+        own, or for the correlation coefficient ``r = c / sqrt(v_a v_b)``
+        (``normalize``) the delta method, ``g.T V g`` with
+        ``g = (1 / sqrt(v_a v_b), -r / (2 v_a), -r / (2 v_b))``."""
+        first, second = self._by_pair(_fluctuations(values, partition)[0])
+        std = np.empty(first.shape[-1])
+        for j in range(std.size):
+            mean, covariance = _pair_sampling_moments(
+                first[:, j], second[:, j], partition
+            )
+            if self.stress["normalize"]:
+                c, v_a, v_b = mean[0], max(mean[1], _TINY), max(mean[2], _TINY)
+                r = c / np.sqrt(v_a * v_b)
+                gradient = np.array(
+                    [1.0 / np.sqrt(v_a * v_b), -0.5 * r / v_a, -0.5 * r / v_b]
+                )
+                std[j] = np.sqrt(max(gradient @ covariance @ gradient, 0.0))
+            else:
+                std[j] = np.sqrt(max(covariance[0, 0], 0.0))
+        return std[None, :]
 
     # ------------------------------------------------------------------
     # spectral
@@ -518,12 +799,31 @@ class ObservationStatistics:
     # ------------------------------------------------------------------
 
     def _statistic_rows(
-        self, setup: _SpectralSetup | None
+        self, setup: _SpectralSetup | None, observations: xarray.DataArray
     ) -> list[tuple[str, _Rows, _Std, np.ndarray]]:
-        """``(block, rows, sampling std, band_frequency)`` of tke and spectral."""
+        """``(block, rows, sampling std, band_frequency)`` of tke, stress and
+        spectral for the frames of ``observations``."""
         rows: list[tuple[str, _Rows, _Std, np.ndarray]] = []
+        if {"tke", "stress"} & set(self.types):
+            partition = self._partition(observations)
         if "tke" in self.types:
-            rows.append(("tke", self._tke, self._tke_std, np.full(1, np.nan)))
+            rows.append(
+                (
+                    "tke",
+                    lambda values, noise: self._tke(values, noise, partition),
+                    lambda values: self._tke_std(values, partition),
+                    np.full(1, np.nan),
+                )
+            )
+        if "stress" in self.types:
+            rows.append(
+                (
+                    "stress",
+                    lambda values, noise: self._stress(values, noise, partition),
+                    lambda values: self._stress_std(values, partition),
+                    np.full(1, np.nan),
+                )
+            )
         if setup is not None:
             rows.append(
                 (
@@ -554,10 +854,14 @@ class ObservationStatistics:
 
         Returns ``(..., "time", "obs")`` with rows stacked along ``"time"``:
         the raw frames, the bin rows (exactly :class:`AggregateObservations`'
-        output), the tke row, then one spectral row per band. A ``"block"``
-        coordinate along ``"time"`` labels each row; ``"band_frequency"``
-        holds the spectral band centres (Hz, NaN on other rows). The tke and
-        spectral rows are labelled with the window's first frame time.
+        output), the tke row, the stress row, then one spectral row per band.
+        A ``"block"`` coordinate along ``"time"`` labels each row;
+        ``"band_frequency"`` holds the spectral band centres (Hz, NaN on other
+        rows). The statistic rows are labelled with the window's first frame
+        time. A stress row narrower than ``obs`` (two components) is padded
+        with zeros and a boolean ``"slot_used"`` coordinate on ``("time",
+        "obs")`` marks the padding False (only then is it there), which
+        ``flatten_observations`` drops.
 
         Args:
             observations: Raw frames with a seconds-valued ``time`` coordinate,
@@ -565,7 +869,8 @@ class ObservationStatistics:
             observed: True for the noisy observed series (statistics as they
                 are; fixes the spectral bands for the next predictions); False
                 (the default, model predictions) adds the expected
-                ``noise_variance`` contribution to the tke and spectral rows.
+                ``noise_variance`` contribution to the tke, stress and
+                spectral rows.
         """
         if "time" not in observations.dims or "obs" not in observations.dims:
             raise ValueError("Observation statistics need 'time' and 'obs' dims.")
@@ -583,9 +888,16 @@ class ObservationStatistics:
             binned = self.aggregation(obs)
             parts.append(("bins", binned, np.full(binned.sizes["time"], np.nan)))
         values = np.asarray(obs.values, dtype=float)
-        for block, rows, _, frequency in self._statistic_rows(setup):
+        num_obs = obs.sizes["obs"]
+        widths = []
+        for block, rows, _, frequency in self._statistic_rows(setup, obs):
             data = rows(values, noise)
-            num_rows = data.shape[-2]
+            num_rows, width = data.shape[-2:]
+            if width < num_obs:
+                data = np.concatenate(
+                    [data, np.zeros((*data.shape[:-1], num_obs - width))], axis=-1
+                )
+            widths += [width] * num_rows
             part = obs.isel(time=[0] * num_rows).copy(data=data)
             part = part.assign_coords(time=np.full(num_rows, times[0]))
             parts.append((block, part, frequency))
@@ -604,6 +916,16 @@ class ObservationStatistics:
                 labelled, dim="time", coords="minimal", compat="override", join="exact"
             )
         )
+        if min(widths, default=num_obs) < num_obs:
+            # The statistic rows are last: every earlier row is full.
+            row_widths = np.full(result.sizes["time"], num_obs)
+            row_widths[result.sizes["time"] - len(widths) :] = widths
+            result = result.assign_coords(
+                slot_used=(
+                    ("time", "obs"),
+                    np.arange(num_obs)[None, :] < row_widths[:, None],
+                )
+            )
         return cast(xarray.DataArray, result.transpose(*observations.dims))
 
     # ------------------------------------------------------------------
@@ -620,9 +942,18 @@ class ObservationStatistics:
             )
         if "tke" in self.types:
             counts["tke"] = 1
+        if "stress" in self.types:
+            counts["stress"] = 1
         if "spectral" in self.types:
             counts["spectral"] = self.spectral["num_bands"]
         return counts
+
+    def _width(self, block: str, num_obs: int) -> int:
+        """Entries per row of ``block``: ``num_obs``, for stress one per pair
+        and sensor."""
+        if block != "stress":
+            return num_obs
+        return int(self._pairs(num_obs)[0].size) * cast(int, self.num_sensors)
 
     def block_slices(self, observations: xarray.DataArray) -> dict[str, slice]:
         """Slices of each block in the flattened single-member vector."""
@@ -630,14 +961,16 @@ class ObservationStatistics:
         slices = {}
         start = 0
         for block, count in self._row_counts(observations).items():
-            slices[block] = slice(start, start + count * num_obs)
-            start += count * num_obs
+            size = count * self._width(block, num_obs)
+            slices[block] = slice(start, start + size)
+            start += size
         return slices
 
     @staticmethod
     def _pool_by_height(std: np.ndarray, heights: np.ndarray) -> np.ndarray:
         """Median of ``(rows, O)`` stds over the sensors at one height, per
-        row and component (a sensor alone at its height keeps its own)."""
+        row and component (stress: pair; a sensor alone at its height keeps
+        its own)."""
         num_sensors = heights.size
         per_component = std.reshape(std.shape[0], -1, num_sensors)
         pooled = per_component.copy()
@@ -659,20 +992,22 @@ class ObservationStatistics:
         ``observations``: the noisy observed ``("time", "obs")`` frames. The
         raw block is ``error.resolve(observations, operator)`` and the bins
         block ``error.resolve(observations, operator, aggregation)``,
-        unchanged. A tke or spectral block's std is
+        unchanged. A tke, stress or spectral block's std is
 
             sqrt(s**2 + representation_std**2), floored at std_floor,
 
         with ``s`` the configured float ``std``, or, for ``"auto"``,
         ``sqrt(2)`` times the sampling error of the observed statistic
-        estimated from the series itself (tke: Bartlett's formulas with the
-        series' autocorrelation; spectral: the scatter of the Welch segments,
-        see ``_spectral_std``): the observed and the predicted statistic each
-        carry one. With ``pool_std: height`` the auto ``s`` is then replaced
+        estimated from the series itself (tke: the variance of a quadratic
+        form with the fluctuations' autocorrelation, see
+        ``_residual_sampling_error``; stress: Bartlett on the influence
+        series, see ``_stress_std``; spectral: the scatter of the Welch
+        segments, see ``_spectral_std``): the observed and the predicted
+        statistic each carry one. With ``pool_std: height`` the auto ``s`` is then replaced
         by its median over the sensors at the same height (per row and
-        component). The blocks are diagonal: the sampling errors of nearby
-        sensors, of u, v, w and of a sensor's tke and low bands are in fact
-        correlated, which this does not model.
+        component or pair). The blocks are diagonal: the sampling errors of
+        nearby sensors, of u, v, w, of a sensor's tke and stress and of its tke
+        and low bands are in fact correlated, which this does not model.
         """
         resolved = error.resolve(observations, operator, self.aggregation)
         num_obs = observations.sizes["obs"]
@@ -688,8 +1023,10 @@ class ObservationStatistics:
         if "raw" in self.types or "bins" in self.types:
             variances.append(resolved.covariance_diag)
         descriptions = []
-        for block, rows, sampling_std, frequency in self._statistic_rows(setup):
-            options = self.tke if block == "tke" else self.spectral
+        for block, rows, sampling_std, frequency in self._statistic_rows(
+            setup, observations
+        ):
+            options = {"tke": self.tke, "stress": self.stress}.get(block, self.spectral)
             num_rows = frequency.size
             # A constant series (no turbulence, no noise) has no defined
             # statistic: name the first such obs.
@@ -713,7 +1050,7 @@ class ObservationStatistics:
                         heights = base.obs_ids_z
                     std = self._pool_by_height(std, np.asarray(heights, dtype=float))
             else:
-                std = np.full((num_rows, num_obs), options["std"])
+                std = np.full((num_rows, self._width(block, num_obs)), options["std"])
             std = np.maximum(
                 np.sqrt(np.square(std) + options["representation_std"] ** 2),
                 options["std_floor"],
@@ -721,19 +1058,21 @@ class ObservationStatistics:
             if not np.all(np.isfinite(std)) or np.any(std <= 0):
                 raise ValueError(f"{block} error must be finite and positive.")
             variances.append(np.square(std).reshape(-1))
+            log = f"log={options['log']}," if "log" in options else ""
             descriptions.append(
                 f"{block}(std={options['std']},pool={options['pool_std']},"
                 f"representation={options['representation_std']},"
-                f"floor={options['std_floor']},log={options['log']},"
+                f"floor={options['std_floor']},{log}"
                 f"normalize={options['normalize']})"
             )
         provenance = resolved.provenance
         if descriptions:
-            provenance += "+statistics.v3:" + ",".join(descriptions)
+            provenance += "+statistics.v4:" + ",".join(descriptions)
         return ResolvedStatisticsError(
             covariance_diag=np.concatenate(variances),
             # The instrument std is constant in time (ObservationErrorSpec).
             noise_variance=np.asarray(resolved.raw_instrument_variance[0]),
             block_slices=self.block_slices(observations),
+            block_rows=self._row_counts(observations),
             provenance=provenance,
         )

@@ -9,7 +9,9 @@ none: null
 # Before each window k > 0, the Desroziers estimate E[d_a d_f] = R of the
 # previous windows' innovations (window 0's only for window 1), per sensor
 # height, sets an inflation of the configured variance (`observation.error`,
-# which is then the floor at min_inflation 1). From innovations only, so it
+# which is then the floor at min_inflation 1). With observation statistics
+# (`observation.types`) every statistic row (tke, each spectral band) is pooled
+# apart from the bins and from each other. From innovations only, so it
 # applies to real observations.
 desroziers:
   _target_: data_assimilation.adaptive_observation_error.AdaptiveObservationError

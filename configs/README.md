@@ -53,6 +53,7 @@ localization.distance.localization_radius=20
 observation.aggregation=null                          # no binning
 observation.aggregation.interval_seconds=30
 'observation.types=[bins,tke,spectral]'               # also assimilate turbulence statistics (smoother)
+'observation.types=[bins,tke,stress,spectral]'        # ... and the Reynolds stresses u'v' (u'w', v'w' with w)
 'observation.types=[raw]'                             # every frame, no binning
 'field_analysis=${field_analysis_settings.local}'     # correct the posterior frames (smoother)
 ```
@@ -62,7 +63,7 @@ observation.aggregation.interval_seconds=30
 | Key | Holds |
 |---|---|
 | `assimilation.*` | `num_windows`, `seed`, `params_to_estimate`, `truth_dir`, `truth_start_time`, `replica_dir`, `ensemble_save_on_disk`, smoothing-only `save_states`, filtering-only `assimilate_every_n_step`, `save_history`, filtering and hybrid `save_forecast_history` |
-| `observation.*` | `operator`, `aggregation`, `types` (what is assimilated: a non-empty list of `raw`, `bins`, `tke`, `spectral`; default `[bins]`; `bins` with a null `interval_seconds` is `raw`; never `raw` with `bins`; `tke`/`spectral` smoother only, without `adaptive_error`), `tke` and `spectral` (their options: `normalize`, `log`, `std` (`auto` or a number), `std_floor`, `pool_std` (`height` or `none`), `representation_std`; spectral also `segment_seconds`, `num_bands`, `f_min`, `f_max`), `error` (`instrument_std`, `representation_std`, `propagation`, optional `representation_time_model`), `adaptive_error` (smoother only; default `null`) |
+| `observation.*` | `operator`, `aggregation`, `types` (what is assimilated: a non-empty list of `raw`, `bins`, `tke`, `stress`, `spectral`; default `[bins]`; `bins` with a null `interval_seconds` is `raw`; never `raw` with `bins`; `tke`/`stress`/`spectral` smoother only; `stress` needs two or three `obs.states`), `tke`, `stress` and `spectral` (their options: `normalize`, `log` (not stress), `std` (`auto` or a number), `std_floor`, `pool_std` (`height` or `none`), `representation_std`; spectral also `segment_seconds`, `num_bands`, `f_min`, `f_max`), `error` (`instrument_std`, `representation_std`, `propagation`, optional `representation_time_model`), `adaptive_error` (smoother only; default `null`) |
 | `field_analysis` | smoother only; default `null`: `localization_radius`, `localization_time` (Gaspari-Cohn cutoffs; both null is the global update), `variables`, `keep_forecast`, `chunking`, `min_dof` |
 | `smoothing.*` | `smoother` (the instantiable smoother), `localization`, `state_reduction`, `num_steps`, `alpha`, `final_time_smoothing` |
 | `filtering` | the `EnsembleKalmanFilter` constructor block: `mode`, `analysis`, `localization`, `state_reduction`, `inflation`, `parameter_evolution`, `beta` |

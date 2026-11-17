@@ -21,10 +21,11 @@ Outputs, in `<paths.results_dir>/smoother/`:
                      observation.adaptive_error also obs_std_assimilated, the
                      inflated std the window used, and obs_error_group; with
                      observation.types other than [bins] or [raw], obs_block
-                     labels each entry raw, bins, tke or spectral; the
-                     predicted tke and spectra include the instrument noise's
-                     bias, which obs_clean (statistics of the clean series)
-                     lacks)
+                     labels each entry raw, bins, tke, stress or spectral
+                     (stress: one entry per pair of obs.states and sensor);
+                     the predicted tke, stress and spectra include the
+                     instrument noise's bias, which obs_clean (statistics of
+                     the clean series) lacks)
     run_info.yaml also lists the adaptive error's per-window inflation.
 
 With `field_analysis` set, each window's posterior frames are corrected with the
@@ -53,7 +54,10 @@ import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
-from data_assimilation.adaptive_observation_error import observation_heights
+from data_assimilation.adaptive_observation_error import (
+    observation_heights,
+    observation_rows,
+)
 from data_assimilation.smoothing.field_analysis import within_parameter_basis
 from hydra.utils import instantiate
 from omegaconf import DictConfig
@@ -168,7 +172,7 @@ def run(cfg: DictConfig) -> None:
         obs, obs_clean, resolved = observations[w]
         # The update's observation vector. Observation statistics are computed
         # from the observed series here; the predictions get the instrument
-        # noise's bias added to their tke and spectra.
+        # noise's bias added to their tke, stress and spectra.
         flat_obs = flatten_obs(obs, aggregation)
         set_prediction_noise(aggregation, resolved)
         params.to_netcdf(windows_dir / f"window_{w}_prior_params.nc")
@@ -179,7 +183,8 @@ def run(cfg: DictConfig) -> None:
         covariance = resolved.covariance_diag
         if adaptive is not None:
             heights = observation_heights(resolved, truth_operator)
-            covariance = adaptive.variance(covariance, heights)
+            rows = observation_rows(resolved)
+            covariance = adaptive.variance(covariance, heights, rows)
 
         output = smoother(
             state=state,
@@ -200,10 +205,11 @@ def run(cfg: DictConfig) -> None:
                 smoother.pred_obs_history[-1],
                 resolved.covariance_diag,
                 heights,
+                rows,
             )
             obs_extra = {
                 "obs_std_assimilated": np.sqrt(covariance),
-                "obs_error_group": adaptive.groups(heights)[0],
+                "obs_error_group": adaptive.groups(heights, rows)[0],
             }
         save_obs(
             windows_dir / f"window_{w}_obs.nc",
