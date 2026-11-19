@@ -80,9 +80,13 @@ with `{"error": "<message>"}`.
   frame with case.json's `crs` and `origin`. The held-out validation sensors
   are not returned.
 - **Log tail**: the last 40 lines of the last 16 KiB of `worker.log`.
-- **Render**: a render uses the default options with the smallest stride that
-  fits every saved time in `max_frames` (60), so long runs render every n-th
-  saved time instead of failing.
+- **Render**: a render uses `visualization.default_options`, as
+  `python -m visualization` does: the default 2D layout plus the interactive
+  3D view, an ensemble's mean velocity, and the smallest stride that fits every
+  saved time in `max_frames` (60) and the 3D scene in its size limit, so long
+  runs and large cases render every n-th saved time instead of failing. The
+  iframe allows fullscreen. MP4 movies need the `rendering` environment
+  (`pixi install -e rendering`); without it the viewer plays the PNG frames.
 - **Viewer**: `visualization` passes the app's own origin as `frame_ancestor`,
   so the viewer served on the supervisor's asset server may be embedded in the
   page (any other page still may not). A render that succeeded without a

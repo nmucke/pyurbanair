@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from mcp_server.tools import Tools
 from user_interface.area_selector import MAX_AREA_KM2, validate_bbox
-from visualization import RenderOptions
+from visualization import default_options
 
 WEB_DIR = pathlib.Path(__file__).with_name("web")
 MAX_BODY_BYTES = 64 * 1024
@@ -560,9 +560,9 @@ class App:
                 return {"visualization_id": existing}
         if self._status(run_id)["state"] != "succeeded":
             raise RequestError(409, "The run has not succeeded (yet)")
-        # The smallest stride that fits every saved time in the frame budget.
-        frames = self._results(run_id).get("dimensions", {}).get("time", 1)
-        options = {"stride": max(1, math.ceil(frames / RenderOptions.max_frames))}
+        # As `python -m visualization`: 3D whenever it fits, the ensemble mean
+        # and the smallest stride that fits the frame and 3D scene budgets.
+        options = default_options(self._results(run_id).get("dimensions", {}))
         job = self.tools.render_simulation(run_id, uuid.uuid4().hex, options)
         with self._lock:
             self.renders[run_id] = job["visualization_id"]

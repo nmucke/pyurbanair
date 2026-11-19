@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import xarray as xr
 from evaluation.turbulence import read_binary_stl
-from visualization import BundleAssetServer, render
+from visualization import BundleAssetServer, default_options, render
 from visualization.__main__ import main
 from visualization.render_3d import SPEED_BINS, clip_triangles
 
@@ -263,6 +263,22 @@ def test_cli_strides_to_fit_the_scene(
     main(root, tmp_path / "viewer")
     scene = json.loads((tmp_path / "viewer/media/flow-3d/scene.json").read_text())
     assert scene["times"] == [0, 2]
+
+
+def test_default_options_from_dataset_sizes() -> None:
+    # Staggered names resolve as the reader's do; an ensemble shows its mean.
+    sizes = {"time": 400, "ensemble": 3, "xt": 8, "xm": 8, "yt": 6, "zt": 4}
+    assert default_options(sizes) == {
+        "stride": 7,  # 400 saved times in 60 frames
+        "render_3d": True,
+        "reduction": "mean_velocity",
+    }
+    palm = {"time": 10, "x": 8, "xu": 9, "y": 6, "yv": 7, "z": 4, "zw": 5}
+    assert default_options(palm) == {"stride": 1, "render_3d": True}
+    assert default_options({"time": 400, "x": 8, "y": 6, "z": 1}) == {
+        "stride": 7,  # 400 saved times in 60 frames
+        "render_3d": False,
+    }
 
 
 def get(url: str) -> tuple[int, str | None]:

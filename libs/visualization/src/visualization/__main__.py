@@ -16,33 +16,18 @@ the movies stay on their first frame).
 
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
 import xarray as xr
 
 from .assets import BundleAssetServer
-from .data import _coordinates
-from .render import RenderOptions, render
-from .render_3d import scene_frames
+from .render import default_options, render
 
 
 def main(run_dir: Path, bundle: Path) -> None:
     with xr.open_dataset(run_dir / "state.nc", decode_times=False) as ds:
-        frames = ds.sizes["time"]
-        ensemble = ds.sizes.get("ensemble", 1) > 1
-        sizes = {axis: len(values) for axis, values in _coordinates(ds).items()}
-    try:
-        budget = min(RenderOptions.max_frames, scene_frames(sizes))
-        render_3d = True
-    except ValueError:  # fewer than two cells on an axis: no 3D view
-        budget, render_3d = RenderOptions.max_frames, False
-    options = RenderOptions(
-        reduction="mean_velocity" if ensemble else None,
-        stride=max(1, math.ceil(frames / max(1, budget))),
-        render_3d=render_3d,
-    )
+        options = default_options(ds.sizes)
     manifest = render(run_dir, bundle, options)
     for warning in manifest.get("warnings", []):
         print(f"Warning: {warning}")

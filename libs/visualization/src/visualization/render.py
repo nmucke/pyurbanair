@@ -5,20 +5,21 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import xarray as xr
 import yaml
 
 from .assets import web_assets
-from .data import ArtifactReader, fingerprint
-from .render_3d import check_scene_size, render_3d
+from .data import AXES, ArtifactReader, fingerprint
+from .render_3d import check_scene_size, render_3d, scene_frames
 
 
 @dataclass
@@ -150,6 +151,35 @@ def validate_options(
     if opts.render_3d and opts.reduction == "mean_speed":
         raise ValueError("The 3D view requires a member or mean_velocity reduction")
     return opts
+
+
+def default_options(sizes: Mapping[Any, int]) -> dict[str, Any]:
+    """The options to render a run with when the caller chooses none.
+
+    ``sizes`` are the dimension sizes of its ``state.nc`` (each axis's first
+    alias in `AXES`, as the reader picks it, so its axis dims must be
+    coordinates, as every backend writes them). The defaults plus
+    the interactive 3D view whenever every axis has at least two cells, and an
+    ensemble's mean velocity. The stride is the smallest that fits every saved
+    time in `max_frames` and the 3D scene in its size limit. Shared by
+    `python -m visualization` and the browser app.
+    """
+    cells = {
+        axis: next((sizes[name] for name in aliases if name in sizes), 1)
+        for axis, aliases in AXES.items()
+    }
+    try:
+        budget = min(RenderOptions.max_frames, scene_frames(cells))
+        render_3d = True
+    except ValueError:  # fewer than two cells on an axis: no 3D view
+        budget, render_3d = RenderOptions.max_frames, False
+    options: dict[str, Any] = {
+        "stride": max(1, math.ceil(sizes.get("time", 1) / max(1, budget))),
+        "render_3d": render_3d,
+    }
+    if sizes.get("ensemble", 1) > 1:
+        options["reduction"] = "mean_velocity"
+    return options
 
 
 def _slice(ds: xr.Dataset, spec: dict[str, Any]) -> tuple[xr.Dataset, dict[str, Any]]:
