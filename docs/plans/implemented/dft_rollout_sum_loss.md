@@ -1,9 +1,10 @@
 # Plan: summed rollout loss for the DFT time-stepper (dft_b, realistic)
 
-Status: open, not yet trained. Branch `feat/dft-rollout-sum-loss`. The code is
-implemented and unit-tested; no GPU run has finished. DelftBlue attempts
-(2026-11-04 to 11-07) ran out of memory; the work moves to Snellius (H100,
-dft_b's own hardware and torch). Current experiment: one arm, below.
+Status: implemented and evaluated (2026-11-19). Branch
+`feat/dft-rollout-sum-loss`. The summed rollout loss closes the spectral
+deficit when the DFT is trained with it **from scratch** (−0.4 dB at 4–8
+cells against dft_b's −6 to −7.6 dB), not when an existing dft_b is
+fine-tuned with it (−4.8 dB). Results and runs: [Results](#results-snellius-2026-11-10-to-11-19).
 
 ## Why
 
@@ -139,3 +140,72 @@ cannot be split between the loss and the extra training; run
 `trainer.rollout_loss=final` with the same overrides if it is needed. If the
 sum does not help, next: a spectral loss along y as SSRolling's, then the
 residual small-scale corrector (assessment of 2026-11-03).
+
+## Results (Snellius, 2026-11-10 to 11-19)
+
+All runs on one H100 94 GB (`cuda` env), `pyudales_realistic`, effective batch
+8 (`grad_accum_samples=8`), fused LoRA, compiled conv stems; weights in
+`/projects/prjs2304/urbanair/model_weights/`. None ran out of memory.
+
+| Run | Start | Rollout and loss | Epochs | GPU-h | Best val |
+|---|---|---|---|---|---|
+| `dft_b_sumloss_k3` | dft_b (`continue_dft`) | K = 3, g = 3, sum; lr 1e-4 constant | 3 | 13.5 | 0.2006 |
+| `dft_b_sumloss_k3_cont` | resumes the above | same | 3 + 3 | 27.2 | 0.1940 |
+| `dft_b_sum_k3_scratch` | `tadpole_ae_b_realistic` (`train_dft`) | sum, horizon 1,1,2,2,3,… (2 epochs per step), `grad_unroll_steps=3`; dft_b's lr schedule (7e-4, cosine to 5e-6) | 15 | 57.3 | 0.0613 |
+| `dft_b_sum_k3_scratch_cont` | the above (`continue_dft`) | K = 3, g = 3, sum; lr 1e-4 constant | 3 | 13.3 | 0.0577 |
+| `dft_s_realistic` | `tadpole_ae_s_realistic` (`train_dft`, size S) | as `dft_b_sum_k3_scratch` | 15 | 22.8 | 0.1130 |
+| `dft_s_realistic_cont` | the above (`continue_dft`) | K = 3, g = 3, sum; lr 1e-4 constant | 3 | 5.5 | 0.1096 |
+
+`val_loss` is the final step at horizon 3 for every row, so the rows compare;
+dft_b's (horizon 4) does not. Batching that fit (step benchmarks with
+`scripts/tools/benchmark_dft_step.py`, peak per Mcell and sample): size B
+9.0 GB with g = 2, so `batch_size=4 cell_budget=4000000` with g = 3; size S
+4.2 GB with g = 2 and 6.05 GB with g = 3, so `batch_size=8
+cell_budget=11200000` (≈ 67 GB peak) with g = 3. Running: `*_cont_k5`
+(K = 5, g = 3, sum: steps 1–2 as one-step losses, 3–5 one chain; lr 5e-5
+cosine to 5e-6, 5 epochs).
+
+Rollouts (`workflows/compare_surrogates.sh`, test split, 10 trajectories to
+their end ≈ 28 T, `periodic_y`; spectra at canopy top, 0 dB is exact; RMSE
+over the window in units of u_ref):
+
+| Model | Inlet forcing | u spectrum 4–8 cells | TKE RMSE | RMSE | ACC horizon | Divergence / truth |
+|---|---|---|---|---|---|---|
+| dft_b (older comparison) | add, input | −7.6 dB | – | – | 145 s | – |
+| `dft_b_sumloss_k3` | add, output | −5.1 dB | 0.017 | 0.175 | ≥ 200 s | 2.4 |
+| `dft_b_sumloss_k3_cont` | add, output | −4.8 dB | 0.019 | 0.185 | ≥ 195 s | 2.3 |
+| `dft_b_sum_k3_scratch` | add, output | −0.4 dB | 0.041 | 0.220 | 135 s | 2.2 |
+| `dft_b_sum_k3_scratch_cont` | add, output | −0.5 dB | 0.040 | 0.219 | 134 s | 2.1 |
+| `dft_b_sum_k3_scratch_cont` | off | −1.2 dB | 0.027 | 0.182 | 112 s | 1.05 |
+| `dft_b_sum_k3_scratch_cont` | replace, output | −0.9 dB | 0.014 | 0.186 | ≥ 189 s | 1.6 |
+| `dft_s_realistic_cont` | add, output | −1.7 dB | 0.037 | 0.222 | 137 s | 2.1 |
+| `ssrolling_tl_roll3_realistic` | none | −0.9 dB | 0.021 | 0.200 | 179 s | 0.97 |
+
+Comparison run dirs: `model_weights/surrogate_comparison/realistic_dft_b_sumloss_k3_inlet_output_periodic_y`,
+`realistic_dft_sum_scratch_b_s_cont_ssrolling`, `realistic_dft_sum_scratch_cont_b_s_ssrolling`,
+`realistic_dft_sum_scratch_cont_b_inlet_input_off`, `realistic_dft_sum_scratch_cont_b_inlet_replace`.
+
+Conclusions:
+
+- **The success criterion is met from scratch, not by fine-tuning.** Three
+  to six epochs of the summed loss on top of dft_b recover only ~2 dB; the DFT
+  trained with it from the start is within SSRolling's deficit. There was no
+  final-loss control from scratch, and that run also differs from dft_b in
+  K (3 vs 4) and g (3 vs 2), so the gain is the recipe's, not the loss's alone.
+- **Energy depends on the inlet forcing.** The from-scratch models keep their
+  own fluctuations, so the additive inlet turbulence overshoots the resolved
+  TKE (1.6× with `apply: output`, 1.4× with `input`); without forcing it
+  decays to ~0.45× by 13 T. Replacing the model's fluctuations in the inlet
+  strip instead of adding to them (`inlet_turbulence.mode: replace`, branch
+  `feat/inlet-turbulence-replace`) tracks the truth (TKE RMSE 0.014, the
+  lowest of all models) and most of the divergence excess was the forcing's.
+- **The 3-step validation loss does not rank long rollouts.** The `_cont`
+  epochs lowered it by 3–6 % with no gain over 28 T, and the scratch runs'
+  far lower val loss came with a higher window RMSE under additive forcing.
+- **Size S** (on the S autoencoder, 15 M parameters, 44 ms per step against
+  97 ms) is close to size B under the same forcing; it has not been run with
+  `mode: replace`.
+
+Open: the K = 5 continuations; `mode: replace` for `dft_b_sumloss_k3` and the
+size-S models; a final-loss control trained from scratch if the loss's own
+share matters.

@@ -12,7 +12,7 @@ the scripts and configs are:
 |---|---|---|
 | Generate training data | [scripts/surrogate/generate_data.py](../scripts/surrogate/generate_data.py) | `surrogate/generate_data.yaml`, `params/surrogate_training_data.yaml` |
 | Train | [scripts/surrogate/train.py](../scripts/surrogate/train.py) `--config-name surrogate/<config>` | `surrogate/{train_stepper,train_autoencoder,train_dft,finetune_stepper,finetune_dft,continue_dft,train_latent_generator,finetune_latent_generator}.yaml`, each on top of `surrogate/training.yaml`; stepper architectures in `surrogate/architectures.yaml` |
-| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
+| Evaluate | `scripts/surrogate/evaluate_{stepper,autoencoder,latent_generator,latent_generator_ensemble}.py`, `compare_autoencoders.py`, `compare_latent_generator_ensembles.py` | `surrogate/eval.yaml`, one block per script |
 | Assimilate with it | `scripts/run_{smoother,filtering,hybrid}.py model@assim_model=neural_surrogate` | `model/neural_surrogate.yaml` |
 
 Each script's module docstring lists its options and outputs. `train.py` builds
@@ -714,6 +714,16 @@ settings. The per-step losses are logged as `train_step_<i>` in
 `state_targets` raises. Tests:
 [test_rollout_loss.py](../tests/neural_surrogates/test_rollout_loss.py).
 
+In practice (size B on `pyudales_realistic`,
+[dft_rollout_sum_loss.md](plans/implemented/dft_rollout_sum_loss.md)): `sum`
+trained from scratch (horizon ramped 1 → 3, `grad_unroll_steps` = 3) closes
+the DFT's small-scale deficit at canopy top (−0.4 dB at 4–8 cells against
+`dft_b`'s −6 to −7.6 dB); a few epochs of `sum` on top of a `final`-trained
+model recover only ~2 dB. Such a model keeps its own fluctuations, so it
+needs the inlet forcing replaced rather than added at inference (§11).
+The horizon-3 `val_loss` does not rank long rollouts: judge runs with
+`workflows/compare_surrogates.sh`.
+
 **Pushforward curriculum.** Setting `pushforward_epochs_per_step` enables a
 curriculum that starts the rollout horizon at `pushforward_start_steps`
 and increments it by one every `pushforward_epochs_per_step` epochs up to
@@ -831,7 +841,7 @@ training starts from the pretrained model) plus the same
 (`trainer.compile_modules`) as the `dft_b` run did. With `dft_b`'s batch
 settings (`cell_budget=7500000`) the summed loss ran out of memory on an
 80 GB A100 with and without them (DelftBlue, torch 2.14; see
-[dft_rollout_sum_loss.md](plans/dft_rollout_sum_loss.md)). It runs at the full
+[dft_rollout_sum_loss.md](plans/implemented/dft_rollout_sum_loss.md)). It runs at the full
 horizon from the first epoch with a one-epoch per-step warmup to a constant
 `optimizer.lr` (`lr_min: ${optimizer.lr}`), on a `RolloutTransitionDataset`
 so that `rollout_loss` `final` and `sum` runs read the same data:
