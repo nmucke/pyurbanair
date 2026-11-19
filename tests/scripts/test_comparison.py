@@ -213,6 +213,28 @@ def test_run_models_labels(
     same = model_dirs[0].parent / ".." / model_dirs[0].parent.name / model_dirs[0].name
     with pytest.raises(ValueError, match="listed twice"):
         run_models(session_root, tmp_path / "d", f"models=[{model_dirs[0]},{same}]")
+    # Its own label lets one folder run twice, e.g. under two settings.
+    run_models(
+        session_root,
+        tmp_path / "two",
+        f"models=[{model_dirs[0]},{{dir:{same},label:again,periodic_y:true}}]",
+        "max_steps=1",
+    )
+    recorded = OmegaConf.load(tmp_path / "two" / "models.yaml")
+    assert list(recorded) == ["local_fno", "again"]
+    assert recorded.again.periodic_y and "periodic_y" not in recorded.local_fno
+    with pytest.raises(ValueError, match="unknown setting"):
+        run_models(
+            session_root,
+            tmp_path / "typo",
+            f"models=[{{dir:{same},label:typo,inlet_turbulence:{{enabeld:true}}}}]",
+        )
+    with pytest.raises(ValueError, match="clash"):
+        run_models(
+            session_root,
+            tmp_path / "c",
+            f"models=[{model_dirs[0]},{{dir:{same},label:local_fno}}]",
+        )
 
 
 def test_run_models_rerun_replaces_the_rollouts(
@@ -264,6 +286,7 @@ def test_run_models_inlet_turbulence(
         assert forced.attrs["inlet_turbulence_seed"] == "truth"
         assert "inlet_turbulence_seed" not in plain.attrs
         assert "inlet_turbulence_apply" not in forced.attrs
+        assert "inlet_turbulence_mode" not in forced.attrs
         for var in ("u", "v", "w"):
             first, ref = forced[var].values[0], plain[var].values[0]
             assert np.isfinite(forced[var].values).all()
@@ -307,6 +330,133 @@ def test_run_models_inlet_turbulence_input(
                 label,
                 var,
             )
+
+
+def test_run_models_inlet_turbulence_replace(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """In one run, models on `add` and on `replace` (per model, with their own
+    `apply` and `ramp_width`): replace swaps the model's own fluctuations at
+    the inlet for the forcing's instead of stacking them, only upstream of the
+    building (x < 7), and is recorded with its ramp width; add records as
+    before."""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    dft = models[1]
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{{dir:{dft},label:dft_add}},"
+        f"{{dir:{dft},label:dft_replace,"
+        "inlet_turbulence:{mode:replace,ramp_width:0}},"
+        f"{{dir:{dft},label:dft_input,"
+        "inlet_turbulence:{mode:replace,apply:input,ramp_width:3}}]",
+        f"data_dir={corpus}",
+        "max_steps=2",
+        "inlet_turbulence.enabled=true",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    common = {"enabled": True, "seed": None}
+    for label in ("local_fno", "dft_add"):
+        assert recorded[label].inlet_turbulence == common | {"apply": "output"}
+    assert recorded.dft_replace.inlet_turbulence == common | {
+        "apply": "output",
+        "mode": "replace",
+        "ramp_width": 0,
+    }
+    assert recorded.dft_input.inlet_turbulence == common | {
+        "apply": "input",
+        "mode": "replace",
+        "ramp_width": 3,
+    }
+    name = pathlib.Path("sample_0000.nc")
+    rollouts = {
+        label: xarray.load_dataset(run_dir / "rollouts" / label / name)
+        for label in recorded
+    }
+    for label in ("local_fno", "dft_add"):
+        assert "inlet_turbulence_mode" not in rollouts[label].attrs
+        assert "inlet_turbulence_ramp_width" not in rollouts[label].attrs
+    for label, ramp in (("dft_replace", 0), ("dft_input", 3)):
+        assert rollouts[label].attrs["inlet_turbulence_mode"] == "replace"
+        assert rollouts[label].attrs["inlet_turbulence_ramp_width"] == ramp
+    assert rollouts["dft_input"].attrs["inlet_turbulence_apply"] == "input"
+    plain = xarray.load_dataset(comparison_run / "rollouts" / "dft" / name)
+
+    def fluct(a: np.ndarray) -> np.ndarray:  # about the y-mean (time, z, y, x)
+        return a - a.mean(axis=-2, keepdims=True)
+
+    for var in ("u", "v", "w"):
+        own = plain[var].values[:1]  # the model's first step, unforced
+        added = rollouts["dft_add"][var].values[:1]
+        replaced = rollouts["dft_replace"][var].values[:1]
+        assert np.isfinite(replaced).all()
+        np.testing.assert_array_equal(replaced[..., 7:], added[..., 7:])
+        # Inlet column, levels the forcing reached: add keeps the model's
+        # fluctuations plus the forcing's, replace only the forcing's.
+        forced = (added != own)[0, :, :, 0].any(axis=-1)
+        assert forced.any(), var
+        inlet = (slice(None), forced, slice(None), 0)
+        forcing = fluct(added - own)[inlet]
+        assert np.abs(fluct(own)[inlet]).max() > 1e-3, var
+        np.testing.assert_allclose(
+            fluct(added)[inlet], fluct(own)[inlet] + forcing, atol=1e-5
+        )
+        np.testing.assert_allclose(fluct(replaced)[inlet], forcing, atol=1e-5)
+        fed_back = rollouts["dft_input"][var].values
+        np.testing.assert_allclose(fed_back[0], own[0], rtol=1e-5, atol=1e-6)
+        assert not np.allclose(fed_back[1], plain[var].values[1]), var
+
+
+def test_run_models_per_model_settings(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """A mapping entry overrides the run's settings for that model only: the
+    DFT gets the forcing fed back, the Local-FNO stays the default run's."""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{{dir:{models[1]},"
+        "inlet_turbulence:{enabled:true,apply:input}}]",
+        f"data_dir={corpus}",
+        "max_steps=2",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    assert recorded.dft.inlet_turbulence == {
+        "enabled": True,
+        "seed": None,
+        "apply": "input",
+    }
+    assert "inlet_turbulence" not in recorded.local_fno
+    name = pathlib.Path("sample_0000.nc")
+    forced = xarray.load_dataset(run_dir / "rollouts" / "dft" / name)
+    assert forced.attrs["inlet_turbulence_apply"] == "input"
+    plain = xarray.load_dataset(run_dir / "rollouts" / "local_fno" / name)
+    ref = xarray.load_dataset(comparison_run / "rollouts" / "local_fno" / name)
+    assert "inlet_turbulence_seed" not in plain.attrs
+    for var in ("u", "v", "w"):
+        np.testing.assert_allclose(
+            plain[var].values, ref[var].values[:2], rtol=1e-5, atol=1e-6
+        )
+        dft = xarray.load_dataset(comparison_run / "rollouts" / "dft" / name)
+        assert not np.allclose(forced[var].values[1], dft[var].values[1]), var
+
+    with pytest.raises(ValueError, match="needs `dir`"):
+        run_models(
+            session_root,
+            tmp_path / "bad",
+            f"models=[{{dir:{models[1]},max_steps:1}}]",
+        )
 
 
 def test_run_models_periodic_y(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import pathlib
+import shutil
 from typing import Any
 
 import numpy as np
@@ -235,6 +236,46 @@ def test_finetune_dft_rollout_and_export(
         assert not all(torch.equal(after[k], before[k]) for k in changed), key
     assert all(torch.equal(model.state_dict()[k], after[k]) for k in after)
     assert (model_dir / "adapter" / "adapter_config.json").exists()
+
+
+def test_continue_dft_trains_the_pretrained_set_on_every_step(
+    tmp_path: pathlib.Path, training_data: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """continue_dft.yaml trains the parameters train_dft.yaml trained, from its
+    weights, here with rollout_loss: sum at a fixed horizon."""
+    tasks = load_script("scripts/utils/tasks.py")
+    dft = OmegaConf.create(OmegaConf.to_container(trained["train_dft"]))
+    OmegaConf.set_struct(dft, False)
+    names = {
+        n
+        for n, p in tasks.TASKS["dft"](dft, tmp_path / "dft").model.named_parameters()
+        if p.requires_grad
+    }
+    cfg = compose(
+        "surrogate/continue_dft",
+        "+test=continue_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=tmp_path,
+    )
+    OmegaConf.set_struct(cfg, False)
+    setup = tasks.TASKS[cfg.task](cfg, tmp_path / "continued")
+    assert {n for n, p in setup.model.named_parameters() if p.requires_grad} == names
+
+    cfg = compose(
+        "surrogate/continue_dft",
+        "+test=continue_dft",
+        f"paths.data_dir={training_data}",
+        f"pretrained_dir={pathlib.Path(dft.paths.weights_dir) / dft.name}",
+        root=tmp_path,
+    )
+    load_script("scripts/surrogate/train.py").run(cfg)
+    model_dir = pathlib.Path(cfg.paths.weights_dir) / cfg.name
+    with open(model_dir / "metrics.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert [int(row["pushforward_steps"]) for row in rows] == [3, 3]
+    assert {"train_step_1", "train_step_2", "train_step_3"} <= rows[0].keys()
+    assert not any(key.startswith("val_step") for key in rows[0])
 
 
 def _latent_cache_cfg(
@@ -614,6 +655,53 @@ def test_evaluate_stepper_inlet_turbulence_input(
     assert not np.allclose(forced[first + 1], plain[first + 1])
 
 
+def test_evaluate_stepper_inlet_turbulence_replace(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """`mode: replace` changes the first predicted frame only upstream of the
+    building (x < 7) and adds its ramp width to metrics.csv; `add` does not."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[str, Any] = {}
+    rollout = script._rollout
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    for mode in ("add", "replace"):
+
+        def capture(*args: Any, mode: str = mode) -> Any:
+            rollouts[mode] = rollout(*args)
+            return rollouts[mode]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={corpus}",
+            f"stepper.output_dir={tmp_path / mode}",
+            "stepper.max_steps=3",
+            "inlet_turbulence.enabled=true",
+            f"inlet_turbulence.mode={mode}",
+            "inlet_turbulence.ramp_width=2",
+            root=session_root,
+        )
+        script.run(cfg)
+    columns = {
+        mode: (tmp_path / mode / "metrics.csv").read_text().splitlines()[0]
+        for mode in rollouts
+    }
+    assert "inlet_turbulence_ramp_width" in columns["replace"]
+    assert "inlet_turbulence_ramp_width" not in columns["add"]
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    replaced, added = rollouts["replace"], rollouts["add"]
+    assert np.isfinite(replaced).all()
+    np.testing.assert_array_equal(replaced[:first], added[:first])  # the truth
+    assert not np.allclose(replaced[first, ..., 0], added[first, ..., 0])
+    np.testing.assert_array_equal(replaced[first, ..., 7:], added[first, ..., 7:])
+
+
 def test_evaluate_stepper_periodic_y(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -668,6 +756,50 @@ def test_evaluate_autoencoder(
     assert set(metrics["per_variable"]) == {"u", "v", "w"}
     assert (out / "latent_stats.png").exists()
     assert list(out.glob("vertical_profiles_*.png"))
+
+
+def test_compare_autoencoders(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """Every model is scored on evaluate_autoencoder.py's snapshots: a copy of
+    the autoencoder scores exactly what that script scores for it alone."""
+    model = session_root / "weights" / "autoencoder"
+    copy = tmp_path / "autoencoder_copy"
+    shutil.copytree(model, copy)
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"autoencoder.output_dir={tmp_path / 'single'}",
+        f"autoencoder_compare.models=[{model},{copy}]",
+        f"autoencoder_compare.output_dir={tmp_path / 'compare'}",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/evaluate_autoencoder.py").run(cfg)
+    load_script("scripts/surrogate/compare_autoencoders.py").run(cfg)
+    single = json.loads((tmp_path / "single" / "metrics.json").read_text())
+    out = tmp_path / "compare"
+    compared = json.loads((out / "metrics.json").read_text())
+    assert list(compared) == ["autoencoder", "autoencoder_copy"]
+    for summary in compared.values():
+        for key in ("rmse", "rel_l2", "psnr_db", "mean_kl", "num_snapshots"):
+            assert summary[key] == pytest.approx(single[key], rel=1e-6), key
+        for name, values in single["per_variable"].items():
+            assert summary["per_variable"][name] == pytest.approx(values, rel=1e-6)
+    with open(out / "metrics.csv") as f:
+        assert [r["model"] for r in csv.DictReader(f)] == list(compared)
+    for name in ("per_channel_metrics.png", "error_hist.png", "latent_stats.png"):
+        assert (out / name).exists(), name
+    assert list(out.glob("reconstruction_*.png"))
+    assert list(out.glob("vertical_profiles_*.png"))
+    with pytest.raises(ValueError, match="at least two"):
+        load_script("scripts/surrogate/compare_autoencoders.py").run(
+            compose(
+                "surrogate/eval",
+                "+test=eval",
+                f"autoencoder_compare.models=[{model}]",
+                root=session_root,
+            )
+        )
 
 
 def test_evaluate_latent_generator(

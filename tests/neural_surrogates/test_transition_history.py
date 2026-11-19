@@ -20,7 +20,11 @@ import xarray as xr
 
 torch = pytest.importorskip("torch")
 
-from neural_surrogates.datasets.transition import TransitionDataset, transition_collate
+from neural_surrogates.datasets.transition import (
+    RolloutTransitionDataset,
+    TransitionDataset,
+    transition_collate,
+)
 
 NZ = NY = NX = 8
 T_LEN = 6
@@ -250,3 +254,32 @@ def test_collate_stacks_history_channels(data_root: Path) -> None:
     for i, item in enumerate(items):
         assert torch.equal(batch["state_n"][i], item["state_n"])
         assert torch.equal(batch["state_next"][i], item["state_next"])
+
+
+@pytest.mark.parametrize(("h", "k"), [(1, 1), (1, 3), (2, 3)])
+def test_rollout_dataset_adds_every_intermediate_target(
+    data_root: Path, h: int, k: int
+) -> None:
+    kwargs = dict(
+        state_vars=STATE_VARS,
+        param_vars=PARAM_VARS,
+        num_history_steps=h,
+        pushforward_steps=k,
+    )
+    ds = RolloutTransitionDataset(data_root, "train", **kwargs)
+    plain = TransitionDataset(data_root, "train", **kwargs)
+    assert ds.sample_index == plain.sample_index
+    for idx in (0, len(ds) - 1):
+        traj, t = ds.sample_index[idx]
+        frames = _raw_frames(data_root, traj)
+        item = ds[idx]
+        assert item["state_targets"].shape == (k, C, NZ, NY, NX)
+        torch.testing.assert_close(item["state_targets"], frames[t + 1 : t + k + 1])
+        torch.testing.assert_close(item["state_next"], item["state_targets"][-1])
+        # Every key of the plain dataset is unchanged.
+        reference = plain[idx]
+        assert item.keys() - reference.keys() == {"state_targets"}
+        for key, value in reference.items():
+            torch.testing.assert_close(item[key], value)
+    batch = transition_collate([ds[0], ds[1]])
+    assert batch["state_targets"].shape == (2, k, C, NZ, NY, NX)

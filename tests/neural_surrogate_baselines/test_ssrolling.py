@@ -10,11 +10,13 @@ import pytest
 import torch
 import xarray as xr
 from aurora.model.film import AdaptiveLayerNorm
-from neural_surrogate_baselines.datasets import RolloutTransitionDataset
 from neural_surrogate_baselines.losses import spectral_loss
 from neural_surrogate_baselines.ssrolling.model import SSRollingUrbanNet
 from neural_surrogate_baselines.ssrolling.training import RolloutTrainer
-from neural_surrogates.datasets.transition import transition_collate
+from neural_surrogates.datasets.transition import (
+    RolloutTransitionDataset,
+    transition_collate,
+)
 from torch.utils.data import DataLoader
 
 NZ, NY, NX = 6, 20, 20
@@ -253,27 +255,6 @@ def _dataset(root: Path, k: int) -> RolloutTransitionDataset:
     return RolloutTransitionDataset(
         root, "train", param_vars=None, num_history_steps=2, pushforward_steps=k
     )
-
-
-@pytest.mark.parametrize("k", [1, 3])  # type: ignore[misc]
-def test_rollout_dataset_adds_every_intermediate_target(corpus: Path, k: int) -> None:
-    ds = _dataset(corpus, k)
-    assert len(ds) == 2 * (T_LEN - k - 1)
-    idx = len(ds) - 1
-    traj, t = ds.sample_index[idx]
-    item = ds[idx]
-    with xr.open_dataset(ds._state_files[traj]) as raw:
-        frames = torch.from_numpy(np.stack([raw[v].values for v in "uvw"], axis=1))
-    assert item["state_targets"].shape == (k, 3, NZ, GRID, GRID)
-    torch.testing.assert_close(item["state_targets"], frames[t + 1 : t + k + 1])
-    torch.testing.assert_close(item["state_n"], frames[t - 1 : t + 1].flatten(0, 1))
-    torch.testing.assert_close(item["state_next"], item["state_targets"][-1])
-    # Every key of the plain dataset is unchanged.
-    plain = super(RolloutTransitionDataset, ds).__getitem__(idx)
-    for key, value in plain.items():
-        torch.testing.assert_close(item[key], value)
-    batch = transition_collate([ds[0], ds[1]])
-    assert batch["state_targets"].shape == (2, k, 3, NZ, GRID, GRID)
 
 
 def test_spectral_loss_is_a_scaled_mse() -> None:

@@ -1,7 +1,7 @@
 """SSRollingUrbanNet's rollout training (Park & Lee 2026, §II E) on our trainer.
 
 * Roll-K: the model is unrolled over the ``K = pushforward_steps`` targets of a
-  :class:`~neural_surrogate_baselines.datasets.RolloutTransitionDataset`, with
+  :class:`~neural_surrogates.datasets.transition.RolloutTransitionDataset`, with
   gradients through every step (the paper trains Roll-1, then fine-tunes
   Roll-3);
 * loss ``Σ_i [MSE_i + α·L_spec,i]``, summed over the steps, not averaged:

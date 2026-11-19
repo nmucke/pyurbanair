@@ -4,7 +4,8 @@ The training-data layout is documented in `docs/archive/training_data.md`. This
 module exposes `TransitionDataset`, which flattens every trajectory in a
 split into individual `(state_n, params_n, geometry) -> state_{n+K}`
 training samples for one-step or K-step (pushforward-trick) neural
-surrogate training.
+surrogate training, and `RolloutTransitionDataset`, which adds every
+intermediate target `state_{n+1} … state_{n+K}`.
 """
 
 from __future__ import annotations
@@ -418,6 +419,40 @@ class TransitionDataset(Dataset):
             # the plain (C, *grid) snapshot as before.
             "state_n": frames[:H].flatten(0, 1),
             "state_next": frames[H],
+            "params_n": self._params[traj][t : t + K],
+            "geometry": self.geometry_for(traj),
+        }
+        features = self.geom_features_for(traj)
+        if features is not None:
+            item["geom_features"] = features
+        return item
+
+
+class RolloutTransitionDataset(TransitionDataset):
+    """A :class:`TransitionDataset` whose items also carry every intermediate
+    target, for losses on each step of a K-step rollout (``Trainer``'s
+    ``rollout_loss="sum"``, the baselines' SSRollingUrbanNet).
+
+    Each item adds ``state_targets`` ``(K, C, *grid)``: the snapshots at
+    ``t+1 … t+K``. ``state_next`` stays the last of them, and every other key
+    is unchanged; ``transition_collate`` stacks the new key to
+    ``(B, K, C, *grid)``. The history and the targets come from one read of
+    the ``H + K`` frames ``t-H+1 … t+K`` (against ``H + 1`` for the parent).
+    """
+
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
+        traj, t = self._index[idx]
+        K = self.pushforward_steps
+        H = self.num_history_steps
+        snap = self._get_state_ds(traj).isel(time=slice(t - H + 1, t + K + 1))
+        channels = np.stack(
+            [np.asarray(snap[v].values) for v in self.state_vars], axis=1
+        )
+        frames = torch.from_numpy(channels).to(self.dtype)
+        item = {
+            "state_n": frames[:H].flatten(0, 1),
+            "state_next": frames[-1],
+            "state_targets": frames[H:],
             "params_n": self._params[traj][t : t + K],
             "geometry": self.geometry_for(traj),
         }

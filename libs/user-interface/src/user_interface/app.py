@@ -30,6 +30,10 @@ from visualization import default_options
 
 WEB_DIR = pathlib.Path(__file__).with_name("web")
 MAX_BODY_BYTES = 64 * 1024
+# A rejected body up to this size is read and dropped before the error reply:
+# closing on unread data resets the connection (macOS), so the client would
+# see a reset instead of the 413/415.
+MAX_DRAIN_BYTES = 1024 * 1024
 LOG_TAIL_BYTES = 16 * 1024
 LOG_TAIL_LINES = 40
 # Always composed under the run's overrides: the inflow fields below live in
@@ -692,6 +696,10 @@ class App:
                     status, result = 500, {"error": str(exc)[:2000] or repr(exc)}
                 self._json(status, result)
 
+            def _drain(self, length: int) -> None:
+                if 0 < length <= MAX_DRAIN_BYTES:
+                    self.rfile.read(length)
+
             def _body(self) -> dict[str, Any]:
                 try:
                     length = int(self.headers.get("Content-Length", "0"))
@@ -700,8 +708,10 @@ class App:
                 if length == 0:
                     return {}
                 if self.headers.get_content_type() != "application/json":
+                    self._drain(length)
                     raise RequestError(415, "Send the request body as JSON")
                 if not 0 < length <= MAX_BODY_BYTES:
+                    self._drain(length)
                     raise RequestError(413, "Request body must be at most 64 KiB")
                 try:
                     payload = json.loads(self.rfile.read(length))

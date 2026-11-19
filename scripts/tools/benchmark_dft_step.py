@@ -103,7 +103,10 @@ def main() -> None:
         raise SystemExit(f"dataset gave K={K}, wanted {args.steps}")
     if args.grid is not None:
         grid = tuple(args.grid)
-        for key in ("state_n", "state_next", "geometry"):
+        # state_targets: every step's target, for trainer.rollout_loss=sum.
+        for key in ("state_n", "state_next", "state_targets", "geometry"):
+            if key not in batch:
+                continue
             batch[key] = tile_to(batch[key], grid)
         if "geom_features" in batch:
             batch["geom_features"] = sdf_features(

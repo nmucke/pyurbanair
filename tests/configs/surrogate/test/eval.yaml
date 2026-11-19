@@ -13,6 +13,12 @@ autoencoder:
   num_metric_samples: 4
   max_internal_batchsize: 2
 
+autoencoder_compare:
+  # Pinned to `autoencoder`'s: the test compares the two scripts' metrics.
+  num_figures: 1
+  num_metric_samples: 4
+  max_internal_batchsize: 2
+
 latent_generator:
   model_dir: ${paths.weights_dir}/latent_generator
   max_snapshots: 4

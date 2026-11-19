@@ -18,17 +18,21 @@ job_scripts/
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_generate_seed_ensemble.slurm # generate_data.py on surrogate/generate_seed_ensemble (array)
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
+│   ├── surrogate_train_gpu.slurm     # the same on one H100 in the cuda env, e.g. the autoencoder
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm
 │   ├── compare_surrogates.slurm      # workflows/compare_surrogates.sh 'models=[...]'
+│   ├── compare_surrogates_gpu.slurm  # the same on one A100 in the cuda env, for device=cuda
 │   ├── compare_models.slurm          # workflows/compare_models.sh 'models=[pyudales,pypalm]'
 │   ├── surrogate_train_{local_fno,ssrolling}.slurm # train.py on a baseline config (GPU)
 │   ├── surrogate_train_dft.slurm     # train.py on surrogate/train_dft (GPU)
 │   ├── surrogate_finetune_{dft,ssrolling,local_fno}.slurm # train.py on surrogate/finetune_dft or a baseline fine-tune (GPU)
+│   ├── surrogate_continue_dft.slurm  # train.py on surrogate/continue_dft: continue a trained DFT, e.g. per trainer.rollout_loss (GPU; H100 on snellius)
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
 │   ├── surrogate_evaluate_latent_generator_gpu.slurm # on best_latent_flow_matching_realistic (GPU)
+│   ├── surrogate_compare_autoencoders.slurm # compare_autoencoders.py on autoencoder_compare.models (GPU)
 │   ├── surrogate_evaluate_latent_generator_ensemble.slurm # vs the seed ensemble, array over the models (GPU)
 │   ├── surrogate_compare_latent_generator_ensembles.slurm # compare_latent_generator_ensembles.py on their outputs
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)

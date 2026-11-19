@@ -15,7 +15,8 @@ training-data folder name, state and parameter variables (``param_vars: null``
 read as the corpus' parameter names) and, where the corpus' config.yaml is
 readable, the same output frequency; the script refuses to compare them
 otherwise. Models are labelled by their folder name (if two names clash, by the
-shortest path suffix that tells them apart, e.g. `seed0_local_fno`).
+shortest path suffix that tells them apart, e.g. `seed0_local_fno`), or by
+an entry's own `label`, which also lets one model run under two settings.
 
 Outputs, in `paths.results_dir` (the run dir):
   config.yaml                        the resolved config, `sample_indices` set
@@ -37,11 +38,25 @@ then recorded in models.yaml and the rollouts' `inlet_turbulence_seed` attr
 `inlet_turbulence.apply: input` adds it only to the frame fed back to the
 model, u_t = F(u_{t-1} + forcing), and stores the model's own output; the
 rollouts then also carry `inlet_turbulence_apply: input`.
+`inlet_turbulence.mode: replace` puts the forcing in place of the model's own
+fluctuations about its y-mean where the frame's new inflow reached (keeping
+its y-mean), blending back to the model's field over the last `ramp_width`
+columns (instead of adding it on top, which doubles the inlet turbulence of a
+model that makes its own). It works with either `apply`. Only then are
+`mode` and `ramp_width` recorded in models.yaml, and the rollouts carry
+`inlet_turbulence_mode: replace` and `inlet_turbulence_ramp_width`.
 
 `periodic_y` makes every model y-periodic at inference (circular y padding in
 its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y), for uDALES' y-periodic domains.
 It is then recorded in models.yaml and the rollouts' `periodic_y` attr (1).
+
+Both settings apply to every model. A `models` entry may instead be a mapping
+`{dir: <model dir>, inlet_turbulence: {...}, periodic_y: ...}` whose keys
+override them for that model only, e.g. inlet turbulence fed back to the DFT
+alone:
+
+    'models=[model_weights/local_fno,{dir:model_weights/dft_s,periodic_y:true,inlet_turbulence:{enabled:true,apply:input}}]'
 """
 
 from __future__ import annotations
@@ -57,6 +72,7 @@ import numpy as np
 import torch
 import xarray
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import ConfigKeyError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
@@ -82,7 +98,9 @@ def run(cfg: DictConfig) -> None:
     shutil.rmtree(out / "rollouts", ignore_errors=True)
     (out / "models.yaml").unlink(missing_ok=True)
 
-    labels = _labels(list(cfg.models))
+    entries = [_model_entry(entry, cfg) for entry in cfg.models]
+    labels = _labels([d for d, _, _ in entries], [n for _, n, _ in entries])
+    settings = dict(zip(labels, (s for _, _, s in entries)))
     signatures = _check_same_data(
         {
             label: OmegaConf.load(pathlib.Path(d) / "config.yaml")
@@ -90,7 +108,7 @@ def run(cfg: DictConfig) -> None:
         }
     )
     models = {
-        label: load_model(d, dev, periodic_y=cfg.periodic_y)
+        label: load_model(d, dev, periodic_y=settings[label].periodic_y)
         for label, d in labels.items()
     }
     first_cfg = next(iter(models.values()))[1]
@@ -123,8 +141,13 @@ def run(cfg: DictConfig) -> None:
         params = data._params[sample]
         geometry = data.geometry_for(sample)
         frames = _frame_coords(data, sample, start, steps)
-        inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
+        forcings: dict[str, Any] = {}  # one per distinct setting
         for label, (model, _) in models.items():
+            its = settings[label]
+            key = OmegaConf.to_yaml(its.inlet_turbulence)
+            if key not in forcings:
+                forcings[key] = inlet_turbulence(its.inlet_turbulence, data, sample)
+            inlet = forcings[key]
             pred, seconds = _rollout(
                 model,
                 window,
@@ -134,7 +157,7 @@ def run(cfg: DictConfig) -> None:
                 steps,
                 dev,
                 inlet,
-                cfg.inlet_turbulence.apply == "input",
+                its.inlet_turbulence.apply == "input",
             )
             timings[label][0] += seconds
             timings[label][1] += max(steps - 1, 1)
@@ -153,13 +176,18 @@ def run(cfg: DictConfig) -> None:
                 },
             )
             if inlet is not None:  # "truth": the truth run's own realization
-                seed = cfg.inlet_turbulence.seed
+                seed = its.inlet_turbulence.seed
                 ds.attrs["inlet_turbulence_seed"] = (
                     "truth" if seed is None else str(seed)
                 )
-                if cfg.inlet_turbulence.apply == "input":
+                if its.inlet_turbulence.apply == "input":
                     ds.attrs["inlet_turbulence_apply"] = "input"
-            if cfg.periodic_y:
+                if its.inlet_turbulence.mode == "replace":
+                    ds.attrs["inlet_turbulence_mode"] = "replace"
+                    ds.attrs["inlet_turbulence_ramp_width"] = int(
+                        its.inlet_turbulence.ramp_width
+                    )
+            if its.periodic_y:
                 ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,11 +206,11 @@ def run(cfg: DictConfig) -> None:
                     "data": signatures[label],
                 }
                 | (
-                    {"inlet_turbulence": cfg.inlet_turbulence}
-                    if cfg.inlet_turbulence.enabled
+                    {"inlet_turbulence": _recorded(settings[label].inlet_turbulence)}
+                    if settings[label].inlet_turbulence.enabled
                     else {}
                 )
-                | ({"periodic_y": True} if cfg.periodic_y else {})
+                | ({"periodic_y": True} if settings[label].periodic_y else {})
                 for label, (model, _) in models.items()
             }
         ),
@@ -191,16 +219,64 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved rollouts in {out}")
 
 
-def _labels(model_dirs: list[str]) -> dict[str, str]:
-    """A unique label per model: its folder name or, if names clash, the
-    shortest path suffix that tells them apart, joined by `_` (a folder name)."""
-    parts = [pathlib.Path(d).resolve().parts for d in model_dirs]
+def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConfig]:
+    """A `models` entry's folder, its own `label` (None: from the folder) and
+    its `inlet_turbulence` / `periodic_y`: the run's, overridden by the
+    entry's own keys if it is a mapping."""
+    run_settings = OmegaConf.create(
+        {"inlet_turbulence": cfg.inlet_turbulence, "periodic_y": cfg.periodic_y}
+    )
+    if not isinstance(entry, DictConfig):
+        return str(entry), None, run_settings
+    own = OmegaConf.to_container(entry)
+    assert isinstance(own, dict)
+    model_dir = own.pop("dir", None)
+    label = own.pop("label", None)
+    unknown = set(own) - set(run_settings)
+    if model_dir is None or unknown:
+        raise ValueError(
+            "a mapping in `models` needs `dir` and may only set `label`, "
+            f"{sorted(run_settings)}, got {sorted(entry)}"
+        )
+    # Struct: a misspelt key inside an entry's settings raises, as at run level.
+    OmegaConf.set_struct(run_settings, True)
+    try:
+        merged = OmegaConf.merge(run_settings, own)
+    except ConfigKeyError as error:
+        raise ValueError(f"unknown setting in `models` entry {model_dir}: {error}")
+    assert isinstance(merged, DictConfig)
+    return str(model_dir), None if label is None else str(label), merged
+
+
+def _recorded(inlet: DictConfig) -> dict[str, Any]:
+    """The `inlet_turbulence` settings for models.yaml: `mode` and
+    `ramp_width` only in replace mode, so an `add` run records what it did
+    before they existed."""
+    own = OmegaConf.to_container(inlet)
+    assert isinstance(own, dict)
+    if own.get("mode", "add") == "add":
+        own.pop("mode", None)
+        own.pop("ramp_width", None)
+    return own
+
+
+def _labels(model_dirs: list[str], own: list[str | None]) -> dict[str, str]:
+    """A unique label per model: its `own` label, else its folder name or, if
+    names clash, the shortest path suffix that tells them apart, joined by `_`
+    (a folder name). A model listed twice needs its own label."""
+    unnamed = [d for d, n in zip(model_dirs, own) if n is None]
+    parts = [pathlib.Path(d).resolve().parts for d in unnamed]
     if len(set(parts)) != len(parts):
-        raise ValueError(f"a model is listed twice: {model_dirs}")
-    for n in range(1, max(map(len, parts)) + 1):
-        labels = ["_".join(p[-n:]).lstrip("_/") for p in parts]
-        if len(set(labels)) == len(labels):
+        raise ValueError(f"a model is listed twice without a `label`: {unnamed}")
+    derived: list[str] = []
+    for n in range(1, max(map(len, parts), default=0) + 1):
+        derived = ["_".join(p[-n:]).lstrip("_/") for p in parts]
+        if len(set(derived)) == len(derived):
             break
+    rest = iter(derived)
+    labels = [n if n is not None else next(rest) for n in own]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"model labels clash: {labels}")
     reserved = set(RESERVED) & set(labels)
     if reserved:
         raise ValueError(
@@ -283,10 +359,10 @@ def _rollout(
     """`steps` predicted frames after the last of `window` (its last `history`
     frames as input), and the inference time of all steps but the first.
 
-    `inlet` (if given) adds the inlet turbulence to every predicted frame
-    before it is stored and fed back; with `inlet_input` only to the frame fed
-    back, so the stored frame is the model's own output. Its time is not
-    counted.
+    `inlet` (if given) adds (or swaps in) the inlet turbulence on every
+    predicted frame before it is stored and fed back; with `inlet_input` only
+    to the frame fed back, so the stored frame is the model's own output. Its
+    time is not counted.
     """
     start = len(window) - 1
     channels, grid = window.shape[1], window.shape[2:]
