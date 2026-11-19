@@ -31,7 +31,9 @@ From the command line, `python -m visualization <run dir> <bundle dir>`
 renders with the default options, the ensemble mean velocity for an ensemble
 and the smallest stride that fits both `max_frames` and the 3D scene's size
 limit, plus the interactive 3D view whenever every axis has at least two cells
-(otherwise it renders 2D only);
+(otherwise it renders 2D only). These options are
+`default_options(sizes)` (the dimension sizes of `state.nc`), which the browser
+app renders with too;
 `workflows/forward_workflow.sh` runs it in the `rendering` environment (for
 ffmpeg) into `<run dir>/viewer`.
 `python -m visualization --serve <bundle dir>` serves a bundle through

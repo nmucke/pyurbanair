@@ -172,7 +172,8 @@ if (typeof document !== "undefined") (async function () {
     const token = ++generation;
     const tick = now => {
       if (token !== generation || !playing || !primary) return;
-      if (lastTick !== null) presentation += Math.max(0, now - lastTick) / 1000 * Number(el("rate").value);
+      // At most 250 ms per tick: a hidden (e.g. embedded) page gets no frames, so it doesn't jump ahead.
+      if (lastTick !== null) presentation += Math.min(250, Math.max(0, now - lastTick)) / 1000 * Number(el("rate").value);
       lastTick = now;
       presentation = Math.min(duration(primary), presentation);
       physical = Math.max(minimumPhysical, ForwardTimeline.physicalTime(primary.frames, presentation));

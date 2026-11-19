@@ -144,7 +144,7 @@ class FakeTools(Tools):
         if artifact_id is None:
             return {"artifacts": [{"artifact_id": 0, "path": "state.nc"}]}
         return {
-            "dimensions": {"time": self.times},
+            "dimensions": {"time": self.times, "xt": 8, "yt": 6, "zt": 4},
             "variables": {"v": {}, "u": {}},
             "coordinates": {
                 "time": {"size": self.times, "first": "0.0", "last": "2.0"}
@@ -409,7 +409,8 @@ def test_run_lifecycle(app: App, monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(listed) == {"run_id", "case_id", "model", "state", "created"}
     status, body, _ = request(app, "api/runs/run1/visualization", raw=b"")
     assert status == 200 and body == {"visualization_id": "vis1"}
-    assert tools.render_options == {"stride": 3}  # 150 saved times in 60 frames
+    # As the CLI: the 3D view, and 150 saved times in 60 frames.
+    assert tools.render_options == {"stride": 3, "render_3d": True}
     assert request(app, "api/visualizations/vis1")[1] == {
         "state": "succeeded",
         "viewer_url": "http://127.0.0.1:1/v/",
