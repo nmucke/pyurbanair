@@ -209,13 +209,21 @@ def generator_samples(
 
 def inlet_turbulence(settings: Any, dataset: Any, traj: int) -> Any:
     """The inlet-turbulence forcing of one trajectory (an `InletTurbulence`,
-    called as `forcing(pred, frame)`), or None when `settings.enabled` is off."""
+    called as `forcing(pred, frame)`), or None when `settings.enabled` is off.
+    `settings.mode` / `ramp_width`: add it, or replace the prediction's own
+    fluctuations by it."""
     if not settings.enabled:
         return None
     from neural_surrogates.inlet_turbulence import InletTurbulence
 
     seed = None if settings.seed is None else int(settings.seed)
-    return InletTurbulence.from_dataset(dataset, traj, seed=seed)
+    return InletTurbulence.from_dataset(
+        dataset,
+        traj,
+        seed=seed,
+        mode=str(settings.mode),
+        ramp_width=int(settings.ramp_width),
+    )
 
 
 def grid_spacing(dataset: Any, traj: int) -> tuple[float, float, float]:

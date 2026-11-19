@@ -29,6 +29,13 @@ inlet_turbulence:
   # output: added to every predicted frame (stored and fed back);
   # input: added only to the frame fed back, u_t = F(u_{t-1} + forcing).
   apply: output
+  # add: on top of the prediction; replace: in place of the prediction's own
+  # fluctuations about its y-mean, where the frame's new inflow reached
+  # (keeps the model's y-mean; for models that make their own turbulence).
+  mode: add
+  # replace: x-columns at the downstream end of the replaced strip over which
+  # the prediction is blended back in (0: a hard edge); at most half the reach.
+  ramp_width: 4
 # Inference-time y-periodicity of the `stepper` models (uDALES domains are
 # periodic in y): circular y padding in every conv and y-periodic SDF features
 # (neural_surrogates.periodic.make_periodic_y); no retraining.

@@ -285,3 +285,117 @@ def test_warns_without_a_free_inlet_column(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="no building-free column"):
         turbulence = InletTurbulence.from_dataset(data, 0)
     assert turbulence.footprint.shape[-1] == 0
+
+
+def _full_reach(n_frames: int, n_cols: int) -> torch.Tensor:
+    reach = torch.full((n_frames, NZ), n_cols)
+    reach[:, 0] = 0  # a ground layer
+    return reach
+
+
+def test_add_is_the_old_behaviour() -> None:
+    footprint = torch.randn(4, 3, NZ, NY, 5)
+    pred = torch.randn(2, 3, NZ, NY, NX)
+    expected = pred.clone()
+    expected[..., :5] += footprint[2]
+    for turbulence in (
+        InletTurbulence(footprint),
+        InletTurbulence(footprint, _full_reach(4, 5), mode="add", ramp_width=0),
+    ):
+        assert torch.equal(turbulence(pred, 2), expected)
+
+
+def test_replace_keeps_the_mean_flow() -> None:
+    """Without a ramp the reached strip is the prediction's y-mean plus the
+    forcing; solid levels (reach 0) and the columns downstream are untouched."""
+    footprint = torch.randn(4, 3, NZ, NY, 5)
+    pred = torch.randn(2, 3, NZ, NY, NX)
+    turbulence = InletTurbulence(footprint, _full_reach(4, 5), "replace", 0)
+    out = turbulence(pred, 2)
+    mean = pred[:, :, 1:, :, :5].mean(dim=-2, keepdim=True)
+    torch.testing.assert_close(out[:, :, 1:, :, :5], mean + footprint[2, :, 1:])
+    assert torch.equal(out[:, :, 0], pred[:, :, 0])
+    assert torch.equal(out[..., 5:], pred[..., 5:])
+
+
+@pytest.mark.parametrize("ramp_width", [0, 2, 4])
+def test_replace_does_not_stack_the_fluctuations(ramp_width: int) -> None:
+    """A prediction that is a mean flow plus the forcing comes back unchanged
+    everywhere in the reach, ramp included; `add` doubles the forcing."""
+    footprint = torch.randn(4, 3, NZ, NY, 5, dtype=torch.float64)
+    mean_flow = torch.randn(2, 3, NZ, 1, NX, dtype=torch.float64)
+    pred = mean_flow.expand(2, 3, NZ, NY, NX).clone()
+    pred[..., :5] += footprint[2] - footprint[2].mean(dim=-2, keepdim=True)
+    reach = _full_reach(4, 5)
+    replaced = InletTurbulence(footprint, reach, "replace", ramp_width)(pred, 2)
+    # The forcing's own y-mean sits on top of the kept mean flow.
+    expected = pred.clone()
+    expected[:, :, 1:, :, :5] += footprint[2, :, 1:].mean(dim=-2, keepdim=True)
+    if ramp_width == 0:
+        torch.testing.assert_close(replaced, expected)
+    fluct = replaced[:, :, 1:, :, :5] - replaced[:, :, 1:, :, :5].mean(
+        dim=-2, keepdim=True
+    )
+    own = pred[:, :, 1:, :, :5] - pred[:, :, 1:, :, :5].mean(dim=-2, keepdim=True)
+    torch.testing.assert_close(fluct, own)  # the forcing's, once
+    added = InletTurbulence(footprint)(pred, 2)[:, :, 1:, :, :5]
+    doubled = added - added.mean(dim=-2, keepdim=True)
+    torch.testing.assert_close(doubled, 2 * own)
+
+
+@pytest.mark.parametrize("ramp_width", [0, 1, 2, 3, 9])
+def test_replace_blends_over_the_ramp(ramp_width: int) -> None:
+    """In the ramp the result is the convex blend (1 - w) pred + w (mean_y +
+    forcing), w falling linearly by 1/(B+1) per column to 1/(B+1) in the last
+    reached column, with B = min(ramp_width, reach // 2): monotone, no jump at
+    the reach's edge, and at least half the reach fully replaced."""
+    footprint = torch.randn(4, 3, NZ, NY, 8, dtype=torch.float64)
+    reach = _full_reach(4, 8)
+    reach[2, 1] = 3  # a short reach (near the ground)
+    reach[2, 2] = 1
+    turbulence = InletTurbulence(footprint, reach, "replace", ramp_width)
+    pred = torch.randn(2, 3, NZ, NY, NX, dtype=torch.float64)
+    out = turbulence(pred, 2)
+    replaced = pred[..., :8].mean(dim=-2, keepdim=True) + footprint[2]
+    x = torch.arange(8, dtype=torch.float64)
+    for level in range(NZ):
+        n = int(reach[2, level])
+        ramp = min(ramp_width, n // 2)
+        w = ((n - x) / (ramp + 1)).clamp(0, 1)
+        expected = (1 - w) * pred[:, :, level, :, :8] + w * replaced[:, :, level]
+        torch.testing.assert_close(out[:, :, level, :, :8], expected)
+        if n:
+            steps = -torch.diff(torch.cat([w[:n], w.new_zeros(1)]))
+            assert (steps >= 0).all()  # monotone
+            assert steps.max() <= 1 / (ramp + 1) + 1e-9  # no jump
+            assert (w[: n - n // 2] == 1).all()  # at least half fully replaced
+            assert torch.equal(out[:, :, level, :, n:], pred[:, :, level, :, n:])
+    assert torch.equal(out[..., 8:], pred[..., 8:])
+
+
+def test_replace_needs_a_reach_and_a_known_mode() -> None:
+    footprint = torch.zeros(2, 3, NZ, NY, 3)
+    with pytest.raises(ValueError, match="reach"):
+        InletTurbulence(footprint, mode="replace")
+    with pytest.raises(ValueError, match="mode"):
+        InletTurbulence(footprint, _full_reach(2, 3), mode="blend")
+
+
+def test_replace_on_a_corpus_spares_ground_and_unreached_cells(
+    tmp_path: Path,
+) -> None:
+    """From a corpus: frame 0, the ground layer and the columns the frame's new
+    inflow did not reach (U*dt/dx = 3) keep the prediction; in the reached
+    cells the y-mean is kept and the forcing replaces the fluctuations."""
+    data = _corpus(tmp_path)
+    turbulence = InletTurbulence.from_dataset(data, 0, mode="replace", ramp_width=0)
+    assert turbulence.footprint.shape[-1] == 3
+    pred = torch.randn(2, 3, NZ, NY, NX)
+    assert torch.equal(turbulence(pred, 0), pred)
+    out = turbulence(pred, 5)
+    assert torch.equal(out[:, :, 0], pred[:, :, 0])  # ground layer
+    assert torch.equal(out[..., 3:], pred[..., 3:])
+    mean = pred[:, :, 1:, :, :3].mean(dim=-2, keepdim=True)
+    torch.testing.assert_close(
+        out[:, :, 1:, :, :3], mean + turbulence.footprint[5, :, 1:]
+    )

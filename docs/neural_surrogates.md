@@ -891,12 +891,47 @@ inlet_turbulence:
   enabled: false
   seed: null   # null: the truth run's own realization; int: a fresh one per trajectory
   apply: output  # input: u_t = F(u_{t-1} + forcing)
+  mode: add      # replace: in place of the model's own fluctuations
+  ramp_width: 4  # replace: columns over which the replaced share fades to 0
 ```
 
 With `apply: input` (`evaluate_stepper.py` and `run_models.py`) the forcing is added only to
 the frame fed back to the model, so the network advects it from the inlet and
 the stored frames are its own outputs, without the thin forced band at the
 west edge that `output` leaves.
+
+`mode: replace` (either `apply`) swaps the forcing in for the prediction's own
+fluctuations instead of adding it on top. Models that make their own
+fluctuations end up with about twice the truth's turbulent energy when the
+forcing is added (TKE ~1.6x with `output`, ~1.4x with `input`; ~0.45x with it
+off), whereas uDALES prescribes the inflow rather than accumulating it. In
+the cells the frame's new inflow reached (per frame and level, the first
+`reach` columns of the strip) the result is the blend
+
+    (1 - w(x)) * pred + w(x) * (mean_y(pred) + forcing)
+
+with `mean_y` the prediction's mean over y per batch member, component, level
+and column (the domain is y-periodic and the strip upstream of every
+building). The model's y-mean is kept and the forcing put on top of it; the
+forcing has its own nonzero y-mean, as uDALES injects it, so the strip's
+y-mean is the model's plus the forcing's. `w = 1` up to the ramp, then falls
+linearly by `1 / (B + 1)` per column to `1 / (B + 1)` in the last reached
+column and 0 beyond it, so the strip joins the untouched model field without
+a jump; in the ramp the forcing and the model's fluctuations are blended,
+never stacked. `B = min(ramp_width, reach // 2)` per frame and level, so at
+least half of every level's reach is fully replaced even near the ground,
+where the inflow is slow and the reach short; `ramp_width: 0` is a hard edge.
+The default 4 columns (16 m on the 4 m corpora, where U * dt / dx is about
+6-12 columns) softens the edge while most of the strip is fully replaced.
+Cells the frame's inflow did not reach keep the model's field (they carry
+the earlier inflow, which the model advects), and solid levels (the ground)
+are left as the model wrote them. `run_models.py` records `mode` and
+`ramp_width` in `models.yaml` and as `inlet_turbulence_mode` /
+`inlet_turbulence_ramp_width` attrs on the rollouts only in replace mode;
+`evaluate_stepper.py` then adds an `inlet_turbulence_ramp_width` column to
+`metrics.csv`. For `add` runs `models.yaml`, the rollout attrs and
+`metrics.csv` are unchanged byte for byte (the saved `config.yaml` lists the
+two new keys).
 
 When enabled, one `neural_surrogates.inlet_turbulence.InletTurbulence` is built
 per trajectory (`InletTurbulence.from_dataset(data, sample, seed)`) and called
