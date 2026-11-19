@@ -276,39 +276,75 @@ The constant constructor covariance remains the default.
 constrain the closure (`sgs_bias_b0/b1/b2`) and the wall roughness
 (`roughness_length`); second moments and spectra of the sensor series carry
 more of that information. `ObservationStatistics(types, aggregation=None,
-tke=None, spectral=None, num_sensors=None, noise_variance=None)` assimilates
-any non-empty subset of four statistic blocks of a window's raw sensor series
-`u_cs(t)` (component `c`, sensor `s`):
+tke=None, spectral=None, num_sensors=None, noise_variance=None, stress=None)`
+assimilates any non-empty subset of five statistic blocks of a window's raw
+sensor series `u_cs(t)` (component `c`, sensor `s`):
 
 | Block | Rows | Value per `(c, s)` |
 |---|---|---|
 | `raw` | one per frame | the frames unchanged (no aggregation) |
 | `bins` | one per interval | the `AggregateObservations` mean (`aggregation` required) |
-| `tke` | 1 | `k_cs = 0.5 var_t(u_cs)` (population variance, `ddof=0`) |
+| `tke` | 1 | `k_cs = 0.5 mean_t(u'_cs**2)`, `u'` about the window mean, or about each bin's mean with `bins` |
+| `stress` | 1 | per pair `(a, b)` of components (not per `c`): `mean_t(u'_as u'_bs)`, the tke's `u'`; by default the correlation coefficient |
 | `spectral` | `num_bands` | mean one-sided Welch PSD in a log-spaced band |
 
 `raw` and `bins` are refused together (the bins are means of the same frames:
-the pair counts the data twice). `tke` and `spectral` may go with `raw`, but
-are then partly redundant with it.
+the pair counts the data twice). `tke`, `stress` and `spectral` may go with
+`raw`, but are then partly redundant with it.
 
 It is a drop-in for `AggregateObservations` as the smoothers'
 `aggregate_observations`: the output keeps the dims `(..., "time", "obs")` with
-the rows stacked along `"time"` in the fixed order raw, bins, tke, spectral; a
-`"block"` coordinate labels each row and `"band_frequency"` holds the band
-centres (Hz; NaN on other rows); tke and spectral rows carry the window's
-first frame time. The `obs` axis keeps the operator's `(component, sensor)`
-layout in every block, so `flatten_observations` works unchanged and
-observation `j` still sits at sensor `j % num_sensors` (distance localization,
-the adaptive error's height groups). `block_slices(observations)` gives each
-block's slice of the flattened vector. The number of rows depends only on the
+the rows stacked along `"time"` in the fixed order raw, bins, tke, stress,
+spectral; a `"block"` coordinate labels each row and `"band_frequency"` holds
+the band centres (Hz; NaN on other rows); the statistic rows carry the
+window's first frame time. The `obs` axis keeps the operator's
+`(component, sensor)` layout in every block but stress, which has
+`(pair, sensor)`, so observation `j` of the flattened vector still sits at
+sensor `j % num_sensors` (distance localization, the adaptive error's height
+groups). `block_slices(observations)` gives each block's slice of the
+flattened vector (`block_rows` of the resolved error its rows).
+
+*Narrower rows.* A stress row has one entry per pair and sensor: with three
+components the three pairs fill the `num_obs` slots of a row, with two (`u`,
+`v`, the `xie_and_castro` case) the one pair fills only the first
+`num_sensors`. The `(time, obs)` output stays rectangular: the unused slots
+hold zeros and a boolean `"slot_used"` coordinate on `("time", "obs")` marks
+them False, and `flatten_observations` drops them, for the observed series and
+for every member's predictions alike. The coordinate exists only when some
+slot is unused, so every output without such a row is unchanged. NaN is never
+the marker (a NaN prediction is a failed member). The number of rows depends only on the
 window length (bands are fixed), so `C_D` keeps its length across equal
 windows; `allow_interval_count_change` is forwarded to the aggregation.
 
-**tke.** The resolved TKE of a sensor is `sum_c k_cs`; the block keeps the
-per-component entries. Options (defaults): `normalize` (false) divides by
-`0.5 |U_s|**2`, `|U_s|**2 = sum_c mean_t(u_cs)**2` over the observed
-components (the turbulence-intensity form, without the leading dependence on
-the inflow speed; needs `num_sensors`); `log` (true) takes the natural log.
+**tke.** Without `bins` the fluctuation `u'` is about the window mean, so
+`k_cs` is half the population variance (`ddof=0`). With `bins` it is about the
+arithmetic mean of each bin's frames (the aggregation's own partition, whatever
+its `mode`): the variation between the bin means, the slow inflow-driven part,
+is what the bins block already observes, and left in it would count that
+information twice and make the tke row follow the inflow rather than the
+turbulence. The resolved TKE of a sensor is `sum_c k_cs`; the block keeps the
+per-component entries. Options (defaults): `normalize` (true) divides by
+`0.5 |U_s|**2`, `|U_s|**2 = sum_c mean_t(u_cs)**2` over the window and the
+observed components (the turbulence-intensity form: unnormalized,
+`log k ~ 2 log U` and the row mostly re-observes the inflow speed; needs
+`num_sensors`, which `make_aggregation` passes); `log` (true) takes the
+natural log.
+
+**stress.** The off-diagonal Reynolds stresses: per pair of observed
+components `(a, b)` in the operator's order, `(0, 1)`, `(0, 2)`, `(1, 2)`
+(`u'v'`, `u'w'`, `v'w'` for `obs.states: [u, v, w]`), and sensor `s`, the
+covariance `mean_t(u'_as u'_bs)` of exactly the tke fluctuations (about the
+window mean, or about each bin's mean with `bins`, so it is also orthogonal
+to the bins). With the tke row it gives the full resolved Reynolds-stress
+tensor per sensor. Options (defaults): `normalize` (true) divides by
+`sqrt(mean_t(u'_as**2) mean_t(u'_bs**2))`, the correlation coefficient
+(bounded in [-1, 1] and independent of the inflow speed; false: the
+covariance in m2/s2). There is no `log` (stresses are signed). Needs
+`num_sensors` and two or three components: one component has no pair and is
+refused (as are more than three), by `ObservationStatistics` and by
+`check_config` from `obs.states`. With `obs.states: [u, v]` the row is `u'v'`
+alone; `u'w'`, the vertical momentum flux most directly tied to the
+roughness and the eddy viscosity, needs `w` among `obs.states`.
 
 **spectral.** Welch with a Hann window, constant detrend, 50% overlap and
 `segment_seconds` (default a quarter of the window) per segment; the frame
@@ -324,13 +360,19 @@ above). For tke and spectral the white instrument noise `sigma**2`
 (`noise_variance`, per obs) biases the statistics of the noisy observed series;
 the bias is put on the prediction side, deterministically, rather than
 subtracted from the observation (a subtraction with clipping makes the
-noise-dominated high bands meaningless under the log):
+noise-dominated high bands meaningless under the log). The noise is
+independent between components, so it adds nothing to a stress covariance;
+with `normalize` the two variances in its denominator get the tke term:
 
-    predicted variance  = var_t(u_cs) + sigma_cs**2
+    predicted tke var   = mean_t(u'_cs**2) + (T - B) / T sigma_cs**2
     predicted band PSD  = PSD_b + mean over the band's bins k of
                           2 sigma_cs**2 dt (1 - |W_k|**2 / (N sum_n w_n**2))
 
-before normalisation and log (the normalising variance likewise). The bracket
+before normalisation and log (the spectral normalising variance, the
+population variance about the window mean, gets
+`var_t(u_cs) + (T - 1) / T sigma_cs**2`, the tke term with `B = 1`). For `T` frames in `B` bins (`B = 1` without
+`bins`) the first is the exact expectation: removing the mean of `n` frames
+removes `1/n` of their white-noise variance. The bracket
 is the exact expected Welch level of white noise: the per-segment mean removal
 takes `|W_k|**2 / (N sum w**2)` of the power at bin `k` (`W` the DFT of the
 Hann window `w`, `N` the segment length; 1/6 at the first bin); DC and the
@@ -351,10 +393,10 @@ each window's observed vector before that window's update.
 **Error.** `resolve_error(noisy, operator, error)` returns a
 `ResolvedStatisticsError`: a block-diagonal, diagonal `C_D`
 (`covariance_diag`, `std`, `provenance`, plus `noise_variance` = the raw
-instrument variance per obs, and `block_slices`). The raw block is exactly
+instrument variance per obs, `block_slices` and `block_rows`). The raw block is exactly
 `error.resolve(noisy, operator)`, the bins block exactly
-`error.resolve(noisy, operator, aggregation)`. For a tke or spectral block,
-per row and `(c, s)`:
+`error.resolve(noisy, operator, aggregation)`. For a tke, stress or spectral
+block, per row and `(c, s)` (stress: pair and sensor):
 
     std = max( sqrt(s**2 + representation_std**2), std_floor )
 
@@ -367,45 +409,88 @@ the latter when the members share one turbulence realisation (the same
 initial state and inflow; ESMDA reruns every iteration from them), so
 `R = S_obs + S_pred ~ 2 S`. The single-series estimates:
 
-- tke: the large-sample (Bartlett) variance of the sample variance of a
-  Gaussian series, `var(s**2) / sigma**4 = (2/T) sum_tau rho(tau)**2`, with the
-  autocorrelation `rho` estimated from the series and summed over `|tau|` up to
-  its first zero crossing (at most `T/4` lags). With `normalize`, the error of
-  `|U_s|**2` from `var(mean) = (sigma**2/T) sum_tau rho(tau)` adds in
+- tke: the variance of the quadratic form `mean_t(u'**2) = u.T Q u / T` of a
+  Gaussian series (`Q` removes the bin means, or the window mean),
+  `var / mean**2 = 2 tr((Q Sigma)**2) / tr(Q Sigma)**2`, with `Sigma` the
+  Toeplitz autocovariance of the fluctuations: the residual's sample
+  autocovariance up to its first zero crossing (at most `T/4` lags), plus the
+  variance the removed means took out of it (solved in closed form from
+  `m_b = sum_tau (1 - |tau|/n_b) gamma(tau) / n_b`). Plain Bartlett on the
+  residual, `(2/T) sum_tau rho(tau)**2`, came out 0.78 at bins of two
+  integral times, as the mean removal shortens the residual's
+  autocorrelation. With `normalize`, the error of `|U_s|**2` from Bartlett's
+  `var(mean) = (sigma**2/T) sum_tau rho(tau)` of the raw series adds in
   quadrature. Batch means were tried first and were ~30% too small for short
-  windows (correlated, few batches).
+  windows (correlated, few batches). The cost is `O(T**2)` per obs and window.
+- stress: the same Gaussian quadratic forms for two components. The
+  auto- and cross-covariances `gamma_ik(tau)` of the pair's fluctuations
+  (the residual's, corrected for the removed bin means as above, kept up to
+  the first non-positive lag of the autocovariances) give, with Isserlis'
+  theorem, the covariance of `(mean_t(a'b'), mean_t(a'**2), mean_t(b'**2))`,
+  `cov(m_ij, m_kl) = (tr(Q S_ik Q S_lj) + tr(Q S_il Q S_kj)) / T**2`. The
+  covariance's std is its own; the correlation coefficient's
+  `r = c / sqrt(v_a v_b)` follows by the delta method. Bartlett on the
+  influence series (`a'b'`, or `z_a z_b - r (z_a**2 + z_b**2) / 2`), the
+  first try, came out 0.70-0.80 (its own sample autocorrelation is too noisy
+  to truncate well). `O(T**2)` per pair entry and window.
 - spectral: the scatter of the band PSD over the `K` Welch segments,
   `r_b = std_m(P_m) / (sqrt(K) mean_m(P_m)) * sqrt(1 + 2c(K-1)/K)`, with `c`
   the squared overlap correlation of adjacent 50%-overlapping Hann windows
   (`(1/6)**2` ~ 0.028, computed from the window). With `normalize`, the band holding the fraction
-  `f_b` of the variance (relative std `r_V`, as for tke) gets
+  `f_b` of the variance (relative std `r_V`, Bartlett's
+  `var(s**2) / sigma**4 = (2/T) sum_tau rho(tau)**2` over `|tau|` up to the
+  first zero crossing) gets
   `r**2 = (1-f_b)**2 r_b**2 + max(r_V**2 - f_b**2 r_b**2, 0)` (bands
   independent). Needs at least two segments.
 
 A Monte Carlo check (AR(1) with `phi = 0.9`, `T = 120` frames, white noise of
-std 0.5, 4000 windows) gives median single-series estimate / true std of 0.90
-(tke) and 1.17, 1.00, 0.92, 0.90 (the four bands) for the defaults; for
-`T = 600`, 0.99 and 0.84 to 0.99. Unnormalized bands come out 13-24% small.
-The tke estimate falls short when the window spans few integral times (the
-truncated sample autocorrelation underestimates `sum rho**2`): `log var` of
-an AR(1) gives 0.77 at `phi = 0.97` and 0.71 at `phi = 0.99` for `T = 120`
-(0.92 and 0.80 for `T = 600`). Raise `std_floor` for such windows.
+std 0.5, 4000 windows) gives median single-series estimate / true std of
+1.17, 1.00, 0.92, 0.90 (the four bands) for the defaults; for `T = 600`, 0.84
+to 0.99. Unnormalized bands come out 13-24% small. For the unnormalized
+`log` tke (1000 windows, `dt = 0.5` s) it gives 0.96, 0.88, 0.82 at
+`phi = 0.9, 0.97, 0.99` for `T = 120` (1.01, 1.00, 0.98 for `T = 600`), and
+about bin means of 40 frames 0.93, 0.86, 0.87 (0.95, 0.89, 0.88). The
+default `normalize` comes out 5-10% lower (the Bartlett error of the mean;
+`tests/data_assimilation/test_observation_statistics.py` checks both). The tke estimate
+falls short when the window spans few integral times (the truncated sample
+autocorrelation); raise `std_floor` for such windows.
+
+For stress (cross-correlated AR(1) components, component correlations
+-0.4, 0.2, 0.3, plus white noise of std 0.5; 1000 windows, 300 estimates;
+two and three components) the median estimate / true std is, at
+`phi = 0.9` (~10 frames correlation time) and `T = 240`: 0.89-0.99
+(correlation coefficient) and 0.82-0.98 (covariance) about the window mean,
+0.87-0.96 and 0.83-0.94 about bin means of 40 frames, 0.86-0.94 and
+0.84-0.92 about bin means of 10 frames; at `T = 600` 0.84-0.98 overall; at
+`phi = 0.97` and `T = 240` (~7 correlation times per window) it falls to
+0.76-0.89 and 0.69-0.89. The unnormalized covariance comes out a few percent
+lower than the coefficient (no cancellation between numerator and
+denominator). `test_stress_auto_std_matches_the_monte_carlo_sampling_error`
+checks a subset.
 
 With `pool_std: height` (default) the auto `s` is then replaced by its median
 over the sensors at the same height (`obs_z`), per row and component; a sensor
 alone at its height keeps its own. Pooling needs `log` or `normalize` (stds in
 absolute units differ between sensors of different turbulence levels).
 `representation_std` (default 0, the block's final units) adds in quadrature
-to either kind of `s`. Defaults: tke `std_floor` 0.05, spectral 0.1. A
+to either kind of `s`. Defaults: tke `std_floor` 0.05, stress 0.05 (on the
+correlation coefficient: the sampling std of ~400 independent samples, so it
+binds only for long, nearly perfectly correlated windows; in m2/s2 without
+`normalize`, set it to the flow), spectral 0.1. Stress pools per pair
+instead of per component and its `pool_std: height` needs `normalize`. A
 constant (or non-finite) series, observed or predicted (a failed member, a
-sensor inside a building), has no statistic and raises.
+sensor inside a building), has no statistic and raises. So do tke and stress
+with `bins` of one frame each (an interval not longer than the output
+spacing leaves no fluctuation about the bin means); a short last bin of one
+frame among longer ones is fine.
 
 Caveats:
 
 - The blocks are diagonal, but the sampling errors are correlated across
   nearby sensors (eddies larger than the window raise or lower every sensor's
-  variance together), across u, v, w and between a sensor's tke row and low
-  bands. Many correlated rows count as independent evidence, so the posterior
+  variance together), across u, v, w, between a sensor's tke and stress
+  entries (the coefficient's denominator holds the tke's variances) and
+  between a sensor's tke row and low bands. Many correlated rows count as independent evidence, so the posterior
   of the parameters they inform is overconfident. Check `fit_per_block`
   (`compute_metrics.py`) and widen `std_floor` or `representation_std` when a
   block's chi^2 or Desroziers ratio is well above 1.
@@ -414,7 +499,7 @@ Caveats:
   update is then conservative.
 - Raw frames are treated as independent (as in the existing likelihood),
   although turbulence and representation errors correlate over seconds; the
-  tke/spectral auto errors do account for that correlation.
+  tke/stress/spectral auto errors do account for that correlation.
 - The auto errors assume a near-Gaussian, stationary series over the window.
 
 ### Adaptive observation error
@@ -467,6 +552,32 @@ The choices for few observations (the 18-sensor layout with 180 s means has
   (default 10) caps it;
 - `memory` pools only the last windows (a drifting error).
 
+**With observation statistics** (`observation.types`, §2 above) the raw or
+bins block keeps exactly these groups and names (`z=2`, `z=[0,10)`), so its
+inflation is that of a run without statistics. Every other block is pooled
+apart from them and from each other, per height (band) and per row of the
+block: `tke z=2` for a one-row block, `spectral[0] z=2` ... `spectral[3] z=2`
+for the bands (lowest first), so a high band with much model error does not
+inflate a low one; the stress row is `stress z=2` (all pairs of a height
+together). `observation_heights` and `observation_rows` read the
+height and row of every entry from the `ResolvedStatisticsError`
+(`block_slices`, `block_rows`; the sensor is innermost in every block, also
+in the narrower stress row), so a new block gets its own groups unchanged. A statistic group holds one entry
+per component and sensor at its height per window, a bins group that many
+per bin: its estimate is noisy (few ratios per window), so `max_inflation`
+and `memory` (or wider `height_bands`) matter more there. It is also biased
+upward: `min_inflation` 1 clips a small group's mean ratio from below, so the
+mean std inflation exceeds 1 even when the configured error is right (with
+`obs.states` [u, v] a stress group has one ratio per sensor at its height per
+window). A Monte Carlo with chi-squared(1) ratios gave 1.17 for one ratio in
+one window, 1.08 for one ratio pooled over nine windows, 1.11 for four and
+1.06 for twenty ratios in one window. The result is conservative; pooling
+over more windows (`memory: null`) or wider `height_bands` reduces it.
+The tke and spectral rows are in log units by default, stress a correlation
+coefficient: their inflation scales the sampling std (plus
+`representation_std`) of `observation.tke` / `observation.stress` /
+`observation.spectral`.
+
 **Window 0 matters for a parameter-only smoother.** With a too-small `R` in
 window 0 the ESMDA collapses the parameter ensemble, and nothing re-inflates
 it: later windows then estimate the right `R` (the Desroziers ratio returns
@@ -476,7 +587,8 @@ to ~1) but the posterior stays overconfident. Start conservatively,
 
 Outputs: `window_{w}_obs.nc` keeps `obs_std` as the configured std (as without
 the option) and adds `obs_std_assimilated`, the inflated std the window used,
-and `obs_error_group`; `run_info.yaml` `adaptive_observation_error` lists per
+and `obs_error_group` (the entry's index into the window's `groups`);
+`run_info.yaml` `adaptive_observation_error` lists per
 window the groups, the inflation used, the std used and the window's own
 estimate (before pooling and bounds; `null` without a positive mean ratio).
 The same is logged per window. In `compute_metrics.py` the Desroziers block
@@ -719,7 +831,7 @@ parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
   Gaspari-Cohn cutoffs (the local option, Eq. 12). Both null is one global `W`
   from all observations for all frames (the global option, Eq. 11).
 - **Observations.** The raw noisy frames, one per forecast frame, whatever
-  `observation.types` assimilates: never bins, tke or spectra. A truth with
+  `observation.types` assimilates: never bins, tke, stress or spectra. A truth with
   another number of frames per window raises. `R` is `observation.error` on the
   raw frames: instrument plus representation variance, no sampling error (the
   target is the realised field), and without the adaptive error's inflation

@@ -82,7 +82,7 @@ window-indexed ones also list `per_window` values):
                   honest); the smoother's normalized data mismatch O_N. A
                   hybrid's smoother stops before the posterior forecast, so
                   its stage has only O_N. With observation statistics
-                  (observation.types with tke or spectral) the RMSE, chi^2
+                  (observation.types with tke, stress or spectral) the RMSE, chi^2
                   and Desroziers use the raw/bins (velocity) observations
                   only, and are left out without any; O_N covers all of them,
                   and `data_mismatch_per_block` gives it per type, as

@@ -172,7 +172,7 @@ def _replica(cfg: DictConfig) -> list[str]:
 
 # Mirrors data_assimilation.observation_statistics.STATISTIC_TYPES (a test checks
 # they agree): this module also runs in environments without data_assimilation.
-STATISTIC_TYPES = ("raw", "bins", "tke", "spectral")
+STATISTIC_TYPES = ("raw", "bins", "tke", "stress", "spectral")
 
 
 def _observation(cfg: DictConfig, workflow: str) -> list[str]:
@@ -205,11 +205,11 @@ def _observation(cfg: DictConfig, workflow: str) -> list[str]:
             f"observation.types {sorted(statistics)} are for the smoother only: "
             f"the {workflow} assimilates frame by frame; use [bins] or [raw]."
         )
-    if statistics and OmegaConf.select(cfg, "observation.adaptive_error") is not None:
+    states = OmegaConf.select(cfg, "obs.states", default=None)
+    if "stress" in types and states is not None and not 2 <= len(states) <= 3:
         problems.append(
-            "observation.adaptive_error pools innovations per height band of one "
-            f"kind of observation: it cannot be used with observation.types "
-            f"{list(types)}; use [bins] or [raw]."
+            "observation.types stress is the covariance between velocity "
+            f"components: it needs two or three obs.states, got {list(states)}."
         )
     return problems
 
@@ -352,7 +352,8 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
     n_aug = 3 * nx * ny * nz
     # One ESMDA update assimilates the whole window at once: every sensor's
     # observed states, stacked into one vector (BaseSmoothing._get_observations),
-    # with per sensor and state the rows of each observation.types entry.
+    # with per sensor and state the rows of each observation.types entry (the
+    # stress row: one per pair of states).
     types = OmegaConf.select(cfg, "observation.types", default=None) or ["bins"]
     rows_per_type = {
         "raw": round(window / frequency),
@@ -361,6 +362,8 @@ def _localized_update_memory(cfg: DictConfig) -> list[str]:
         "spectral": OmegaConf.select(cfg, "observation.spectral.num_bands", default=1),
     }
     n_d = len(sensors) * len(states) * sum(rows_per_type.get(t, 0) for t in types)
+    if "stress" in types:
+        n_d += len(sensors) * math.comb(len(states), 2)
     needed = n_aug * n_d**2 * 4
     available = _physical_memory()
     message = (

@@ -172,11 +172,11 @@ parameter-updating filter modes need inflation or a parameter evolution;
 `hybrid.likelihood_allocation=shared_budget` needs `filtering.beta > 1`, no
 aggregation and `assimilate_every_n_step=1`; `params_to_estimate` names only
 prior parameters; `observation.adaptive_error` is smoother-only;
-`observation.types` is a non-empty list of `raw`, `bins`, `tke`, `spectral`
-without both `raw` and `bins`, and its statistics (`tke`, `spectral`) are
-smoother-only (the filter and the hybrid's filter assimilate frame by frame)
-and rule out `observation.adaptive_error` (it pools one kind of observation per
-height band); `field_analysis` is smoother-only, excludes
+`observation.types` is a non-empty list of `raw`, `bins`, `tke`, `stress`,
+`spectral` without both `raw` and `bins`, and its statistics (`tke`,
+`stress`, `spectral`) are smoother-only (the filter and the hybrid's filter
+assimilate frame by frame); `stress` needs two or three `obs.states`;
+`field_analysis` is smoother-only, excludes
 `final_time_smoothing` and sets `localization_radius` and `localization_time`
 together (it warns that its `R` treats frames as independent, and that the
 adaptive error's inflation does not reach it); and the SGS-discrepancy rules of
@@ -309,10 +309,12 @@ All DA run dirs share one layout: `config.yaml`, `run_info.yaml`,
 `smoothing.num_steps` ESMDA steps and starts the next window from the
 posterior. `observation.types` picks what it assimilates of each window's
 sensor series: `raw` frames, `bins` (interval means, the default), and the
-turbulence statistics `tke` and `spectral`, stacked in that order with a
-block-diagonal R ([data_assimilation.md](data_assimilation.md) §2). The
+turbulence statistics `tke`, `stress` (the covariances between components;
+`u'w'` needs `w` in `obs.states`) and `spectral`, stacked in that order with
+a block-diagonal R ([data_assimilation.md](data_assimilation.md) §2). The
 observed statistics are taken from the noisy series as they are and the
-instrument noise's variance is added to the predicted tke and spectra (so
+instrument noise's variance is added to the predicted tke, stress and
+spectra (so
 `obs_clean`, from the clean series, lacks that bias); `window_{w}_obs.nc`
 then labels each entry in `obs_block`, and compute_metrics.py scores the RMSE, chi² and Desroziers on the
 `raw`/`bins` entries only, O_N on all and per block. `assimilation.save_states` picks the smoother's state files, the

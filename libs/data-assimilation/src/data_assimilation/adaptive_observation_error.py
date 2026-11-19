@@ -13,7 +13,11 @@ Before each window ``k > 0`` the estimate pools ``r_i = d_a,i d_f,i / R_conf,i``
 of the previous windows per group of observations (one group per sensor height
 or per configured height band) into an inflation ``lambda_g**2 = mean r_i`` of
 the configured variance ``R_conf``; window ``k`` then assimilates with
-``lambda_g**2 R_conf``. Re-estimating from windows that used the previous
+``lambda_g**2 R_conf``. With observation statistics
+(``ObservationStatistics``) the raw or bins block keeps these groups; every
+other block is grouped apart, per height (band) and per row of the block (the
+tke row, each spectral band), so each statistic gets its own inflation.
+Re-estimating from windows that used the previous
 estimate is the usual fixed-point iteration of the Desroziers diagnostic (Li et
 al. 2009). The diagnostic is only unbiased for an analysis that used the right
 ``R``, which window 0 (assimilated with ``initial_inflation``) did not: window 1
@@ -51,15 +55,40 @@ logger = logging.getLogger(__name__)
 def observation_heights(resolved: Any, observation_operator: Any) -> np.ndarray:
     """The sensor height of every entry of ``resolved.covariance_diag``.
 
-    ``resolved`` is a ``ResolvedObservationError``: its vector is time-major
-    with ``sensor_indices`` labelling one frame.
+    ``resolved`` is a ``ResolvedObservationError`` (time-major with
+    ``sensor_indices`` labelling one frame) or a ``ResolvedStatisticsError``
+    (sensor innermost in every block: entry ``j`` is sensor
+    ``j % num_sensors``).
     """
     base = getattr(observation_operator, "observation_operator", observation_operator)
     heights = getattr(base, "obs_z", None)
     if heights is None:
         raise ValueError("Adaptive observation error needs sensor heights (obs_z).")
-    frame = np.asarray(heights, dtype=float)[list(resolved.sensor_indices)]
+    heights = np.asarray(heights, dtype=float)
+    if getattr(resolved, "block_slices", None) is not None:
+        return heights[np.arange(resolved.covariance_diag.size) % heights.size]
+    frame = heights[list(resolved.sensor_indices)]
     return np.tile(frame, len(resolved.times))
+
+
+def observation_rows(resolved: Any) -> np.ndarray | None:
+    """The statistic row of every entry of ``resolved.covariance_diag``.
+
+    ``""`` for the raw and bins blocks, the block name for a one-row block
+    (``tke``) and ``block[r]`` for row ``r`` of a longer one (``spectral[0]``
+    the lowest band); ``None`` without observation statistics.
+    """
+    slices = getattr(resolved, "block_slices", None)
+    if slices is None:
+        return None
+    labels = np.full(resolved.covariance_diag.size, "", dtype=object)
+    for block, rows in slices.items():
+        if block in ("raw", "bins"):
+            continue
+        count = resolved.block_rows[block]
+        names = [block] if count == 1 else [f"{block}[{r}]" for r in range(count)]
+        labels[rows] = np.repeat(names, (rows.stop - rows.start) // count)
+    return labels
 
 
 class AdaptiveObservationError:
@@ -111,9 +140,27 @@ class AdaptiveObservationError:
         self._records: list[tuple[np.ndarray, np.ndarray]] = []
         self.history: list[dict[str, Any]] = []
 
-    def groups(self, heights: np.ndarray) -> tuple[np.ndarray, list[str]]:
-        """Group id per observation and the group names."""
-        heights = np.asarray(heights, dtype=float)
+    def groups(
+        self, heights: np.ndarray, rows: np.ndarray | None = None
+    ) -> tuple[np.ndarray, list[str]]:
+        """Group id per observation and the group names.
+
+        ``rows`` (``observation_rows``) splits the height groups further per
+        statistic row: ``""`` entries (raw, bins) keep the height group and its
+        name (``z=2``), the others are named after their row (``tke z=2``,
+        ``spectral[1] z=2``).
+        """
+        ids, names = self._height_groups(np.asarray(heights, dtype=float))
+        if rows is None:
+            return ids, names
+        rows = np.asarray(rows, dtype=str)
+        labels = list(dict.fromkeys(rows.tolist()))  # in vector order
+        row_ids = np.array([labels.index(r) for r in rows])
+        return row_ids * len(names) + ids, [
+            f"{label} {name}" if label else name for label in labels for name in names
+        ]
+
+    def _height_groups(self, heights: np.ndarray) -> tuple[np.ndarray, list[str]]:
         if self.bands is None:
             levels, ids = np.unique(heights, return_inverse=True)
             return ids, [f"z={z:g}" for z in levels]
@@ -150,16 +197,20 @@ class AdaptiveObservationError:
         return np.asarray(np.clip(factor, self.min_inflation, self.max_inflation))
 
     def variance(
-        self, configured_variance: np.ndarray, heights: np.ndarray
+        self,
+        configured_variance: np.ndarray,
+        heights: np.ndarray,
+        rows: np.ndarray | None = None,
     ) -> np.ndarray:
-        """The variance to assimilate the next window with.
+        """The variance to assimilate the next window with (``rows``: see
+        :meth:`groups`).
 
         Also appends the window's entry to ``history`` (groups, inflation and
         the std used, mean over each group; ``None`` for a group without
         observations) and logs it.
         """
         configured_variance = np.asarray(configured_variance, dtype=float)
-        ids, names = self.groups(heights)
+        ids, names = self.groups(heights, rows)
         factor = self.inflation(names)
         variance = configured_variance * factor[ids] ** 2
         window = len(self._records)
@@ -192,18 +243,20 @@ class AdaptiveObservationError:
         analysis: np.ndarray,
         configured_variance: np.ndarray,
         heights: np.ndarray,
+        rows: np.ndarray | None = None,
     ) -> None:
         """Add one assimilated window's innovations to the statistics.
 
         ``forecast`` / ``analysis`` are the prior and posterior predicted
         observations, ``(N_d, N_e)``; ``configured_variance`` is the window's
-        configured (not inflated) variance. Non-finite ratios are dropped.
+        configured (not inflated) variance; ``rows`` as in :meth:`groups`.
+        Non-finite ratios are dropped.
         """
         y = np.asarray(observations, dtype=float).ravel()
         d_f = y - np.asarray(forecast, dtype=float).mean(axis=1)
         d_a = y - np.asarray(analysis, dtype=float).mean(axis=1)
         ratios = d_a * d_f / np.asarray(configured_variance, dtype=float)
-        ids, names = self.groups(heights)
+        ids, names = self.groups(heights, rows)
         finite = np.isfinite(ratios)
         if not finite.all():
             logger.warning(

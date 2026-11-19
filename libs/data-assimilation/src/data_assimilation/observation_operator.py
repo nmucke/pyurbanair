@@ -432,12 +432,20 @@ def flatten_observations(obs: xarray.DataArray) -> np.ndarray:
     the sensor index stays the innermost axis and
     :func:`sensor_observation_coords` keeps mapping observation ``j`` to sensor
     ``j % num_sensors``.
+
+    A boolean ``slot_used`` coordinate on ``("time", "obs")`` (observation
+    statistics with a row narrower than the ``obs`` axis, e.g. ``stress``)
+    drops the slots marked False.
     """
     if "ensemble" in obs.dims:
         values = np.asarray(obs.transpose("ensemble", "time", "obs").values)
-        return values.reshape(values.shape[0], -1)
-    values = np.asarray(obs.transpose("time", "obs").values)
-    return values.reshape(-1)
+        values = values.reshape(values.shape[0], -1)
+    else:
+        values = np.asarray(obs.transpose("time", "obs").values).reshape(-1)
+    if "slot_used" in obs.coords:
+        used = np.asarray(obs["slot_used"].transpose("time", "obs").values, dtype=bool)
+        values = values[..., used.reshape(-1)]
+    return values
 
 
 def sensor_observation_coords(observation_operator: Any, n_d: int) -> np.ndarray:

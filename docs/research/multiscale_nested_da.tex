@@ -88,9 +88,9 @@ $u_{cs}(t_i)$, for velocity component $c$, sensor $s$ and frames
 $i = 1,\dots,n$ with spacing $\Delta t$. The config chooses any non-empty subset
 of them as a list, \texttt{observation.types: [bins, tke, spectral]}. The
 default is \texttt{[bins]}, which reproduces current runs exactly. In the
-observation vector the rows come in the order raw, bins, tke, spectral, and
-within each row the sensor is the innermost index, so localisation and the
-height grouping still apply. This is being implemented on branch
+observation vector the rows come in the order raw, bins, tke, stress,
+spectral, and within each row the sensor is the innermost index, so
+localisation and the height grouping still apply. This is being implemented on branch
 \texttt{feat/observation-statistics}, in
 \texttt{data\_assimilation.observation\_statistics}.
 
@@ -102,6 +102,7 @@ Type & Statistic per $(c, s)$ & Informs mainly \\
 raw & every frame $u_{cs}(t_i)$ & state, inflow \\
 bins & interval means $\langle u_{cs}\rangle_k$, $k = 1,\dots,K$ & inflow $\bm x$ \\
 tke & $k_{cs} = \tfrac12 \operatorname{var}_t u_{cs}$ & $\bm\theta$ (closure, $z_0$) \\
+stress & per pair $(a, b)$: $\overline{u'_{as} u'_{bs}}$, by default $/\sqrt{\overline{u'^2_{as}}\,\overline{u'^2_{bs}}}$ & $\bm\theta$ ($z_0$, closure) \\
 spectral & band-mean PSD $\bar E_{cs}(f_b)$, $b = 1,\dots,B$ & $\bm\theta$ (closure) \\
 \bottomrule
 \end{tabular}
@@ -112,14 +113,26 @@ are averages of the same frames and the data would be counted twice.
 \texttt{raw} with \texttt{tke} or \texttt{spectral} is allowed, but partly
 redundant. The TKE of a sensor is the sum of its component entries,
 $k_s = \sum_c k_{cs}$. The TKE stays split by component so that every type has
-the same (component, sensor) layout.
+the same (component, sensor) layout. With \texttt{bins}, the variance is taken
+about each bin's mean instead of the window mean, so the variation between
+the bin means, which the bins already observe, is not counted twice.
+\texttt{stress} completes the resolved Reynolds-stress tensor: per pair of
+observed components (operator order $(0,1), (0,2), (1,2)$) and sensor, the
+covariance of the same fluctuations, by default as a correlation coefficient
+(bounded, independent of the inflow speed). Its row has one entry per pair
+and sensor, so with two components (\texttt{[u, v]}: $\overline{u'v'}$ only)
+it is narrower than the other rows; $\overline{u'w'}$, the vertical momentum
+flux most tied to $z_0$ and the eddy viscosity, needs $w$ among the observed
+states. Instrument noise, independent between components, adds nothing to the
+covariance; the sampling error comes from the Gaussian (Isserlis) variance of
+the quadratic forms with the fluctuations' auto- and cross-covariances.
 
 \paragraph{Transforms.} The two turbulence statistics have optional
 transforms:
 \begin{align}
   \text{tke:}\quad &
   \tilde k_{cs} = \log \frac{k_{cs}}{\tfrac12 |\bar{\bm U}_s|^2}
-  \quad\text{(normalisation optional, default off)}, \\
+  \quad\text{(normalisation default on)}, \\
   \text{spectral:}\quad &
   \tilde E_{cs,b} = \log \frac{\bar E_{cs}(f_b)}{\operatorname{var}_t u_{cs}}
   \quad\text{(normalisation default on)},

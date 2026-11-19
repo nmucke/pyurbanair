@@ -99,26 +99,55 @@ observation:
   #   raw       every frame as it is (no aggregation)
   #   bins      the interval means of `aggregation` above
   #   tke       the window's velocity variance per sensor (`tke` below)
+  #   stress    the covariances u'v', u'w', v'w' per sensor (`stress` below)
   #   spectral  band energies of each sensor's spectrum (`spectral` below)
-  # e.g. [bins], [raw], [bins, tke, spectral], [tke, spectral]. Not raw and
-  # bins together (the same frames twice). bins with a null interval_seconds
-  # (or aggregation: null) is raw. R is block-diagonal, one block per type.
-  # tke and spectral are smoother-only and rule out adaptive_error.
+  # e.g. [bins], [raw], [bins, tke, spectral], [bins, tke, stress, spectral],
+  # [tke, spectral]. Not raw and bins together (the same frames twice). bins
+  # with a null interval_seconds (or aggregation: null) is raw. R is
+  # block-diagonal, one block per type. tke, stress and spectral are
+  # smoother-only; with adaptive_error each of their rows gets its own
+  # inflation.
+  # Typical choices, as command-line overrides:
+  #   inflow only:        'observation.types=[bins]'
+  #   + roughness:        'observation.types=[bins,tke,stress]'
+  #   + SGS constant:     'observation.types=[bins,tke,stress,spectral]'
+  #   vertical flux u'w': add w, 'obs.states=[u,v,w]'
+  #   truth from another model or real sensors, also:
+  #     'observation.adaptive_error=${adaptive_error.desroziers}'
   types: [bins]
-  # tke: per component and sensor, half the window's variance of the series
-  # (normalize: divided by half the sensor's squared mean speed), log if `log`.
+  # tke: per component and sensor, half the mean square of the fluctuations
+  # about the window mean, or with bins about each bin's mean (the variation
+  # between bins is the bins' own); normalize: divided by half the sensor's
+  # squared mean speed (else log tke mostly follows the inflow speed); log if
+  # `log`.
   tke:
-    normalize: false
+    normalize: true
     log: true
-    # Error std: auto -> the sampling error of the observed series' statistic
-    # (from its autocorrelation, Bartlett; pool_std: height -> the median over
-    # the sensors at one height, needs log or normalize; none -> per sensor),
+    # Error std: auto -> the Gaussian sampling error of the observed series'
+    # statistic (a quadratic form in the fluctuations' autocovariance; with
+    # normalize plus Bartlett's error of the mean; pool_std: height -> the
+    # median over the sensors at one height, needs log or normalize; none ->
+    # per sensor),
     # floored at `std_floor`; or a number in the statistic's (log) units.
     std: auto
     std_floor: 0.05
     pool_std: height
     # Added in quadrature (same units): the model error of a truth from
     # another model or real sensors. 0 for an identical-twin run.
+    representation_std: 0.0
+  # stress: per pair of obs.states (u-v, u-w, v-w: two or three states) and
+  # sensor, the covariance of the tke fluctuations (the same bins). [u, v]
+  # gives u'v' only; u'w', the vertical momentum flux most tied to roughness
+  # and eddy viscosity, needs w in obs.states. normalize: the correlation
+  # coefficient (bounded, independent of the inflow speed); else m2/s2.
+  stress:
+    normalize: true
+    # As for tke (no log: stresses are signed); auto: the Gaussian sampling
+    # error of the observed series' statistic. pool_std: height needs
+    # normalize. std_floor in the statistic's units.
+    std: auto
+    std_floor: 0.05
+    pool_std: height
     representation_std: 0.0
   # spectral: per component and sensor, the mean Welch PSD in `num_bands`
   # log-spaced bands from f_min to f_max (null -> the lowest resolved
