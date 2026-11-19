@@ -655,6 +655,53 @@ def test_evaluate_stepper_inlet_turbulence_input(
     assert not np.allclose(forced[first + 1], plain[first + 1])
 
 
+def test_evaluate_stepper_inlet_turbulence_replace(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    trained: dict[str, Any],
+) -> None:
+    """`mode: replace` changes the first predicted frame only upstream of the
+    building (x < 7) and adds its ramp width to metrics.csv; `add` does not."""
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    rollouts: dict[str, Any] = {}
+    rollout = script._rollout
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    for mode in ("add", "replace"):
+
+        def capture(*args: Any, mode: str = mode) -> Any:
+            rollouts[mode] = rollout(*args)
+            return rollouts[mode]
+
+        monkeypatch.setattr(script, "_rollout", capture)
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"data_dir={corpus}",
+            f"stepper.output_dir={tmp_path / mode}",
+            "stepper.max_steps=3",
+            "inlet_turbulence.enabled=true",
+            f"inlet_turbulence.mode={mode}",
+            "inlet_turbulence.ramp_width=2",
+            root=session_root,
+        )
+        script.run(cfg)
+    columns = {
+        mode: (tmp_path / mode / "metrics.csv").read_text().splitlines()[0]
+        for mode in rollouts
+    }
+    assert "inlet_turbulence_ramp_width" in columns["replace"]
+    assert "inlet_turbulence_ramp_width" not in columns["add"]
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    first = int(model_cfg.dataset.get("num_history_steps") or 1)  # first predicted
+    replaced, added = rollouts["replace"], rollouts["add"]
+    assert np.isfinite(replaced).all()
+    np.testing.assert_array_equal(replaced[:first], added[:first])  # the truth
+    assert not np.allclose(replaced[first, ..., 0], added[first, ..., 0])
+    np.testing.assert_array_equal(replaced[first, ..., 7:], added[first, ..., 7:])
+
+
 def test_evaluate_stepper_periodic_y(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

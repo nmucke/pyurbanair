@@ -28,6 +28,10 @@ predicted frame (neural_surrogates.inlet_turbulence.InletTurbulence; the
 corpus must have been generated with it); `rollout_seconds` includes it.
 `inlet_turbulence.apply: input` adds it only to the frame fed back to the
 model, u_t = F(u_{t-1} + forcing), and stores the model's own output.
+`inlet_turbulence.mode: replace` puts it in place of the model's own
+fluctuations about its y-mean, blending back over the last `ramp_width` columns
+(either `apply`), and adds an `inlet_turbulence_ramp_width` column to
+metrics.csv.
 Top-level `periodic_y` makes every model y-periodic at inference (circular y
 padding in its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y) and adds a `periodic_y` column
@@ -111,6 +115,15 @@ def run(cfg: DictConfig) -> None:
                     "rollout_seconds": seconds,
                 }
                 | ({"periodic_y": 1} if cfg.periodic_y else {})
+                | (
+                    {
+                        "inlet_turbulence_ramp_width": int(
+                            cfg.inlet_turbulence.ramp_width
+                        )
+                    }
+                    if inlet is not None and cfg.inlet_turbulence.mode == "replace"
+                    else {}
+                )
             )
             if sample == ev.sample_indices[0]:
                 first.setdefault("truth", truth)
@@ -159,9 +172,9 @@ def _rollout(
     """Step from the first `history` true frames to the trajectory's end.
 
     The first `history` frames of the result are the truth itself. `inlet` (if
-    given) adds the inlet turbulence to every predicted frame before it is
-    stored and fed back; with `inlet_input` only to the frame fed back, so the
-    stored frame is the model's own output.
+    given) adds (or swaps in) the inlet turbulence on every predicted frame
+    before it is stored and fed back; with `inlet_input` only to the frame fed
+    back, so the stored frame is the model's own output.
     """
     channels, grid = truth.shape[1], truth.shape[2:]
     pred = truth.copy()

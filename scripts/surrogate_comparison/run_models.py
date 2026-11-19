@@ -38,6 +38,13 @@ then recorded in models.yaml and the rollouts' `inlet_turbulence_seed` attr
 `inlet_turbulence.apply: input` adds it only to the frame fed back to the
 model, u_t = F(u_{t-1} + forcing), and stores the model's own output; the
 rollouts then also carry `inlet_turbulence_apply: input`.
+`inlet_turbulence.mode: replace` puts the forcing in place of the model's own
+fluctuations about its y-mean where the frame's new inflow reached (keeping
+its y-mean), blending back to the model's field over the last `ramp_width`
+columns (instead of adding it on top, which doubles the inlet turbulence of a
+model that makes its own). It works with either `apply`. Only then are
+`mode` and `ramp_width` recorded in models.yaml, and the rollouts carry
+`inlet_turbulence_mode: replace` and `inlet_turbulence_ramp_width`.
 
 `periodic_y` makes every model y-periodic at inference (circular y padding in
 its convolutions, y-periodic SDF features:
@@ -175,6 +182,11 @@ def run(cfg: DictConfig) -> None:
                 )
                 if its.inlet_turbulence.apply == "input":
                     ds.attrs["inlet_turbulence_apply"] = "input"
+                if its.inlet_turbulence.mode == "replace":
+                    ds.attrs["inlet_turbulence_mode"] = "replace"
+                    ds.attrs["inlet_turbulence_ramp_width"] = int(
+                        its.inlet_turbulence.ramp_width
+                    )
             if its.periodic_y:
                 ds.attrs["periodic_y"] = 1
             path = out / "rollouts" / label / f"sample_{sample:04d}.nc"
@@ -194,7 +206,7 @@ def run(cfg: DictConfig) -> None:
                     "data": signatures[label],
                 }
                 | (
-                    {"inlet_turbulence": settings[label].inlet_turbulence}
+                    {"inlet_turbulence": _recorded(settings[label].inlet_turbulence)}
                     if settings[label].inlet_turbulence.enabled
                     else {}
                 )
@@ -234,6 +246,18 @@ def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConf
         raise ValueError(f"unknown setting in `models` entry {model_dir}: {error}")
     assert isinstance(merged, DictConfig)
     return str(model_dir), None if label is None else str(label), merged
+
+
+def _recorded(inlet: DictConfig) -> dict[str, Any]:
+    """The `inlet_turbulence` settings for models.yaml: `mode` and
+    `ramp_width` only in replace mode, so an `add` run records what it did
+    before they existed."""
+    own = OmegaConf.to_container(inlet)
+    assert isinstance(own, dict)
+    if own.get("mode", "add") == "add":
+        own.pop("mode", None)
+        own.pop("ramp_width", None)
+    return own
 
 
 def _labels(model_dirs: list[str], own: list[str | None]) -> dict[str, str]:
@@ -335,10 +359,10 @@ def _rollout(
     """`steps` predicted frames after the last of `window` (its last `history`
     frames as input), and the inference time of all steps but the first.
 
-    `inlet` (if given) adds the inlet turbulence to every predicted frame
-    before it is stored and fed back; with `inlet_input` only to the frame fed
-    back, so the stored frame is the model's own output. Its time is not
-    counted.
+    `inlet` (if given) adds (or swaps in) the inlet turbulence on every
+    predicted frame before it is stored and fed back; with `inlet_input` only
+    to the frame fed back, so the stored frame is the model's own output. Its
+    time is not counted.
     """
     start = len(window) - 1
     channels, grid = window.shape[1], window.shape[2:]

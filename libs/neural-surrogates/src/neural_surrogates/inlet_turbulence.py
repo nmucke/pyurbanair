@@ -8,6 +8,18 @@ replays the same forcing onto every predicted frame: the inflow that entered
 during the frame's output interval, laid out downstream of the inlet face by
 Taylor's hypothesis, in the building-free columns upstream of the geometry.
 
+``mode="add"`` adds the forcing on top of the prediction. ``mode="replace"``
+swaps the prediction's own fluctuations for it where it is prescribed (the
+cells the frame's new inflow reached): there the prediction's mean over the
+y-periodic domain is kept and the forcing (which has its own y-mean, as
+uDALES injects it) put on top, blended with the untouched prediction,
+``(1 - w) * pred + w * (mean_y(pred) + forcing)``. ``w = 1`` except over the
+last columns of each level's reach, where it falls linearly to 0 so the
+replaced strip joins the model's own field without a jump; the forcing and
+the model's fluctuations are blended there, never stacked. A model that
+makes its own fluctuations then keeps the truth's turbulent energy instead
+of doubling it at the inlet.
+
 The fluctuations come from the same generator, seed and global record indices
 as the uDALES run (``seed=None``), so a rollout and its truth share the forcing;
 an integer seed draws a fresh realization per trajectory instead. Frame ``t``
@@ -48,28 +60,72 @@ MIN_ADVECTION_SPEED = 0.1
 
 
 class InletTurbulence:
-    """Frozen-turbulence footprint of uDALES' inlet forcing, added to rollout
-    predictions.
+    """Frozen-turbulence footprint of uDALES' inlet forcing, added to (or, with
+    ``mode="replace"``, replacing the fluctuations of) rollout predictions.
 
     ``footprint`` is ``(T, 3, nz, ny, n_cols)``: what is added to the
     predicted frame ``t`` (``[u, v, w]``, physical m/s) in the first ``n_cols``
-    x-columns; frame 0 (never predicted) is zero.
+    x-columns; frame 0 (never predicted) is zero. ``reach`` ``(T, nz)`` is
+    how many of those columns frame ``t``'s new inflow reached at each level
+    (0 on solid levels): where ``"replace"`` acts, so it needs one.
+    ``ramp_width`` is the number of columns at the downstream end of the reach
+    over which the replaced share ``w`` falls linearly to 0 (0: a hard edge),
+    capped at half the reach (``reach // 2``) so at least half the reached
+    columns of every level are fully replaced.
     """
 
-    def __init__(self, footprint: torch.Tensor) -> None:
+    def __init__(
+        self,
+        footprint: torch.Tensor,
+        reach: torch.Tensor | None = None,
+        mode: str = "add",
+        ramp_width: int = 4,
+    ) -> None:
+        if mode not in ("add", "replace"):
+            raise ValueError(f"mode must be 'add' or 'replace', got {mode!r}")
+        if ramp_width < 0:
+            raise ValueError(f"ramp_width must be >= 0, got {ramp_width}")
         self.footprint = footprint
-        self.columns = slice(0, footprint.shape[-1])
+        n_cols = footprint.shape[-1]
+        self.columns = slice(0, n_cols)
+        # Replaced share w (T, nz, 1, n_cols): 1 up to the ramp, then
+        # (reach - x) / (ramp + 1), 0 past the reach; the ramp is at most
+        # half the reach.
+        self.weight = None
+        if mode == "replace":
+            if reach is None:
+                raise ValueError(
+                    "mode='replace' needs `reach`: the columns each frame's "
+                    "inflow reached per level (0 on solid levels)"
+                )
+            ramp = torch.clamp(reach.float() // 2, max=ramp_width)
+            x = torch.arange(n_cols, dtype=torch.float32)
+            share = (reach.float()[..., None] - x) / (ramp[..., None] + 1)
+            self.weight = share.clamp(0, 1)[:, :, None, :]
 
     def __call__(self, pred: torch.Tensor, frame: int) -> torch.Tensor:
         """``pred`` ``(B, 3, z, y, x)`` with the forcing of ``frame`` added to
-        every batch member."""
+        every batch member (in ``"replace"`` mode, in place of its own
+        fluctuations about its y-mean)."""
         out = pred.clone()
-        out[..., self.columns] += self.footprint[frame].to(pred)
+        if self.weight is None:
+            out[..., self.columns] += self.footprint[frame].to(pred)
+            return out
+        # Replaced cells (w > 0) are fluid across their whole y-row (the strip
+        # is upstream of every building), so the plain y-mean is over fluid.
+        strip = pred[..., self.columns]
+        replaced = strip.mean(dim=-2, keepdim=True) + self.footprint[frame].to(pred)
+        out[..., self.columns] += self.weight[frame].to(pred) * (replaced - strip)
         return out
 
     @classmethod
     def from_dataset(
-        cls, data: Any, sample: int, seed: int | None = None
+        cls,
+        data: Any,
+        sample: int,
+        seed: int | None = None,
+        mode: str = "add",
+        ramp_width: int = 4,
     ) -> "InletTurbulence":
         """The forcing of trajectory ``sample`` of ``data`` (a
         :class:`~neural_surrogates.datasets.transition.TransitionDataset`).
@@ -81,6 +137,7 @@ class InletTurbulence:
             seed: ``None`` replays the truth run's own realization; an integer
                 draws a fresh one, ``derive_seed(f"{seed}_{split}_{sample}")``,
                 from its own record 0.
+            mode, ramp_width: As in :class:`InletTurbulence`.
         """
         from omegaconf import OmegaConf
         from pyudales.utils.inflow_utils import angle_to_velocity
@@ -256,7 +313,8 @@ class InletTurbulence:
             length_scale_z=float(turb["length_scale_z"]),
         )
         # Scaled as pyudales.utils.inlet_turbulence_utils.build_driver_planes
-        # does (planes minus their mean profile); w from the faces to zt.
+        # does (u' minus its whole-plane mean, so the bulk inflow is kept;
+        # v', w' as drawn); w from the faces to zt.
         intensity = float(turb["intensity"])
         record_speed = np.interp(record_times, knot_times, knot_speed)[:, None]
         sigma_u = intensity * record_speed * shape_t
@@ -308,4 +366,13 @@ class InletTurbulence:
         ]
         values = values * reached[..., None, None]
         footprint = values.transpose(0, 3, 1, 4, 2) * fluid[None, :, :, :n_cols]
-        return cls(torch.from_numpy(footprint.astype(np.float32)))
+        # Per frame and level the reached columns are the first ones (the lag
+        # grows downstream); a level is only replaced if fluid in the strip.
+        open_level = fluid[:, :, :n_cols].all(axis=(1, 2))
+        reach = reached.sum(axis=-1) * open_level
+        return cls(
+            torch.from_numpy(footprint.astype(np.float32)),
+            torch.from_numpy(reach),
+            mode,
+            ramp_width,
+        )
