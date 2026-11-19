@@ -32,6 +32,7 @@ job_scripts/
 │   ├── surrogate_train_latent_generator.slurm # train.py on surrogate/train_latent_generator (GPU)
 │   ├── surrogate_evaluate_dft.slurm  # evaluate_stepper.py on dft_b (GPU)
 │   ├── surrogate_evaluate_latent_generator_gpu.slurm # on best_latent_flow_matching_realistic (GPU)
+│   ├── surrogate_compare_autoencoders.slurm # compare_autoencoders.py on autoencoder_compare.models (GPU)
 │   ├── surrogate_evaluate_latent_generator_ensemble.slurm # vs the seed ensemble, array over the models (GPU)
 │   ├── surrogate_compare_latent_generator_ensembles.slurm # compare_latent_generator_ensembles.py on their outputs
 │   └── out_files/                    # SLURM logs, %x-%j.out (gitignored)
