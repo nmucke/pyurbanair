@@ -65,6 +65,7 @@ import numpy as np
 import torch
 import xarray
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import ConfigKeyError
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
@@ -225,7 +226,12 @@ def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConf
             "a mapping in `models` needs `dir` and may only set `label`, "
             f"{sorted(run_settings)}, got {sorted(entry)}"
         )
-    merged = OmegaConf.merge(run_settings, own)
+    # Struct: a misspelt key inside an entry's settings raises, as at run level.
+    OmegaConf.set_struct(run_settings, True)
+    try:
+        merged = OmegaConf.merge(run_settings, own)
+    except ConfigKeyError as error:
+        raise ValueError(f"unknown setting in `models` entry {model_dir}: {error}")
     assert isinstance(merged, DictConfig)
     return str(model_dir), None if label is None else str(label), merged
 

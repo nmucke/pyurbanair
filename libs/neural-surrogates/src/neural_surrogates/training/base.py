@@ -1109,11 +1109,26 @@ class BaseTraining:
         return self.weights_path.parent / "metrics.csv"
 
     def _log_metrics(self, path: Path, row: dict) -> None:
-        write_header = not path.exists()
-        with path.open("a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row))
-            if write_header:
+        """Append ``row``. A row with columns the file lacks (``rollout_loss:
+        sum`` logs a ``train_step_<i>`` per step of the curriculum's growing
+        horizon) rewrites the file under the widened header, the earlier rows
+        blank in the new columns, so every row stays aligned with it."""
+        header, rows, mode = list(row), [], "w"
+        if path.exists():
+            with path.open(newline="") as f:
+                reader = csv.DictReader(f)
+                old = list(reader.fieldnames or [])
+                new = [k for k in row if k not in old]
+                header = old + new
+                if new:
+                    rows = list(reader)
+                else:
+                    mode = "a"
+        with path.open(mode, newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+            if mode == "w":
                 writer.writeheader()
+                writer.writerows(rows)
             writer.writerow(row)
 
     def _save_checkpoint(

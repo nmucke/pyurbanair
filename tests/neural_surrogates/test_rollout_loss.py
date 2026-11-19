@@ -272,3 +272,26 @@ def test_sum_epoch_takes_the_whole_graph_step(
         (row,) = list(csv.DictReader(f))
     assert {f"train_step_{i + 1}" for i in range(k)} <= row.keys()
     assert not any(key.startswith("val_step") for key in row)
+
+
+def test_metrics_csv_widens_with_the_horizon(tmp_path: Path) -> None:
+    """Under the curriculum `sum` logs one more train_step_<i> per horizon
+    step: the file is rewritten under the widened header, rows stay aligned;
+    rows with the same columns just append."""
+    trainer = _trainer(_Linear())
+    path = tmp_path / "metrics.csv"
+    rows = [
+        {"epoch": 1, "val_loss": 0.5, "train_step_1": 0.1},
+        {"epoch": 2, "val_loss": 0.4, "train_step_1": 0.2, "train_step_2": 0.3},
+        {"epoch": 3, "val_loss": 0.3, "train_step_1": 0.4, "train_step_2": 0.5},
+    ]
+    for row in rows:
+        trainer._log_metrics(path, row)
+    lines = path.read_text().splitlines()
+    assert lines[0] == "epoch,val_loss,train_step_1,train_step_2"
+    assert all(len(line.split(",")) == 4 for line in lines)
+    with open(path) as f:
+        got = list(csv.DictReader(f))
+    assert got[0]["train_step_2"] == ""
+    assert [r["train_step_2"] for r in got[1:]] == ["0.3", "0.5"]
+    assert [r["epoch"] for r in got] == ["1", "2", "3"]

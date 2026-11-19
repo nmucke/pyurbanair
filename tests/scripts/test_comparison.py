@@ -223,6 +223,12 @@ def test_run_models_labels(
     recorded = OmegaConf.load(tmp_path / "two" / "models.yaml")
     assert list(recorded) == ["local_fno", "again"]
     assert recorded.again.periodic_y and "periodic_y" not in recorded.local_fno
+    with pytest.raises(ValueError, match="unknown setting"):
+        run_models(
+            session_root,
+            tmp_path / "typo",
+            f"models=[{{dir:{same},label:typo,inlet_turbulence:{{enabeld:true}}}}]",
+        )
     with pytest.raises(ValueError, match="clash"):
         run_models(
             session_root,
