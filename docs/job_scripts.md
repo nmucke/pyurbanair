@@ -18,6 +18,7 @@ job_scripts/
 │   ├── surrogate_generate_data.slurm # scripts/surrogate/generate_data.py
 │   ├── surrogate_generate_seed_ensemble.slurm # generate_data.py on surrogate/generate_seed_ensemble (array)
 │   ├── surrogate_train.slurm         # scripts/surrogate/train.py
+│   ├── surrogate_train_gpu.slurm     # the same on one H100 in the cuda env, e.g. the autoencoder
 │   ├── surrogate_prechunk_data.slurm # scripts/surrogate/train.py prechunk.prepare_only=true
 │   ├── surrogate_prepare_latents.slurm # train.py latent_cache.prepare_only=true (GPU)
 │   ├── surrogate_evaluate_{stepper,autoencoder,latent_generator}.slurm

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import pathlib
+import shutil
 from typing import Any
 
 import numpy as np
@@ -708,6 +709,50 @@ def test_evaluate_autoencoder(
     assert set(metrics["per_variable"]) == {"u", "v", "w"}
     assert (out / "latent_stats.png").exists()
     assert list(out.glob("vertical_profiles_*.png"))
+
+
+def test_compare_autoencoders(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """Every model is scored on evaluate_autoencoder.py's snapshots: a copy of
+    the autoencoder scores exactly what that script scores for it alone."""
+    model = session_root / "weights" / "autoencoder"
+    copy = tmp_path / "autoencoder_copy"
+    shutil.copytree(model, copy)
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"autoencoder.output_dir={tmp_path / 'single'}",
+        f"autoencoder_compare.models=[{model},{copy}]",
+        f"autoencoder_compare.output_dir={tmp_path / 'compare'}",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/evaluate_autoencoder.py").run(cfg)
+    load_script("scripts/surrogate/compare_autoencoders.py").run(cfg)
+    single = json.loads((tmp_path / "single" / "metrics.json").read_text())
+    out = tmp_path / "compare"
+    compared = json.loads((out / "metrics.json").read_text())
+    assert list(compared) == ["autoencoder", "autoencoder_copy"]
+    for summary in compared.values():
+        for key in ("rmse", "rel_l2", "psnr_db", "mean_kl", "num_snapshots"):
+            assert summary[key] == pytest.approx(single[key], rel=1e-6), key
+        for name, values in single["per_variable"].items():
+            assert summary["per_variable"][name] == pytest.approx(values, rel=1e-6)
+    with open(out / "metrics.csv") as f:
+        assert [r["model"] for r in csv.DictReader(f)] == list(compared)
+    for name in ("per_channel_metrics.png", "error_hist.png", "latent_stats.png"):
+        assert (out / name).exists(), name
+    assert list(out.glob("reconstruction_*.png"))
+    assert list(out.glob("vertical_profiles_*.png"))
+    with pytest.raises(ValueError, match="at least two"):
+        load_script("scripts/surrogate/compare_autoencoders.py").run(
+            compose(
+                "surrogate/eval",
+                "+test=eval",
+                f"autoencoder_compare.models=[{model}]",
+                root=session_root,
+            )
+        )
 
 
 def test_evaluate_latent_generator(

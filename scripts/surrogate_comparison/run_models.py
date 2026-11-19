@@ -15,7 +15,8 @@ training-data folder name, state and parameter variables (``param_vars: null``
 read as the corpus' parameter names) and, where the corpus' config.yaml is
 readable, the same output frequency; the script refuses to compare them
 otherwise. Models are labelled by their folder name (if two names clash, by the
-shortest path suffix that tells them apart, e.g. `seed0_local_fno`).
+shortest path suffix that tells them apart, e.g. `seed0_local_fno`), or by
+an entry's own `label`, which also lets one model run under two settings.
 
 Outputs, in `paths.results_dir` (the run dir):
   config.yaml                        the resolved config, `sample_indices` set
@@ -90,8 +91,8 @@ def run(cfg: DictConfig) -> None:
     (out / "models.yaml").unlink(missing_ok=True)
 
     entries = [_model_entry(entry, cfg) for entry in cfg.models]
-    labels = _labels([d for d, _ in entries])
-    settings = dict(zip(labels, (s for _, s in entries)))
+    labels = _labels([d for d, _, _ in entries], [n for _, n, _ in entries])
+    settings = dict(zip(labels, (s for _, _, s in entries)))
     signatures = _check_same_data(
         {
             label: OmegaConf.load(pathlib.Path(d) / "config.yaml")
@@ -205,38 +206,47 @@ def run(cfg: DictConfig) -> None:
     print(f"Saved rollouts in {out}")
 
 
-def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, DictConfig]:
-    """A `models` entry's folder and its `inlet_turbulence` / `periodic_y`:
-    the run's, overridden by the entry's own keys if it is a mapping."""
+def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConfig]:
+    """A `models` entry's folder, its own `label` (None: from the folder) and
+    its `inlet_turbulence` / `periodic_y`: the run's, overridden by the
+    entry's own keys if it is a mapping."""
     run_settings = OmegaConf.create(
         {"inlet_turbulence": cfg.inlet_turbulence, "periodic_y": cfg.periodic_y}
     )
     if not isinstance(entry, DictConfig):
-        return str(entry), run_settings
+        return str(entry), None, run_settings
     own = OmegaConf.to_container(entry)
     assert isinstance(own, dict)
     model_dir = own.pop("dir", None)
+    label = own.pop("label", None)
     unknown = set(own) - set(run_settings)
     if model_dir is None or unknown:
         raise ValueError(
-            "a mapping in `models` needs `dir` and may only set "
+            "a mapping in `models` needs `dir` and may only set `label`, "
             f"{sorted(run_settings)}, got {sorted(entry)}"
         )
     merged = OmegaConf.merge(run_settings, own)
     assert isinstance(merged, DictConfig)
-    return str(model_dir), merged
+    return str(model_dir), None if label is None else str(label), merged
 
 
-def _labels(model_dirs: list[str]) -> dict[str, str]:
-    """A unique label per model: its folder name or, if names clash, the
-    shortest path suffix that tells them apart, joined by `_` (a folder name)."""
-    parts = [pathlib.Path(d).resolve().parts for d in model_dirs]
+def _labels(model_dirs: list[str], own: list[str | None]) -> dict[str, str]:
+    """A unique label per model: its `own` label, else its folder name or, if
+    names clash, the shortest path suffix that tells them apart, joined by `_`
+    (a folder name). A model listed twice needs its own label."""
+    unnamed = [d for d, n in zip(model_dirs, own) if n is None]
+    parts = [pathlib.Path(d).resolve().parts for d in unnamed]
     if len(set(parts)) != len(parts):
-        raise ValueError(f"a model is listed twice: {model_dirs}")
-    for n in range(1, max(map(len, parts)) + 1):
-        labels = ["_".join(p[-n:]).lstrip("_/") for p in parts]
-        if len(set(labels)) == len(labels):
+        raise ValueError(f"a model is listed twice without a `label`: {unnamed}")
+    derived: list[str] = []
+    for n in range(1, max(map(len, parts), default=0) + 1):
+        derived = ["_".join(p[-n:]).lstrip("_/") for p in parts]
+        if len(set(derived)) == len(derived):
             break
+    rest = iter(derived)
+    labels = [n if n is not None else next(rest) for n in own]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"model labels clash: {labels}")
     reserved = set(RESERVED) & set(labels)
     if reserved:
         raise ValueError(

@@ -213,6 +213,22 @@ def test_run_models_labels(
     same = model_dirs[0].parent / ".." / model_dirs[0].parent.name / model_dirs[0].name
     with pytest.raises(ValueError, match="listed twice"):
         run_models(session_root, tmp_path / "d", f"models=[{model_dirs[0]},{same}]")
+    # Its own label lets one folder run twice, e.g. under two settings.
+    run_models(
+        session_root,
+        tmp_path / "two",
+        f"models=[{model_dirs[0]},{{dir:{same},label:again,periodic_y:true}}]",
+        "max_steps=1",
+    )
+    recorded = OmegaConf.load(tmp_path / "two" / "models.yaml")
+    assert list(recorded) == ["local_fno", "again"]
+    assert recorded.again.periodic_y and "periodic_y" not in recorded.local_fno
+    with pytest.raises(ValueError, match="clash"):
+        run_models(
+            session_root,
+            tmp_path / "c",
+            f"models=[{model_dirs[0]},{{dir:{same},label:local_fno}}]",
+        )
 
 
 def test_run_models_rerun_replaces_the_rollouts(
