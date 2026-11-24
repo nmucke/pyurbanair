@@ -4,7 +4,7 @@
 #   bash workflows/compare_surrogates.sh 'models=[dirA,dirB]' [hydra overrides...]
 #
 # e.g.
-#   bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno,model_weights/dft_s]' max_steps=50
+#   bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno_realistic,model_weights/dft_s_realistic]' max_steps=50
 #
 # Runs scripts/surrogate_comparison/run_models.py with the overrides
 # (configs/comparison.yaml), then compute_metrics.py, visualize_comparison.py

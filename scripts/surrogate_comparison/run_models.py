@@ -5,7 +5,7 @@ workflows/compare_surrogates.sh; compute_metrics.py and visualize_comparison.py
 (next to this script) score and draw the run dir it writes.
 
     python scripts/surrogate_comparison/run_models.py \
-        'models=[model_weights/local_fno,model_weights/dft_s]'
+        'models=[model_weights/local_fno_realistic,model_weights/dft_s_realistic]'
 
 Every model starts from the same frame, the latest any model needs as history
 (``max(H) - 1``), each from its own last ``H`` true frames up to it, and rolls
@@ -51,12 +51,16 @@ its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y), for uDALES' y-periodic domains.
 It is then recorded in models.yaml and the rollouts' `periodic_y` attr (1).
 
-Both settings apply to every model. A `models` entry may instead be a mapping
+Both settings apply to every model, overridden per architecture by
+`model_defaults` (keyed by the class name of the model's
+`architecture._target_`): by default every DFT (TadpoleTimeStepper) runs with
+`periodic_y: true` and inlet turbulence in `mode: replace`; `model_defaults=null`
+drops that. A `models` entry may instead be a mapping
 `{dir: <model dir>, inlet_turbulence: {...}, periodic_y: ...}` whose keys
-override them for that model only, e.g. inlet turbulence fed back to the DFT
-alone:
+override them for that model only, e.g. inlet turbulence fed back to one
+model alone:
 
-    'models=[model_weights/local_fno,{dir:model_weights/dft_s,periodic_y:true,inlet_turbulence:{enabled:true,apply:input}}]'
+    'models=[model_weights/local_fno_realistic,{dir:model_weights/ssrolling_realistic,inlet_turbulence:{enabled:true,apply:input}}]'
 """
 
 from __future__ import annotations
@@ -81,6 +85,7 @@ from eval_common import (  # noqa: E402
     inlet_turbulence,
     load_model,
     load_states,
+    model_settings,
     open_dataset,
 )
 
@@ -221,23 +226,22 @@ def run(cfg: DictConfig) -> None:
 
 def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConfig]:
     """A `models` entry's folder, its own `label` (None: from the folder) and
-    its `inlet_turbulence` / `periodic_y`: the run's, overridden by the
-    entry's own keys if it is a mapping."""
-    run_settings = OmegaConf.create(
-        {"inlet_turbulence": cfg.inlet_turbulence, "periodic_y": cfg.periodic_y}
-    )
+    its `inlet_turbulence` / `periodic_y`: the run's, overridden by
+    `model_defaults` for its architecture, then by the entry's own keys if it
+    is a mapping."""
     if not isinstance(entry, DictConfig):
-        return str(entry), None, run_settings
+        return str(entry), None, _settings(str(entry), cfg)
     own = OmegaConf.to_container(entry)
     assert isinstance(own, dict)
     model_dir = own.pop("dir", None)
     label = own.pop("label", None)
-    unknown = set(own) - set(run_settings)
+    unknown = set(own) - {"inlet_turbulence", "periodic_y"}
     if model_dir is None or unknown:
         raise ValueError(
             "a mapping in `models` needs `dir` and may only set `label`, "
-            f"{sorted(run_settings)}, got {sorted(entry)}"
+            f"['inlet_turbulence', 'periodic_y'], got {sorted(entry)}"
         )
+    run_settings = _settings(str(model_dir), cfg)
     # Struct: a misspelt key inside an entry's settings raises, as at run level.
     OmegaConf.set_struct(run_settings, True)
     try:
@@ -246,6 +250,13 @@ def _model_entry(entry: Any, cfg: DictConfig) -> tuple[str, str | None, DictConf
         raise ValueError(f"unknown setting in `models` entry {model_dir}: {error}")
     assert isinstance(merged, DictConfig)
     return str(model_dir), None if label is None else str(label), merged
+
+
+def _settings(model_dir: str, cfg: DictConfig) -> DictConfig:
+    """The run's settings for the model in `model_dir` (model_settings)."""
+    train_cfg = OmegaConf.load(pathlib.Path(model_dir) / "config.yaml")
+    assert isinstance(train_cfg, DictConfig)
+    return model_settings(cfg, train_cfg)
 
 
 def _recorded(inlet: DictConfig) -> dict[str, Any]:
