@@ -838,9 +838,24 @@ parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
   (`check_config` warns).
 - **R treats frames as independent.** They are not, so an analysis over several
   frames can be overconfident; `check_config` warns with the frame count.
-  `window_{w}_field_obs.nc` has `innovation_lag1` per observation, roughly
-  `(1 + r) / (1 - r)` frames per independent sample, `run_info.yaml` its median,
-  and a median above 0.5 is printed. Nothing is corrected for it.
+  `window_{w}_field_obs.nc` has `innovation_lag1` per observation (`r`: the
+  lag-1 autocorrelation in time, over the window's frames, of the raw frame
+  minus the uncorrected forecast's ensemble mean), roughly `(1 + r) / (1 - r)`
+  frames per independent sample, `run_info.yaml` its median, and a median above
+  0.5 is printed.
+- **`max_time_correlation`** (default `null`: nothing is corrected) takes each
+  observation's errors as AR(1) in time with `r = clip(innovation_lag1, 0,
+  max_time_correlation)` and multiplies its variance by
+  `f = w^T C w / w^T w`, `C_kl = r^|k-l|`, over the frames one analysis uses
+  with their temporal tapers `w`: the variance of the tapered mean of the errors
+  over its variance for independent frames. In the global form (`w = 1`, all `n`
+  frames of the window) that is `1 + 2 sum_k (1 - k/n) r^k`, close to
+  `(1 + r) / (1 - r)`. In the local form `f` is per frame and smaller, since the
+  taper leaves few effective frames (4.9 at 5 s with 1 s frames): the
+  asymptotic factor would over-inflate there. `f >= 1`, and 1 for one frame.
+  `r` mixes the errors of the observations with those of the forecast mean,
+  which the ensemble already describes, so it only pays off when an analysis
+  uses many frames (twin test below). Both presets set 0.95.
 - **Next window.** It starts from the uncorrected final frame: a localized `W` is
   not divergence-free, and a restart would need a projection first. Parameters
   and warm starts are therefore those of a run without the analysis.
@@ -853,13 +868,26 @@ parameters. `window_{w}_posterior_state.nc` then holds the corrected frames, so
 - **Not usable with** the filter, the hybrid (no posterior forecast) or
   `final_time_smoothing` (`check_config` refuses them).
 
-**Twin test** (uDALES Xie & Castro at 2 m, J=32, 4 seeds; table in
-`docs/research/multiscale_nested_da.tex`). Use `local`: `global` worsened the
-volume RMSE by 1.5% in all four seeds. `local` with cutoffs 20 m and 5 s (twice
-the measured 2.4 s integral time) improved it by 3.1% and by 18% within 8 m of a
-sensor, gone by 16 m, while time-shuffled observations did not improve it. Held-out
-sensors at least 10 m away gained only 0.5%, `w` barely improved, and the
-projection gave no RMSE benefit. Rms divergence rises to about 0.02 1/s.
+**Twin test** (uDALES Xie & Castro at 2 m, J=32, 4 seeds, 2 windows; first
+table in `docs/research/multiscale_nested_da.tex`). Use `local`: `global`
+worsened the volume RMSE by 1.5% in all four seeds. Changes of the posterior-mean
+RMSE against the uncorrected forecast, mean over seeds:
+
+| cutoffs, `max_time_correlation` | volume | `w` | held-out sensors (`u`, `v`) | spread / error |
+|---|---|---|---|---|
+| 20 m, 5 s, null | -3.1% | -0.9% | -0.5% | 0.98 |
+| 20 m, 5 s, 0.95 | -2.5% | -0.9% | -0.2% | 0.99 |
+| 40 m, 10 s, null | -3.0% | +2.5% | -3.7% | 0.84 |
+| 40 m, 10 s, 0.95 (the preset) | -4.8% | -1.0% | -4.5% | 0.92 |
+
+The held-out sensors are 10 to 22 m from a sensor, so only the wider cutoffs
+reach them, and those are overconfident without the inflation. With it they
+improved in all four seeds; at 20 m and 5 s (4.9 effective frames) the inflation
+cost 0.6% in all four. The plain `(1 + r) / (1 - r)` factor was never better and
+is clearly worse at 5 s. `global` gains 0.5% from the inflation and stays worse
+than no update. The median `r` is 0.53 with white instrument noise. Time-shuffled
+observations did not improve the field, and the projection gave no RMSE benefit.
+Rms divergence rises to about 0.02 1/s (measured at 20 m, 5 s).
 
 `scripts/run_field_analysis.py` applies the same helper
 (`helper_functions.correct_window`) to a finished run, see

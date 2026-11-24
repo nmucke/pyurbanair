@@ -2,6 +2,7 @@
 
 import pathlib
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import xarray
@@ -11,8 +12,10 @@ from data_assimilation.smoothing.field_analysis import (
     field_analysis,
     field_analysis_netcdf,
     global_field_weights,
+    time_correlation_inflation,
     within_parameter_basis,
 )
+from jax.experimental import enable_x64
 
 J = 24
 
@@ -338,6 +341,106 @@ def test_incomplete_localization_is_refused(options):
         options = {**options, "row_coords": problem["row_coords"]}
     with pytest.raises(ValueError):
         _run(problem, **options)
+
+
+def test_time_correlation_inflation_factor():
+    lag1 = np.array([0.0, 0.3, 0.9, 0.3])
+    frames = 7
+    time = 2.0 * np.arange(frames)  # frames 2 s apart: the lag is in frames
+    factor = time_correlation_inflation(
+        np.tile(lag1, frames), np.repeat(time, 4), np.ones(4 * frames), 2.0
+    )
+    lags = np.arange(1, frames)
+    expected = 1 + 2 * ((1 - lags / frames) * lag1[:, None] ** lags).sum(axis=1)
+    np.testing.assert_allclose(factor, np.tile(expected, frames), rtol=1e-12)
+    assert expected[0] == 1.0
+    assert (expected[1:] < (1 + lag1[1:]) / (1 - lag1[1:])).all()
+
+    # Many frames reach (1 + r) / (1 - r); one frame has nothing to inflate.
+    long = np.arange(4000.0)
+    np.testing.assert_allclose(
+        time_correlation_inflation(np.full(4000, 0.6), long, np.ones(4000), 1.0),
+        (1 + 0.6) / (1 - 0.6),
+        rtol=1e-3,
+    )
+    assert time_correlation_inflation(np.array([0.9]), long[:1], np.ones(1), 1.0) == 1
+
+    # Tapered frames: w^T C w / w^T w, between 1 and the equal-weight factor.
+    taper = np.array([0.2, 0.7, 1.0, 0.7, 0.2])
+    corr = 0.5 ** np.abs(np.subtract.outer(np.arange(5), np.arange(5)))
+    tapered = time_correlation_inflation(np.full(5, 0.5), long[:5], taper, 1.0)
+    np.testing.assert_allclose(tapered, taper @ corr @ taper / (taper @ taper))
+    equal = time_correlation_inflation(np.full(5, 0.5), long[:5], np.ones(5), 1.0)
+    assert (1 < tapered).all() and (tapered < equal).all()
+
+
+def _with_lag1(problem, lag1):
+    """``problem`` with one lag-1 autocorrelation per sensor."""
+    obs_lag1 = np.tile(lag1, problem["times"].size)
+    return {**problem, "kwargs": {**problem["kwargs"], "obs_lag1": obs_lag1}}
+
+
+def _inflated(problem, factor):
+    """``problem`` with ``obs_var`` times ``factor``, one per sensor."""
+    kwargs = problem["kwargs"]
+    obs_var = kwargs["obs_var"] * np.tile(factor, problem["times"].size)
+    return {**problem, "kwargs": {**kwargs, "obs_var": obs_var}}
+
+
+@pytest.mark.parametrize("localized", [False, True])
+def test_zero_lag1_is_the_analysis_of_independent_frames(localized):
+    problem = _problem()
+    options = (
+        {"L_r": 60.0, "L_t": 2.5, "row_coords": problem["row_coords"]}
+        if localized
+        else {}
+    )
+    correlated, _ = _run(_with_lag1(problem, np.zeros(4)), **options)
+    np.testing.assert_allclose(correlated, _run(problem, **options)[0], rtol=1e-12)
+
+
+def test_lag1_inflates_the_variances_of_the_global_form():
+    problem = _problem()
+    problem["kwargs"]["obs_time"] *= 3.0  # the lag is one frame, not one second
+    lag1 = np.array([0.0, 0.2, 0.5, 0.9])
+    lags = np.arange(1, 6)
+    factor = 1 + 2 * ((1 - lags / 6) * lag1[:, None] ** lags).sum(axis=1)
+    correlated, _ = _run(_with_lag1(problem, lag1))
+    expected, _ = _run(_inflated(problem, factor))
+    np.testing.assert_allclose(correlated, expected, rtol=1e-10)
+    assert np.abs(correlated - _run(problem)[0]).max() > 1e-3
+
+
+def test_lag1_inflates_the_variances_of_the_frames_a_local_analysis_uses():
+    problem = _problem(frames=5)
+    lag1 = np.array([0.0, 0.2, 0.5, 0.9])
+    options = {"L_r": 60.0, "L_t": 1.5, "row_coords": problem["row_coords"]}
+    correlated, _ = _run(_with_lag1(problem, lag1), **options)
+
+    # A frame inside the window sees its two neighbours, the first frame one.
+    with enable_x64():
+        side = float(gaspari_cohn(jnp.array([1.0]), 1.5)[0])
+    inside = 1 + (4 * side * lag1 + 2 * side**2 * lag1**2) / (1 + 2 * side**2)
+    edge = 1 + 2 * side * lag1 / (1 + side**2)
+    for frame, factor in ((2, inside), (0, edge)):
+        expected, _ = _run(_inflated(problem, factor), **options)
+        np.testing.assert_allclose(correlated[frame], expected[frame], rtol=1e-10)
+    assert np.abs(correlated[2] - _run(problem, **options)[0][2]).max() > 1e-3
+
+    # Frames further apart than the time cutoff: one frame per analysis.
+    alone = {**options, "L_t": 0.5}
+    np.testing.assert_allclose(
+        _run(_with_lag1(problem, lag1), **alone)[0],
+        _run(problem, **alone)[0],
+        rtol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("lag1", [np.full(24, 1.0), np.full(24, -0.1), np.zeros(4)])
+def test_lag1_outside_the_unit_interval_or_of_another_size_is_refused(lag1):
+    problem = _problem()
+    with pytest.raises(ValueError, match="obs_lag1"):
+        _run({**problem, "kwargs": {**problem["kwargs"], "obs_lag1": lag1}})
 
 
 def test_gaspari_cohn_shape():

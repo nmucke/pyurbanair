@@ -246,6 +246,11 @@ def _field_analysis(cfg: DictConfig, workflow: str) -> list[str]:
         )
     if settings.chunking < 1:
         problems.append("field_analysis.chunking must be at least 1.")
+    max_lag1 = settings.get("max_time_correlation")
+    if max_lag1 is not None and not 0 <= max_lag1 < 1:
+        problems.append(
+            "field_analysis.max_time_correlation must be in [0, 1) or null."
+        )
     if not problems:
         _warn_field_analysis_error(cfg)
     return problems
@@ -258,13 +263,14 @@ def _warn_field_analysis_error(cfg: DictConfig) -> None:
     reach = cfg.field_analysis.localization_time
     span = window if reach is None else min(2.0 * float(reach), window)
     frames = int(span / step) + 1
-    if frames > 1:
+    if frames > 1 and cfg.field_analysis.get("max_time_correlation") is None:
         warnings.warn(
             f"field_analysis uses up to {frames} frames per analysis with an R "
             "that treats them as independent, although their turbulence and "
             "representation errors are correlated over seconds: the update is "
             "overconfident by up to that many frames over their effective "
-            "number. See innovation_lag1 in window_*_field_obs.nc.",
+            "number. See innovation_lag1 in window_*_field_obs.nc and "
+            "field_analysis.max_time_correlation.",
             stacklevel=2,
         )
     if OmegaConf.select(cfg, "observation.adaptive_error") is not None:

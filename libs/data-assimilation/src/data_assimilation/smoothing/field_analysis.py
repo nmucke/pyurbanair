@@ -41,6 +41,19 @@ each cell costs one matrix product and one ``nu x nu`` eigendecomposition.
 Rows with no local observation are never touched. With local ``W`` the affine
 constraints all members satisfy are lost unless they hold row by row: a row
 equal across members (``u = 0`` in a building) stays exact, divergence does not.
+
+**Errors correlated in time.** ``R`` is per frame, as if a sensor's errors were
+independent between frames. With ``obs_lag1``, the lag-1 autocorrelation ``r``
+of each observation's series, they are taken as AR(1), and the ``n`` frames an
+analysis uses, with temporal tapers ``w`` (all 1 in the global form), get
+``R_o f`` in place of ``R_o``::
+
+    f = w^T C w / w^T w = 1 + 2 sum_{k<l} w_k w_l r^(l-k) / sum_k w_k^2,
+
+``C_kl = r^|k-l|``: the variance of the ``w``-weighted mean of the errors over
+its variance for independent errors. Equal weights give
+``1 + 2 sum_{k=1}^{n-1} (1 - k/n) r^k``, which grows with ``n`` to
+``(1 + r) / (1 - r)``; one frame gives 1.
 """
 
 import logging
@@ -227,11 +240,16 @@ class _Analysis:
             cross[sensor] = tapered.T @ self.innovation[chosen]
         return gram, cross
 
-    def global_weights(self) -> np.ndarray:
-        """The dense ``W``, ``(J_active, J_active)``, of Eq. (11)."""
+    def global_weights(self, weights: Optional[np.ndarray] = None) -> np.ndarray:
+        """The dense ``W``, ``(J_active, J_active)``, of Eq. (11).
+
+        ``weights`` scale the observations' precisions; ``None`` for 1.
+        """
         num_obs = self.whitened.shape[0]
+        if weights is None:
+            weights = np.ones(num_obs)
         gram, cross = self.sensor_sums(
-            np.arange(num_obs), np.ones(num_obs), np.zeros(num_obs, dtype=int), 1
+            np.arange(num_obs), weights, np.zeros(num_obs, dtype=int), 1
         )
         with enable_x64():
             coordinates = _coordinates(
@@ -261,6 +279,23 @@ def global_field_weights(
     ).global_weights()
 
 
+def time_correlation_inflation(
+    lag1: np.ndarray, time: np.ndarray, taper: np.ndarray, step: float
+) -> np.ndarray:
+    """The factor ``f`` of the module docstring, per observation.
+
+    ``lag1``, ``time`` and ``taper``: ``(N,)`` lag-1 autocorrelation in
+    ``[0, 1)``, time and temporal taper of the observations of one analysis; the
+    taper is a function of the time. ``step``: the time between two frames.
+    """
+    frames, first = np.unique(time, return_index=True)
+    lags = np.abs(frames[:, None] - frames[None, :]) / step
+    pairs = np.outer(taper[first], taper[first])
+    values, inverse = np.unique(lag1, return_inverse=True)
+    factors = (values[:, None, None] ** lags * pairs).sum(axis=(1, 2))
+    return np.asarray(factors[inverse] / np.trace(pairs))
+
+
 def field_analysis(
     frames: Iterable[tuple[float, np.ndarray]],
     write: Callable[[int, np.ndarray], None],
@@ -271,6 +306,7 @@ def field_analysis(
     obs_time: np.ndarray,
     obs_coords: np.ndarray,
     params: np.ndarray,
+    obs_lag1: Optional[np.ndarray] = None,
     row_coords: Optional[np.ndarray] = None,
     member_mask: Optional[np.ndarray] = None,
     L_r: Optional[float] = None,
@@ -295,6 +331,10 @@ def field_analysis(
         obs_coords: ``(N_o, 3)`` sensor positions. Equal rows are one sensor.
         params: ``(N_p, J)`` analysis-space parameter rows of the members,
             estimated or not (log or bounded space, one row per time knot).
+        obs_lag1: ``(N_o,)`` lag-1 autocorrelation in time of each row's error
+            series, in ``[0, 1)``, the lag being the spacing of ``obs_time``:
+            the variances are inflated by the factor of the module docstring.
+            ``None`` takes the frames as independent.
         row_coords: ``(N_rows, 3)`` positions of the rows; needed with ``L_r``.
         member_mask: ``(J,)``, ``False`` for failed or substituted members: they
             are excluded from every statistic and their columns stay unchanged.
@@ -328,11 +368,22 @@ def field_analysis(
             f"{obs_coords.shape}."
         )
     members = analysis.members
+    lag1 = step = None
+    if obs_lag1 is not None:
+        lag1 = np.asarray(obs_lag1, dtype=float)
+        if lag1.shape != obs_time.shape or not ((lag1 >= 0.0) & (lag1 < 1.0)).all():
+            raise ValueError(f"obs_lag1 must be {obs_time.shape}, in [0, 1).")
+        step = float(np.diff(np.unique(obs_time)).min(initial=np.inf))
 
     weights = None
     spatial = sensors = sensor_xyz = None
     if L_r is None:
-        weights = analysis.global_weights() - np.eye(analysis.num_members)
+        precision = None
+        if lag1 is not None and step is not None:
+            precision = 1.0 / time_correlation_inflation(
+                lag1, obs_time, np.ones(obs_time.size), step
+            )
+        weights = analysis.global_weights(precision) - np.eye(analysis.num_members)
     else:
         sensor_xyz, sensors = np.unique(obs_coords, axis=0, return_inverse=True)
         sensors = np.asarray(sensors).reshape(-1)
@@ -360,8 +411,13 @@ def field_analysis(
         live = np.flatnonzero(spatial[:, np.unique(sensors[local])].any(axis=1))
         if live.size == 0:
             continue
+        precision = temporal[local]
+        if lag1 is not None and step is not None:
+            precision = precision / time_correlation_inflation(
+                lag1[local], obs_time[local], precision, step
+            )
         gram, cross = analysis.sensor_sums(
-            local, temporal[local], sensors[local], spatial.shape[1]
+            local, precision, sensors[local], spatial.shape[1]
         )
         _apply_local(
             values, live, spatial, gram, cross, analysis.basis, members, chunk_size

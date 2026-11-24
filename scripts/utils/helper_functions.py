@@ -473,12 +473,20 @@ def correct_window(
     which is left alone, so a correction can never be applied twice, and
     window_{w}_field_obs.nc and _posterior_params.nc. Returns the
     `FieldAnalysisInfo`, plus the median of `innovation_lag1`, for run_info.yaml.
+
+    With `field_analysis.max_time_correlation`, `innovation_lag1`, clipped to
+    [0, that], is each observation's error correlation between frames.
     """
     settings = cfg.field_analysis
     field_obs = xarray.load_dataset(windows_dir / f"window_{w}_field_obs.nc")
     params = xarray.load_dataset(windows_dir / f"window_{w}_posterior_params.nc")
     num_frames, num_obs = field_obs.sizes["time"], field_obs.sizes["obs"]
     coords = np.stack([field_obs[f"obs_{a}"].values for a in "xyz"], axis=1)
+    max_lag1 = settings.get("max_time_correlation")
+    obs_lag1 = None
+    if max_lag1 is not None:
+        clipped = np.clip(np.nan_to_num(field_obs.innovation_lag1.values), 0, max_lag1)
+        obs_lag1 = np.tile(clipped, num_frames)
     # The corrected file only replaces the posterior once it is complete.
     partial = windows_dir / f"window_{w}_posterior_state.nc.partial"
     shutil.copyfile(windows_dir / f"window_{w}_posterior_forecast_state.nc", partial)
@@ -491,6 +499,7 @@ def correct_window(
         obs_time=np.repeat(field_obs.time.values, num_obs),
         obs_coords=np.tile(coords, (num_frames, 1)),
         params=field_parameter_rows(cfg, params),
+        obs_lag1=obs_lag1,
         member_mask=field_obs.member_mask.values.astype(bool),
         L_r=settings.localization_radius,
         L_t=settings.localization_time,
@@ -499,7 +508,7 @@ def correct_window(
     )
     partial.replace(windows_dir / f"window_{w}_posterior_state.nc")
     lag1 = float(np.nanmedian(field_obs.innovation_lag1.values))
-    if lag1 > 0.5:
+    if lag1 > 0.5 and max_lag1 is None:
         print(
             f"Window {w}: the innovations' median lag-1 autocorrelation is "
             f"{lag1:.2f}, about {(1 + lag1) / (1 - lag1):.1f} frames per "
