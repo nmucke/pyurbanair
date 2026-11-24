@@ -854,18 +854,23 @@ def test_smoother_run_clears_a_previous_field_analysis(
     assert not list((run_dir / "windows").glob("*forecast_state.nc"))
 
 
+@pytest.mark.parametrize("max_lag1", [None, 0.5])  # type: ignore[misc]
 @pytest.mark.parametrize("option", ["local", "global"])  # type: ignore[misc]
 def test_correct_window_pairs_frames_members_and_sensors(
-    option: str, tmp_path: pathlib.Path
+    option: str, max_lag1: float | None, tmp_path: pathlib.Path
 ) -> None:
     """On a synthetic window with real spread: the frames written are those of
-    the library fed row by row, one row per (frame, component, sensor)."""
+    the library fed row by row, one row per (frame, component, sensor). The
+    innovations' lag-1 autocorrelation only enters with max_time_correlation,
+    clipped to [0, it]."""
     cfg = compose(
         "assimilation",
         "+test=assimilation",
         "params@prior_params=sgs_roughness",
         f"field_analysis=${{field_analysis_settings.{option}}}",
         "field_analysis_settings.local.localization_radius=3.0",
+        f"field_analysis_settings.{option}.max_time_correlation="
+        f"{'null' if max_lag1 is None else max_lag1}",
         root=tmp_path,
     )
     rng = np.random.default_rng(0)
@@ -889,6 +894,8 @@ def test_correct_window_pairs_frames_members_and_sensors(
     obs = rng.normal(size=(frames, num_obs))
     variance = rng.uniform(0.5, 1.5, (frames, num_obs))
     mask = np.arange(members) != 3
+    lag1 = np.linspace(-0.3, 0.9, num_obs)
+    lag1[1] = np.nan  # a constant innovation series
     frame = ("time", "obs")
     xyz = np.tile(sensors, (components, 1))
     xarray.Dataset(
@@ -900,13 +907,16 @@ def test_correct_window_pairs_frames_members_and_sensors(
             "obs_y": ("obs", xyz[:, 1]),
             "obs_z": ("obs", xyz[:, 2]),
             "member_mask": ("ensemble", mask),
-            "innovation_lag1": ("obs", np.zeros(num_obs)),
+            "innovation_lag1": ("obs", lag1),
         },
         coords={"time": times},
     ).to_netcdf(tmp_path / "window_0_field_obs.nc")
 
     helper = load_script("scripts/utils/helper_functions.py")
     helper.correct_window(cfg, tmp_path, 0)
+    clipped = None
+    if max_lag1 is not None:
+        clipped = np.clip(np.nan_to_num(lag1), 0.0, max_lag1)
 
     rows = [(t, o) for t in range(frames) for o in range(num_obs)]
     settings = cfg.field_analysis
@@ -921,6 +931,7 @@ def test_correct_window_pairs_frames_members_and_sensors(
         obs_time=np.array([times[t] for t, _ in rows]),
         obs_coords=np.array([xyz[o] for _, o in rows]),
         params=helper.field_parameter_rows(cfg, params),
+        obs_lag1=None if clipped is None else np.array([clipped[o] for _, o in rows]),
         member_mask=mask,
         L_r=settings.localization_radius,
         L_t=settings.localization_time,
@@ -1059,6 +1070,11 @@ def test_field_analysis_needs_degrees_of_freedom(
         ),
         ("smoother", ["field_analysis_settings.local.variables=[pres]"], "subset"),
         ("smoother", ["field_analysis_settings.local.chunking=0"], "chunking"),
+        (
+            "smoother",
+            ["field_analysis_settings.local.max_time_correlation=1.0"],
+            "max_time_correlation",
+        ),
     ],
 )
 def test_field_analysis_rejected(

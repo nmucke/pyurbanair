@@ -9,11 +9,17 @@ none: null
 # Eq. (12) of the note: one weight matrix per grid cell and frame.
 local:
   # Gaspari-Cohn cutoffs: an observation's weight reaches zero this far from a
-  # cell (m) and from a frame (s). Set both, the time about twice the integral
-  # time scale of the velocity at the sensors, or both null for the global
-  # update. See docs/data_assimilation.md for the twin test of these values.
-  localization_radius: 20.0
-  localization_time: 5.0
+  # cell (m) and from a frame (s). Set both, or both null for the global update.
+  # See docs/data_assimilation.md for the twin test of these values.
+  localization_radius: 40.0
+  localization_time: 10.0
+  # A sensor's errors are correlated between frames. A number in [0, 1) inflates
+  # each observation's error variance for the lag-1 autocorrelation r of its
+  # innovations (innovation_lag1 in window_{w}_field_obs.nc), clipped to
+  # [0, this]: by (1 + r) / (1 - r) for many frames, by less for the few frames
+  # within localization_time. null takes the frames as independent, which is
+  # overconfident at these cutoffs.
+  max_time_correlation: 0.95
   # The fields updated. The state's other variables are kept as they are.
   variables: [u, v, w]
   # Also keep the frames as the model wrote them,
@@ -29,6 +35,8 @@ local:
 global:
   localization_radius: null
   localization_time: null
+  # See local.
+  max_time_correlation: 0.95
   variables: [u, v, w]
   keep_forecast: false
   chunking: 4096

@@ -21,6 +21,7 @@ field_analysis_settings:
   local:
     localization_radius: 10.0
     localization_time: 1.5
+    max_time_correlation: null
     variables: [u, v, w]
     keep_forecast: false
     chunking: 4096
@@ -28,6 +29,7 @@ field_analysis_settings:
   global:
     localization_radius: null
     localization_time: null
+    max_time_correlation: null
     variables: [u, v, w]
     keep_forecast: false
     chunking: 4096
