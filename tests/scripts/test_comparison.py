@@ -294,6 +294,52 @@ def test_run_models_inlet_turbulence(
             np.testing.assert_array_equal(first[..., 7:], ref[..., 7:])
 
 
+def test_run_models_model_defaults(
+    tmp_path: pathlib.Path,
+    session_root: pathlib.Path,
+    training_data: pathlib.Path,
+    comparison_run: pathlib.Path,
+) -> None:
+    """`model_defaults` sets each architecture's inference settings (by class
+    name) over the run's; a `models` entry's own keys still win. (The tiny
+    grid's ny = 20 is no multiple of 16, so the DFT cannot be y-periodic.)"""
+    corpus = inlet_turbulence_corpus(training_data, tmp_path)
+    run_dir = tmp_path / "run"
+    models = OmegaConf.load(comparison_run / "config.yaml").models
+    fno = OmegaConf.load(pathlib.Path(models[0]) / "config.yaml")
+    fno_class = str(fno.architecture._target_).rsplit(".", 1)[-1]
+    run_models(
+        session_root,
+        run_dir,
+        f"models=[{models[0]},{models[1]},"
+        f"{{dir:{models[1]},label:dft_own,inlet_turbulence:{{enabled:false}}}}]",
+        "model_defaults={TadpoleTimeStepper:{inlet_turbulence:"
+        f"{{enabled:true,mode:replace,ramp_width:2}}}},{fno_class}:{{periodic_y:true}}}}",
+        f"data_dir={corpus}",
+        "max_steps=1",
+    )
+    recorded = OmegaConf.load(run_dir / "models.yaml")
+    assert recorded.dft.inlet_turbulence == {
+        "enabled": True,
+        "seed": None,
+        "apply": "output",
+        "mode": "replace",
+        "ramp_width": 2,
+    }
+    assert recorded.local_fno.periodic_y
+    assert "inlet_turbulence" not in recorded.local_fno
+    for label in ("dft", "dft_own"):
+        assert "periodic_y" not in recorded[label]
+    assert "inlet_turbulence" not in recorded.dft_own
+    with pytest.raises(ValueError, match="unknown setting in model_defaults"):
+        run_models(
+            session_root,
+            tmp_path / "typo",
+            f"models=[{models[1]}]",
+            "model_defaults={TadpoleTimeStepper:{periodic_z:true}}",
+        )
+
+
 def test_run_models_inlet_turbulence_input(
     tmp_path: pathlib.Path,
     session_root: pathlib.Path,

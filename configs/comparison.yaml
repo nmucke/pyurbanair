@@ -17,8 +17,9 @@ split: test
 data_dir: null
 # Trained model folders (config.yaml + weights.pt), all trained on the same data.
 # An entry may be {dir: <folder>, label: <name>, inlet_turbulence: {...},
-# periodic_y: ...}: its keys override the two settings below for that model
-# only; `label` names its rollouts (needed to list one folder twice).
+# periodic_y: ...}: its keys override the two settings below (and
+# `model_defaults`) for that model only; `label` names its rollouts (needed to
+# list one folder twice).
 models: []
 # Trajectories of the split to compare; null: every trajectory.
 sample_indices: null
@@ -43,6 +44,15 @@ inlet_turbulence:
 # padding in every conv and y-periodic SDF features
 # (neural_surrogates.periodic.make_periodic_y); no retraining.
 periodic_y: false
+# Per-architecture overrides of `inlet_turbulence` and `periodic_y`, keyed by
+# the class name of a model's `architecture._target_`; `model_defaults=null`
+# runs every model with the two settings above.
+model_defaults:
+  TadpoleTimeStepper:  # DFT: makes its own turbulence, so replace, not add
+    inlet_turbulence:
+      enabled: true
+      mode: replace
+    periodic_y: true
 
 # Rollout label -> name in the figures and tables, e.g. {dft_s: Ours}; a label
 # not listed is shown as it is.

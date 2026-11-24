@@ -4,6 +4,8 @@
 # corpus: 10 frames, so 8 lead steps for the H=2 Local-FNO).
 device: cpu
 split: test
+# Pinned: the tests set each model's inference settings themselves.
+model_defaults: null
 
 display_names: {dft: Ours}
 

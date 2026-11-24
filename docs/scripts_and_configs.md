@@ -344,7 +344,7 @@ Both read window files one member at a time, so multi-GB runs fit in memory.
 |---|---|---|
 | `generate_data.py` | `surrogate/generate_data` | one simulation per sample on the case geometry or random STL layouts; resumable, shardable; writes `state/` and `param/` `{train,val,test}/sample_XXXX.nc` |
 | `train.py` | `--config-name surrogate/<train_*\|finetune_stepper>` | builds datasets + model for the config's `task` (`scripts/utils/tasks.py`: `stepper`, `autoencoder`, `latent_generator`, `dft`, `finetune_stepper`), then fits |
-| `evaluate_stepper.py` | `surrogate/eval` block `stepper` (+ top-level `inlet_turbulence`, `periodic_y`) | rolls one or several steppers out on test trajectories; metrics + figures |
+| `evaluate_stepper.py` | `surrogate/eval` block `stepper` (+ top-level `inlet_turbulence`, `periodic_y`, and `model_defaults`: both on, inlet turbulence in `mode: replace`, for DFT models) | rolls one or several steppers out on test trajectories; metrics + figures |
 | `evaluate_autoencoder.py` | `surrogate/eval` block `autoencoder` | reconstruction metrics + figures |
 | `compare_autoencoders.py` | `surrogate/eval` block `autoencoder_compare` | the same metrics and figures for several autoencoders on the same snapshots: `metrics.csv` (one row per model), overlaid figures |
 | `evaluate_latent_generator.py` | `surrogate/eval` block `latent_generator` | generated-field statistics vs real fields |
@@ -364,7 +364,7 @@ docstring lists every metric and figure.
 
 | Script | Input | Output |
 |---|---|---|
-| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, or with `apply: input` only to the frame fed back; `mode: replace` puts it in place of the model's own fluctuations about its y-mean (keeping its y-mean), blending back to the model's field over `ramp_width` columns; off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11). Both apply to every model; a `models` entry `{dir: <folder>, label: <name>, inlet_turbulence: {...}, periodic_y: ...}` overrides them for that model only (`label` names its rollouts; one folder may be listed twice with different labels) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
+| `run_models.py` | `configs/comparison.yaml`: `models`, `split`, `sample_indices`, `max_steps`, `inlet_turbulence` (uDALES inlet forcing added to every predicted frame, or with `apply: input` only to the frame fed back; `mode: replace` puts it in place of the model's own fluctuations about its y-mean (keeping its y-mean), blending back to the model's field over `ramp_width` columns; off by default; [neural_surrogates.md](neural_surrogates.md) §11), `periodic_y` (circular y padding at inference for y-periodic domains, off by default; recorded in `models.yaml` and the rollouts' attrs; §11). Both apply to every model, overridden per architecture by `model_defaults` (by default every DFT runs with `periodic_y: true` and inlet turbulence in `mode: replace`; `model_defaults=null` drops that); a `models` entry `{dir: <folder>, label: <name>, inlet_turbulence: {...}, periodic_y: ...}` overrides them for that model only (`label` names its rollouts; one folder may be listed twice with different labels) | the run dir: `config.yaml`, `models.yaml` (history length, parameter count, inference s/step), `rollouts/<model>/sample_NNNN.nc` |
 | `compute_metrics.py <run dir> [key=value ...]` | the run dir; the truth is read from the corpus again | `metrics.yaml` (scalars per source, mean and per sample, and the reference scales) and `metrics.nc` (curves against lead time, spectra, PDFs, profiles) |
 | `visualize_comparison.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | the paper figures, PDF and PNG: error growth, ACC, vorticity, TKE / divergence / integral length, pedestrian level, spectra and their ratio map, fluctuation PDFs, profiles, station profiles, horizontal and vertical slices, window statistics, window TKE at `figures.tke_heights` (in units of H); `animation_speed.mp4` and one `animation_tke_z<h>H.mp4` per height |
 | `make_tables.py <run dir> [key=value ...]` | the run dir (run `compute_metrics.py` first) | `table_{accuracy,physics,cost}.tex` (booktabs, best model in bold, ready to `\input`) and `.csv` |
@@ -463,7 +463,7 @@ wrote.
 ```bash
 bash workflows/forward_workflow.sh model=pylbm params=static_truth
 bash workflows/assimilation_workflow.sh filtering 'filtering.analysis=${analysis.letkf}'
-bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno,model_weights/dft_s]' max_steps=50
+bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno_realistic,model_weights/dft_s_realistic]' max_steps=50
 bash workflows/compare_models.sh 'models=[pyudales,pypalm]' replicas=2 +overrides.pypalm.model.forward_model.boundary_condition=inflow_outflow
 ```
 

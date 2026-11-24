@@ -23,6 +23,7 @@ import torch  # noqa: E402
 import xarray  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
+from omegaconf.errors import ConfigKeyError  # noqa: E402
 
 
 def device(name: str) -> torch.device:
@@ -57,6 +58,29 @@ def load_model(
 
         model = make_periodic_y(model)
     return model.to(dev).eval(), cfg
+
+
+def model_settings(cfg: DictConfig, train_cfg: DictConfig) -> DictConfig:
+    """The run's `inlet_turbulence` and `periodic_y` for one model, overridden
+    by `cfg.model_defaults` for its architecture (the class name of its
+    `architecture._target_`, e.g. TadpoleTimeStepper)."""
+    settings = OmegaConf.create(
+        {"inlet_turbulence": cfg.inlet_turbulence, "periodic_y": cfg.periodic_y}
+    )
+    target = OmegaConf.select(train_cfg, "architecture._target_", default="")
+    name = str(target).rsplit(".", 1)[-1]
+    own = (cfg.model_defaults or {}).get(name)
+    if own is None:
+        return settings
+    # Struct: a misspelt key in `model_defaults` raises.
+    OmegaConf.set_struct(settings, True)
+    try:
+        merged = OmegaConf.merge(settings, own)
+    except ConfigKeyError as error:
+        raise ValueError(f"unknown setting in model_defaults.{name}: {error}")
+    OmegaConf.set_struct(merged, False)
+    assert isinstance(merged, DictConfig)
+    return merged
 
 
 def open_dataset(

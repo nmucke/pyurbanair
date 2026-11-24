@@ -746,6 +746,30 @@ def test_evaluate_stepper_periodic_y(
         )
 
 
+def test_evaluate_stepper_model_defaults(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """`model_defaults` applies only to the model of its architecture (by
+    class name): its `periodic_y` adds the column for that model alone."""
+    model_cfg = OmegaConf.load(session_root / "weights" / "stepper" / "config.yaml")
+    name = str(model_cfg.architecture._target_).rsplit(".", 1)[-1]
+    script = load_script("scripts/surrogate/evaluate_stepper.py")
+    for key, expect in ((name, True), ("NotThisModel", False)):
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"stepper.output_dir={tmp_path / key}",
+            "stepper.max_steps=2",
+            "periodic_y=false",
+            f"model_defaults={{{key}:{{periodic_y:true}}}}",
+            root=session_root,
+        )
+        script.run(cfg)
+        with open(tmp_path / key / "metrics.csv") as f:
+            rows = list(csv.DictReader(f))
+        assert ("periodic_y" in rows[0]) is expect, key
+
+
 def test_evaluate_autoencoder(
     session_root: pathlib.Path, trained: dict[str, Any]
 ) -> None:

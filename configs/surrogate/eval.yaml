@@ -40,6 +40,15 @@ inlet_turbulence:
 # periodic in y): circular y padding in every conv and y-periodic SDF features
 # (neural_surrogates.periodic.make_periodic_y); no retraining.
 periodic_y: false
+# Per-architecture overrides of `inlet_turbulence` and `periodic_y`, keyed by
+# the class name of a model's `architecture._target_`; `model_defaults=null`
+# runs every model with the two settings above.
+model_defaults:
+  TadpoleTimeStepper:  # DFT: makes its own turbulence, so replace, not add
+    inlet_turbulence:
+      enabled: true
+      mode: replace
+    periodic_y: true
 
 stepper:
   # One model, or several compared side by side on the same trajectories.

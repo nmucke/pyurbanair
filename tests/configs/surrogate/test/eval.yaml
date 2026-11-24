@@ -2,6 +2,8 @@
 # Tiny evaluation (configs/surrogate/eval.yaml) of the models the
 # train_* overlays write.
 device: cpu
+# Pinned: the tests set each model's inference settings themselves.
+model_defaults: null
 
 stepper:
   models: [ "${paths.weights_dir}/stepper" ]

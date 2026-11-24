@@ -883,7 +883,8 @@ with the inflow angle and speed recovered at the inlet) and `rollout.mp4`
 A stepper's predictions are smooth at the inlet: the digital-filter turbulence
 uDALES injects at the west face every `time_step` is lost. The top-level block
 `inlet_turbulence` (in `eval.yaml` and in `comparison.yaml` for
-`scripts/surrogate_comparison/run_models.py`, both off by default) adds that
+`scripts/surrogate_comparison/run_models.py`, both off by default, but on in
+`mode: replace` for DFT models through `model_defaults`, below) adds that
 forcing back at inference only, without retraining:
 
 ```yaml
@@ -979,7 +980,8 @@ convolution, so a rollout grows a seam at the y edges: on `dft_b` the jump
 across the y boundary is 3.6-5x the truth's and the edge bands are
 over-smoothed. The top-level `periodic_y` (in `eval.yaml` for the `stepper`
 block and in `comparison.yaml` for `scripts/surrogate_comparison/run_models.py`,
-both `false` by default) fixes this at inference only, without retraining:
+both `false` by default, but `true` for DFT models through `model_defaults`,
+below) fixes this at inference only, without retraining:
 `load_model(..., periodic_y=True)` in `scripts/utils/eval_common.py` calls
 `neural_surrogates.periodic.make_periodic_y(model)`, which pads y circularly in
 every 3-D convolution (z and x stay zero-padded) and computes the SDF geometry
@@ -1017,6 +1019,30 @@ is applied by these two evaluation scripts only: not in training, not in
 `evaluate_autoencoder.py` / `evaluate_latent_generator.py` (single-frame
 reconstructions and generated fields, where the rollout seam does not arise;
 the latent generator raises anyway), and not in `NeuralSurrogateForwardModel`.
+
+#### Per-architecture defaults (`model_defaults`)
+
+Both evaluation configs (`eval.yaml`, `comparison.yaml`) carry a
+`model_defaults` block that overrides the top-level `inlet_turbulence` and
+`periodic_y` per architecture, keyed by the class name of a model's
+`architecture._target_` (`model_settings` in `scripts/utils/eval_common.py`):
+
+```yaml
+model_defaults:
+  TadpoleTimeStepper:  # DFT
+    inlet_turbulence: {enabled: true, mode: replace}
+    periodic_y: true
+```
+
+So every DFT (`dft_b_*`, `dft_s_*`) runs y-periodic with the truth's inlet
+forcing in place of its own inlet fluctuations, while the baselines keep the
+run-level settings (off). Precedence: run level < `model_defaults` < a
+`run_models.py` `models` entry's own keys. A misspelt key raises.
+`model_defaults=null` runs every model on the run-level settings (`{}` does
+not clear it: Hydra merges a dict override); to change one key, override it,
+e.g. `model_defaults.TadpoleTimeStepper.periodic_y=false`. Because inlet
+turbulence is on, a DFT can only be evaluated on a corpus generated with it
+(the real corpora are), and periodic y needs `ny` a multiple of 16.
 
 ---
 

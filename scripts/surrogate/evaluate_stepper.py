@@ -36,6 +36,10 @@ Top-level `periodic_y` makes every model y-periodic at inference (circular y
 padding in its convolutions, y-periodic SDF features:
 neural_surrogates.periodic.make_periodic_y) and adds a `periodic_y` column
 (1) to metrics.csv.
+Both are overridden per architecture by `model_defaults` (keyed by the class
+name of the model's `architecture._target_`): by default every DFT
+(TadpoleTimeStepper) runs with `periodic_y: true` and inlet turbulence in
+`mode: replace`; `model_defaults=null` drops that.
 """
 
 from __future__ import annotations
@@ -50,7 +54,7 @@ import numpy as np
 import torch
 from matplotlib import animation
 from matplotlib import pyplot as plt
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
@@ -59,6 +63,7 @@ from eval_common import (  # noqa: E402
     inlet_turbulence,
     load_model,
     load_states,
+    model_settings,
     open_dataset,
     plot_slice_rows,
     speed,
@@ -74,21 +79,25 @@ def run(cfg: DictConfig) -> None:
 
     models = {}
     for model_dir in ev.models:
-        model, train_cfg = load_model(model_dir, dev, periodic_y=cfg.periodic_y)
+        train_cfg = OmegaConf.load(pathlib.Path(model_dir) / "config.yaml")
+        assert isinstance(train_cfg, DictConfig)
+        settings = model_settings(cfg, train_cfg)
+        model, train_cfg = load_model(model_dir, dev, periodic_y=settings.periodic_y)
         # Steppers that take geometry features compute them from the mask.
         data = open_dataset(train_cfg, cfg.data_dir, cfg.split, sdf_features="none")
         history = int(train_cfg.dataset.get("num_history_steps") or 1)
-        models[pathlib.Path(model_dir).name] = (model, data, history)
+        models[pathlib.Path(model_dir).name] = (model, data, history, settings)
 
     rows: list[dict] = []
     rmse_curves: dict[int, dict[str, np.ndarray]] = {}
     first: dict[str, Any] = {}
     for sample in ev.sample_indices:
         rmse_curves[sample] = {}
-        for name, (model, data, history) in models.items():
+        for name, (model, data, history, settings) in models.items():
+            its = settings.inlet_turbulence
             truth = _truth(data, sample, ev.max_steps)
             params = data._params[sample][: len(truth)]
-            inlet = inlet_turbulence(cfg.inlet_turbulence, data, sample)
+            inlet = inlet_turbulence(its, data, sample)
             start = time.perf_counter()
             pred = _rollout(
                 model,
@@ -98,7 +107,7 @@ def run(cfg: DictConfig) -> None:
                 history,
                 dev,
                 inlet,
-                cfg.inlet_turbulence.apply == "input",
+                its.apply == "input",
             )
             seconds = time.perf_counter() - start
             error = pred - truth
@@ -114,14 +123,10 @@ def run(cfg: DictConfig) -> None:
                     "final_rmse": float(per_step[-1]),
                     "rollout_seconds": seconds,
                 }
-                | ({"periodic_y": 1} if cfg.periodic_y else {})
+                | ({"periodic_y": 1} if settings.periodic_y else {})
                 | (
-                    {
-                        "inlet_turbulence_ramp_width": int(
-                            cfg.inlet_turbulence.ramp_width
-                        )
-                    }
-                    if inlet is not None and cfg.inlet_turbulence.mode == "replace"
+                    {"inlet_turbulence_ramp_width": int(its.ramp_width)}
+                    if inlet is not None and its.mode == "replace"
                     else {}
                 )
             )

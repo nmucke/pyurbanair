@@ -92,6 +92,7 @@ def test_compare_surrogates_workflow(
         "compare_surrogates.sh",
         *_overrides(tmp_path, session_root),
         f"models=[{session_root / 'weights' / 'dft'}]",
+        "model_defaults=null",  # the tiny corpus has no inlet turbulence
         "device=cpu",
         f"paths.results_dir={run_dir}",
     )
