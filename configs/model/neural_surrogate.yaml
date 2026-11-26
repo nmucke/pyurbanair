@@ -73,6 +73,10 @@ forward_model:
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    # AE decode mode of the samples; null -> the AE's own. local_blend on a local
+    # AE reduces tile seams, at the cost of slightly smoother small scales near
+    # them (docs/neural_surrogates.md §36).
+    decode_spatial_mode: null
     # Optional {variable: unit} map asserted against the artifact's own units
     # (which must already cover every state and param variable): state what this
     # deployment feeds the generator and a unit change fails loud instead of

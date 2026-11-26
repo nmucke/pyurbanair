@@ -12,6 +12,7 @@ autoencoder:
   num_figures: 1
   num_metric_samples: 4
   max_internal_batchsize: 2
+  spatial_mode: null
 
 autoencoder_compare:
   # Pinned to `autoencoder`'s: the test compares the two scripts' metrics.
@@ -46,6 +47,7 @@ latent_generator_ensemble:
   batch_size: 4
   max_internal_batchsize: 2
   latent_spectrum: true
+  decode_modes: null
   num_figures: 1
   bootstrap_resamples: 10
 

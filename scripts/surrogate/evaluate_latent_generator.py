@@ -21,13 +21,23 @@ per sampler; sweeps of a sampler other than `sampler` are named
 `generated_<sampler>_steps<k>`. Each sweep entry records its sampler and NFE
 (velocity evaluations: Euler 1, Heun 2 per step).
 
-`decode_modes` (e.g. [local, halo, global]) decodes with other decoder spatial
-policies than the AE was trained in (`decode_halo_size`: the halo; null = the
-AE's). Each mode that differs from the trained policy adds
-`generated_decode_<mode>` (the same noise, so the same latents, as `generated`)
-and `ae_recon_decode_<mode>` (the real latents decoded that way), which
-separates decoder effects (e.g. seams on the tile grid) from generator
-effects. The acceptance gate always judges `generated` against `ae_recon`.
+`decode_modes` (e.g. [local, halo, global, local_blend]) decodes with other
+decoder spatial policies than the AE was trained in (`decode_halo_size`: the
+halo; null = the AE's; `local_blend`, on a `local` AE only, decodes locally and
+blends half-tile-shifted tilings near the seams, which reduces them). Each
+mode that differs from the trained policy adds `generated_decode_<mode>` (the
+same noise, so the same latents, as `generated`) and `ae_recon_decode_<mode>`
+(the real latents decoded that way), which separates decoder effects (e.g.
+seams on the tile grid) from generator effects. The acceptance gate always
+judges `generated` against `ae_recon`.
+
+With a tiled AE (`local`, `local_blend` or `halo`) every source also gets
+`seam_ratio` and `seam_ratio_<var>`: per tiled axis, the mean |difference| of
+adjacent fluid cells across interior borders of the AE's `encoder_crop_size`
+tiles over that across the other faces, averaged over the tiled axes (1 = no
+seam); `seam_ratio_axis_<z|y|x>` is one axis's ratio (nan
+if untiled; compare it with the same axis of `real`, since a mean gradient
+biases it).
 
 Outputs, in `latent_generator.output_dir`:
   summary.json        acceptance verdict, held-out reference scales, per-source
@@ -76,6 +86,7 @@ from omegaconf import DictConfig
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
+    DECODE_COLORS,
     ae_reconstruct,
     device,
     encoded_latent_moments,
@@ -95,8 +106,6 @@ from eval_common import (  # noqa: E402
 # Sources drawn in the profile, histogram and spectrum figures (plus the
 # decode-mode variants, when `decode_modes` adds any).
 PLOTTED = ("real", "ae_recon", "generated", "generated_const_history")
-# Line colour per decode-mode variant (solid: generated, dotted: AE).
-DECODE_COLORS = {"local": "tab:purple", "halo": "tab:brown", "global": "tab:olive"}
 SCALARS = (
     "profile_rmse",
     "rms_profile_rmse",
@@ -133,6 +142,8 @@ def run(cfg: DictConfig) -> None:
         if mode != model.spatial_mode
         or (mode == "halo" and halo is not None and halo != model.halo_size)
     ]
+    # The tile grid of a tiled AE, on which the seam ratios are measured.
+    crop = None if model.spatial_mode == "global" else model.encoder_crop_size
     selection = _select(data, int(ev.max_snapshots), rng)
 
     # Conditioning probes over the whole selection: histories shuffled between
@@ -150,8 +161,8 @@ def run(cfg: DictConfig) -> None:
         seed: int,
         num_steps: int = steps,
         how: str = sampler,
-        decode: str | None = None,
         latents: list[dict] | None = None,
+        redecode: dict[tuple[str, int | None], list[np.ndarray]] | None = None,
     ) -> np.ndarray:
         return generator_samples(
             model,
@@ -163,8 +174,8 @@ def run(cfg: DictConfig) -> None:
             int(ev.batch_size),
             dev,
             sampler=how,
-            decode=(decode, halo if decode else None),
             latents=latents,
+            redecode=redecode,
         )
 
     def sweep_source(how: str, k: int) -> str:
@@ -203,6 +214,8 @@ def run(cfg: DictConfig) -> None:
                 "divergence": ge.divergence(fields, stencil, spacing),
                 "n": len(fields),
             }
+            if crop is not None:
+                metrics["seams"] = ge.tile_seams(fields, fluid, crop)
             groups.setdefault(source, {}).setdefault(grid, []).append(metrics)
             values.setdefault(source, []).append(
                 ge.fluid_values(fields, fluid, int(ev.max_values), rng)
@@ -215,9 +228,19 @@ def run(cfg: DictConfig) -> None:
         add("ae_recon", ae)
 
         sampled = latent_parts["generated"] if ev.latent_spectrum else None
+        # `generated`'s latents, also decoded in each of `decode_modes`.
+        redecoded: dict[tuple[str, int | None], list[np.ndarray]] = {
+            (mode, halo): [] for mode in decode_modes
+        }
         generated = np.stack(
             [
-                generate(hist, traj, 1000 * int(cfg.seed) + s, latents=sampled)
+                generate(
+                    hist,
+                    traj,
+                    1000 * int(cfg.seed) + s,
+                    latents=sampled,
+                    redecode=redecoded,
+                )
                 for s in range(seeds)
             ]
         )
@@ -235,12 +258,7 @@ def run(cfg: DictConfig) -> None:
                     model, real, data, traj, int(ev.batch_size), dev, (mode, halo)
                 ),
             )
-            decoded = np.stack(
-                [
-                    generate(hist, traj, 1000 * int(cfg.seed) + s, decode=mode)
-                    for s in range(seeds)
-                ]
-            )
+            decoded = np.concatenate(redecoded[mode, halo]).reshape(generated.shape)
             add(f"generated_decode_{mode}", decoded.reshape(-1, *decoded.shape[2:]))
             diversity[f"generated_decode_{mode}"].append(
                 ge.diversity(decoded, fluid)["per_condition"]
@@ -344,6 +362,12 @@ def run(cfg: DictConfig) -> None:
         scalars[source] |= {
             f"w1_{n}": float(w) for n, w in zip(names, hists[source]["w1"])
         }
+        if crop is not None:
+            seams = {g: ge.seam_ratios(m["seams"], names) for g, m in per.items()}
+            scalars[source] |= {
+                k: _weighted({g: r[k] for g, r in seams.items()}, per)
+                for k in next(iter(seams.values()))
+            }
     scalars["real"]["diversity"] = reference["real_pairwise_spread"]
     for source, per_condition in diversity.items():
         scalars[source]["diversity"] = ge.nanmean(np.concatenate(per_condition))

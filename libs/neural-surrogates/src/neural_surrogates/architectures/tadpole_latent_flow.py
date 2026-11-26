@@ -13,14 +13,15 @@ encoder skips could be reused.
 Latent representation
 ---------------------
 One canonical **full-domain latent grid** is used for all three AE spatial
-modes (``local`` / ``global`` / ``halo``), so the velocity network always sees
+modes (``local`` / ``global`` / ``halo``; ``local_blend`` encodes exactly as
+``local``), so the velocity network always sees
 one ``(B, D, Zl, Yl, Xl)`` token grid with ``D = n_state_channels * Cl``
 (``Cl`` = the AE's latent feature count per folded channel, 256 / 512 / 1024
 for S / B / L):
 
 1. the AE's own field-IO helpers assemble the masked, z-scored working input
-   and pad it with the inherited policy (global -> stride 16, local/halo -> the
-   crop size);
+   and pad it with the inherited policy (global -> stride 16, local /
+   local_blend / halo -> the crop size);
 2. :func:`~neural_surrogates.architectures._tadpole_spatial.encode_spatial`
    runs the plain AE encoder for **every** mode -- local regions simply have a
    zero halo -- and gathers one latent per central latent cell, so local mode
@@ -111,6 +112,7 @@ from neural_surrogates.architectures._tadpole_spatial import (
     STRIDE,
     decode_spatial,
     encode_spatial,
+    tiling_mode,
     validate_spatial_mode,
 )
 from neural_surrogates.architectures.tadpole_ae import TadpoleAE
@@ -160,6 +162,11 @@ class LatentEncoding:
         ``None`` in branch mode.
     mask:
         Fluid mask ``(B, 1, d, h, w)`` applied to the decoded physical state.
+    geom_features:
+        The SDF features the conditioning was derived from (a geometry-branch
+        AE's are computed from the caller's mask when not passed, so they keep
+        its dtype convention; ``cond.mask`` is fp32); a ``local_blend`` decode
+        re-runs the branch on them for shifts that are not multiples of 16.
     """
 
     z: torch.Tensor | None
@@ -168,6 +175,7 @@ class LatentEncoding:
     orig_shape: tuple[int, int, int]
     geom_latents: torch.Tensor | None
     mask: torch.Tensor
+    geom_features: torch.Tensor | None = None
 
 
 def _sinusoidal_time_embedding(tau: torch.Tensor, dim: int) -> torch.Tensor:
@@ -975,16 +983,6 @@ class TadpoleLatentGenerator(nn.Module):
 
     # -- encoding ----------------------------------------------------------- #
 
-    def _full_grid_feats(self, feats: list[torch.Tensor]) -> list[torch.Tensor]:
-        """Branch pyramid ``(B, F, ...)`` -> the ``(B*C, F, ...)`` full-grid
-        layout ``encode_spatial`` / ``decode_spatial`` slice regions from (the
-        same expansion ``_fold_geom_feats`` does outside local mode; local mode
-        must NOT use that helper's crop fold here)."""
-        c = self.n_state_channels
-        return [
-            f.unsqueeze(1).expand(-1, c, -1, -1, -1, -1).flatten(0, 1) for f in feats
-        ]
-
     def _geometry_conditioning(
         self,
         geometry: torch.Tensor,
@@ -1001,11 +999,11 @@ class TadpoleLatentGenerator(nn.Module):
         branch = self.ae.geometry_branch
         if branch is not None:
             feats: list[torch.Tensor] = branch(block)
-            return self._full_grid_feats(feats), feats[3], None
+            return self.ae._full_grid_feats(feats), feats[3], None
         latent, _, _ = encode_spatial(
             self.ae.ae,
             block,
-            self.spatial_mode,
+            tiling_mode(self.spatial_mode),
             self.encoder_crop_size,
             self.halo_size,
             None,
@@ -1013,6 +1011,17 @@ class TadpoleLatentGenerator(nn.Module):
         )  # (B*n_geom, Cl, Zl, Yl, Xl)
         geom_raw = latent.reshape(b, self.geom_latent_dim, *latent.shape[2:])
         return None, None, geom_raw
+
+    def _conditioning_sdf(
+        self, geometry: torch.Tensor, geom_features: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """``geom_features``, or for a geometry-branch AE with SDF features the
+        ones :meth:`_geometry_conditioning` would compute from ``geometry``
+        itself, so the :class:`LatentEncoding` can keep exactly them."""
+        ae = self.ae
+        if geom_features is not None or ae.geometry_branch is None:
+            return geom_features
+        return ae._sdf_features(geometry) if ae.sdf_features_enabled else None
 
     @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
     def _encode_raw(
@@ -1052,7 +1061,7 @@ class TadpoleLatentGenerator(nn.Module):
         latent, _, _ = encode_spatial(
             self.ae.ae,
             x_pad,
-            self.spatial_mode,
+            tiling_mode(self.spatial_mode),
             self.encoder_crop_size,
             self.halo_size,
             dec_feats,
@@ -1084,6 +1093,9 @@ class TadpoleLatentGenerator(nn.Module):
     ) -> LatentEncoding:
         """Deterministic normalised state latents + geometry conditioning."""
         self._require_latent_stats("encode_latents")
+        geom_features = self._conditioning_sdf(geometry, geom_features)
+        if geom_features is not None:
+            geom_features = geom_features.to(state.device)
         with torch.no_grad(), self._autocast_off(state.device):
             z_raw, geom_raw, branch_cond, dec_feats, mask, orig = self._encode_raw(
                 state, geometry, geom_features
@@ -1101,6 +1113,7 @@ class TadpoleLatentGenerator(nn.Module):
             orig_shape=orig,
             geom_latents=geom_raw,
             mask=mask,
+            geom_features=geom_features,
         )
 
     def geometry_condition(
@@ -1137,10 +1150,13 @@ class TadpoleLatentGenerator(nn.Module):
             raise ValueError(
                 f"geometry batch {g.shape[0]} does not match batch_size={b}"
             )
+        geom_features = self._conditioning_sdf(g, geom_features)
+        if geom_features is not None:
+            geom_features = geom_features.to(device)
         with torch.no_grad(), self._autocast_off(device):
             mask = g.unsqueeze(1).to(dtype=torch.float32)
             dec_feats, branch_cond, geom_raw = self._geometry_conditioning(
-                g, None if geom_features is None else geom_features.to(device), dtype
+                g, geom_features, dtype
             )
             geom_cond = (
                 branch_cond
@@ -1155,11 +1171,12 @@ class TadpoleLatentGenerator(nn.Module):
             orig_shape=(d, h, w),
             geom_latents=geom_raw,
             mask=mask,
+            geom_features=geom_features,
         )
 
     # -- decoding ----------------------------------------------------------- #
 
-    def _resolve_decode_mode(
+    def resolve_decode_mode(
         self, mode: str | None, halo_size: int | None
     ) -> tuple[str, int]:
         """``(spatial_mode, halo_size)`` :meth:`decode_latents` runs the frozen
@@ -1174,12 +1191,22 @@ class TadpoleLatentGenerator(nn.Module):
         latent context around each core (clipped at the grid edge). When the
         padded grid is not a multiple of the crop (an AE trained ``global``),
         the last tile along an axis is simply shorter -- no latents are
-        invented to fill it. The decoder computes a different function in each
-        mode; only the trained one reproduces the AE's reconstruction.
+        invented to fill it. ``local_blend`` decodes like ``local`` and then
+        blends the tile seams (:meth:`TadpoleAE.blend_shifted_tilings`); it
+        needs an AE trained ``local`` / ``local_blend`` (the latents of the two
+        are identical, so either overrides the other). The decoder computes a
+        different function in each mode; only the trained one reproduces the
+        AE's reconstruction.
         """
         resolved = self.spatial_mode if mode is None else mode
         halo = self.halo_size if halo_size is None else halo_size
         validate_spatial_mode(resolved, halo)
+        if resolved == "local_blend" and tiling_mode(self.spatial_mode) != "local":
+            raise ValueError(
+                "spatial_mode 'local_blend' blends independently decoded tiles "
+                "and needs an AE trained in spatial_mode 'local', got "
+                f"{self.spatial_mode!r}"
+            )
         return resolved, halo
 
     def decode_latents(
@@ -1193,9 +1220,10 @@ class TadpoleLatentGenerator(nn.Module):
         """Normalised state latents ``(B, D, Zl, Yl, Xl)`` -> physical state
         ``(B, C, d, h, w)`` on the original grid, obstacle cells zeroed.
 
-        ``spatial_mode`` (``local`` / ``halo`` / ``global``) and ``halo_size``
+        ``spatial_mode`` (``local`` / ``local_blend`` / ``halo`` / ``global``)
+        and ``halo_size``
         (halo mode; a nonnegative multiple of 16) override the decoder's
-        spatial processing for this call (see :meth:`_resolve_decode_mode`);
+        spatial processing for this call (see :meth:`resolve_decode_mode`);
         ``None`` keeps the AE's."""
         expected = self.latent_grid_for(cond.orig_shape)
         if z.dim() != 5 or z.shape[1] != self.state_latent_dim:
@@ -1204,7 +1232,7 @@ class TadpoleLatentGenerator(nn.Module):
                 f"{tuple(z.shape)}"
             )
         self._check_latent_grid(z, expected, "z")
-        mode, halo = self._resolve_decode_mode(spatial_mode, halo_size)
+        mode, halo = self.resolve_decode_mode(spatial_mode, halo_size)
         b = z.shape[0]
         c, cl = self.n_state_channels, self.latent_channels
         with self._autocast_off(z.device):
@@ -1226,7 +1254,7 @@ class TadpoleLatentGenerator(nn.Module):
             decoded = decode_spatial(
                 self.ae.ae,
                 folded,
-                mode,
+                tiling_mode(mode),
                 self.encoder_crop_size,
                 halo,
                 cond.decoder_geom_feats,
@@ -1234,7 +1262,15 @@ class TadpoleLatentGenerator(nn.Module):
             d, h, w = cond.orig_shape
             recon = decoded.reshape(b, n_work, *decoded.shape[2:])[:, :c, :d, :h, :w]
             state = self.ae._denormalize_state(recon)
-            return state * cond.mask.to(state)
+            state = state * cond.mask.to(state)
+        if mode == "local_blend":
+            state = self.ae.blend_shifted_tilings(
+                state,
+                cond.mask[:, 0],
+                cond.geom_features,
+                branch_features=cond.decoder_geom_feats,
+            )
+        return state
 
     # -- conditioning schema ------------------------------------------------- #
 
@@ -1553,10 +1589,11 @@ class TadpoleLatentGenerator(nn.Module):
         :meth:`set_conditioning_schema`) rather than per Euler step.
         ``decode_spatial_mode`` / ``decode_halo_size`` override the decoder's
         spatial processing (``None``: the AE's trained policy; see
-        :meth:`_resolve_decode_mode`); the sampled latents are the same.
+        :meth:`resolve_decode_mode`); the sampled latents are the same.
         ``return_latents=True`` returns ``(states, z)`` with ``z`` the
         normalised latents ``(B, D, Zl, Yl, Xl)`` after the last step, the
-        ones that were decoded.
+        ones that were decoded (``local_blend`` decoding blends the fields,
+        not the latents).
         """
         self._check_conditioning_schema(param_names, history_dt_seconds, "sample")
         if initial_noise is not None and generator is not None:
@@ -1577,7 +1614,7 @@ class TadpoleLatentGenerator(nn.Module):
             raise ValueError(
                 f"sampler must be one of {sorted(SAMPLER_NFE_PER_STEP)}, got {sampler!r}"
             )
-        self._resolve_decode_mode(decode_spatial_mode, decode_halo_size)
+        self.resolve_decode_mode(decode_spatial_mode, decode_halo_size)
 
         cond = self.geometry_condition(
             geometry, geom_features, batch_size=b, device=device

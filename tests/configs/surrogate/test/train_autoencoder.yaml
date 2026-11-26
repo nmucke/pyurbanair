@@ -3,6 +3,10 @@ defaults:
   - training
 
 name: autoencoder
+# 16-cell tiles: the tiny grid (20 x 20 x 4) spans two along y and x, so the
+# evaluations have tile seams to measure and blend.
+architecture:
+  encoder_crop_size: 16
 # Never the user's copy: a test that wants one passes its own dir.
 prechunk:
   output_root: null

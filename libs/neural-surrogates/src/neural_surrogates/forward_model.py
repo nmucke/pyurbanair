@@ -231,8 +231,9 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 fix for the rollout OOM on large ensembles / high resolution).
             generative_spinup: The ``generative_spinup`` config block
                 (``model_dir``, ``template_path``, ``seed``,
-                ``sample_batch_size``, ``num_sampling_steps``; an optional
-                ``save_diagnostics`` flag is consumed by the caller). Required
+                ``sample_batch_size``, ``num_sampling_steps``,
+                ``decode_spatial_mode``; an optional ``save_diagnostics`` flag
+                is consumed by the caller). Required
                 when ``spinup_source == "generative"`` and ignored otherwise,
                 so every other mode is unaffected by its presence.
         """

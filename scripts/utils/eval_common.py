@@ -24,6 +24,15 @@ import xarray  # noqa: E402
 from hydra.utils import instantiate  # noqa: E402
 from omegaconf import DictConfig, OmegaConf  # noqa: E402
 
+# Line colour of the `<kind>_decode_<mode>` variants of the latent-generator
+# evaluations (solid: generated, dotted: AE).
+DECODE_COLORS = {
+    "local": "tab:purple",
+    "halo": "tab:brown",
+    "global": "tab:olive",
+    "local_blend": "tab:cyan",
+}
+
 
 def device(name: str) -> torch.device:
     """The requested device, or the CPU when CUDA is not available."""
@@ -165,16 +174,19 @@ def generator_samples(
     batch: int,
     dev: torch.device,
     sampler: str = "euler",
-    decode: tuple[str | None, int | None] = (None, None),
     latents: list[dict] | None = None,
     noise: torch.Tensor | None = None,
+    redecode: dict[tuple[str, int | None], list[np.ndarray]] | None = None,
 ) -> np.ndarray:
     """Generated fields for parameter histories (B, Hp, P) on trajectory
     `traj`'s geometry. The noise is fixed by `seed` (one generator over the
-    batches), or given per sample as `noise` (B, D, Zl, Yl, Xl). `decode` =
-    (spatial mode, halo size) of the decoder, `None` for the trained ones.
-    `latents`, if given, gets the token moments of the sampled latents
-    (`generator_evaluation.latent_moments`), one dict per batch."""
+    batches), or given per sample as `noise` (B, D, Zl, Yl, Xl); the fields
+    are decoded in the AE's trained spatial mode. `latents`, if given, gets
+    the token moments of the sampled latents
+    (`generator_evaluation.latent_moments`), one dict per batch. `redecode`,
+    if given, maps further (spatial mode, halo size) decodes to lists that get
+    the same sampled latents decoded that way, one array per batch (the flow
+    is sampled once for all decodes)."""
     from neural_surrogates import generator_evaluation as ge
 
     generator = (
@@ -186,23 +198,34 @@ def generator_samples(
     for start in range(0, len(hist), batch):
         h = hist[start : start + batch].to(dev)
         b = len(h)
+        geom = expand(data.geometry_for(traj), b, dev)
+        feats = expand(data.geom_features_for(traj), b, dev)
+        want_z = latents is not None or bool(redecode)
         sample = model.sample(
             h,
-            expand(data.geometry_for(traj), b, dev),
-            expand(data.geom_features_for(traj), b, dev),
+            geom,
+            feats,
             initial_noise=None if noise is None else noise[start : start + b],
             generator=generator,
             num_steps=int(num_steps),
             param_names=model.param_names,
             history_dt_seconds=model.history_dt_seconds,
             sampler=sampler,
-            decode_spatial_mode=decode[0],
-            decode_halo_size=decode[1],
-            return_latents=latents is not None,
+            return_latents=want_z,
         )
-        if latents is not None:
+        if want_z:
             sample, z = sample
+        if latents is not None:
             latents.append(ge.latent_moments(z.float().cpu().numpy()))
+        if redecode:
+            # The conditioning `sample` derived, for the same latents.
+            cond = model.geometry_condition(geom, feats, batch_size=b)
+            with torch.no_grad():
+                for (mode, halo), parts in redecode.items():
+                    decoded = model.decode_latents(
+                        z, cond, spatial_mode=mode, halo_size=halo
+                    )
+                    parts.append(decoded.float().cpu().numpy())
         out.append(sample.float().cpu().numpy())
     return np.concatenate(out)
 

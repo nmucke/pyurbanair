@@ -8,8 +8,9 @@ the SDF geometry features are computed on a y-periodic mask
 (``neural_surrogates.sdf.sdf_features(..., periodic_y=True)``).
 
 Supported: ``TadpoleTimeStepper`` / ``TadpoleAE`` in ``spatial_mode`` global (ny
-a multiple of 16) or local with one crop spanning y (ny == crop y), ``P3D``
-without shifted windows, ``UNetConvNeXt``, ``SimpleConv``, and LoRA-wrapped
+a multiple of 16) or local / local_blend with one crop spanning y (ny == crop
+y; local_blend's shifted tilings then shift only z / x and keep the whole
+wrapped y), ``P3D`` without shifted windows, ``UNetConvNeXt``, ``SimpleConv``, and LoRA-wrapped
 convs (peft's ``lora_A`` conv is patched like its base). Already y-periodic
 parts are left as they are: the baselines built with ``periodic_axes``
 containing ``"y"`` (``periodic_y`` attribute ``True``) are returned unchanged,

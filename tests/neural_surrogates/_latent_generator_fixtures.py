@@ -54,12 +54,17 @@ NET: dict[str, Any] = dict(n_layers=1, num_heads=2, film_hidden=8, time_embed_di
 # --------------------------------------------------------------------------- #
 
 
-def ae_arch(spatial_mode: str, geometry: str, latent_type: str = "mode") -> dict:
+def ae_arch(
+    spatial_mode: str,
+    geometry: str,
+    latent_type: str = "mode",
+    crop: int | list[int] = CROP,
+) -> dict:
     """The ``architecture`` node of a fabricated AE export."""
     arch: dict[str, Any] = {
         "_target_": "neural_surrogates.TadpoleAE",
         "size": "S",
-        "encoder_crop_size": CROP,
+        "encoder_crop_size": crop,
         "latent_type": latent_type,
         "normalize": True,
         "sdf_clamp_cells": 8.0,
@@ -85,16 +90,18 @@ def make_ae_export(
     geometry: str = "fold",
     *,
     latent_type: str = "mode",
+    crop: int | list[int] = CROP,
 ) -> Path:
     """Fabricate a ``pretrain_autoencoder.py``-shaped AE export under
-    ``root/model_weights/ae_<spatial_mode>_<geometry>`` and return its path.
+    ``root/model_weights/ae_<spatial_mode>_<geometry>`` (plus ``_crop<z>x<y>x<x>``
+    for a ``crop`` other than ``CROP``) and return its path.
 
     Zero-init heads (the decoder's output projection and, in branch mode, the
     geometry projections) are randomised so representation-parity checks are
     non-trivial; non-trivial state statistics are installed."""
     from neural_surrogates import TadpoleAE
 
-    arch = ae_arch(spatial_mode, geometry, latent_type)
+    arch = ae_arch(spatial_mode, geometry, latent_type, crop)
     kwargs = {k: v for k, v in arch.items() if k != "_target_"}
     ae = TadpoleAE(n_state_channels=C, **kwargs)
     with torch.no_grad():
@@ -112,7 +119,10 @@ def make_ae_export(
                 torch.nn.init.normal_(proj.weight, std=0.05)
     ae.set_normalization([0.1, -0.2, 0.3], [1.0, 1.5, 0.7])
 
-    model_dir = root / "model_weights" / f"ae_{spatial_mode}_{geometry}"
+    name = f"ae_{spatial_mode}_{geometry}"
+    if crop != CROP:
+        name += "_crop" + "x".join(str(n) for n in np.broadcast_to(crop, 3))
+    model_dir = root / "model_weights" / name
     model_dir.mkdir(parents=True)
     torch.save(ae.state_dict(), model_dir / "weights.pt")
     OmegaConf.save(

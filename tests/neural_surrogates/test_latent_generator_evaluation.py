@@ -218,6 +218,82 @@ def _group(fields: np.ndarray, fluid: np.ndarray) -> dict[str, Any]:
     }
 
 
+def test_seam_ratio_is_one_for_smooth_fields_and_large_for_tile_offsets() -> None:
+    names = ["u", "v", "w"]
+    crop = (4, 8, 8)  # z (size 4) is one tile: skipped
+    fluid = np.ones((4, 16, 24), dtype=bool)
+    z, y, x = np.meshgrid(
+        np.arange(4.0), np.arange(16.0), np.arange(24.0), indexing="ij"
+    )
+    smooth = np.broadcast_to(0.1 * z + 0.2 * y + 0.3 * x, (2, 3, 4, 16, 24))
+    seams = ge.tile_seams(smooth, fluid, crop)
+    assert seams["border_count"][0] == 0 and seams["interior_count"][0] == 0
+    assert ge.seam_ratios(seams, names)["seam_ratio"] == pytest.approx(1.0)
+    noise = np.random.default_rng(1).standard_normal((4, 3, 4, 16, 24))
+    ratios = ge.seam_ratios(ge.tile_seams(noise, fluid, crop), names)
+    assert ratios["seam_ratio"] == pytest.approx(1.0, abs=0.1)
+    # A linear ramp plus a constant offset per (y, x) tile.
+    rng = np.random.default_rng(0)
+    offsets = rng.standard_normal((2, 3)).repeat(8, axis=0).repeat(8, axis=1)
+    tiled = 0.01 * (x + y) + offsets[None, None, None]
+    tiled = np.broadcast_to(tiled, (2, 3, 4, 16, 24))
+    ratios = ge.seam_ratios(ge.tile_seams(tiled, fluid, crop), names)
+    assert ratios["seam_ratio"] > 20
+    assert set(ratios) == {
+        "seam_ratio",
+        "seam_ratio_u",
+        "seam_ratio_v",
+        "seam_ratio_w",
+        "seam_ratio_axis_z",
+        "seam_ratio_axis_y",
+        "seam_ratio_axis_x",
+    }
+    # Offsets across the x tiles only: the x axis carries the seam.
+    offsets = rng.standard_normal(3).repeat(8)
+    tiled = np.broadcast_to(0.01 * (x + y) + offsets, (2, 3, 4, 16, 24))
+    ratios = ge.seam_ratios(ge.tile_seams(tiled, fluid, crop), names)
+    assert ratios["seam_ratio_axis_x"] > 20
+    assert ratios["seam_ratio_axis_y"] == pytest.approx(1.0)
+    assert np.isnan(ratios["seam_ratio_axis_z"])  # one tile along z
+    assert ratios["seam_ratio"] == pytest.approx(
+        (ratios["seam_ratio_axis_x"] + ratios["seam_ratio_axis_y"]) / 2
+    )
+
+
+def test_seam_ratio_skips_obstacle_pairs_and_untiled_fields() -> None:
+    names = ["u"]
+    fluid = np.ones((2, 2, 16), dtype=bool)
+    fields = np.broadcast_to(np.arange(16.0), (1, 1, 2, 2, 16)).copy()
+    fields[..., 8:] += 100.0  # a jump across the only interior border (x = 8)
+    fluid[..., 8] = False  # ... next to an obstacle: that pair is excluded
+    seams = ge.tile_seams(fields, fluid, (2, 2, 8))
+    assert seams["border_count"][2] == 0
+    assert np.isnan(ge.seam_ratios(seams, names)["seam_ratio"])
+    fluid[..., 8] = True
+    assert ge.seam_ratios(ge.tile_seams(fields, fluid, (2, 2, 8)), names)[
+        "seam_ratio"
+    ] == pytest.approx(101.0)
+    # No axis longer than its crop: nothing to measure.
+    untiled = ge.tile_seams(fields, fluid, (2, 2, 16))
+    assert not untiled["border_count"].any() and not untiled["interior_count"].any()
+    assert np.isnan(ge.seam_ratios(untiled, names)["seam_ratio"])
+
+
+def test_merge_group_metrics_sums_tile_seams() -> None:
+    rng = np.random.default_rng(3)
+    fluid = np.ones((6, 6, 16), dtype=bool)
+    a = rng.standard_normal((2, 3, 6, 6, 16))
+    b = rng.standard_normal((3, 3, 6, 6, 16))
+    groups = []
+    for f in (a, b):
+        groups.append(_group(f, fluid) | {"seams": ge.tile_seams(f, fluid, (8, 8, 8))})
+    merged = ge.merge_group_metrics(groups)["seams"]
+    pooled = ge.tile_seams(np.concatenate([a, b]), fluid, (8, 8, 8))
+    for key, value in pooled.items():
+        assert np.allclose(merged[key], value)
+    assert "seams" not in ge.merge_group_metrics([_group(a, fluid)])
+
+
 def test_merge_group_metrics_matches_pooled_computation() -> None:
     rng = np.random.default_rng(2)
     fluid = np.ones((6, 6, 8), dtype=bool)

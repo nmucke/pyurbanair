@@ -44,6 +44,7 @@ import torch.nn.functional as F
 from neural_surrogates.sdf import sdf_features as compute_sdf_features
 
 from ._tadpole_crop import CropShape
+from ._tadpole_spatial import tiling_mode
 
 
 class _TadpoleFieldIO:
@@ -103,10 +104,11 @@ class _TadpoleFieldIO:
         )
         # A y-periodic model (make_periodic_y) can neither zero-pad y nor fold
         # it into several independent local crops.
+        local = tiling_mode(self.spatial_mode) == "local"
         if getattr(self, "periodic_y", False) and (
-            pad_h or (self.spatial_mode == "local" and h != multiples[1])
+            pad_h or (local and h != multiples[1])
         ):
-            need = "equal" if self.spatial_mode == "local" else "be a multiple of"
+            need = "equal" if local else "be a multiple of"
             raise ValueError(
                 f"periodic_y: ny ({h}) must {need} {multiples[1]} "
                 f"(spatial_mode={self.spatial_mode!r})"
@@ -303,7 +305,7 @@ class _TadpoleFieldIO:
         """
         from einops import rearrange
 
-        if self.spatial_mode != "local":
+        if tiling_mode(self.spatial_mode) != "local":
             return [
                 f.unsqueeze(1).expand(-1, n_channels, -1, -1, -1, -1).flatten(0, 1)
                 for f in feats

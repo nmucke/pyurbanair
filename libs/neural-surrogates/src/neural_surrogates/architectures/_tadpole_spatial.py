@@ -23,8 +23,10 @@ STRIDE = 16
 
 
 def validate_spatial_mode(mode: str, halo_size: int) -> None:
-    if mode not in ("local", "global", "halo"):
-        raise ValueError("spatial_mode must be 'local', 'global', or 'halo'")
+    if mode not in ("local", "local_blend", "global", "halo"):
+        raise ValueError(
+            "spatial_mode must be 'local', 'local_blend', 'global', or 'halo'"
+        )
     if mode == "halo" and (
         isinstance(halo_size, bool)
         or not isinstance(halo_size, int)
@@ -32,6 +34,12 @@ def validate_spatial_mode(mode: str, halo_size: int) -> None:
         or halo_size % STRIDE
     ):
         raise ValueError("halo_size must be a nonnegative multiple of 16")
+
+
+def tiling_mode(mode: str) -> str:
+    """How ``mode`` tiles, encodes and decodes the grid: ``local_blend`` is
+    ``local`` plus an inference-only seam blend after decoding."""
+    return "local" if mode == "local_blend" else mode
 
 
 @dataclass
