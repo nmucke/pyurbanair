@@ -65,6 +65,10 @@ autoencoder:
   # Cap on the crops the encoder/decoder run at once (null: the model's own),
   # to fit large grids in GPU memory.
   max_internal_batchsize: null
+  # Spatial mode to rebuild the AE in (e.g. local_blend for a local AE: local
+  # decode with half-tile-shifted tilings blended near the seams); null -> its
+  # trained one.
+  spatial_mode: null
 
 autoencoder_compare:
   # Trained autoencoder folders, compared on the same snapshots (at least two).
@@ -102,7 +106,9 @@ latent_generator:
   samplers: [euler, heun]
   # Decoder spatial policies to compare on the same latents, e.g.
   # [local, halo, global]; each one differing from the AE's trained policy adds
-  # generated_decode_<mode> and ae_recon_decode_<mode>. null -> none.
+  # generated_decode_<mode> and ae_recon_decode_<mode>. local_blend (a local AE
+  # only) decodes locally and blends half-tile-shifted tilings near the seams,
+  # which reduces them. null -> none.
   decode_modes: [local, halo, global]
   # Halo of a halo decode (a multiple of 16); null -> the AE's halo_size.
   decode_halo_size: null
@@ -158,6 +164,10 @@ latent_generator_ensemble:
   # Per-geometry variance of the generated latents in the PCA basis of the
   # encoded members (one extra encoder pass over the members).
   latent_spectrum: true
+  # Decoder spatial policies other than the AE's (e.g. [local_blend]): each adds
+  # generated_decode_<mode> and ae_recon_decode_<mode>, as in latent_generator
+  # (a halo decode uses the AE's halo_size). null -> none.
+  decode_modes: null
   # Geometries with a std-map figure.
   num_figures: 3
   bootstrap_resamples: 2000

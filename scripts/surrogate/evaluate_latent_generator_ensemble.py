@@ -20,6 +20,13 @@ the t = 0 history `params_hist_for(traj, 0)`. Per geometry, one at a time:
   generated                  `num_draws` draws with the t = 0 history
   generated_shuffled_params  `probe_draws` draws with the next test
                              trajectory's t = 0 history (the conditioning probe)
+  generated_decode_<mode>,   `generated` (its sampled latents) and `ae_recon`
+  ae_recon_decode_<mode>     decoded in another spatial mode of the frozen AE,
+                             for each entry of `decode_modes` that differs
+                             from the AE's own (e.g. local_blend on a local AE:
+                             reduces tile seams), as in
+                             evaluate_latent_generator.py (the halo of a halo
+                             decode is the AE's)
 
 Draw k's initial noise depends only on (`seed`, sample, k), so every model
 sees the same noise (common random numbers for paired model comparisons), and
@@ -49,6 +56,9 @@ fluid cells (neural_surrogates.generator_evaluation):
                 stresses and divergence of each source against the members
   latent_var_ratio_*  generated vs encoded-member latent variance per
                 eigen-band of the members' latent PCA (`latent_spectrum`)
+  seam_ratio*   tile seams on the AE's tile grid (tiled AE), per
+                variable and per axis, as in evaluate_latent_generator.py
+                (1 = no seam)
 
 The `real` row holds the floors: the leave-one-out CRPS and rank histogram
 and the split-half values. Aggregates are the mean over geometries with a
@@ -88,6 +98,7 @@ from omegaconf import DictConfig, OmegaConf
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
 
 from eval_common import (  # noqa: E402
+    DECODE_COLORS,
     ae_reconstruct,
     device,
     encoded_latent_moments,
@@ -102,6 +113,8 @@ from eval_common import (  # noqa: E402
     write_json,
 )
 
+# Sources, followed by the `<kind>_decode_<mode>` variants of `decode_modes`;
+# PAIRED, HALVED and PHYSICS hold for a variant when they hold for its kind.
 SOURCES = ("ae_recon", "generated", "generated_shuffled_params")
 # Sources whose member i is derived from real member i.
 PAIRED = ("ae_recon",)
@@ -129,6 +142,8 @@ def run(cfg: DictConfig) -> None:
     model, train_cfg = load_latent_generator(
         ev.model_dir, dev, ev.max_internal_batchsize
     )
+    # Decoder policies that differ from the trained one (that one is `generated`).
+    modes = [str(m) for m in (ev.decode_modes or []) if m != model.spatial_mode]
     data = open_dataset(train_cfg, data_dir, str(made.split))
     names = list(data.state_vars)
     traj_of = {int(p.stem.split("_")[-1]): i for i, p in enumerate(data._state_files)}
@@ -152,7 +167,7 @@ def run(cfg: DictConfig) -> None:
     for i, sample in enumerate(samples):
         begin = time.perf_counter()
         result, arrays = _evaluate_geometry(
-            cfg, model, data, ensemble_dir, sample, traj_of[sample], steps, dev
+            cfg, model, data, ensemble_dir, sample, traj_of[sample], steps, dev, modes
         )
         result["seconds"]["total"] = time.perf_counter() - begin
         key = f"sample_{sample:04d}"
@@ -166,7 +181,7 @@ def run(cfg: DictConfig) -> None:
         print(f"{key} ({result['geometry']}, n_real {result['n_real']}): {seconds}")
 
     aggregate: dict[str, dict[str, Any]] = {}
-    for source in ("real", *SOURCES):
+    for source in _ordered(dict.fromkeys(r["source"] for r in rows)):
         per = [r for r in rows if r["source"] == source]
         if not per:
             continue
@@ -195,6 +210,7 @@ def run(cfg: DictConfig) -> None:
         "nfe": steps * SAMPLER_NFE_PER_STEP[str(ev.sampler)],
         "num_draws": int(ev.num_draws),
         "probe_draws": int(ev.probe_draws),
+        "decode_modes": modes,
         "num_points": int(ev.num_points),
         "rank_bins": int(ev.rank_bins),
         "num_splits": int(ev.num_splits),
@@ -300,6 +316,7 @@ def _evaluate_geometry(
     traj: int,
     steps: int,
     dev: torch.device,
+    modes: list[str],
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     ev = cfg.latent_generator_ensemble
     batch, seed = int(ev.batch_size), int(cfg.seed)
@@ -326,7 +343,12 @@ def _evaluate_geometry(
     )
     sampled: list[dict] | None = [] if ev.latent_spectrum else None
 
-    def generate(h: torch.Tensor, n: int, latents: list[dict] | None = None) -> Any:
+    def generate(
+        h: torch.Tensor,
+        n: int,
+        latents: list[dict] | None = None,
+        redecode: dict[tuple[str, int | None], list[np.ndarray]] | None = None,
+    ) -> Any:
         return generator_samples(
             model,
             h.unsqueeze(0).expand(n, -1, -1),
@@ -339,10 +361,15 @@ def _evaluate_geometry(
             sampler=str(ev.sampler),
             latents=latents,
             noise=noise[:n],
+            redecode=redecode,
         )
 
     stacks = {"real": real}
-    stacks["generated"] = generate(hist, int(ev.num_draws), sampled)
+    # `generated`'s latents, also decoded in each of `modes`.
+    redecoded: dict[tuple[str, int | None], list[np.ndarray]] = {
+        (mode, None): [] for mode in modes
+    }
+    stacks["generated"] = generate(hist, int(ev.num_draws), sampled, redecoded)
     if int(ev.probe_draws) > 0:
         stacks["generated_shuffled_params"] = generate(
             data.params_hist_for(probe_traj, 0), int(ev.probe_draws)
@@ -350,6 +377,11 @@ def _evaluate_geometry(
     seconds["generate"] = time.perf_counter() - begin
     begin = time.perf_counter()
     stacks["ae_recon"] = ae_reconstruct(model, real, data, traj, batch, dev)
+    for mode in modes:
+        stacks[f"ae_recon_decode_{mode}"] = ae_reconstruct(
+            model, real, data, traj, batch, dev, (mode, None)
+        )
+        stacks[f"generated_decode_{mode}"] = np.concatenate(redecoded[mode, None])
     latent_real = (
         encoded_latent_moments(model, real, data, traj, batch, dev)
         if ev.latent_spectrum
@@ -359,6 +391,10 @@ def _evaluate_geometry(
 
     begin = time.perf_counter()
     scalars, arrays = _metrics(cfg, stacks, fluid, data, traj, sample)
+    if model.spatial_mode != "global":  # seams on the AE's tile grid
+        for source, fields in stacks.items():
+            seams = ge.tile_seams(fields, fluid, model.encoder_crop_size)
+            scalars[source] |= ge.seam_ratios(seams, list(data.state_vars))
     if sampled is not None and latent_real is not None:
         spectrum = ge.latent_spectrum(
             ge.merge_latent_moments(latent_real), ge.merge_latent_moments(sampled)
@@ -537,8 +573,11 @@ def _metrics(
 
         return metric
 
-    for source in (s for s in SOURCES if s in stacks):
-        fields, paired = stacks[source], source in PAIRED
+    for source in _ordered(stacks):
+        if source == "real":
+            continue
+        base = source.partition("_decode_")[0]
+        fields, paired = stacks[source], base in PAIRED
         mom = moments[source]
         diff_var = ge.ensemble_moments(fields - real, fluid)["var"] if paired else None
         bias = ge.mean_bias(mom, moments["real"], diff_var)
@@ -564,11 +603,11 @@ def _metrics(
             "diversity": float(own.sum()) / (len(own) * (len(own) - 1)),
         }
         row["diversity_ratio"] = row["diversity"] / real_pairwise
-        if source in PHYSICS:
+        if base in PHYSICS:
             row |= ge.compare_to_real(_physics(fields, fluid, spacing), real_physics)
         kinds = (
             (("cheap", int(ev.num_splits)), ("fields", int(ev.num_field_splits)))
-            if source in HALVED
+            if base in HALVED
             else ()
         )
         for kind, splits in kinds:
@@ -591,6 +630,20 @@ def _metrics(
         arrays[f"{source}.bias_profile_standardised"] = bias["profile_standardised"]
         arrays[f"{source}.rank_counts"] = ranks["counts"]
     return scalars, arrays
+
+
+def _ordered(sources: Any) -> list[str]:
+    """`sources` (names) in report order: real, SOURCES, then the decode-mode
+    variants in their given order."""
+    return [s for s in ("real", *SOURCES) if s in sources] + [
+        s for s in sources if "_decode_" in s
+    ]
+
+
+def _color(source: str) -> str | None:
+    """STYLE's colour, or a decode-mode variant's in its mode's colour."""
+    mode = source.partition("_decode_")[2]
+    return DECODE_COLORS.get(mode) if mode else STYLE[source]["color"]
 
 
 def _half(key: str, value: Any, names: list[str], suffix: str = "") -> dict:
@@ -667,7 +720,7 @@ def _plot_rank_histograms(
     fig, axes = plt.subplots(
         1, len(names), figsize=(3.4 * len(names), 3.2), squeeze=False
     )
-    shown = [s for s in ("real", *SOURCES) if f"{s}.rank_counts" in arrays[0]]
+    shown = _ordered([k.split(".")[0] for k in arrays[0] if k.endswith(".rank_counts")])
     width = 0.8 / len(shown)
     for c, name in enumerate(names):
         for j, source in enumerate(shown):
@@ -676,7 +729,7 @@ def _plot_rank_histograms(
             x = np.arange(len(counts)) + (j - (len(shown) - 1) / 2) * width
             label = "real (leave-one-out)" if source == "real" else source
             ax = axes[0, c]
-            ax.bar(x, density, width, color=STYLE[source]["color"], label=label)
+            ax.bar(x, density, width, color=_color(source), label=label)
         axes[0, c].axhline(1.0, color="k", lw=0.8)
         axes[0, c].set_title(f"{name}: rank histogram")
         axes[0, c].set_xlabel("rank bin")
@@ -689,8 +742,9 @@ def _plot_rank_histograms(
 def _plot_std_maps(arrays: dict, names: list[str], path: pathlib.Path) -> None:
     rows = [
         (source, list(arrays[f"{source}.std_map"]), False)
-        for source in ("real", *SOURCES)
-        if f"{source}.std_map" in arrays
+        for source in _ordered(
+            [k.split(".")[0] for k in arrays if k.endswith(".std_map")]
+        )
     ]
     plot_slice_rows(
         rows,

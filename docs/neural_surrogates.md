@@ -1618,6 +1618,7 @@ Both wrappers expose the same architecture settings, saved with the model:
 | Setting | Meaning |
 |---|---|
 | `spatial_mode: local` | Default and legacy behavior: encode/decode independent tiles. `encoder_crop_size` is either a scalar for cubic tiles or `[z, y, x]` for anisotropic tiles; every entry must be a multiple of 16. |
+| `spatial_mode: local_blend` | AE only (the DFT rejects it). Exactly `local` for encoding, decoding, training (the `working_space=True` loss path, and train mode in general) and the state dict; only the eval-mode physical reconstruction of `TadpoleAE.forward` is additionally passed through the seam blend below (no gradient). |
 | `spatial_mode: global` | Encode/decode each state channel over the whole rectangular domain. Pad each axis only to a multiple of 16; `encoder_crop_size` is unused. This uses more memory and retains the backbone's existing windowed attention. |
 | `spatial_mode: halo` | Encode overlapping tiles with `halo_size` cells of context on each side, assemble the central latent cores, then decode overlapping latent neighborhoods and retain only central output cores. `encoder_crop_size` sets the per-axis core shape. |
 | `halo_size` | Default 16; nonnegative multiple of 16, used only in halo mode. Zero gives tiles without overlap. Boundary halos are clipped at the padded domain edge. |
@@ -1630,6 +1631,37 @@ uses neighboring **evolved** latents during decoding, together with the
 corresponding encoder skips and geometry features. It does not run independent
 time-steppers on overlapping patches. Geometry folding and the separate branch
 are supported in all three modes; geometry stays static.
+
+**`local_blend`: shifted-tiling re-projection.** Independently decoded local
+tiles leave seams on the tile grid. `TadpoleAE.blend_shifted_tilings(state,
+geometry, geom_features=None, branch_features=None)` (what `local_blend` applies; callable on any
+`local` / `local_blend` AE, `ValueError` otherwise) keeps the decoder in its
+trained local mode and reconstructs the decoded field (tiling A) again on
+tilings whose borders fall mid-tile of A. Every axis longer than its crop is
+blended, including a z split into 16-cell slabs. For every non-empty subset of
+the k tiled axes the shifted tiles are cut out of A's own padded working-space
+input (the normalised, zero-padded field), `[c/2, padded − c/2)` along each
+shifted axis, i.e. one tile fewer than A there, and encoded (posterior mode) +
+decoded tile by tile (local, no halo). A geometry branch's features are sliced
+from A's feature pyramid (`branch_features`, which `forward` and the generator
+pass in; computed when not given) when every shift is a multiple of the latent stride
+16, so a shifted tile sees exactly the conditioning A has at those cells; a
+shift of 8 (crop 16) cannot be cut on the latent grid, so the branch is re-run
+on the cut-out geometry block instead (its normalisation then sees that
+sub-grid). A fold-mode AE reconstructs the state channels without the geometry
+channels (folded channels are independent). A and the 2^k − 1 shifted
+reconstructions are blended in physical space, on the cells each one covers,
+with a separable partition of unity: per axis `sin^2(pi (i + 0.5) / c)` for A,
+`1 −` that for the shifted tiling, and A alone wherever the nearest A border is
+the domain edge. So only cells within half a crop of an interior seam of A
+change; all others come back bit for bit (obstacles zeroed), and a single-tile
+field is returned as given. This **reduces** seams rather than removing them:
+the AE reproduces what it can represent, a seam in its input included, and
+cells near the seams are reconstructed twice. Cost: 2^k − 1 extra AE encode +
+decode passes, each over one tile fewer per shifted axis than A. `decode`
+does not blend (it returns folded crops and has no geometry); the generator
+applies it through its `local_blend` decode override (§36, measurements
+there).
 
 Halo processing trades extra computation for spatial context. It is a
 finite-context approximation, not an exact reproduction of global processing:
@@ -1669,13 +1701,16 @@ Measured on the idealized data with `tadpole_ae_s_new` (trained `local`,
   features) with the overlap, so it does not bound training memory by itself.
   Do not tile z with a halo (use the full z as the core's z size).
 - A model must be deployed in the spatial mode (and tile/halo sizes) it was
-  trained in: the encoder/decoder compute different functions in each.
+  trained in: the encoder/decoder compute different functions in each. The
+  one exception is `local_blend`, which trains as `local`: a `local`-trained
+  AE loads unchanged (same state dict) with `spatial_mode: local_blend`, and
+  back.
 
 For example, set these in `train_autoencoder.yaml` or `train_dft.yaml`:
 
 ```yaml
 architecture:
-  spatial_mode: halo  # local | global | halo
+  spatial_mode: halo  # local | local_blend (AE only) | global | halo
   encoder_crop_size: [16, 32, 32]  # (z, y, x); scalar 32 remains valid
   halo_size: 16
 ```
@@ -2534,6 +2569,7 @@ grid, so no mode needs latents or features re-padded:
 | Decode mode | What the decoder sees |
 |---|---|
 | `local` | each `encoder_crop_size` core alone |
+| `local_blend` | `local`, then the decoded fields go through `TadpoleAE.blend_shifted_tilings` (§26); needs an AE trained `local` or `local_blend` (identical latents, so each overrides the other), `ValueError` otherwise. The blend reuses `cond.decoder_geom_feats` (tiling A's branch features) and re-runs a geometry branch only for 8-cell shifts (crop 16), on `cond.geom_features`: the SDF features `encode_latents` / `geometry_condition` were given or, if none, computed from the caller's mask (a bool mask gives other SDF features than the fp32 `cond.mask`) |
 | `halo` | each core plus `halo_size` (default the AE's; nonnegative multiple of 16) latent cells of context, clipped at the padded edge; output keeps the core. `halo_size: 0` equals local |
 | `global` | the whole padded latent grid at once (padding latents included — they are the encodings of the zero-padded input), cropped afterwards |
 
@@ -2544,6 +2580,34 @@ others compute a different function (§26 "Spatial processing": the frozen AE is
 a function of its training tile), so an override's own AE reconstruction
 (`ae_recon_decode_<mode>` in §39) is the baseline to judge it by, not the
 trained `ae_recon`.
+
+**Shifted-tiling re-projection (seam reduction, local AEs).** The
+`local_blend` decode (`decode_latents(…, spatial_mode="local_blend")`,
+`sample(…, decode_spatial_mode="local_blend")`, or an AE configured
+`local_blend`) reconstructs the decoded field again on half-tile-shifted
+tilings and blends it into the seams; the algorithm is described with the AE
+in §26 "Spatial processing". The latents are unchanged (`return_latents`
+returns the same `z` as `local`); only the decoded fields differ, and no
+velocity-net evaluations are added.
+
+Measured on the trained `lg_b_realistic` (B AE with a geometry branch, crop
+`[16, 32, 32]`), pyudales_realistic test split, 16 snapshots, one seed — seam
+ratio per axis z / y / x (§39):
+
+| Source | z | y | x |
+|---|---|---|---|
+| `real` | 0.83 | 1.02 | 0.98 |
+| `ae_recon` | 0.98 | 1.27 | 1.30 |
+| `ae_recon` + blend | 0.81 | 1.01 | 0.97 |
+| `generated` | 1.63 | 2.41 | 2.92 |
+| `generated` + blend | 1.05 | 1.51 | 1.40 |
+
+The blend brings the AE reconstruction back to `real` on every axis and cuts
+the generated fields' excess over `real` by 65–80 %, but does not remove it.
+Side effects on the generated fields: spectra LSD 1.57 → 2.33 dB, W1
+0.054 → 0.049, divergence RMS 0.0343 → 0.0307, profile RMSE 0.073 → 0.074. A
+second blend pass (seam ratio 1.33 → 1.23 for double the cost) or a narrower
+blend band (unchanged) did not help materially.
 
 **Precision policy.** The frozen encoder, geometry conditioning, latent
 statistics and the whole sampling loop always run in **fp32** with
@@ -2699,7 +2763,9 @@ replace the `latent_stats` estimate. It reads each trajectory once in source
 time chunks and encodes it one frame at a time through `_encode_raw`, as
 training does. A manifest of the AE fingerprint and `ae_kwargs`, the source
 files and the dataset settings makes an interrupted run resume and refuses a
-changed autoencoder or data (pick a new dir); `LatentCacheDataset` checks the
+changed autoencoder or data (pick a new dir) — including the same AE
+configured `local_blend` instead of `local`, although its latents are
+identical (the manifest keys on `ae_kwargs`); `LatentCacheDataset` checks the
 sources again when training starts. Training then reads `LatentCacheDataset` items (`latent`, `geom`,
 `params_hist`) and calls `forward_cached`, which is `forward` minus the
 encoder, so the objective is unchanged. `latent_cache.prepare_only=true`
@@ -2815,7 +2881,10 @@ spread over the trajectories) under matched geometry and history:
   latents decoded that way). Comparing the two isolates decoder effects (tile
   seams) from generator effects (§36, decode-time spatial policy). They join
   `metrics.csv`, `summary.json`, the profile / histogram / spectrum figures
-  (mode-coloured; AE dotted) and the `states_*.png` rows.
+  (mode-coloured; AE dotted) and the `states_*.png` rows. `local_blend` (a
+  `local` AE only; not in the default list) decodes locally and blends
+  half-tile-shifted tilings near the seams (§36), which reduces them:
+  `generated_decode_local_blend` / `ae_recon_decode_local_blend` (cyan).
 
 ```bash
 pixi run -e dev python scripts/surrogate/evaluate_latent_generator.py \
@@ -2830,6 +2899,20 @@ fluctuation-RMS vertical profiles; pooled per-component histograms and the
 stresses (diagonal and cross terms); divergence on a **stencil-valid** fluid
 mask (cells whose six face neighbours are all fluid); diversity across noise
 seeds against the real pairwise spread; and sampling time per step count.
+With a tiled AE (`local`, `local_blend` or `halo`) every source also gets the **seam ratio**
+(`ge.tile_seams` / `ge.seam_ratios`): per axis longer than the AE's
+`encoder_crop_size`, the mean |difference| of adjacent cells across interior
+tile-border faces (at `k * crop`) over that across all other faces, both cells
+fluid, averaged over the tiled axes — `seam_ratio_<var>` and their mean
+`seam_ratio`; 1 = no seam (`real` is the reference), nan when no axis is tiled.
+`seam_ratio_axis_<z|y|x>` is one axis's ratio, averaged over the variables (nan
+when that axis is not tiled). A mean gradient along an axis biases its ratio
+(real fields give 0.83 along z, the wall-normal profile), so compare each axis
+with the same axis of `real`, not with 1.
+`evaluate_autoencoder.py` reports the same ratios for every tiled AE: its
+`metrics.json` gains `spatial_mode` (the evaluated one; `autoencoder.spatial_mode`
+overrides the trained one, e.g. `local_blend`) and `seams` (the ratios of
+truth and reconstruction).
 With `rollout_stepper_dir` a trained stepper is rolled out `rollout_steps`
 from real, AE and generated fields.
 
@@ -2921,6 +3004,13 @@ the same size (a half-size subset of the source against the other half).
 | `diversity_ratio` | from `rms_distances` | mean pairwise distance of S over that of R |
 | physics | `profiles`, `spectra`, `reynolds_stresses`, `divergence`, `compare_to_real` | like-for-like now: one geometry and forcing |
 | `latent_var_ratio_*` | `latent_spectrum` | generated vs encoded-member latent variance per eigen-band |
+| `seam_ratio*` | `tile_seams`, `seam_ratios` | tile seams on the AE's tile grid (tiled AE), per variable and per axis (`seam_ratio_axis_<z\|y\|x>`), as in §39 |
+
+`decode_modes` (default `null`; e.g. `[local_blend]`) adds, per mode that
+differs from the AE's, `generated_decode_<mode>` (the same noise as
+`generated`) and the paired `ae_recon_decode_<mode>`, named as in §39 (a halo
+decode uses the AE's `halo_size`) and scored like `generated` / `ae_recon`;
+`summary.json` records the modes run (`decode_modes`).
 
 The `real` row of the outputs holds the floors (leave-one-out CRPS and rank
 histogram, split-half `*_half` values and their `*_half_std`); `*_half` on a
@@ -2990,6 +3080,10 @@ forward_model:
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
+    # AE decode mode of the samples; null -> the AE's own. local_blend on a local
+    # AE reduces tile seams, at the cost of slightly smoother small scales near
+    # them (docs/neural_surrogates.md §36).
+    decode_spatial_mode: null
     expected_units: null     # optional {variable: unit} map asserted against the artifact
     save_diagnostics: false  # ignored by the current DA scripts (see below)
 ```
@@ -3011,7 +3105,7 @@ instance read-only across members.
 | **Current-first-knot conditioning** | `current_param_vector(params, member)` reads each member's **current** value of every `param_vars` entry in the saved order: the first knot (`isel(time=0)`) of a time-varying schedule, the scalar of a static one, `default_params` for a variable the params omit — else it raises naming the member and the variable; non-finite values raise. The physical rollout itself still uses the full parameter schedule. |
 | **Constant history** | The cold start has no history, so `constant_history(values, hp)` repeats the current vector `Hp` times, `(Hp, P)` — the `constant_prehistory` convention of the training dataset (§35). This is the case the acceptance study must cover separately (§39). |
 | **Per-member seeded noise / common random numbers** | Member `i`'s base noise `(D, Zl, Yl, Xl)` is drawn on CPU from its own `torch.Generator` seeded `_member_seed(seed, i) = seed * 1_000_003 + i` — a function of the configured seed and the **stable ensemble index** only, never of the batch position or composition. So member `i` sees the same latent noise across `sample_batch_size` settings and across ESMDA iterations, and a parameter update changes its sample *only* through the conditioning, keeping unrelated Monte Carlo noise out of the assimilation map. Distinct members get distinct noise; no member is ever reset to a shared draw. |
-| **Regeneration on every cold forecast** | Nothing about a generated state is cached: every `generate(member_params, member_indices)` call samples afresh from the members' current parameters, in chunks of `sample_batch_size`, via `model.sample(params_hist, geometry, geom_features, initial_noise=noise, num_steps=self.num_sampling_steps)` (`num_sampling_steps` = the configured override, else the artifact's `generator.sampling.num_steps`). The output is shape-checked, re-masked (obstacle cells zero is an invariant of the class), finite-checked and written onto a deep copy of the template as one canonical `(z, y, x)` snapshot per member. A generator failure raises with the member indices and their conditioning values — there is **no** CFD fallback. |
+| **Regeneration on every cold forecast** | Nothing about a generated state is cached: every `generate(member_params, member_indices)` call samples afresh from the members' current parameters, in chunks of `sample_batch_size`, via `model.sample(params_hist, geometry, geom_features, initial_noise=noise, num_steps=self.num_sampling_steps)` (`num_sampling_steps` = the configured override, else the artifact's `generator.sampling.num_steps`; a `decode_spatial_mode` adds `decode_spatial_mode=<mode>`, §36, and is not passed otherwise; an unknown mode raises at construction (`validate_spatial_mode`) and the model's own check (`resolve_decode_mode`) when it loads, so `local_blend` on an AE not trained `local` raises before any sampling). The output is shape-checked, re-masked (obstacle cells zero is an invariant of the class), finite-checked and written onto a deep copy of the template as one canonical `(z, y, x)` snapshot per member. A generator failure raises with the member indices and their conditioning values — there is **no** CFD fallback. |
 | **Single-member path** | `_get_template_and_initial_state(state=None)` with `spinup_source == "generative"` calls `generate([params], [member_index])` (`member_index` defaults to `None`, which falls back to member 0 — right for a genuine single-model run — and warns once per process that an ensemble caller must pass a stable index, since otherwise every member would share one noise draw), runs `_validate_generated_snapshot` (every `state_vars` channel on `(z, y, x)` at the surrogate's `(nz, ny, nx)` with its cell spacing — a generator/stepper mismatch fails here rather than inside the rollout), then continues through the normal `_to_regular_grid` / `_history_window` path, so single forward runs work too. An explicit `state` always takes the warm path. The geometry channel comes from the mask on the (generated) template, or — if the state carries none — from an explicit `stl_path`, voxelised as in every other mode; only the CFD-backend and non-zero-state fallbacks are forbidden here (they need the absent backend, or would infer obstacles from generated zeros) and raise. |
 | **Ensemble path** | `run_ensemble(state=None)` takes `_generative_templates` before `_spinup_templates`: one `generate` call over all members with `member_indices = range(ensemble_size)`, in the parent process; each snapshot then takes the **warm** path (same canonicalisation and history handling as the single member) and the batched `rollout_batched` follows. The CFD spin-up ensemble is never constructed and `_last_failure_substitutions` is empty (nothing to resample). |
 | **No CFD anywhere** | The constructor accepts `generative`; a config-node `spinup_forward_model` is left **un-instantiated** (`None`) so a generator needs no CFD executable, case dir or preprocessing; `dirs` raises `AttributeError` so the ensemble base falls back to its own `temp_dir`; `clone_for_member` shares the backend (none) and the `GenerativeSpinup` handle; `prepare_neural_surrogate` is a no-op (as for `training_data`). |

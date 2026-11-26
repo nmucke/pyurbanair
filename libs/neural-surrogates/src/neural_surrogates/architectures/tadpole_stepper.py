@@ -297,7 +297,8 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
     spatial_mode:
         ``local`` (default), ``global`` or ``halo``; the same spatial encoder/
         decoder policy as :class:`TadpoleAE`. Every mode runs the latent
-        subnetwork once on the full assembled domain.
+        subnetwork once on the full assembled domain. The AE's ``local_blend``
+        is rejected.
     halo_size:
         Context width in cells, a nonnegative multiple of 16 (halo mode only);
         ``encoder_crop_size`` sets the central core size.
@@ -459,6 +460,13 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         self.latent_type = latent_type
         self.encoder_crop_size = normalize_crop_size(encoder_crop_size)
         validate_spatial_mode(spatial_mode, halo_size)
+        if spatial_mode == "local_blend":
+            # The DFT decoder reads the encoder's skips, which a re-encode of
+            # shifted tiles would have to recompute: not supported.
+            raise ValueError(
+                "TadpoleTimeStepper does not support spatial_mode='local_blend' "
+                "(a TadpoleAE inference mode); use 'local'"
+            )
         self.spatial_mode = spatial_mode
         self.halo_size = halo_size
         self.spatial_checkpoint = bool(spatial_checkpoint)

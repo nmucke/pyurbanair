@@ -436,6 +436,74 @@ def divergence(
 
 
 # --------------------------------------------------------------------------- #
+# Tile seams
+# --------------------------------------------------------------------------- #
+
+
+def tile_seams(
+    fields: np.ndarray, fluid: np.ndarray, crop: Sequence[int]
+) -> dict[str, np.ndarray]:
+    """Sums for :func:`seam_ratios`: the absolute difference of adjacent cells
+    along each axis, split into the faces on interior tile borders (at
+    ``k * crop``, ``0 < k * crop < size``) and all other faces. Only pairs of
+    two fluid cells count; an axis no longer than its ``crop`` (one tile) gets
+    zeros.
+
+    Returns ``{"border_sum", "interior_sum": (3, C), "border_count",
+    "interior_count": (3,)}`` per ``(z, y, x)`` axis (sums merge across
+    groups).
+    """
+    f, m = _check_fields(fields, fluid)
+    n, c = f.shape[:2]
+    out = {
+        "border_sum": np.zeros((3, c)),
+        "interior_sum": np.zeros((3, c)),
+        "border_count": np.zeros(3),
+        "interior_count": np.zeros(3),
+    }
+    for a, size in enumerate(m.shape):
+        if size <= int(crop[a]):
+            continue
+        pair = np.diff(m.astype(np.int8), axis=a) == 0
+        pair &= np.delete(m, -1, axis=a)  # both cells fluid
+        border = np.zeros(size - 1, dtype=bool)
+        border[int(crop[a]) - 1 :: int(crop[a])] = True  # face i sits between i, i + 1
+        shape = [1, 1, 1]
+        shape[a] = size - 1
+        on_border = pair & border.reshape(shape)
+        within = pair & ~border.reshape(shape)
+        diff = np.abs(np.diff(f, axis=2 + a))  # (N, C, ...)
+        out["border_sum"][a] = diff[:, :, on_border].sum(axis=(0, 2))
+        out["interior_sum"][a] = diff[:, :, within].sum(axis=(0, 2))
+        out["border_count"][a] = n * on_border.sum()
+        out["interior_count"][a] = n * within.sum()
+    return out
+
+
+def seam_ratios(seams: dict[str, np.ndarray], names: Sequence[str]) -> dict[str, float]:
+    """Tile-seam strength from :func:`tile_seams` sums: per tiled axis, the mean
+    absolute adjacent-cell difference across interior tile borders over the
+    mean across the other faces, averaged over the tiled axes. ``1`` = no
+    seam. ``seam_ratio_<var>`` per variable and ``seam_ratio`` their mean; nan
+    when no axis has a border and an interior pair. ``seam_ratio_axis_<z|y|x>``
+    is the mean over the variables for one axis (nan if not tiled): a mean
+    gradient along an axis (the wall-normal profile along z) biases its ratio,
+    so compare an axis with the same axis of real fields.
+    """
+    ok = (seams["border_count"] > 0) & (seams["interior_count"] > 0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        border = seams["border_sum"] / seams["border_count"][:, None]
+        interior = seams["interior_sum"] / seams["interior_count"][:, None]
+        ratio = np.where(ok[:, None] & (interior > 0), border / interior, np.nan)
+    per_var = [nanmean(ratio[:, i]) for i in range(len(names))]
+    return (
+        {f"seam_ratio_{n}": r for n, r in zip(names, per_var)}
+        | {"seam_ratio": nanmean(per_var)}
+        | {f"seam_ratio_axis_{a}": nanmean(ratio[i]) for i, a in enumerate("zyx")}
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Diversity / energy
 # --------------------------------------------------------------------------- #
 
@@ -566,7 +634,8 @@ def merge_group_metrics(groups: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
     Each group dict holds the outputs of :func:`profiles` (``"profiles"``),
     :func:`spectra` (``"spectra"``), :func:`reynolds_stresses`
-    (``"reynolds"``), :func:`divergence` (``"divergence"``) and the sample
+    (``"reynolds"``), :func:`divergence` (``"divergence"``), optionally
+    :func:`tile_seams` (``"seams"``, summed) and the sample
     count ``"n"``; sample-level arrays (``sample_mean``, ``per_sample_rms``)
     are concatenated. Profile ``rms`` merges in the square (see
     :func:`_weighted_profile`).
@@ -618,13 +687,18 @@ def merge_group_metrics(groups: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "sum_sq": sum_sq,
         "count": count,
     }
-    return {
+    merged = {
         "profiles": merged_prof,
         "spectra": merged_spec,
         "reynolds": merged_rey,
         "divergence": merged_div,
         "n": int(sum(int(g["n"]) for g in groups)),
     }
+    if "seams" in groups[0]:
+        merged["seams"] = {
+            k: sum(g["seams"][k] for g in groups) for k in groups[0]["seams"]
+        }
+    return merged
 
 
 def compare_to_real(source: dict[str, Any], real: dict[str, Any]) -> dict[str, float]:

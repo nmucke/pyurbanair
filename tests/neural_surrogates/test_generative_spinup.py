@@ -29,6 +29,7 @@ from neural_surrogates import (
     GenerativeSpinup,
     NeuralSurrogateEnsembleForwardModel,
     NeuralSurrogateForwardModel,
+    TadpoleLatentGenerator,
     UNetConvNeXt,
 )
 from neural_surrogates import ensemble_forward_model as ens_mod
@@ -65,6 +66,11 @@ class _StubGenerator(torch.nn.Module):
     :class:`TadpoleLatentGenerator`. ``ae`` advertises no SDF features so no
     ``geom_features`` are built.
     """
+
+    spatial_mode = "local"
+    halo_size = 16
+    # The real generator's decode-mode check (reads spatial_mode / halo_size).
+    resolve_decode_mode = TadpoleLatentGenerator.resolve_decode_mode
 
     def __init__(
         self,
@@ -108,6 +114,7 @@ class _StubGenerator(torch.nn.Module):
         num_steps=None,
         param_names=None,
         history_dt_seconds=None,
+        decode_spatial_mode="unset",  # "unset": not passed
     ):
         assert initial_noise is not None, "GenerativeSpinup must pass per-member noise"
         assert generator is None
@@ -134,6 +141,7 @@ class _StubGenerator(torch.nn.Module):
                 "num_steps": num_steps,
                 "param_names": param_names,
                 "history_dt_seconds": history_dt_seconds,
+                "decode_spatial_mode": decode_spatial_mode,
                 "batch": b,
             }
         )
@@ -720,6 +728,43 @@ def test_real_loader_strict_load_and_sampling_steps(artifact) -> None:
     gs2 = _gs(artifact, num_sampling_steps=3)
     gs2.generate([_params()], [0])
     assert gs2._model.calls[-1]["num_steps"] == 3
+
+
+def test_decode_spatial_mode_reaches_the_sampler_only_when_set(artifact) -> None:
+    gs = _gs(artifact)
+    gs.generate([_params()], [0])
+    assert gs.decode_spatial_mode is None
+    assert gs._model.calls[-1]["decode_spatial_mode"] == "unset"  # not passed
+    blended = _gs(artifact, decode_spatial_mode="local_blend")
+    blended.generate([_params()], [0])
+    assert blended._model.calls[-1]["decode_spatial_mode"] == "local_blend"
+    # The forward model hands the config key through.
+    model_dir, template = artifact
+    model = _make_model(
+        artifact,
+        generative_spinup={
+            "model_dir": str(model_dir),
+            "template_path": str(template),
+            "decode_spatial_mode": "local_blend",
+        },
+    )
+    assert model._generative_spinup.decode_spatial_mode == "local_blend"
+    assert _make_model(artifact)._generative_spinup.decode_spatial_mode is None
+
+
+def test_decode_spatial_mode_is_checked_when_the_model_loads(
+    artifact, monkeypatch
+) -> None:
+    """An unknown mode raises at construction; the generator's own check runs
+    at load, before any sampling: local_blend on an AE not trained local
+    raises."""
+    with pytest.raises(ValueError, match="spatial_mode must be"):
+        _gs(artifact, decode_spatial_mode="blend")
+    monkeypatch.setattr(_StubGenerator, "spatial_mode", "global")
+    _gs(artifact).generate([_params()], [0])  # unset: any AE
+    _gs(artifact, decode_spatial_mode="halo")._ensure_model()
+    with pytest.raises(ValueError, match="local_blend.*'global'"):
+        _gs(artifact, decode_spatial_mode="local_blend")._ensure_model()
 
 
 def test_loader_installs_conditioning_schema_and_restates_it(artifact) -> None:

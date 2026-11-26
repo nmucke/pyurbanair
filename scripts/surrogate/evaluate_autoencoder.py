@@ -6,12 +6,17 @@ Config: configs/surrogate/eval.yaml, block `autoencoder`.
     python scripts/surrogate/evaluate_autoencoder.py autoencoder.model_dir=model_weights/ae
 
 Snapshots are reconstructed whole (no random crop). Every metric is over fluid
-cells only.
+cells only. `spatial_mode` (null: the trained one) rebuilds the AE in another
+spatial mode, e.g. `local_blend` for a `local` AE (local decode with
+half-tile-shifted tilings blended near the seams).
 
 Outputs, in `autoencoder.output_dir`:
   metrics.json               overall RMSE, relative L2 and PSNR; RMSE, MAE,
                              relative L2 and R² per variable; mean KL and the
-                             fraction of active latent channels
+                             fraction of active latent channels; for a tiled
+                             AE the tile-seam ratios of truth and
+                             reconstruction (`seams`, 1 = no seam; as in
+                             evaluate_latent_generator.py)
   reconstruction_*.png       |U| at a few heights: truth, reconstruction, error
                              (one figure per snapshot)
   per_channel_metrics.png    RMSE and relative L2 per variable
@@ -35,6 +40,7 @@ import hydra
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+from neural_surrogates import generator_evaluation as ge
 from omegaconf import DictConfig
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "utils"))
@@ -63,6 +69,8 @@ def run(cfg: DictConfig) -> None:
     arch: dict[str, Any] = {}
     if ev.max_internal_batchsize is not None:
         arch["max_internal_batchsize"] = int(ev.max_internal_batchsize)
+    if ev.spatial_mode is not None:
+        arch["spatial_mode"] = str(ev.spatial_mode)
     model, train_cfg = load_model(ev.model_dir, dev, **arch)
     model.ae.latent_type = str(ev.latent_type)
     data = open_dataset(train_cfg, cfg.data_dir, cfg.split, random_crop_size=None)
@@ -95,6 +103,9 @@ def run(cfg: DictConfig) -> None:
     acc = _Metrics(len(names), rng)
     profiles: dict[tuple[int, ...], _Profiles] = {}
     kl, latent_std = [], []
+    # Tile-seam sums of truth and reconstruction on a tiled AE's tile grid.
+    tiled = model.spatial_mode != "global"
+    seams: dict[str, list[dict]] = {"truth": [], "reconstruction": []}
     for traj, times in by_traj.items():
         fluid = data.geometry_for(traj).numpy().astype(bool)
         profile = profiles.setdefault(
@@ -110,6 +121,11 @@ def run(cfg: DictConfig) -> None:
             for true_state, recon_state in zip(truth, recon):
                 acc.add(true_state, recon_state, fluid)
                 profile.add(true_state, recon_state, fluid)
+            if tiled:
+                for key, fields in (("truth", truth), ("reconstruction", recon)):
+                    seams[key].append(
+                        ge.tile_seams(fields, fluid, model.encoder_crop_size)
+                    )
 
     summary = acc.summary(names)
     spread = np.mean(latent_std, axis=0)
@@ -118,7 +134,13 @@ def run(cfg: DictConfig) -> None:
         "latent_active_fraction": float(np.mean(spread > ACTIVE_STD)),
         "num_snapshots": len(kl),
         "latent_type": str(ev.latent_type),
+        "spatial_mode": str(model.spatial_mode),
     }
+    if tiled:
+        summary["seams"] = {
+            key: ge.seam_ratios({k: sum(s[k] for s in parts) for k in parts[0]}, names)
+            for key, parts in seams.items()
+        }
     write_json(summary, out / "metrics.json")
     _plot_per_channel(summary, names, out / "per_channel_metrics.png")
     _plot_height_profile(acc, out / "height_profile.png")
@@ -151,8 +173,7 @@ def _reconstruct(
     state = torch.from_numpy(truth).to(dev)
     geom = expand(data.geometry_for(traj), b, dev)
     feat = expand(data.geom_features_for(traj), b, dev)
-    recon = model(state, geom, feat)
-    _, kl = model(state, geom, feat, return_kl_element=True)
+    recon, kl = model(state, geom, feat, return_kl_element=True)
     latent = model.encode(state, geom, feat, latent_type="mode")
     return (
         recon.float().cpu().numpy(),

@@ -29,6 +29,14 @@ What is locked down here:
   check; at init the velocity is exactly the Gaussian-optimal ``a(tau) * z``;
   ``a`` is the least-squares velocity of the linear path; the default build
   has no new keys; a narrow net trains a step and samples with Euler and Heun.
+* **Shifted-tiling blend** (``TadpoleAE.blend_shifted_tilings``, the
+  ``local_blend`` decode) -- an identity AE returns the masked input (cut/paste
+  alignment); a tile-mean AE shrinks a synthetic seam; only cells within half a
+  crop of an interior seam change; aligned shifts reuse tiling A's branch
+  features, unaligned ones rerun the branch; anisotropic crops tile z too;
+  ``local`` <-> ``local_blend`` decode overrides both work on the same latents,
+  the decode blends with the conditioning's own geometry (given SDF features,
+  bool masks) and ``local_blend`` on a global AE raises.
 
 Gated with ``importorskip`` on the vendored Tadpole runtime deps
 (``diffusers`` / ``timm`` / ``einops``), like the neighbouring Tadpole tests.
@@ -46,8 +54,15 @@ pytest.importorskip("diffusers")
 pytest.importorskip("timm")
 pytest.importorskip("einops")
 
+import numpy as np
 from hydra.utils import instantiate
 from neural_surrogates import LatentEncoding, TadpoleAE, TadpoleLatentGenerator
+from neural_surrogates import generator_evaluation as ge
+from neural_surrogates.architectures import tadpole_ae as tae
+from neural_surrogates.architectures._tadpole_spatial import (
+    decode_spatial,
+    encode_spatial,
+)
 from omegaconf import OmegaConf
 
 # The fabricated AE export (+ its architecture node) is shared with the
@@ -1574,3 +1589,281 @@ def test_sample_returns_the_decoded_latents(tmp_path):
         params_hist, geom, initial_noise=noise, num_steps=3, return_latents=True
     )
     assert torch.equal(euler_fields, plain)
+
+
+# --------------------------------------------------------------------------- #
+# 8. Shifted-tiling re-projection (spatial_mode="local_blend").
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("size", [32, 40, 44, 48])
+def test_seam_blend_weight(size):
+    h = TadpoleAE._seam_blend_weight(size, CROP)
+    assert ((h >= 0) & (h <= 1)).all()
+    interior = [f for f in range(CROP, size, CROP)]
+    for i in range(size):
+        nearest = min(range(0, size + CROP, CROP), key=lambda f: abs(i + 0.5 - f))
+        if nearest in interior:  # A's seam: the shifted tiling takes over
+            assert h[i] < 1.0
+        else:  # no real seam nearby: tiling A alone
+            assert h[i] == 1.0
+    for f in interior:  # cells touching a seam are almost all shifted tiling
+        assert h[f - 1] < 0.01 and h[f] < 0.01
+
+
+def _blend_generator(
+    tmp_path: Path, geometry: str, crop: int | list[int] = CROP
+) -> TadpoleLatentGenerator:
+    m = _generator(_make_ae_export(tmp_path, "local", geometry, crop=crop)).eval()
+    _install_nontrivial_latent_stats(m)
+    return m
+
+
+def _far_from_seams(grid: tuple, crop: tuple) -> torch.Tensor:
+    """``(*grid)`` True where a cell is more than half a crop from every
+    interior tile border of tiling A, along every axis."""
+    far = []
+    for size, c in zip(grid, crop):
+        centre = torch.arange(size) + 0.5
+        near = torch.zeros(size, dtype=torch.bool)
+        for f in range(c, size, c):
+            near |= (centre - f).abs() < c / 2
+        far.append(~near)
+    return far[0][:, None, None] & far[1][None, :, None] & far[2][None, None, :]
+
+
+def _identity_encode(model, x, mode, crop, halo, features=None, **kw):
+    return x.flatten(0, 1).unsqueeze(1), None, None
+
+
+def _identity_decode(model, latent, mode, crop, halo, features=None, **kw):
+    return latent
+
+
+def _tile_mean_decode(model, latent, mode, crop, halo, features=None, **kw):
+    """A stub AE that reconstructs every crop tile as its mean."""
+    n, _, d, h, w = latent.shape
+    cz, cy, cx = crop
+    tiles = latent.reshape(n, 1, d // cz, cz, h // cy, cy, w // cx, cx)
+    return tiles.mean((3, 5, 7), keepdim=True).expand_as(tiles).reshape(latent.shape)
+
+
+@pytest.mark.parametrize("grid", [GRID, RECT_GRID, (24, 40, 56)])
+def test_blend_shifted_tilings_with_an_identity_ae_is_the_input(
+    tmp_path, monkeypatch, grid
+):
+    """An exact identity AE reproduces every shifted tile, so the blend returns
+    the masked input: the shifted tiles are cut and pasted back in place."""
+    m = _blend_generator(tmp_path, "fold")
+    monkeypatch.setattr(tae, "encode_spatial", _identity_encode)
+    monkeypatch.setattr(tae, "decode_spatial", _identity_decode)
+    state, geom, _ = _inputs(b=2, grid=grid)
+    out = m.ae.blend_shifted_tilings(state, geom)
+    torch.testing.assert_close(out, state * geom.unsqueeze(1), atol=1e-5, rtol=1e-5)
+
+
+def test_blend_shifted_tilings_shrinks_a_synthetic_seam(tmp_path, monkeypatch):
+    """A tile-mean "AE" on a field with a constant offset per tile of A: the
+    shifted tiles average the offsets across A's borders, so the jump there
+    shrinks."""
+    m = _blend_generator(tmp_path, "fold")
+    monkeypatch.setattr(tae, "encode_spatial", _identity_encode)
+    monkeypatch.setattr(tae, "decode_spatial", _tile_mean_decode)
+    grid = (16, 32, 48)  # y, x tiled
+    geom = torch.ones(1, *grid)
+    offsets = torch.randn(1, C, 1, 2, 3).repeat_interleave(CROP, 3)
+    state = offsets.repeat_interleave(CROP, 4).expand(1, C, *grid).contiguous()
+    state = state + 0.01 * torch.arange(48.0)  # interior faces differ too
+    out = m.ae.blend_shifted_tilings(state, geom)
+    fluid = np.ones(grid, dtype=bool)
+    before = ge.tile_seams(state.numpy(), fluid, (CROP,) * 3)
+    after = ge.tile_seams(out.numpy(), fluid, (CROP,) * 3)
+    for axis in (1, 2):
+        jump = after["border_sum"][axis] / before["border_sum"][axis]
+        assert (jump < 0.1).all(), (axis, jump)
+    ratio = ge.seam_ratios(after, STATE_VARS)["seam_ratio"]
+    assert ratio < 0.1 * ge.seam_ratios(before, STATE_VARS)["seam_ratio"]
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+@pytest.mark.parametrize("grid", [GRID, RECT_GRID])
+def test_blend_shifted_tilings_shape_mask_and_locality(tmp_path, geometry, grid):
+    m = _blend_generator(tmp_path, geometry)
+    branch_calls = []
+    if m.ae.geometry_branch is not None:
+        m.ae.geometry_branch.register_forward_hook(lambda *_: branch_calls.append(1))
+    state, geom, _ = _inputs(b=2, grid=grid)
+    out = m.ae.blend_shifted_tilings(state, geom)
+    assert out.shape == state.shape and out.dtype == torch.float32
+    assert torch.isfinite(out).all()
+    assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+    # Only cells within half a crop of an interior seam change.
+    keep = _far_from_seams(grid, (CROP,) * 3)
+    masked = state * geom.unsqueeze(1)
+    assert torch.equal(out[..., keep], masked[..., keep])
+    assert not torch.allclose(out[..., ~keep], masked[..., ~keep])
+    if branch_calls:  # shifts of 8: the branch reruns once per shifted tiling
+        k = sum(n > CROP for n in grid)
+        assert len(branch_calls) == 2**k
+    # Supplying the SDF the AE would compute gives the same result.
+    if m.ae.sdf_features_enabled:
+        same = m.ae.blend_shifted_tilings(state, geom, _sdf_feats(m, geom))
+        torch.testing.assert_close(same, out)
+
+
+def test_blend_shifted_tilings_anisotropic_crop_and_branch_features(
+    tmp_path, monkeypatch
+):
+    """Crop [16, 32, 32], z tiled in 16-cell slabs: every tiled axis is blended.
+    Shifts along y / x (16, a multiple of the latent stride) hand the shifted
+    tiles tiling A's own branch features at those cells; a z shift (8) reruns
+    the branch on the cut-out geometry."""
+    crop = (16, 32, 32)
+    m = _blend_generator(tmp_path, "branch", list(crop))
+    grid = (32, 48, 72)  # padded (32, 64, 96)
+    state, geom, _ = _inputs(b=1, grid=grid)
+    reference = m.encode_latents(state, geom).decoder_geom_feats
+    assert reference is not None
+    seen: list[tuple] = []
+
+    def spy_encode(model, x, mode, crop, halo, features=None, **kw):
+        seen.append(("encode", tuple(x.shape[2:]), features))
+        return encode_spatial(model, x, mode, crop, halo, features, **kw)
+
+    def spy_decode(model, latent, mode, crop, halo, features=None, **kw):
+        seen.append(("decode", None, features))
+        return decode_spatial(model, latent, mode, crop, halo, features, **kw)
+
+    monkeypatch.setattr(tae, "encode_spatial", spy_encode)
+    monkeypatch.setattr(tae, "decode_spatial", spy_decode)
+    branch_calls = []
+    m.ae.geometry_branch.register_forward_hook(lambda *_: branch_calls.append(1))
+    out = m.ae.blend_shifted_tilings(state, geom)
+    assert torch.isfinite(out).all()
+    assert len(seen) == 2 * 7  # 2^3 - 1 shifted tilings
+    assert len(branch_calls) == 1 + 4  # A + every tiling shifted along z
+    padded = (32, 64, 96)
+    aligned = 0
+    for (_, shape, feats), (_, _, dec_feats) in zip(seen[::2], seen[1::2]):
+        assert dec_feats is feats
+        shifted = [shape[a] == padded[a] - crop[a] for a in range(3)]
+        assert all(shape[a] in (padded[a], padded[a] - crop[a]) for a in range(3))
+        if shifted[0]:
+            continue
+        aligned += 1
+        tiles = [
+            slice(c // 2, p - c // 2) if s else slice(0, p)
+            for c, p, s in zip(crop, padded, shifted)
+        ]
+        for f, ref, k in zip(feats, reference, (1, 2, 4, 16)):
+            sub = ref[(Ellipsis, *(slice(t.start // k, t.stop // k) for t in tiles))]
+            assert torch.equal(f, sub)
+    assert aligned == 3
+    keep = _far_from_seams(grid, crop)
+    masked = state * geom.unsqueeze(1)
+    assert torch.equal(out[..., keep], masked[..., keep])
+    z_seam = (slice(None), slice(None), slice(8, 24))  # z changes too
+    assert not torch.allclose(out[z_seam], masked[z_seam])
+
+
+def test_blend_shifted_tilings_single_tile_and_non_local(tmp_path):
+    m = _blend_generator(tmp_path, "fold")
+    state, geom, _ = _inputs(b=1, grid=(16, 16, 16))
+    assert m.ae.blend_shifted_tilings(state, geom) is state
+    g = _generator(_make_ae_export(tmp_path, "global", "fold")).eval()
+    _install_nontrivial_latent_stats(g)
+    state, geom, params_hist = _inputs(b=1)
+    with pytest.raises(ValueError, match="local"):
+        g.ae.blend_shifted_tilings(state, geom)
+    enc = g.encode_latents(state, geom)
+    with pytest.raises(ValueError, match="local_blend"):
+        g.decode_latents(enc.z, enc, spatial_mode="local_blend")
+    with pytest.raises(ValueError, match="local_blend"):
+        g.sample(params_hist, geom, decode_spatial_mode="local_blend")
+
+
+@pytest.mark.parametrize("geometry", GEOMS)
+def test_local_blend_decode_override_both_directions(tmp_path, geometry):
+    """``local`` and ``local_blend`` share the latents: a local generator
+    decodes ``local_blend`` as local + the AE's blend, and a ``local_blend``
+    generator (same weights) inherits that and decodes ``local`` plainly."""
+    ae_dir = _make_ae_export(tmp_path, "local", geometry)
+    m = _generator(ae_dir).eval()
+    _install_nontrivial_latent_stats(m)
+    # A local AE deployed as local_blend: same state dict, no new keys.
+    lb = TadpoleLatentGenerator(
+        n_state_channels=C,
+        n_params=P,
+        param_history_steps=HP,
+        ae_kwargs={**m.ae_kwargs, "spatial_mode": "local_blend"},
+        skip_pretrained_load=True,
+        **NET,
+    ).eval()
+    assert lb.spatial_mode == "local_blend"
+    lb.load_state_dict(m.state_dict(), strict=True)
+    state, geom, _ = _inputs(b=2, grid=RECT_GRID)
+    feats = _sdf_feats(m, geom)
+    with torch.no_grad():
+        enc = m.encode_latents(state, geom, feats)
+        enc_lb = lb.encode_latents(state, geom, feats)
+        assert torch.equal(enc_lb.z, enc.z)
+        plain = m.decode_latents(enc.z, enc)
+        blended = m.decode_latents(enc.z, enc, spatial_mode="local_blend")
+        assert torch.equal(blended, m.ae.blend_shifted_tilings(plain, geom, feats))
+        assert not torch.allclose(blended, plain)
+        assert torch.equal(lb.decode_latents(enc.z, enc_lb), blended)
+        assert torch.equal(
+            lb.decode_latents(enc.z, enc_lb, spatial_mode="local"), plain
+        )
+        cond = lb.geometry_condition(geom, feats)
+        assert torch.equal(lb.decode_latents(enc.z, cond), blended)
+
+
+@pytest.mark.parametrize("crop", [CROP, [16, 32, 32]])
+def test_local_blend_decode_uses_the_conditioning_geometry(tmp_path, crop):
+    """A branch AE's blend gets the conditioning's own geometry: SDF features
+    the encoding was given (crop 16: the branch re-runs on them) and tiling
+    A's branch features (shifts of 16: sliced from them), and a bool mask
+    blends as the AE blends with that mask, although ``cond.mask`` is fp32
+    (a bool mask gives other SDF features than a float one)."""
+    m = _blend_generator(tmp_path, "branch", crop)
+    state, geom, _ = _inputs(b=2, grid=RECT_GRID)
+    perturbed = _sdf_feats(m, geom) + 0.5 * torch.randn(2, 1, *RECT_GRID)
+    with torch.no_grad():
+        for mask, feats in ((geom, perturbed), (geom.bool(), None)):
+            enc = m.encode_latents(state, mask, feats)
+            plain = m.decode_latents(enc.z, enc)
+            blended = m.decode_latents(enc.z, enc, spatial_mode="local_blend")
+            expected = m.ae.blend_shifted_tilings(plain, mask, feats)
+            assert torch.equal(blended, expected)
+            cond = m.geometry_condition(mask, feats, batch_size=2)
+            same = m.decode_latents(enc.z, cond, spatial_mode="local_blend")
+            assert torch.equal(same, blended)
+        own = m.ae.blend_shifted_tilings(plain, geom.bool().float())
+        assert not torch.allclose(blended, own)
+        enc = m.encode_latents(state, geom, perturbed)
+        plain = m.decode_latents(enc.z, enc)
+        blended = m.decode_latents(enc.z, enc, spatial_mode="local_blend")
+        assert not torch.allclose(blended, m.ae.blend_shifted_tilings(plain, geom))
+
+
+def test_sample_local_blend_decode(tmp_path):
+    m = _moving_generator(tmp_path)
+    _, geom, params_hist = _inputs(b=2)
+    noise = torch.randn(2, m.state_latent_dim, *m.latent_grid_for(GRID))
+    cond = m.geometry_condition(geom, batch_size=2)
+    plain, z = m.sample(
+        params_hist, geom, initial_noise=noise, num_steps=2, return_latents=True
+    )
+    assert torch.equal(plain, m.decode_latents(z, cond))
+    blended, z_b = m.sample(
+        params_hist,
+        geom,
+        initial_noise=noise,
+        num_steps=2,
+        decode_spatial_mode="local_blend",
+        return_latents=True,
+    )
+    assert torch.equal(z_b, z)
+    assert torch.equal(blended, m.ae.blend_shifted_tilings(plain, geom))
+    assert not torch.allclose(blended, plain)

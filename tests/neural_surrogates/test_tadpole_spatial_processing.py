@@ -30,10 +30,10 @@ def _cpu_threads() -> Iterator[None]:
     torch.set_num_threads(previous)
 
 
-def _ae(mode: str = "local", **kwargs: Any) -> TadpoleAE:
+def _ae(mode: str = "local", crop: Any = 16, **kwargs: Any) -> TadpoleAE:
     model: TadpoleAE = TadpoleAE(
         n_state_channels=2,
-        encoder_crop_size=16,
+        encoder_crop_size=crop,
         spatial_mode=mode,
         latent_type="mode",
         **kwargs,
@@ -352,3 +352,81 @@ def test_global_single_region_matches_generic_region_assembly() -> None:
         torch.testing.assert_close(p.grad, grads[name].grad, rtol=1e-4, atol=1e-6)
         checked += 1
     assert checked > 0
+
+
+def _local_and_blend(branch: bool, crop: Any = 16) -> tuple[TadpoleAE, TadpoleAE]:
+    """The same weights in ``local`` and ``local_blend`` (branch projections
+    active, so a misaligned branch feature cannot pass vacuously)."""
+    options: dict[str, Any] = {"encode_geometry": not branch}
+    if branch:
+        options.update(geometry_branch={"width": 4}, sdf_features="sdf")
+    local = _ae("local", crop, **options)
+    if branch:
+        with torch.no_grad():
+            for name, p in local.named_parameters():
+                if "geom_proj" in name or "geom_latent_proj" in name:
+                    p.fill_(0.01)
+    blend = TadpoleAE(
+        n_state_channels=2,
+        encoder_crop_size=crop,
+        spatial_mode="local_blend",
+        latent_type="mode",
+        **options,
+    ).eval()
+    # A local checkpoint loads unchanged into local_blend and back.
+    assert blend.state_dict().keys() == local.state_dict().keys()
+    blend.load_state_dict(local.state_dict(), strict=True)
+    local.load_state_dict(blend.state_dict(), strict=True)
+    return local, blend
+
+
+# Crop [16, 32, 32]: the x shift (16) slices the branch features forward hands
+# the blend, the z shift (8) reruns the branch.
+@pytest.mark.parametrize(
+    ("branch", "crop"), [(False, 16), (True, 16), (True, [16, 32, 32])]
+)
+def test_local_blend_is_local_except_the_eval_reconstruction(
+    branch: bool, crop: Any
+) -> None:
+    local, blend = _local_and_blend(branch, crop)
+    state = torch.randn(2, 2, 32, 16, 48)  # tiled along z and x
+    geom = torch.ones(2, 32, 16, 48)
+    geom[:, 3:9, 2:7, 5:12] = 0.0
+    with torch.no_grad():
+        z = local.encode(state, geom)
+        assert torch.equal(blend.encode(state, geom), z)
+        if not branch:  # decode takes folded branch features otherwise
+            assert torch.equal(blend.decode(z), local.decode(z))
+        for a, b in zip(
+            local(state, geom, working_space=True, return_kl_element=True),
+            blend(state, geom, working_space=True, return_kl_element=True),
+        ):
+            assert torch.equal(a, b)
+        plain, kl = local(state, geom, return_kl_element=True)
+        out, kl_b = blend(state, geom, return_kl_element=True)
+        assert torch.equal(kl_b, kl)
+        assert torch.equal(out, local.blend_shifted_tilings(plain, geom))
+        assert not torch.allclose(out, plain)
+        assert torch.count_nonzero(out * (1 - geom.unsqueeze(1))) == 0
+    # Training mode: exactly local, with gradients (the blend is eval-only).
+    local.train()
+    blend.train()
+    torch.manual_seed(1)
+    expected = local(state, geom)
+    torch.manual_seed(1)
+    got = blend(state, geom)
+    assert torch.equal(got, expected)
+    assert got.requires_grad
+
+
+def test_local_blend_single_tile_is_local() -> None:
+    local, blend = _local_and_blend(False)
+    state = torch.randn(1, 2, 16, 16, 16)
+    geom = torch.ones(1, 16, 16, 16)
+    with torch.no_grad():
+        assert torch.equal(blend(state, geom), local(state, geom))
+
+
+def test_stepper_rejects_local_blend() -> None:
+    with pytest.raises(ValueError, match="local_blend"):
+        _stepper("local_blend")

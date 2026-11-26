@@ -754,8 +754,41 @@ def test_evaluate_autoencoder(
     out = pathlib.Path(cfg.autoencoder.output_dir)
     metrics = json.loads((out / "metrics.json").read_text())
     assert set(metrics["per_variable"]) == {"u", "v", "w"}
+    assert metrics["spatial_mode"] == "local"
+    assert set(metrics["seams"]) == {"truth", "reconstruction"}
+    assert np.isfinite(metrics["seams"]["reconstruction"]["seam_ratio"])
     assert (out / "latent_stats.png").exists()
     assert list(out.glob("vertical_profiles_*.png"))
+
+
+def test_evaluate_autoencoder_in_another_spatial_mode(
+    session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """`spatial_mode: local_blend` rebuilds the local AE blending its shifted
+    tilings: the same encoder (KL), another reconstruction and seams."""
+    assert trained["train_autoencoder"].architecture.spatial_mode == "local"
+    metrics = {}
+    for mode in ("local", "local_blend"):
+        cfg = compose(
+            "surrogate/eval",
+            "+test=eval",
+            f"autoencoder.output_dir={session_root / f'ae_eval_{mode}'}",
+            f"autoencoder.spatial_mode={mode}",
+            root=session_root,
+        )
+        load_script("scripts/surrogate/evaluate_autoencoder.py").run(cfg)
+        out = pathlib.Path(cfg.autoencoder.output_dir)
+        metrics[mode] = json.loads((out / "metrics.json").read_text())
+    plain, blend = metrics["local"], metrics["local_blend"]
+    assert blend["spatial_mode"] == "local_blend"
+    assert blend["mean_kl"] == pytest.approx(plain["mean_kl"], rel=1e-6)
+    assert blend["rmse"] != pytest.approx(plain["rmse"], rel=1e-6)
+    assert blend["seams"]["truth"] == pytest.approx(
+        plain["seams"]["truth"], nan_ok=True  # z is one tile: nan
+    )
+    assert blend["seams"]["reconstruction"]["seam_ratio"] != pytest.approx(
+        plain["seams"]["reconstruction"]["seam_ratio"], rel=1e-4
+    )
 
 
 def test_compare_autoencoders(
@@ -817,6 +850,9 @@ def test_evaluate_latent_generator(
     assert "passed" in summary["acceptance"]
     assert [row["num_steps"] for row in summary["step_sweep"]] == [2, 5]
     assert set(summary["rollout_kinetic_energy"]) == {"real", "ae_recon", "generated"}
+    assert summary["decode_modes"] == []
+    assert not any("_decode_" in source for source in summary["scalars"])
+    assert "seam_ratio" in summary["scalars"]["generated"]  # a local AE
     spectrum = summary["latent_spectrum"]
     assert spectrum["var_ratio"] and all(
         np.isfinite(r) and r > 0 for r in spectrum["var_ratio"].values()
@@ -871,6 +907,42 @@ def test_evaluate_latent_generator_decode_modes_and_samplers(
     assert expected <= sources
     for name in ("profiles.png", "histograms.png", "spectra.png", "step_sweep.png"):
         assert (out / name).exists(), name
+
+
+def test_evaluate_latent_generator_local_blend(
+    session_root: pathlib.Path, trained: dict[str, Any]
+) -> None:
+    """The `local_blend` decode mode adds its two sources; every source of a
+    tiled AE gets seam ratios. The tiny AE's 16-cell tiles split the 20 x 20 x
+    4 grid (padded to 32) along y and x (z is one tile), so the blend is real."""
+    assert trained["train_autoencoder"].architecture.spatial_mode == "local"
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        "latent_generator.output_dir=" + str(session_root / "lg_eval_blend"),
+        "latent_generator.decode_modes=[local_blend]",
+        "latent_generator.num_steps_sweep=[2]",
+        "latent_generator.latent_spectrum=false",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/evaluate_latent_generator.py").run(cfg)
+    out = pathlib.Path(cfg.latent_generator.output_dir)
+    summary = json.loads((out / "summary.json").read_text())
+    scalars = summary["scalars"]
+    assert summary["decode_modes"] == ["local_blend"]
+    blended = {"generated_decode_local_blend", "ae_recon_decode_local_blend"}
+    assert blended <= set(scalars)
+    assert "diversity" in scalars["generated_decode_local_blend"]
+    for row in scalars.values():
+        assert {"seam_ratio", "seam_ratio_u", "seam_ratio_v", "seam_ratio_w"} <= set(
+            row
+        )
+        assert np.isfinite([row["seam_ratio_axis_y"], row["seam_ratio_axis_x"]]).all()
+        assert np.isnan(row["seam_ratio_axis_z"])
+    for kind in ("generated", "ae_recon"):  # the blend changes the seams
+        assert scalars[f"{kind}_decode_local_blend"]["seam_ratio"] != pytest.approx(
+            scalars[kind]["seam_ratio"], rel=1e-4
+        )
 
 
 def _synthetic_seed_ensemble(corpus: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
@@ -938,6 +1010,7 @@ def test_evaluate_latent_generator_ensemble_and_compare(
         "generated",
         "generated_shuffled_params",
     }
+    assert summary["decode_modes"] == []
     for key in ("crps_ratio", "spread_ratio", "energy_distance_rel", "rank_outer"):
         assert np.isfinite(scalars["generated"][key]), key
     assert np.isfinite(scalars["real"]["energy_distance_rel_half"])
@@ -987,6 +1060,42 @@ def test_evaluate_latent_generator_ensemble_and_compare(
     assert diffs["crps_ratio"] == pytest.approx(0.0, abs=1e-4)
     for name in ("spread_ratio_profiles.png", "rank_histograms.png", "scores.png"):
         assert (cmp_out / name).exists(), name
+
+
+def test_evaluate_latent_generator_ensemble_local_blend(
+    session_root: pathlib.Path, trained: dict[str, Any], training_data: pathlib.Path
+) -> None:
+    """`decode_modes=[local_blend]` adds its two sources, scored like their
+    kinds; every source gets seam ratios (finite along the tiled y and x)."""
+    ensemble = _synthetic_seed_ensemble(
+        training_data, session_root / "seed_ensemble_blend"
+    )
+    cfg = compose(
+        "surrogate/eval",
+        "+test=eval",
+        f"latent_generator_ensemble.ensemble_dir={ensemble}",
+        "latent_generator_ensemble.output_dir="
+        + str(session_root / "lg_ensemble_eval_blend"),
+        "latent_generator_ensemble.decode_modes=[local,local_blend]",
+        root=session_root,
+    )
+    load_script("scripts/surrogate/evaluate_latent_generator_ensemble.py").run(cfg)
+    out = pathlib.Path(cfg.latent_generator_ensemble.output_dir)
+    summary = json.loads((out / "summary.json").read_text())
+    assert summary["decode_modes"] == ["local_blend"]  # local is the AE's own
+    scalars = summary["per_geometry"]["sample_0000"]["scalars"]
+    assert list(scalars)[-2:] == [
+        "ae_recon_decode_local_blend",
+        "generated_decode_local_blend",
+    ]
+    assert set(summary["aggregate"]) == set(scalars)
+    assert all(np.isfinite(row["seam_ratio"]) for row in scalars.values())
+    for kind in ("generated", "ae_recon"):
+        blended = scalars[f"{kind}_decode_local_blend"]
+        assert "w1_points_half_u" in blended and "profile_rmse" in blended
+        assert blended["seam_ratio"] != pytest.approx(
+            scalars[kind]["seam_ratio"], rel=1e-4
+        )
 
 
 @pytest.mark.integration  # type: ignore[misc]

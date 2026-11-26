@@ -140,6 +140,12 @@ class GenerativeSpinup:
         num_sampling_steps: Euler steps for the flow sampler; ``None`` uses the
             validated default recorded in the artifact
             (``generator.sampling.num_steps``).
+        decode_spatial_mode: Spatial mode the frozen AE decodes the sampled
+            latents in (``TadpoleLatentGenerator.sample(...,
+            decode_spatial_mode=...)``); ``None`` keeps the AE's own. E.g.
+            ``local_blend`` on a ``local`` AE blends half-tile-shifted tilings
+            near the tile seams, which reduces them. The name is validated
+            here; whether the AE can decode so is checked when the model loads.
         device: Torch device string.
         dtype: Torch dtype name for the weights / geometry tensors. Sampling
             itself always runs in fp32 with autocast disabled (the generator's
@@ -162,6 +168,7 @@ class GenerativeSpinup:
         seed: int = 0,
         sample_batch_size: int = 8,
         num_sampling_steps: Optional[int] = None,
+        decode_spatial_mode: Optional[str] = None,
         device: str = "cpu",
         dtype: str = "float32",
         default_params: Optional[dict[str, float]] = None,
@@ -182,12 +189,20 @@ class GenerativeSpinup:
                 "num_sampling_steps must be a positive int or None, got "
                 f"{num_sampling_steps!r}."
             )
+        if decode_spatial_mode is not None:
+            from .architectures._tadpole_spatial import validate_spatial_mode
+
+            # Name only (halo_size 0 passes): the AE's own halo applies.
+            validate_spatial_mode(str(decode_spatial_mode), 0)
         self.model_dir = pathlib.Path(model_dir)
         self.template_path = pathlib.Path(template_path)
         self.seed = int(seed)
         self.sample_batch_size = int(sample_batch_size)
         self._requested_num_steps = (
             int(num_sampling_steps) if num_sampling_steps is not None else None
+        )
+        self.decode_spatial_mode = (
+            None if decode_spatial_mode is None else str(decode_spatial_mode)
         )
         self.device = torch.device(device)
         self.torch_dtype = getattr(torch, dtype)
@@ -330,8 +345,9 @@ class GenerativeSpinup:
         The seam tests replace to inject an instrumented stub: the returned
         module must expose ``sample``, ``set_conditioning_schema``,
         ``param_history_steps``, ``n_params``, ``n_state_channels``,
-        ``state_latent_dim``, ``latent_grid_for`` and ``ae`` (for the optional
-        SDF-feature hook).
+        ``state_latent_dim``, ``latent_grid_for``, ``ae`` (for the optional
+        SDF-feature hook) and, for a ``decode_spatial_mode``,
+        ``resolve_decode_mode``.
 
         The artifact's conditioning schema is installed on the rebuilt model
         right after the weights: the ordered ``param_vars`` and the saved
@@ -378,6 +394,9 @@ class GenerativeSpinup:
                 f"generator n_params={n_params} disagrees with the saved "
                 f"param_vars {schema['param_vars']}."
             )
+        if self.decode_spatial_mode is not None:
+            # The generator's own check: raises unless its AE can decode so.
+            model.resolve_decode_mode(self.decode_spatial_mode, None)
         self._model = model
         return model
 
@@ -750,6 +769,12 @@ class GenerativeSpinup:
                         # schema it was loaded with (see _load_model).
                         param_names=self.param_vars,
                         history_dt_seconds=self.history_dt_seconds,
+                        # Only when set: a default call stays the plain sample.
+                        **(
+                            {"decode_spatial_mode": self.decode_spatial_mode}
+                            if self.decode_spatial_mode is not None
+                            else {}
+                        ),
                     )
             except Exception as exc:
                 conditioning = {

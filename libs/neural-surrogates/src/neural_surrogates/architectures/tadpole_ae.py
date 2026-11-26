@@ -56,9 +56,12 @@ What the wrapper adds around the raw autoencoder
   with the branch disconnected.
 * **Spatial processing.** ``local`` preserves independent crops; ``global``
   processes the whole domain per channel; ``halo`` uses overlapping encoder and
-  decoder context around central cores. Local/halo zero-pad to a multiple of
-  ``encoder_crop_size``; global pads only to the encoder stride (16). Outputs
-  are cropped back to the original domain in every mode.
+  decoder context around central cores. ``local_blend`` is ``local`` (same
+  latents, same training) plus an eval-only seam blend of the reconstruction
+  (:meth:`TadpoleAE.blend_shifted_tilings`), so a ``local``-trained AE can be
+  run in it. Local/halo zero-pad to a multiple of ``encoder_crop_size``;
+  global pads only to the encoder stride (16). Outputs are cropped back to the
+  original domain in every mode.
 
 Reconstruction target / loss space
 -----------------------------------
@@ -75,6 +78,7 @@ The heavy vendored stack (``diffusers`` / ``timm``) is imported lazily inside
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import numpy.typing as npt
@@ -82,8 +86,10 @@ import torch
 from neural_surrogates.architectures._tadpole_crop import CropSize, normalize_crop_size
 from neural_surrogates.architectures._tadpole_field_io import _TadpoleFieldIO
 from neural_surrogates.architectures._tadpole_spatial import (
+    STRIDE,
     decode_spatial,
     encode_spatial,
+    tiling_mode,
     validate_spatial_mode,
 )
 from neural_surrogates.sdf import n_sdf_feature_channels, normalize_sdf_mode
@@ -119,7 +125,10 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
     spatial_mode:
         ``local`` (default): independent tiles; ``global``: whole rectangular
         domain per channel; ``halo``: encode expanded tiles, assemble central
-        latents, decode with neighboring latent context, and retain tile cores.
+        latents, decode with neighboring latent context, and retain tile cores;
+        ``local_blend``: ``local`` everywhere (encode, decode, training loss,
+        state dict) except that the eval-mode physical reconstruction of
+        :meth:`forward` goes through :meth:`blend_shifted_tilings`.
         Global pads only to stride 16; local/halo pad to ``encoder_crop_size``.
     halo_size:
         Halo width in cells, a nonnegative multiple of 16 (halo mode only).
@@ -353,7 +362,7 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         halo overlap is discarded when assembling this full-grid latent."""
         x = self._assemble_working_input(state, geometry, geom_features)
         x, _ = self._pad_to_crop_multiple(x)
-        if self.spatial_mode != "local":
+        if tiling_mode(self.spatial_mode) != "local":
             features = self._branch_features(geometry, geom_features, state)
             if features is not None:
                 features = self._fold_geom_feats(features, x.shape[1])
@@ -404,8 +413,11 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         decoder unconditioned. In global/halo mode both latents and features
         have full padded spatial grids (batch folded over B*Cin only), and this
         returns ``(B*Cin, 1, Dpad, Hpad, Wpad)``. Halo decoding extracts latent
-        context and retains central cores, matching :meth:`forward`."""
-        if self.spatial_mode != "local":
+        context and retains central cores, matching :meth:`forward`.
+        ``local_blend`` decodes like ``local`` (folded crops, no blend): the
+        seam blend needs the full-grid field and its geometry, so it runs in
+        :meth:`forward` / :meth:`blend_shifted_tilings` instead."""
+        if tiling_mode(self.spatial_mode) != "local":
             return decode_spatial(
                 self.ae,
                 latent,
@@ -415,6 +427,170 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
                 geom_feats,
             )
         return self.ae.decoder(latent, geom_feats)
+
+    # -- local_blend: shifted-tiling re-projection -------------------------- #
+
+    def _full_grid_feats(self, feats: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Branch pyramid ``(B, F, ...)`` -> the ``(B*C, F, ...)`` full-grid
+        layout ``encode_spatial`` / ``decode_spatial`` slice regions from (the
+        same expansion ``_fold_geom_feats`` does outside local mode; local mode
+        must NOT use that helper's crop fold here)."""
+        c = self.n_state_channels
+        return [
+            f.unsqueeze(1).expand(-1, c, -1, -1, -1, -1).flatten(0, 1) for f in feats
+        ]
+
+    @staticmethod
+    def _seam_blend_weight(size: int, crop: int) -> torch.Tensor:
+        """Per-cell weight ``h_A`` ``(size,)`` of the unshifted tiling along one
+        axis of :meth:`blend_shifted_tilings` (the half-tile-shifted tiling gets
+        ``1 - h_A``): ``sin^2(pi (i + 0.5) / crop)`` near an interior tile border
+        (a face ``k * crop`` with ``0 < k * crop < size``), exactly 1 wherever
+        the nearest border is the domain edge or beyond it."""
+        i = torch.arange(size, dtype=torch.float32)
+        h = torch.sin(math.pi * (i + 0.5) / crop) ** 2
+        nearest = torch.round((i + 0.5) / crop) * crop
+        interior = (nearest > 0) & (nearest < size)
+        return torch.where(interior, h, torch.ones_like(h))
+
+    @torch.no_grad()  # type: ignore[misc, unused-ignore]  # torch is untyped in the pre-commit mypy env
+    def blend_shifted_tilings(
+        self,
+        state: torch.Tensor,
+        geometry: torch.Tensor,
+        geom_features: torch.Tensor | None = None,
+        branch_features: list[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """The ``local_blend`` step: reduce the tile seams of a ``local``
+        decode by shifted-tiling re-projection (inference only, no gradient).
+
+        ``state`` ``(B, C, d, h, w)`` is a decoded physical field (tiling A,
+        tile borders at faces ``k * crop``); ``geometry`` the fluid mask
+        ``(*grid,)`` or ``(B, *grid)``. Along every tiled axis (size > crop)
+        the tiles shifted by half a crop straddle A's seams. For every non-empty
+        subset of the tiled axes those tiles are cut out of A's own padded
+        working input, encoded (posterior mode) and decoded, and blended into
+        the field with the separable partition of unity of
+        :meth:`_seam_blend_weight`: only cells within half a crop of an
+        interior seam of A change. A geometry branch's features are cut out the
+        same way, so each tile sees exactly the conditioning A's tiles do --
+        unless a shift is not a multiple of 16 (a crop of 16), where the
+        latent-grid features cannot be cut and the branch runs on the cut-out
+        geometry instead (its normalisation then sees that sub-grid). The AE
+        reproduces a seam it can represent, so this smooths seams rather than
+        removing them, and near the seams the field is reconstructed twice.
+        Returns fp32 physical states, obstacles zeroed; a field with no blended
+        axis comes back as given. Needs a ``local`` / ``local_blend`` AE.
+
+        ``geom_features`` are the SDF features the unshifted pass got (``None``:
+        computed from ``geometry``, whose dtype then matters -- a bool mask gives
+        other features than a float one -- so pass the mask that pass saw).
+        ``branch_features`` are tiling A's geometry-branch features in the
+        ``(B*C, F, ...)`` full-grid layout of :meth:`_full_grid_feats`
+        (``None``: the branch runs here on the full grid); the geometry block is
+        then only built for shifts that are not multiples of 16. The AE and
+        branch run in their current train/eval mode: call this on an eval-mode
+        AE (:meth:`forward` blends only in eval mode).
+        """
+        if tiling_mode(self.spatial_mode) != "local":
+            raise ValueError(
+                "blend_shifted_tilings (spatial_mode 'local_blend') needs an AE "
+                "trained in spatial_mode 'local' (independently decoded tiles), "
+                f"got {self.spatial_mode!r}"
+            )
+        if state.dim() != 5 or state.shape[1] != self.n_state_channels:
+            raise ValueError(
+                f"state must be (B, {self.n_state_channels}, d, h, w), got "
+                f"{tuple(state.shape)}"
+            )
+        grid = tuple(int(n) for n in state.shape[2:])
+        crop = self.encoder_crop_size
+        blended = [a for a in range(3) if grid[a] > crop[a]]
+        if not blended:
+            return state
+        device = state.device
+        b, c = state.shape[:2]
+        with torch.autocast(device_type=device.type, enabled=False):
+            state = state.to(torch.float32)
+            g = self._expand_geometry(torch.as_tensor(geometry, device=device), state)
+            mask = g.unsqueeze(1).to(state.dtype)
+            state = state * mask
+            x, _ = self._pad_to_crop_multiple(self._normalize_state(state, mask))
+            branch = self.geometry_branch
+
+            def geometry_block() -> torch.Tensor:
+                # The padded branch input; only needed when the branch runs here.
+                block = self._geometry_channels(g, geom_features, b, grid, state.dtype)
+                return self._pad_to_crop_multiple(block)[0]
+
+            block = None
+            feats = None
+            if branch is not None and branch_features is not None:
+                feats = [
+                    f.to(device=device, dtype=state.dtype) for f in branch_features
+                ]
+            elif branch is not None:
+                block = geometry_block()
+                feats = self._full_grid_feats(branch(block))
+            h_a = [
+                self._seam_blend_weight(grid[a], crop[a]).to(device) for a in range(3)
+            ]
+            out = state.clone()
+            for n in range(1, 2 ** len(blended)):
+                shifted = [blended[j] for j in range(len(blended)) if n >> j & 1]
+                weight = torch.ones(grid, device=device)
+                # The shifted tiles inside A's padded grid, and their cells on
+                # the real grid (the rest is padding).
+                tiles = [slice(0, m) for m in x.shape[2:]]
+                cells = [slice(0, m) for m in grid]
+                for a in blended:
+                    view = [1, 1, 1]
+                    view[a] = -1
+                    h = h_a[a].view(view)
+                    if a in shifted:
+                        half = crop[a] // 2
+                        tiles[a] = slice(half, x.shape[2 + a] - half)
+                        cells[a] = slice(half, min(tiles[a].stop, grid[a]))
+                        weight = weight * (1 - h)
+                    else:
+                        weight = weight * h
+                sub = None
+                if feats is not None and any(t.start % STRIDE for t in tiles):
+                    if block is None:
+                        block = geometry_block()
+                    sub = self._full_grid_feats(branch(block[(Ellipsis, *tiles)]))
+                elif feats is not None:
+                    sub = [
+                        f[
+                            (Ellipsis,)
+                            + tuple(slice(t.start // k, t.stop // k) for t in tiles)
+                        ]
+                        for f, k in zip(feats, (1, 2, 4, STRIDE))
+                    ]
+                # Folded channels are independent, so a fold-mode AE needs no
+                # geometry channels to reconstruct the state ones.
+                latent, _, _ = encode_spatial(
+                    self.ae,
+                    x[(Ellipsis, *tiles)],
+                    "local",
+                    crop,
+                    0,
+                    sub,
+                    latent_type="mode",
+                )
+                recon = decode_spatial(self.ae, latent, "local", crop, 0, sub)
+                recon = recon.reshape(b, c, *recon.shape[2:])[
+                    (Ellipsis,) + tuple(slice(0, s.stop - s.start) for s in cells)
+                ]
+                # out starts as x_A; adding w_S (x_S - x_A) over the shifted
+                # tilings S gives sum_T w_T x_T, since the weights sum to 1 and
+                # w_S is 0 outside the cells S covers.
+                here = (Ellipsis, *cells)
+                out[here] += weight[tuple(cells)] * (
+                    self._denormalize_state(recon) - state[here]
+                )
+                del latent, recon
+            return out * mask
 
     # -- forward ----------------------------------------------------------- #
 
@@ -430,7 +606,9 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         """Reconstruct ``state``.
 
         Default (``working_space=False``): return the **physical-units** state
-        reconstruction ``(B, C, *grid)`` (obstacle cells zeroed). With
+        reconstruction ``(B, C, *grid)`` (obstacle cells zeroed); in
+        ``local_blend`` mode and eval mode it is passed through
+        :meth:`blend_shifted_tilings` (no gradient). With
         ``working_space=True`` return the tuple ``(recon, target)`` of the
         **full-channel working-space** reconstruction and its input target
         ``(B, Cin, *grid)`` -- what :class:`AutoencoderTrainer` needs to compute
@@ -442,10 +620,11 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
         x_pad, orig = self._pad_to_crop_multiple(x)
         # Geometry-branch features (None outside branch mode) are folded over the
         # SAME channel count the autoencoder folds -- state channels only there.
-        geom_feats = self._branch_features(geometry, geom_features, state)
-        if geom_feats is not None:
-            geom_feats = self._fold_geom_feats(geom_feats, x_pad.shape[1])
-        if self.spatial_mode == "local":
+        branch_feats = self._branch_features(geometry, geom_features, state)
+        geom_feats: list[torch.Tensor] | None = None
+        if branch_feats is not None:
+            geom_feats = self._fold_geom_feats(branch_feats, x_pad.shape[1])
+        if tiling_mode(self.spatial_mode) == "local":
             recon_pad, kl_elem = self.ae(
                 x_pad, return_kl_element=True, geom_feats=geom_feats
             )
@@ -469,6 +648,15 @@ class TadpoleAE(_TadpoleFieldIO, nn.Module):
             state_recon = self._denormalize_state(recon[:, : self.n_state_channels])
             mask = self._batched_mask(geometry, state)
             out = (state_recon * mask,)
+            if self.spatial_mode == "local_blend" and not self.training:
+                full = None
+                if branch_feats is not None:
+                    full = self._full_grid_feats(branch_feats)
+                out = (
+                    self.blend_shifted_tilings(
+                        out[0], geometry, geom_features, branch_features=full
+                    ),
+                )
         if return_kl_element:
             out = out + (kl_elem,)
         return out[0] if len(out) == 1 else out
