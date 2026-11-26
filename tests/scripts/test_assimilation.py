@@ -646,13 +646,21 @@ FIELD_ANALYSIS = ["field_analysis=${field_analysis_settings.local}"]
 def _field_run(
     root: pathlib.Path, session_root: pathlib.Path, *overrides: str
 ) -> tuple[Any, pathlib.Path]:
-    """A smoother run of 12 members, its config and run dir."""
+    """A smoother run of 12 members, its config and run dir.
+
+    The tiny surrogate's members differ by about 1e-4 m/s, so with the test
+    overlay's observation error (0.27 m/s) a field correction is at float32
+    rounding of the frames and "the frames changed" passes or fails by chance.
+    An error near the ensemble spread keeps the correction well above it.
+    """
     cfg = compose(
         "assimilation",
         "+test=assimilation",
         *SURROGATE,
         *surrogate(session_root),
         "ensemble.ensemble_size=12",
+        "observation.error.instrument_std=0.001",
+        "observation.error.representation_std=0.0005",
         *overrides,
         root=root,
     )
@@ -723,8 +731,11 @@ def test_field_analysis_in_the_run(field_runs: Any) -> None:
         assert field_obs.obs.shape == field_obs.obs_var.shape == (frames, num_obs)
         assert field_obs.pred_obs.shape == (12, frames, num_obs)
         np.testing.assert_array_equal(field_obs.time, forecast.time)
-        # The overlay's 0.25 and 0.1, not shrunk by the 1.5 s bins of Stage 1.
-        np.testing.assert_allclose(field_obs.obs_var, 0.25**2 + 0.1**2)
+        # Both error terms of the run, not shrunk by the 1.5 s bins of Stage 1.
+        error = cfg.observation.error
+        np.testing.assert_allclose(
+            field_obs.obs_var, error.instrument_std**2 + error.representation_std**2
+        )
         assert field_obs.member_mask.all()
         assert np.isfinite(field_obs.innovation_lag1).all()
     info = yaml.safe_load((run_dir / "run_info.yaml").read_text())["field_analysis"]
