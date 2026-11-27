@@ -130,6 +130,10 @@ def stage_discrepancy_warmstart(
             for index, name in enumerate(dimensions, start=2):
                 if name in fields:
                     values = fields[name][np.ix_(xindices, yindices, zindices)]
+                    if name == "w":
+                        # The top face is the lid: zero, not a copy of the
+                        # face below (see _zero_top_face).
+                        values[:, :, -1] = 0.0
                     records[index] = (
                         values.astype(dtype).flatten(order="F").view(np.uint8)
                     )
@@ -281,6 +285,18 @@ def _fill_halo_cells(
         ws_3d[:, :, k] = ws_3d[:, :, iz_start]
     for k in range(iz_end, nz):
         ws_3d[:, :, k] = ws_3d[:, :, iz_end - 1]
+
+
+def _zero_top_face(ws_3d: np.ndarray, iz_end: int) -> None:
+    """Zero w on the faces above the interior (the lid), in place.
+
+    The fielddump has no top face, and copying the face below into it opens a
+    leak with BCtopm=3 (inflow/outflow): uDALES then only adds a horizontally
+    uniform slab-mean pressure term to that face, so a copied pattern stays for
+    the whole window and grows with every restart. With BCtopm 1 or 2 uDALES
+    zeroes the face every step, and this changes nothing.
+    """
+    ws_3d[:, :, iz_end:] = 0.0
 
 
 def set_trestart(dirs: DirectoryPaths) -> None:
@@ -850,6 +866,8 @@ def update_warmstart_file_from_xarray(
                     bc_periodic_x,
                     bc_periodic_y,
                 )
+                if var_name == "w0":
+                    _zero_top_face(ws_3d, offset_z + ktot)
 
                 # Flatten back to 1D (Fortran order)
                 records[idx] = ws_3d.flatten(order="F")
