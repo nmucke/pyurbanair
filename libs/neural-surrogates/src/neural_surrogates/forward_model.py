@@ -162,6 +162,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         spinup_source: str = "forward_model",
         geometry_var: str = "blanking",
         rollout_batch_size: Optional[int] = None,
+        amp_dtype: Optional[str] = None,
         generative_spinup: Optional[dict[str, Any]] = None,
     ) -> None:
         """Initialise the surrogate.
@@ -230,6 +231,12 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 split a large ensemble into chunks of this size, trading a small
                 amount of throughput for a lower peak GPU memory footprint (the
                 fix for the rollout OOM on large ensembles / high resolution).
+            amp_dtype: Run the network's steps under ``torch.autocast`` in this
+                dtype (``"bfloat16"`` or ``"float16"``), as the trainer's
+                ``amp_dtype`` does: weights, geometry features and the carried
+                state stay in ``dtype``, the activations (most of the memory on
+                a large grid) drop to half precision. ``None`` (default) runs
+                in ``dtype`` throughout.
             generative_spinup: The ``generative_spinup`` config block
                 (``model_dir``, ``template_path``, ``seed``,
                 ``sample_batch_size``, ``num_sampling_steps``,
@@ -294,6 +301,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self.stl_path = pathlib.Path(stl_path) if stl_path is not None else None
         self.device = torch.device(device)
         self.torch_dtype = getattr(torch, dtype)
+        if amp_dtype not in (None, "bfloat16", "float16"):
+            raise ValueError(
+                f"amp_dtype must be null, 'bfloat16' or 'float16', got {amp_dtype!r}."
+            )
+        self.amp_dtype = getattr(torch, amp_dtype) if amp_dtype is not None else None
 
         self.spinup_source = spinup_source
         if spinup_source not in ("forward_model", "training_data", "generative"):
@@ -1133,10 +1145,17 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         with torch.no_grad():
             for k in range(n_internal):
                 param_k = schedule[:, k, :]
-                if geom_features is None:
-                    pred = self.model(current, param_k, geom)
-                else:
-                    pred = self.model(current, param_k, geom, geom_features)
+                with torch.autocast(
+                    self.device.type,
+                    dtype=self.amp_dtype,
+                    enabled=self.amp_dtype is not None,
+                ):
+                    if geom_features is None:
+                        pred = self.model(current, param_k, geom)
+                    else:
+                        pred = self.model(current, param_k, geom, geom_features)
+                if self.amp_dtype is not None:
+                    pred = pred.to(self.torch_dtype)
                 # Shift the history window: drop the oldest frame, append the
                 # prediction. H == 1 degenerates to the historic wholesale
                 # replacement (same tensor, same op order).

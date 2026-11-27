@@ -1112,7 +1112,12 @@ spin-up backend (a no-op for `training_data` and `generative`).
 `default_params` gives constant fallbacks for trained parameters a caller
 omits (DA varies only the inflow, but a uDALES-trained net also expects
 `pressure_gradient_magnitude`). `rollout_batch_size` caps the members rolled
-through the network in one batched pass.
+through the network in one batched pass. `amp_dtype: bfloat16` runs each step
+under `torch.autocast`, as the trainer's `amp_dtype` does: weights, geometry
+features and the state carried between steps stay in `dtype`, the activations
+drop to half precision. It roughly halves the memory of one step on a large
+grid (the limit on a single GPU, since one member is one batched pass); the
+default `null` runs in full precision.
 
 Select it like any backend:
 

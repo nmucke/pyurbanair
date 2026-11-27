@@ -231,6 +231,25 @@ def test_model_dir_domain_mismatch_raises(tmp_path) -> None:
         )
 
 
+def test_amp_dtype_runs_the_steps_in_bfloat16() -> None:
+    """Autocast changes the arithmetic, not the contract: same shapes, a float32
+    output close to the full-precision one."""
+    torch.manual_seed(0)
+    full = _make_model()(params=_params())
+    torch.manual_seed(0)
+    amp = _make_model(amp_dtype="bfloat16")(params=_params())
+
+    for v in STATE_VARS:
+        assert amp[v].dtype == full[v].dtype == np.float32
+        assert not np.array_equal(amp[v].values, full[v].values)
+        np.testing.assert_allclose(amp[v].values, full[v].values, rtol=0.05, atol=0.05)
+
+
+def test_amp_dtype_must_be_a_half_precision() -> None:
+    with pytest.raises(ValueError, match="amp_dtype"):
+        _make_model(amp_dtype="float64")
+
+
 def test_trained_output_frequency_contradicting_model_dir_raises(tmp_path) -> None:
     """An explicit step may stand in for an unreadable one, never contradict it."""
     model_dir = _model_dir(tmp_path, output_frequency=2.0)
