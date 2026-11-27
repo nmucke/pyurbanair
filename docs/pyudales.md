@@ -1108,11 +1108,13 @@ tiny cold-start run is triggered to produce the template. After the warm run,
 `store_carry` captures the new end-of-run restart for the next window.
 
 The restart's top face of `w` (the lid, which the fielddump does not hold) is
-written as zero. Copied from the face below, it stays for the whole window
-(with `BCtopm=3` uDALES only changes it by the pressure gradient there) and
-lets mass out through the lid, more with every restart: a run advanced in
-180 s windows then loses up to 0.5 m/s of the mean wind at the top and the
-outlet within five windows, where a continuous run loses none.
+written as zero. With `BCtopm=3` (inflow/outflow) uDALES only adds a
+horizontally uniform slab-mean pressure term to that face, so a pattern copied
+from the face below stays for the whole window and lets mass out through the
+lid, more with every restart: a run advanced in 180 s windows then loses up to
+0.5 m/s of the mean wind at the top and the outlet within five windows, where
+a continuous run loses none. With `BCtopm` 1 or 2 (periodic cases) uDALES
+zeroes the face every step, so zero changes nothing there.
 
 On failure substitution, `EnsembleForwardModel.run_ensemble` copies the donor's
 carry to the failed member's slot so the resampled state and the subgrid carry are

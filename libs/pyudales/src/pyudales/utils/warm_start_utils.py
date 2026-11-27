@@ -291,9 +291,10 @@ def _zero_top_face(ws_3d: np.ndarray, iz_end: int) -> None:
     """Zero w on the faces above the interior (the lid), in place.
 
     The fielddump has no top face, and copying the face below into it opens a
-    leak: uDALES does not reset that face during the run (with BCtopm=3 it only
-    changes by the pressure gradient there, about zero), so the copied w stays
-    for the whole window and grows with every restart.
+    leak with BCtopm=3 (inflow/outflow): uDALES then only adds a horizontally
+    uniform slab-mean pressure term to that face, so a copied pattern stays for
+    the whole window and grows with every restart. With BCtopm 1 or 2 uDALES
+    zeroes the face every step, and this changes nothing.
     """
     ws_3d[:, :, iz_end:] = 0.0
 

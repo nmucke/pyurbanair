@@ -8,7 +8,10 @@ from typing import Any
 import numpy as np
 import pytest
 import xarray as xr
-from pyudales.utils.warm_start_utils import stage_discrepancy_warmstart
+from pyudales.utils.warm_start_utils import (
+    stage_discrepancy_warmstart,
+    update_warmstart_file_from_xarray,
+)
 from scipy.io import FortranEOFError, FortranFile
 
 from tests.pyudales.test_udales_output_cleanup import _make_dirs
@@ -94,6 +97,47 @@ def test_all_ranks_receive_local_flow_global_halos_and_same_clock(
                 actual[:, :, 4], 0.0 if name == "w" else actual[:, :, 3]
             )
     assert [path.read_bytes() for path in templates] == before
+
+
+@pytest.mark.parametrize("bcxm", [1, 2])
+def test_template_update_zeroes_the_top_face_of_w(
+    tmp_path: pathlib.Path, bcxm: int
+) -> None:
+    """The other restart path (no model discrepancy) writes the same lid."""
+    nx, ny, nz = 8, 6, 4
+    dirs = _make_dirs(tmp_path, "000")
+    (dirs.experiment_dir / "namoptions.000").write_text(
+        "&RUN\nnprocx=1\nnprocy=1\ndtmax=0.2\n/\n"
+        f"&DOMAIN\nitot={nx}\njtot={ny}\nktot={nz}\n/\n"
+        f"&BC\nBCxm={bcxm}\nBCym=1\n/\n"
+    )
+    path = tmp_path / "initd00000003_000_000.000"
+    halo_cells = (nx + 2) * (ny + 2) * (nz + 1)
+    with FortranFile(path, "w") as handle:
+        handle.write_record(np.arange(nx * ny * nz, dtype=np.float64))
+        handle.write_record(np.arange(nx * ny * nz * 5, dtype=np.float64))
+        for index in range(2, 12):
+            handle.write_record(np.full(halo_cells, 7.0 + index))
+        handle.write_record(np.array([3.0, 0.1]))
+    values = np.arange(nz * ny * nx, dtype=float).reshape(nz, ny, nx) + 1
+    state = xr.Dataset(
+        {
+            "u": (("zt", "yt", "xm"), values),
+            "v": (("zt", "ym", "xt"), values + 1000),
+            "w": (("zm", "yt", "xt"), values + 2000),
+            "pres": (("zt", "yt", "xt"), values + 3000),
+        }
+    )
+    update_warmstart_file_from_xarray(state, dirs, path)
+    records = _records(path)
+    for index, name in enumerate(("u", "v", "w", "pres"), start=2):
+        actual = records[index].view(np.float64).reshape(nx + 2, ny + 2, nz + 1, order="F")
+        np.testing.assert_array_equal(
+            actual[1:-1, 1:-1, :nz], state[name].values.transpose(2, 1, 0)
+        )
+        np.testing.assert_array_equal(
+            actual[:, :, nz], 0.0 if name == "w" else actual[:, :, nz - 1]
+        )
 
 
 def test_incomplete_rank_set_fails_before_staging(tmp_path: pathlib.Path) -> None:
