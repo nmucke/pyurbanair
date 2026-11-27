@@ -372,7 +372,15 @@ class TadpoleTimeStepper(_TadpoleFieldIO, nn.Module):
         the frozen Tadpole AE encodes exactly ``C`` state channels (+ geometry)
         per crop, so a history-flattened input would need a different (and
         re-pretrained) encoder. ``> 1`` raises :class:`NotImplementedError`.
+
+    ``domain_flexible = True``: every spatial mode zero-pads the grid to its
+    tile multiple (16 in global mode), runs the latent subnetwork on whatever
+    latent grid results and crops back, so one trained instance runs on any
+    grid at its training cell spacing (the forward model then checks spacing
+    only).
     """
+
+    domain_flexible = True
 
     def __init__(
         self,

@@ -231,6 +231,42 @@ def test_model_dir_domain_mismatch_raises(tmp_path) -> None:
         )
 
 
+def test_amp_dtype_runs_the_steps_in_bfloat16() -> None:
+    """Autocast changes the arithmetic, not the contract: same shapes, a float32
+    output close to the full-precision one."""
+    torch.manual_seed(0)
+    full = _make_model()(params=_params())
+    torch.manual_seed(0)
+    amp = _make_model(amp_dtype="bfloat16")(params=_params())
+
+    for v in STATE_VARS:
+        assert amp[v].dtype == full[v].dtype == np.float32
+        assert not np.array_equal(amp[v].values, full[v].values)
+        np.testing.assert_allclose(amp[v].values, full[v].values, rtol=0.05, atol=0.05)
+
+
+def test_amp_dtype_must_be_a_half_precision() -> None:
+    with pytest.raises(ValueError, match="amp_dtype"):
+        _make_model(amp_dtype="float64")
+
+
+def test_trained_output_frequency_contradicting_model_dir_raises(tmp_path) -> None:
+    """An explicit step may stand in for an unreadable one, never contradict it."""
+    model_dir = _model_dir(tmp_path, output_frequency=2.0)
+    with pytest.raises(ValueError, match="contradicts"):
+        NeuralSurrogateForwardModel(
+            spinup_forward_model=_StubSpinup(),
+            nx=NX,
+            ny=NY,
+            nz=NZ,
+            bounds=[[0.0, NX], [0.0, NY], [0.0, NZ]],
+            simulation_time=4.0,
+            output_frequency=2.0,
+            model_dir=model_dir,
+            trained_output_frequency=5.0,
+        )
+
+
 def test_default_params_fill_missing_trained_param(tmp_path) -> None:
     """A trained param the caller omits is filled from default_params."""
     model = _make_model(
@@ -454,6 +490,54 @@ def test_stl_geometry_voxelisation(tmp_path: pathlib.Path) -> None:
     # Domain corner is fluid; the central cell sits inside the box.
     assert mask[0, 0, 0] == 1.0
     assert mask[NZ // 2, NY // 2, NX // 2] == 0.0
+
+
+def test_non_watertight_stl_is_voxelised_by_vertical_rays(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A city-style mesh (open-bottomed buildings on a ground plane) is not
+    watertight, so it is voxelised by its roof heights, matching the closed
+    version of the same buildings and any template dim order."""
+    # Two buildings on cell boundaries: 2x4 m footprint 3 m high, 2x2 m 1 m high.
+    closed = [
+        trimesh.creation.box(bounds=[[1.0, 2.0, 0.0], [3.0, 6.0, 3.0]]),
+        trimesh.creation.box(bounds=[[5.0, 5.0, 0.0], [7.0, 7.0, 1.0]]),
+    ]
+    open_bottomed = []
+    for box in closed:
+        box = box.copy()
+        box.update_faces(box.face_normals[:, 2] > -0.5)  # drop the floor
+        open_bottomed.append(box)
+    ground = trimesh.Trimesh(
+        vertices=[[0, 0, 0], [NX, 0, 0], [NX, NY, 0], [0, NY, 0]],
+        faces=[[0, 1, 2], [0, 2, 3]],
+    )
+    city = trimesh.util.concatenate([*open_bottomed, ground])
+    assert not city.is_watertight
+    city_path, closed_path = tmp_path / "city.stl", tmp_path / "closed.stl"
+    city.export(city_path)
+    trimesh.util.concatenate(closed).export(closed_path)
+
+    coords = {
+        "z": np.arange(NZ) + 0.5,
+        "y": np.arange(NY) + 0.5,
+        "x": np.arange(NX) + 0.5,
+    }
+    template_var = xr.DataArray(
+        np.zeros((NZ, NY, NX)), dims=("z", "y", "x"), coords=coords
+    )
+    mask = stl_to_fluid_mask(city_path, template_var)
+    expected = np.ones((NZ, NY, NX), dtype=np.float32)
+    expected[:3, 2:6, 1:3] = 0.0
+    expected[:1, 5:7, 5:7] = 0.0
+    np.testing.assert_array_equal(mask, expected)
+    # The watertight (closed) version through mesh.contains agrees.
+    np.testing.assert_array_equal(stl_to_fluid_mask(closed_path, template_var), mask)
+    # A template in (x, y, z) order gets the same mask in its own order.
+    np.testing.assert_array_equal(
+        stl_to_fluid_mask(city_path, template_var.transpose("x", "y", "z")),
+        mask.transpose(2, 1, 0),
+    )
 
 
 def test_stl_geometry_used_in_rollout(tmp_path: pathlib.Path) -> None:

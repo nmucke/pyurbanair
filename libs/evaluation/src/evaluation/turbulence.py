@@ -98,13 +98,22 @@ _STL_RECORD = np.dtype(
 )
 
 
-def read_binary_stl(path: pathlib.Path | str) -> np.ndarray:
-    """Triangles of a binary STL as an ``(n_tri, 3, 3)`` array (vertex, xyz)."""
+def read_stl(path: pathlib.Path | str) -> np.ndarray:
+    """Triangles of a binary or ASCII STL as an ``(n_tri, 3, 3)`` array
+    (vertex, xyz)."""
     data = pathlib.Path(path).read_bytes()
-    n = int(np.frombuffer(data, "<u4", count=1, offset=80)[0])
-    return np.frombuffer(data, _STL_RECORD, count=n, offset=84)["vertices"].astype(
-        float
-    )
+    n = int(np.frombuffer(data, "<u4", count=1, offset=80)[0]) if len(data) >= 84 else 0
+    if len(data) == 84 + n * _STL_RECORD.itemsize:
+        return np.frombuffer(data, _STL_RECORD, count=n, offset=84)["vertices"].astype(
+            float
+        )
+    # ASCII: every `vertex x y z` line, three per facet.
+    vertices = [
+        line.split()[1:4]
+        for line in data.decode("ascii", errors="replace").splitlines()
+        if line.lstrip().startswith("vertex")
+    ]
+    return np.asarray(vertices, dtype=float).reshape(-1, 3, 3)
 
 
 def stl_solid_mask(stl_path, z, y, x) -> np.ndarray:
@@ -128,7 +137,7 @@ def stl_solid_mask(stl_path, z, y, x) -> np.ndarray:
     below a roof is under it, so a centre on a wall or a roof is solid -- as
     pylbm voxelises it and PALM and uDALES leave it (near) still.
     """
-    tris = read_binary_stl(stl_path)
+    tris = read_stl(stl_path)
     z, y, x = (np.asarray(c, dtype=float) for c in (z, y, x))
     spacing = [np.diff(c).min() for c in (z, y, x) if c.size > 1]
     tol = SURFACE_TOLERANCE * min(spacing, default=1.0)

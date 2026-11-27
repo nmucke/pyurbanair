@@ -105,7 +105,7 @@ loaded whole.
   `(z, y, x)` field linearly onto another grid's cell centres, only along the
   axes that differ (a truth from another solver).
 - `stl_solid_mask(stl_path, z, y, x)`: the building cells of the case STL
-  (`read_binary_stl`) on a grid of cell centres, in the STL's frame (every
+  (`read_stl`: binary or ASCII) on a grid of cell centres, in the STL's frame (every
   backend writes its state in it). A cell is solid when its centre is at or
   below the highest point where the vertical ray through its column meets the
   mesh, or within `SURFACE_TOLERANCE` (1e-3 of the smallest cell size) of it,

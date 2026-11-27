@@ -66,7 +66,8 @@ def test_tools_via_sdk(tmp_path: pathlib.Path) -> None:
             } <= names
             result = await client.call_tool("list_config_options", {"group": "model"})
             assert not result.is_error
-            assert result.structured_content["total"] == 4
+            models = list((REPO / "configs/model").glob("*.yaml"))
+            assert result.structured_content["total"] == len(models)
             result = await client.call_tool(
                 "inspect_config",
                 {"overrides": ["model=pylbm", "forward.rollout_steps=2"]},

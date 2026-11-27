@@ -23,6 +23,7 @@ The previous setup (`conf/`, `scripts/esmda/`, `scripts/filtering/`,
 | Run ESMDA | `python scripts/run_smoother.py ...`, variant `'smoothing.smoother=${smoother.<name>}'` |
 | Run a sequential filter (EnKF) | `python scripts/run_filtering.py ...`, `filtering.mode=state\|parameter\|joint` |
 | Run the hybrid (ESMDA params + filter state) | `python scripts/run_hybrid.py ...` |
+| Run the surrogate on a new geometry | `bash workflows/surrogate_forward_workflow.sh geometry.stl_path=... domain.nx=... 'domain.bounds=...'` (§2.4) |
 | Run + metrics + figures in one go | `bash workflows/assimilation_workflow.sh <smoother\|filtering\|hybrid> ...`, `bash workflows/forward_workflow.sh ...` (§2.4) |
 | Add a new experiment (domain/sensors/geometry) | [`configs/case/`](../configs/case/) — one YAML per case; inputs in [`geometries/`](../geometries/README.md) |
 | Switch CFD backend | `model=...` (forward) or `model@truth_model=... model@assim_model=...` (assimilation) |
@@ -47,7 +48,8 @@ configs/
   assimilation.yaml       # entry point: run_smoother.py, run_filtering.py, run_hybrid.py
   common.yaml             # run, paths (per machine), ensemble budget, Hydra run dir
   case/                   # xie_and_castro (default), xie_and_castro_periodic, barcelona
-  model/                  # pylbm, pyudales, pypalm, neural_surrogate
+  model/                  # pylbm, pyudales, pypalm, neural_surrogate,
+                          #   neural_surrogate_generative
   params/                 # static, dynamic, dynamic_sine, dynamic_cosine,
                           #   static_truth, dynamic_truth, surrogate_training_data
   assimilation_settings/  # smoother, analysis, localization, state_reduction, inflation
@@ -111,6 +113,7 @@ genuine model error.
 | `pyudales.yaml` | uDALES (staggered grid) | `ncpu` (must divide `domain.nx` plus the outflow buffer), `nudging_config`, `instability_check` (dt watchdog), `precomputed_geom_dir`, `closure`, `model_discrepancy` (§1.7); boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
 | `pypalm.yaml` | PALM | `ncpu` (must divide `domain.nx` plus the outflow buffer), `outflow_damping`, `random_seed`; boundary condition, buffer, profile, nudging, inlet turbulence and `roughness_length` from `flow` |
 | `neural_surrogate.yaml` | learned stepper | `model_dir` (a `scripts/surrogate/train.py` output), `spinup_source` (`forward_model \| training_data \| generative`), `spinup_forward_model`, `generative_spinup`, `default_params`; `solver_name: pylbm` |
+| `neural_surrogate_generative.yaml` | learned stepper on any geometry | `neural_surrogate` plus `stepper_dir` and `generator_dir` (the two model dirs), `spinup_source: generative` with `decode_spatial_mode: local_blend` and no template (`allow_unseen_geometry`; the mask comes from `geometry.stl_path`), and the stepper's trained 4 m / 5 s grid; run by `surrogate_forward_workflow.sh` |
 
 ### 1.4 `params/`
 
@@ -456,12 +459,14 @@ wrote.
 | Workflow | Args | Runs |
 |---|---|---|
 | `forward_workflow.sh` | `[overrides...]` | `run_forward.py`, then `visualize_forward.py <paths.results_dir>` and the HTML viewer with its 3D view, `python -m visualization <paths.results_dir> <paths.results_dir>/viewer` in the `rendering` env ([visualization.md](visualization.md)) |
+| `surrogate_forward_workflow.sh` | `[overrides...]` | `forward_workflow.sh` with `model=neural_surrogate_generative time.output_frequency=5.0` first: the time stepper `model.stepper_dir`, cold-started by the latent generator `model.generator_dir` (decoded with `local_blend`) on `geometry.stl_path`, cropped by the `domain` bounds at 4 m spacing |
 | `assimilation_workflow.sh` | `<smoother\|filtering\|hybrid> [overrides...]` | `run_<method>.py`, then `compute_metrics.py` and `visualize_assimilation.py` on `<paths.results_dir>/<method>` |
 | `compare_surrogates.sh` | `'models=[...]' [overrides...]` | `surrogate_comparison/run_models.py`, then `surrogate_comparison/compute_metrics.py`, `surrogate_comparison/visualize_comparison.py` and `surrogate_comparison/make_tables.py` on `<paths.results_dir>` (§2.3b) |
 | `compare_models.sh` | `[overrides...]` | `comparison/run_models.py`, then `comparison/compute_metrics.py` and `comparison/visualize_comparison.py` on `<paths.results_dir>` (§2.3c) |
 
 ```bash
 bash workflows/forward_workflow.sh model=pylbm params=static_truth
+bash workflows/surrogate_forward_workflow.sh case=barcelona
 bash workflows/assimilation_workflow.sh filtering 'filtering.analysis=${analysis.letkf}'
 bash workflows/compare_surrogates.sh 'models=[model_weights/local_fno,model_weights/dft_s]' max_steps=50
 bash workflows/compare_models.sh 'models=[pyudales,pypalm]' replicas=2 +overrides.pypalm.model.forward_model.boundary_condition=inflow_outflow

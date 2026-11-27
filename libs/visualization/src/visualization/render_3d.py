@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import xarray as xr
-from evaluation.turbulence import read_binary_stl
+from evaluation.turbulence import read_stl
 
 from .data import fingerprint
 
@@ -117,7 +117,7 @@ def render_3d(
         path = reader.geometry
         if path.suffix.lower() != ".stl":
             raise ValueError("3D geometry must be an STL in the state coordinate frame")
-        tri = read_binary_stl(path)
+        tri = read_stl(path)
         if (
             not len(tri)
             or np.any(tri.max((0, 1)) < faces[:, 0])

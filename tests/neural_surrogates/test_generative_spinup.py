@@ -596,6 +596,66 @@ def test_unsupported_geometry_raises(tmp_path, inject_stub) -> None:
         GenerativeSpinup(model_dir, template).generate([_params()], [0])
 
 
+def test_allow_unseen_geometry_accepts_new_masks_and_grids(
+    tmp_path, inject_stub
+) -> None:
+    """Opt-in only: an unseen mask on an untrained grid (any shape and bounds)
+    is sampled with a warning, but never at another cell spacing."""
+    model_dir = _write_artifact(tmp_path / "m", fluid_cells=1)  # nothing matches
+    template = _write_template(tmp_path / "t.nc")
+    with pytest.raises(ValueError, match="allow_unseen_geometry"):
+        GenerativeSpinup(model_dir, template).generate([_params()], [0])
+
+    with pytest.warns(RuntimeWarning, match="allow_unseen_geometry"):
+        out = GenerativeSpinup(
+            model_dir, template, allow_unseen_geometry=True
+        ).generate([_params()], [0])[0]
+    assert out["u"].shape == GRID
+
+    # A larger, shifted grid at the trained spacing (1 m) is accepted ...
+    wide = (NZ, NY + 4, NX + 8)
+    moved = [[-3.0, NX + 5.0], [10.0, 14.0 + NY], [0.0, NZ]]
+    big = _write_template(tmp_path / "big.nc", grid=wide, bounds=moved)
+    with pytest.warns(RuntimeWarning):
+        out = GenerativeSpinup(model_dir, big, allow_unseen_geometry=True).generate(
+            [_params()], [0]
+        )[0]
+    assert out["u"].shape == wide
+    np.testing.assert_allclose(out["x"].values[0], -2.5)
+    # ... another spacing is not.
+    coarse = _write_template(
+        tmp_path / "coarse.nc", bounds=[[0.0, 2 * NX], [0.0, NY], [0.0, NZ]]
+    )
+    with pytest.raises(ValueError, match="cell spacing"):
+        GenerativeSpinup(model_dir, coarse, allow_unseen_geometry=True).generate(
+            [_params()], [0]
+        )
+
+
+def test_allow_unseen_geometry_keeps_a_supported_geometry_strict(
+    tmp_path, inject_stub
+) -> None:
+    """A supported mask still takes the full grid check and warns nothing."""
+    model_dir = _write_artifact(tmp_path / "m")
+    template = _write_template(tmp_path / "t.nc")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        GenerativeSpinup(model_dir, template, allow_unseen_geometry=True).generate(
+            [_params()], [0]
+        )
+
+
+def test_in_memory_template_replaces_the_file(artifact, inject_stub) -> None:
+    model_dir, template_path = artifact
+    with xr.open_dataset(template_path) as ds:
+        template = ds.load()
+    from_file = GenerativeSpinup(model_dir, template_path).generate([_params()], [0])
+    in_memory = GenerativeSpinup(model_dir, template=template).generate(
+        [_params()], [0]
+    )
+    xr.testing.assert_identical(from_file[0], in_memory[0])
+
+
 def test_relocated_obstacles_with_same_fluid_count_raise(tmp_path, inject_stub) -> None:
     """Shape + fluid-cell count are not an identity: a DIFFERENT obstacle layout
     with the same counts is a geometry the generator never saw."""
@@ -705,6 +765,10 @@ def test_state_var_dims_mismatch_raises(tmp_path, inject_stub) -> None:
 def test_constructor_validation() -> None:
     with pytest.raises(ValueError, match="model_dir"):
         GenerativeSpinup(None, "t.nc")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="exactly one"):
+        GenerativeSpinup("m")
+    with pytest.raises(ValueError, match="exactly one"):
+        GenerativeSpinup("m", "t.nc", template=xr.Dataset())
     with pytest.raises(ValueError, match="sample_batch_size"):
         GenerativeSpinup("m", "t.nc", sample_batch_size=0)
     with pytest.raises(ValueError, match="num_sampling_steps"):
@@ -966,6 +1030,51 @@ def test_generative_mode_falls_back_to_the_explicit_stl(
     # Without an stl_path the same maskless state is still refused.
     with pytest.raises(RuntimeError, match="never inferred"):
         _make_model(artifact)._build_geometry(snap)
+
+
+def _box_stl(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A 2 m box in the middle of the GRID domain, as an STL."""
+    trimesh = pytest.importorskip("trimesh")
+    box = trimesh.creation.box(extents=(2.0, 2.0, 2.0))
+    box.apply_translation((NX / 2, NY / 2, NZ / 2))
+    path = tmp_path / "box.stl"
+    box.export(path)
+    return path
+
+
+def test_forward_model_builds_the_template_from_its_grid_and_stl(
+    artifact, inject_stub, tmp_path
+) -> None:
+    """No template_path: coords come from the requested grid and the mask
+    from the STL, so a new geometry needs no NetCDF (and, being unseen, the
+    generator's opt-in)."""
+    model_dir, _ = artifact
+    box = _box_stl(tmp_path)
+    block = {"model_dir": str(model_dir), "template_path": None}
+    with pytest.raises(ValueError, match="template_path or an stl_path"):
+        _make_model(artifact, generative_spinup=block)
+    model = _make_model(artifact, generative_spinup=block, stl_path=box)
+    with pytest.raises(ValueError, match="supported_geometries"):
+        model.run_single(state=None, params=_params(), member_index=0)
+
+    model = _make_model(
+        artifact,
+        generative_spinup={**block, "allow_unseen_geometry": True},
+        stl_path=box,
+    )
+    with pytest.warns(RuntimeWarning, match="allow_unseen_geometry"):
+        snap = model._generative_spinup.generate([_params()], [0])[0]
+    assert snap["u"].dims == ("z", "y", "x")
+    np.testing.assert_allclose(snap["x"].values, np.arange(NX) + 0.5)
+    np.testing.assert_allclose(snap["z"].values, np.arange(NZ) + 0.5)
+    from neural_surrogates.geometry import stl_to_fluid_mask
+
+    fluid = stl_to_fluid_mask(box, snap["u"])
+    assert fluid.min() == 0.0  # the box carved cells
+    np.testing.assert_array_equal(snap["blanking"].values, 1.0 - fluid)
+    np.testing.assert_array_equal(inject_stub.calls[-1]["geometry"][0], fluid)
+    out = model.run_single(state=None, params=_params(), member_index=0)
+    assert out.sizes["time"] == 3
 
 
 def test_generative_cold_start_without_member_index_warns_once(

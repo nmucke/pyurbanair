@@ -11,7 +11,7 @@ from urllib.request import urlopen
 import numpy as np
 import pytest
 import xarray as xr
-from evaluation.turbulence import read_binary_stl
+from evaluation.turbulence import read_stl
 from visualization import BundleAssetServer, default_options, render
 from visualization.__main__ import main
 from visualization.render_3d import SPEED_BINS, clip_triangles
@@ -155,7 +155,7 @@ def test_buildings_cut_to_the_domain(tmp_path: Path) -> None:
     scene = json.loads((scene_dir / "scene.json").read_text())
     tri = np.fromfile(scene_dir / scene["buildings"], "<f4").reshape(-1, 3, 3)
     assert len(tri) == flow["geometry"]["triangles"] > 0
-    assert len(tri) != len(read_binary_stl(XIE_CASTRO))
+    assert len(tri) != len(read_stl(XIE_CASTRO))
     tolerance = 1e-4
     assert np.all(tri.min((0, 1)) >= np.array(bounds[::2]) - tolerance)
     assert np.all(tri.max((0, 1)) <= np.array(bounds[1::2]) + tolerance)
