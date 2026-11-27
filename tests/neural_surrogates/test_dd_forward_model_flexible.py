@@ -209,3 +209,43 @@ def test_non_flexible_grid_mismatch_still_raises() -> None:
             nz=T_NZ,
             bounds=[[0.0, T_NX + 1], [0.0, T_NY], [0.0, T_NZ]],
         )
+
+
+@pytest.mark.parametrize("mode", ["local", "global"])
+def test_tadpole_stepper_runs_any_grid_at_the_trained_spacing(mode: str) -> None:
+    """The Tadpole stepper pads to its tile multiple and crops back, so the
+    forward model checks spacing only: one instance rolls out on two grids that
+    are not tile multiples, and another spacing is still refused."""
+    pytest.importorskip("diffusers")
+    pytest.importorskip("timm")
+    pytest.importorskip("einops")
+    from neural_surrogates import TadpoleTimeStepper
+
+    stepper = TadpoleTimeStepper(
+        n_state_channels=len(STATE_VARS),
+        n_params=len(PARAM_VARS),
+        encoder_crop_size=16,
+        spatial_mode=mode,
+        subnetwork_cfg={"n_layers": 1, "hidden_size": 32, "num_heads": 2},
+    ).eval()
+    assert stepper.domain_flexible
+    for nz, ny, nx in ((5, 9, 11), (T_NZ, 2 * T_NY + 3, 3 * T_NX + 1)):
+        model = _make_model(
+            stepper,
+            nx=nx,
+            ny=ny,
+            nz=nz,
+            bounds=[[0.0, nx], [-4.0, ny - 4.0], [0.0, nz]],
+            simulation_time=2.0,
+        )
+        out = model.run_single(params=_params())
+        assert out["u"].shape == (2, nz, ny, nx)
+        assert np.all(np.isfinite(out["u"].values))
+    with pytest.raises(ValueError, match="spacing"):
+        _make_model(
+            stepper,
+            nx=T_NX,
+            ny=T_NY,
+            nz=T_NZ,
+            bounds=[[0.0, 2.0 * T_NX], [0, T_NY], [0, T_NZ]],
+        )

@@ -77,6 +77,9 @@ forward_model:
     # AE reduces tile seams, at the cost of slightly smoother small scales near
     # them (docs/neural_surrogates.md §36).
     decode_spatial_mode: null
+    # Accept a geometry the generator was not trained on (only its cell
+    # spacing is checked); false refuses anything outside supported_geometries.
+    allow_unseen_geometry: false
     # Optional {variable: unit} map asserted against the artifact's own units
     # (which must already cover every state and param variable): state what this
     # deployment feeds the generator and a unit change fails loud instead of

@@ -26,6 +26,7 @@ run script, and the post-processing reads the run dir it wrote:
 
 ```bash
 bash workflows/forward_workflow.sh model=pylbm                  # run_forward + visualize_forward
+bash workflows/surrogate_forward_workflow.sh <overrides>       # the same with model=neural_surrogate_generative
 bash workflows/assimilation_workflow.sh smoother <overrides>    # or filtering / hybrid; run_<method>
                                                                 #   + compute_metrics + visualize_assimilation
 ```

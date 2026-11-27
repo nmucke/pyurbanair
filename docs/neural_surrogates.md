@@ -1054,9 +1054,9 @@ Key behaviours:
 | Concern | Behaviour |
 |---|---|
 | **Trained step size** | The network always advances at its trained cadence (`trained_output_frequency`). To honour a requested `output_frequency` that differs, the rollout emits a frame at the internal step closest to each requested output time — so the result lands on the requested grid whether or not the two cadences divide evenly. A requested cadence *finer* than the trained step (the surrogate can't emit between steps) raises. |
-| **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). |
+| **Domain check** | The requested `(nx, ny, nz, bounds)` must equal `trained_domain`; a mismatch raises (the network only applies to its training grid). A network with `domain_flexible = True` (`DomainDecomposed`, `TadpoleTimeStepper`, which pads to its tile multiple and crops back) runs any grid whose cell spacing `(hi - lo) / n` matches `trained_domain`'s per axis. |
 | **Spin-up / collocation** | With `spinup_source: forward_model` a cold start (`state is None`) is bootstrapped by `spinup_forward_model` — the CFD backend that generated the training data — whose final field seeds the rollout. Because the training data is collocated to cell centers (pyudales' staggered C-grid → `xt/yt/zt`; §1), the spin-up field is collocated the same way and renamed to `(z, y, x)` *before* it reaches the network, so the inputs match what it trained on. Warm starts (a `state` is passed) skip spin-up; collocation is idempotent, so the surrogate's own regular-grid output passes through unchanged. `disable_spinup()` propagates to the backend. With `spinup_source: training_data` the surrogate runs **no** spin-up of its own — the caller must supply warm-start states (see below), so a cold start (`state is None`) raises. With `spinup_source: generative` a cold start is **sampled** from a trained latent generator conditioned on the member's current parameters (Part I, §40); the CFD backend is neither built nor run. |
-| **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. |
+| **Geometry** | When `stl_path` is set the geometry channel is voxelised from the STL onto the grid ([geometry.py](../libs/neural-surrogates/src/neural_surrogates/geometry.py)); otherwise it falls back to the non-zero-state convention used by `TransitionDataset`. A watertight STL is classified by `mesh.contains`; a non-watertight one (city meshes: open-bottomed buildings on a ground plane) by `evaluation.turbulence.stl_solid_mask` (vertical rays: a cell is solid when its centre is at or below the highest hit, as pylbm and PALM voxelise and the metrics count; no overhangs). |
 | **Parameters** | Time-varying inflow params are interpolated onto the start of each internal step, `k · trained_output_frequency` (§1, parameter time convention), in the trained `param_vars` order; scalar params are broadcast. |
 | **State history** | `num_history_steps` (`H`) is read **off the built network** — there is no forward-model config knob. The rollout buffer is `(B, H·C, *grid)`, oldest first; each step feeds it to the net, appends the `(B, C, *grid)` prediction, drops the oldest frame, and **emits the prediction** rather than the wider buffer. `_output_schedule()` (`n_internal`, `emit_steps`) is unchanged, so a history rollout emits exactly as many frames as an `H=1` one and substepping stays orthogonal. At `H=1` it is the historic loop, tensor for tensor. Seeding policy below. |
 
@@ -1133,6 +1133,33 @@ to that sample's final value) are in
 configured by the model-level `training_data_spinup` block, but the current DA
 scripts do not call them (the archived `run_esmda.py` did), so use
 `forward_model` or `generative` with them.
+
+**New geometries.**
+[configs/model/neural_surrogate_generative.yaml](../configs/model/neural_surrogate_generative.yaml)
+builds on `neural_surrogate.yaml` (a Hydra default in the same group) and runs
+a domain-flexible stepper on any STL: `model.stepper_dir` (default
+`dft_b_realistic`) cold-started by the generator `model.generator_dir`
+(default `lg_b_realistic`, decoded with `local_blend`), with no template
+(`allow_unseen_geometry`) and the mask from `geometry.stl_path`. It states the
+stepper's trained grid (4 m, 5 s) itself, because the artifact's
+`dataset.root_dir` points at the training machine; a stepper with another
+step or spacing needs `model.forward_model.trained_output_frequency` /
+`trained_domain` too (a step that contradicts the one the artifact's training
+data states raises). The `domain` is the crop
+window in the STL's frame at 4 m spacing (any extent; the corpus was 128 m
+high);
+`time.output_frequency` must be ≥ 5 s (a coarser one is emitted at the nearest
+step) and `time.spinup_time` is unused. The case's other keys (`case_dir`,
+sensors) are not read. `workflows/surrogate_forward_workflow.sh` runs it and
+draws the `forward_workflow.sh` figures and viewer:
+
+```bash
+bash workflows/surrogate_forward_workflow.sh case=barcelona   # a 4 m case
+bash workflows/surrogate_forward_workflow.sh \
+    geometry.stl_path=path/to/city.stl \
+    domain.nx=176 domain.ny=176 domain.nz=32 \
+    'domain.bounds=[[0,704],[0,704],[0,128]]'
+```
 
 ### Extending
 
@@ -1268,7 +1295,11 @@ so its `_target_` is the flat `neural_surrogates.DomainDecomposed`.
 
 [forward_model.py](../libs/neural-surrogates/src/neural_surrogates/forward_model.py)
 
-`DomainDecomposed` advertises `domain_flexible = True`. The forward model's
+`DomainDecomposed` advertises `domain_flexible = True`, as does
+`TadpoleTimeStepper` (every spatial mode zero-pads to its tile multiple, 16 in
+`global`, and crops back; the `pyudales_realistic` steppers trained on 72
+distinct grid shapes, all at 4 m).
+The forward model's
 `_check_domain` detects this (`getattr(self.model, "domain_flexible", False)`)
 and switches to a **cell-spacing** invariant (`_check_domain_flexible`): the
 requested and trained `(dx, dy, dz) = (hi − lo) / (nx, ny, nz)` must agree per
@@ -3077,6 +3108,8 @@ forward_model:
   generative_spinup:
     model_dir: null          # a train_latent_generator export (config.yaml + weights.pt)
     template_path: null      # NetCDF with canonical coords + an explicit `blanking` mask
+                             # (null: built from the grid and stl_path)
+    allow_unseen_geometry: false  # accept a mask/grid outside supported_geometries
     seed: 0                  # base seed; member i's noise is seeded by (seed, i)
     sample_batch_size: 8     # members sampled per generator call (memory bound)
     num_sampling_steps: null # Euler steps; null -> the artifact's validated default
@@ -3099,6 +3132,8 @@ instance read-only across members.
 
 | Concern | Behaviour |
 |---|---|
+| **Template from the grid** | With `template_path: null` the surrogate builds the template in memory (`_grid_template`): cell-centred `(z, y, x)` coords from its `nx/ny/nz/bounds`, zero state variables and `blanking = 1 - stl_to_fluid_mask(stl_path)`, handed to `GenerativeSpinup(template=...)`, which validates it exactly like a file. Without an `stl_path` as well, construction raises. A new geometry's mask is in no `supported_geometries`, so this needs `allow_unseen_geometry`. |
+| **Unseen geometries** | `allow_unseen_geometry: true` accepts a mask or grid that is not in `supported_geometries` (or a supported mask on an untrained grid) with a `RuntimeWarning` (once: the template loads once) instead of raising; only the cell spacing is then checked against the artifact's `grid` (`dz/dy/dx`), shape and bounds are free. All other checks (mask convention, binary mask, units, conditioning schema) stay, and a supported geometry still takes the full grid check. The sample is out of distribution: no held-out geometry evaluation backs it. Default `false` is unchanged behaviour. |
 | **Template requirements** | `template_path` is a NetCDF carrying the canonical coordinates and an explicit obstacle mask (`blanking`); its velocity values are **never** used, obstacles are never inferred from generated zeros, and a training snapshot may serve (for its metadata only). It is canonicalised through `_to_regular_grid`, reduced to its last frame, and validated against the artifact's `generator.physical_schema`: every `state_vars` variable and the mask present on `coordinate_order` dims; grid shape, spacing (within `1e-4` relative) and bounds matching the selected supported geometry's `grid` (legacy artifacts fall back to the top-level `grid`); a binary mask; and the geometry fingerprint — shape, fluid-cell count **and** `geometry_fingerprint(fluid)` (sha256 of the uint8 mask in `(z, y, x)`) — present in `supported_geometries`, so an unseen geometry is rejected rather than sampled blindly, including a relocation of the same obstacles, which matches on shape and cell count alone (initial scope is a validated supported geometry/grid; an artifact whose entries predate `mask_sha256` is refused and must be re-exported). Only the state variables and the mask are kept, so no stale template variable leaks into generated states; the fluid mask (`1 - blanking`) and, for an AE with SDF feature channels, its SDF features are computed once and cached. |
 | **Mask polarity and units** | The schema's `geometry_mask_convention` must equal `MASK_CONVENTION` (`"blanking: 1 = obstacle; model fluid mask = 1 - blanking"`) *exactly* — the value `train_latent_generator.yaml` writes — and must name the `geometry_var`, so an artifact can never carry a polarity opposite to the `1 - blanking` the deployment applies. The schema's `units` must cover **every** state and parameter variable (the error lists the missing names), and the optional `expected_units` constructor kwarg / config key states the deployment's own convention: every variable listed there must match the artifact's unit, so a generator trained on `deg` cannot be driven with `rad`. |
 | **Conditioning schema on the model** | After the strict `load_state_dict`, the loader calls `model.set_conditioning_schema(param_vars, history_dt_seconds)` from the artifact's `physical_schema`, and every `sample` call restates `param_names` / `history_dt_seconds` for the model to re-check (order-sensitive names, cadence within `1e-6` relative). `params_hist` is a bare `(B, Hp, P)` tensor, so nothing else would catch a reordered conditioning vector or a history saved at another cadence; supplying a claim to a model with **no** schema installed raises rather than passing silently. |
@@ -3130,7 +3165,9 @@ an instrumented stub generator injected through `GenerativeSpinup._load_model`
 params rerun the generator, static/default/missing params, first-knot
 conditioning, canonical coords + zero obstacles, every template check), the
 forward-model and ensemble cold/warm paths, a real ESMDA first window
-asserting a generator call per cold forecast, and a real trained (tiny)
+asserting a generator call per cold forecast, the grid-built template and
+`allow_unseen_geometry` (unseen masks/grids accepted, spacing still checked),
+and a real trained (tiny)
 `TadpoleLatentGenerator` artifact sampled through the whole path.
 
 ### 41. Limitations / deferred
@@ -3142,9 +3179,11 @@ asserting a generator call per cold forecast, and a real trained (tiny)
   current-parameter history is supported at deployment; an arbitrary supplied
   history must match `history_dt_seconds` and would need explicit resampling
   (nothing consumes one today).
-- **Supported geometries only.** The template geometry must be one of the
-  train-split geometries (shape + fluid-cell fingerprint); unseen geometries
-  need a held-out geometry evaluation and an explicit supported-domain policy.
+- **Supported geometries only, by default.** The template geometry must be one
+  of the train-split geometries (shape + fluid-cell fingerprint);
+  `allow_unseen_geometry` lifts that (spacing must still match) for new
+  geometries such as a city STL, but the generator's quality there has had no
+  held-out geometry evaluation.
 - **Parameter-inference only.** Joint-state smoothers are not reconciled with
   conditional regeneration (and the current DA scripts do not reject them,
   §40).

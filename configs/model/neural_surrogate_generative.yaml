@@ -1,0 +1,36 @@
+# The neural surrogate on any geometry: a domain-flexible time stepper,
+# cold-started from a field sampled by a latent generator on the case's STL.
+# Run it with workflows/surrogate_forward_workflow.sh; point at other models
+# with model.stepper_dir=... model.generator_dir=...
+defaults:
+  - neural_surrogate
+  - _self_
+
+# A scripts/surrogate/train.py artifact (the time stepper) and a
+# train_latent_generator.py artifact (the cold-start generator).
+stepper_dir: model_weights/dft_b_realistic
+generator_dir: model_weights/lg_b_realistic
+
+forward_model:
+  model_dir: ${..stepper_dir}
+  # The geometry channel is voxelised from the case STL; the domain bounds are
+  # the crop window in the STL's frame, at the trained 4 m spacing.
+  stl_path: ${geometry.stl_path}
+  # The default stepper's training corpus (pyudales_realistic: 4 m cells, 5 s
+  # steps). Given here because the artifact's dataset.root_dir points at the
+  # machine it was trained on; change them with stepper_dir for a stepper with
+  # another step or spacing (a step contradicting the one its training data
+  # states raises). A domain-flexible stepper only needs the spacing to match.
+  trained_output_frequency: 5.0
+  trained_domain:
+    nx: 176
+    ny: 176
+    nz: 32
+    bounds: [[-64.0, 640.0], [-64.0, 640.0], [0.0, 128.0]]
+  spinup_source: generative
+  generative_spinup:
+    model_dir: ${...generator_dir}
+    # No template: the grid comes from the domain and the mask from stl_path.
+    template_path: null
+    allow_unseen_geometry: true
+    decode_spatial_mode: local_blend

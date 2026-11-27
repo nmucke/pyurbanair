@@ -61,3 +61,4 @@ numpy = ">=2.3.5,<3"
 [tool.pixi.pypi-dependencies]
 neural-surrogates = { path = "libs/neural_surrogates", editable = true }
 pyurbanair = { path = "../..", editable = true }
+evaluation = { path = "../evaluation", editable = true }

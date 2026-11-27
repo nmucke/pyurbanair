@@ -15,7 +15,8 @@ Design notes / requirements honoured here:
   trained step is rejected.
 * **Domain check.** The requested ``(nx, ny, nz, bounds)`` must match the
   domain the network was trained on, otherwise the geometry / channel
-  layout would be meaningless. A mismatch raises.
+  layout would be meaningless. A mismatch raises. A domain-flexible network
+  (``domain_flexible = True``) only needs the trained cell spacing.
 * **Spin-up.** A cold start (``state is None``) is bootstrapped by the
   *spin-up forward model* — the very CFD backend that generated the
   training data — which produces a physically developed initial field.
@@ -232,7 +233,9 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             generative_spinup: The ``generative_spinup`` config block
                 (``model_dir``, ``template_path``, ``seed``,
                 ``sample_batch_size``, ``num_sampling_steps``,
-                ``decode_spatial_mode``; an optional ``save_diagnostics`` flag
+                ``decode_spatial_mode``, ``allow_unseen_geometry``; a null
+                ``template_path`` is built from the grid and ``stl_path``;
+                an optional ``save_diagnostics`` flag
                 is consumed by the caller). Required
                 when ``spinup_source == "generative"`` and ignored otherwise,
                 so every other mode is unaffected by its presence.
@@ -248,10 +251,21 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         weights_path = (
             weights_path if weights_path is not None else trained.get("weights_path")
         )
+        declared = trained.get("output_frequency")
+        if (
+            trained_output_frequency is not None
+            and declared is not None
+            and not np.isclose(float(trained_output_frequency), float(declared))
+        ):
+            raise ValueError(
+                f"trained_output_frequency={trained_output_frequency} contradicts "
+                f"the {declared} s step of {model_dir}'s training data; drop the "
+                "override or point at the matching model."
+            )
         trained_output_frequency = (
             trained_output_frequency
             if trained_output_frequency is not None
-            else trained.get("output_frequency")
+            else declared
         )
         trained_domain = (
             trained_domain if trained_domain is not None else trained.get("domain")
@@ -455,11 +469,15 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         ``model_dir`` / ``template_path`` default to ``null`` in
         ``conf/model/neural_surrogate.yaml`` (a ``???`` would break every
         composition that never uses generative mode), so they are validated
-        here instead. ``save_diagnostics`` is a run-script concern and is
-        dropped before the handle is built; every remaining key (including the
-        optional ``expected_units`` map the deployment asserts against the
-        artifact's) reaches :class:`GenerativeSpinup` as-is, and the surrogate's
-        own ``default_params`` are passed through so a parameter the
+        here instead. Without a ``template_path`` the template is built from
+        the requested grid and ``stl_path`` (:meth:`_grid_template`), so a new
+        geometry needs no NetCDF; one of the two is required.
+        ``save_diagnostics`` is a run-script concern and is dropped before the
+        handle is built; every remaining key (including the optional
+        ``expected_units`` map the deployment asserts against the artifact's,
+        and ``allow_unseen_geometry``) reaches :class:`GenerativeSpinup` as-is,
+        and the surrogate's own ``default_params`` are passed through so a
+        parameter the
         assimilation does not vary is conditioned on its constant fallback.
         """
         from omegaconf import OmegaConf
@@ -473,12 +491,19 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             block = cast(dict[str, Any], OmegaConf.to_container(block, resolve=True))
         settings: dict[str, Any] = dict(block)
         settings.pop("save_diagnostics", None)
-        for key in ("model_dir", "template_path"):
-            if settings.get(key) is None:
+        if settings.get("model_dir") is None:
+            raise ValueError(
+                "spinup_source='generative' requires generative_spinup.model_dir "
+                "(it defaults to null in conf/model/neural_surrogate.yaml)."
+            )
+        if settings.get("template_path") is None:
+            if self.stl_path is None:
                 raise ValueError(
-                    f"spinup_source='generative' requires generative_spinup.{key} "
-                    "(it defaults to null in conf/model/neural_surrogate.yaml)."
+                    "spinup_source='generative' requires "
+                    "generative_spinup.template_path or an stl_path to build the "
+                    "template (its obstacle mask) from; both are null."
                 )
+            settings["template"] = self._grid_template()
         return GenerativeSpinup(
             device=device,
             dtype=dtype,
@@ -486,6 +511,36 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             geometry_var=self.geometry_var,
             **settings,
         )
+
+    def _grid_template(self) -> xr.Dataset:
+        """A generative-spin-up template on the requested grid, from ``stl_path``.
+
+        Cell-centred ``(z, y, x)`` coords from ``nx/ny/nz`` and ``bounds``, zero
+        state variables (a template's values are never used) and the
+        ``geometry_var`` obstacle mask (``1`` = obstacle) voxelised from the STL.
+        """
+        from omegaconf import OmegaConf
+
+        assert self.stl_path is not None
+        bounds = np.asarray(
+            (
+                OmegaConf.to_container(self.bounds)
+                if OmegaConf.is_config(self.bounds)
+                else self.bounds
+            ),
+            dtype=float,
+        )
+        coords = {}
+        for dim, n, (lo, hi) in zip("zyx", (self.nz, self.ny, self.nx), bounds[::-1]):
+            coords[dim] = lo + (np.arange(n) + 0.5) * (hi - lo) / n
+        dims = ("z", "y", "x")
+        zeros = np.zeros((self.nz, self.ny, self.nx), dtype=np.float32)
+        template = xr.Dataset(
+            {v: (dims, zeros.copy()) for v in self.state_vars}, coords=coords
+        )
+        fluid = stl_to_fluid_mask(self.stl_path, template[self.state_vars[0]])
+        template[self.geometry_var] = (dims, 1.0 - fluid)
+        return template
 
     # -- construction-time validation --------------------------------------
 

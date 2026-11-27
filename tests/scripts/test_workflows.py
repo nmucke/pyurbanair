@@ -45,6 +45,31 @@ def test_forward_workflow(
     assert (tmp_path / "neural_surrogate" / "figures" / "parameters.png").exists()
 
 
+def test_surrogate_forward_workflow(
+    tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
+) -> None:
+    """The tiny DFT stepper, cold-started by the tiny generator on the case STL."""
+    weights = session_root / "weights"
+    # Overrides only: the workflow puts its own before them, so a flag such as
+    # --config-dir would end Hydra's override list early.
+    overrides = _overrides(tmp_path, session_root)[2:]
+    _workflow(
+        "surrogate_forward_workflow.sh",
+        f"hydra.searchpath=[file://{TEST_CONFIGS}]",
+        *overrides,
+        "+test=forward",
+        f"model.stepper_dir={weights / 'dft'}",
+        f"model.generator_dir={weights / 'latent_generator'}",
+        "model.forward_model.device=cpu",
+        # The tiny artifacts' own grid and step, from their training data.
+        "model.forward_model.trained_domain=null",
+        "model.forward_model.trained_output_frequency=null",
+        "time.output_frequency=1.0",
+        "model.forward_model.generative_spinup.num_sampling_steps=2",
+    )
+    assert (tmp_path / "neural_surrogate" / "figures" / "parameters.png").exists()
+
+
 def test_assimilation_workflow(
     tmp_path: pathlib.Path, session_root: pathlib.Path, trained: Any
 ) -> None:

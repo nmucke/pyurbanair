@@ -193,6 +193,28 @@ def test_check_config_accepts_production(workflow: str, tmp_path: pathlib.Path) 
     check(compose(name, *VALID.get(workflow, []), root=tmp_path), workflow)
 
 
+def test_generative_surrogate_points_at_its_two_models(tmp_path: pathlib.Path) -> None:
+    """model.stepper_dir / model.generator_dir reach the surrogate's model dirs."""
+    cfg = compose(
+        "forward",
+        "model=neural_surrogate_generative",
+        "model.stepper_dir=weights/stepper",
+        "model.generator_dir=weights/generator",
+        "geometry.stl_path=city.stl",
+        root=tmp_path,
+    )
+    fm = OmegaConf.to_container(cfg.model.forward_model, resolve=True)
+    assert isinstance(fm, dict)
+    assert fm["model_dir"] == "weights/stepper"
+    assert fm["stl_path"] == "city.stl"
+    assert fm["spinup_source"] == "generative"
+    spinup = fm["generative_spinup"]
+    assert spinup["model_dir"] == "weights/generator"
+    assert spinup["template_path"] is None and spinup["allow_unseen_geometry"]
+    assert spinup["decode_spatial_mode"] == "local_blend"
+    load_script("scripts/utils/inconsistency_check.py").check_config(cfg, "forward")
+
+
 @pytest.mark.parametrize(  # type: ignore[misc]
     "workflow, overrides, message",
     [

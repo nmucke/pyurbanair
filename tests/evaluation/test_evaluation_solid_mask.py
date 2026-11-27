@@ -4,7 +4,7 @@ import pathlib
 
 import numpy as np
 import xarray as xr
-from evaluation.turbulence import on_grid, stl_solid_mask
+from evaluation.turbulence import on_grid, read_stl, stl_solid_mask
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 XIE_CASTRO = REPO / "geometries/xie_and_castro/xie_castro_2008_STL.stl"
@@ -44,6 +44,21 @@ def _below_roofs(boxes, z, y, x):
         over = (y[:, None] >= y0) & (y[:, None] <= y1) & (x >= x0) & (x <= x1)
         roof = np.where(over, np.maximum(roof, z1), roof)
     return z[:, None, None] <= roof
+
+
+def test_ascii_and_binary_stl_read_the_same_triangles(tmp_path):
+    binary = _write_boxes(tmp_path / "box.stl", [((2.0, 6.0), (2.0, 6.0), (0.0, 3.0))])
+    tris = read_stl(binary)
+    facets = "".join(
+        "facet normal 0 0 0\n outer loop\n"
+        + "".join(f"  vertex {x} {y} {z}\n" for x, y, z in tri)
+        + " endloop\nendfacet\n"
+        for tri in tris
+    )
+    ascii_stl = tmp_path / "box_ascii.stl"
+    ascii_stl.write_text(f"solid box\n{facets}endsolid box\n")
+
+    assert np.array_equal(read_stl(ascii_stl), tris)
 
 
 def test_centres_on_walls_roofs_and_the_roof_diagonal_are_solid(tmp_path):

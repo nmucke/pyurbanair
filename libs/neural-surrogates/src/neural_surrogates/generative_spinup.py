@@ -25,7 +25,7 @@ Design points, in order of importance:
   coordinates and the obstacle mask (``blanking``); its velocity values are
   never used. Obstacles are never inferred from generated zeros, and an
   unsupported geometry (one the generator was not trained on) is rejected
-  rather than sampled blindly.
+  rather than sampled blindly, unless ``allow_unseen_geometry`` opts in.
 * **No CFD fallback.** A failed sample raises with the member index and its
   conditioning values.
 """
@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import pathlib
+import warnings
 from typing import Any, Optional, Sequence, cast
 
 import numpy as np
@@ -133,6 +134,14 @@ class GenerativeSpinup:
         template_path: NetCDF carrying the canonical coordinates and the
             obstacle mask (``blanking``) of the deployment geometry. Its state
             values are ignored.
+        template: The same template as an in-memory dataset, in place of
+            ``template_path`` (the surrogate builds one from its own grid and
+            STL when no template file is configured). Exactly one of the two.
+        allow_unseen_geometry: Accept a mask/grid that is not in the
+            artifact's ``supported_geometries`` (warning once) instead of
+            rejecting it; its cell spacing must still be the generator's. Such
+            a sample is out of distribution: it has had no held-out geometry
+            evaluation.
         seed: Base seed for the per-member latent noise (see
             :func:`_member_seed`).
         sample_batch_size: Maximum number of members sampled per generator
@@ -164,7 +173,7 @@ class GenerativeSpinup:
     def __init__(
         self,
         model_dir: str | pathlib.Path,
-        template_path: str | pathlib.Path,
+        template_path: Optional[str | pathlib.Path] = None,
         seed: int = 0,
         sample_batch_size: int = 8,
         num_sampling_steps: Optional[int] = None,
@@ -174,11 +183,15 @@ class GenerativeSpinup:
         default_params: Optional[dict[str, float]] = None,
         geometry_var: str = "blanking",
         expected_units: Optional[dict[str, str]] = None,
+        allow_unseen_geometry: bool = False,
+        template: Optional[xr.Dataset] = None,
     ) -> None:
-        if model_dir is None or template_path is None:
+        if model_dir is None or (template_path is None) == (template is None):
             raise ValueError(
-                "GenerativeSpinup needs both model_dir and template_path "
-                f"(got model_dir={model_dir!r}, template_path={template_path!r})."
+                "GenerativeSpinup needs model_dir and exactly one of "
+                f"template_path / template (got model_dir={model_dir!r}, "
+                f"template_path={template_path!r}, template given: "
+                f"{template is not None})."
             )
         if int(sample_batch_size) < 1:
             raise ValueError(
@@ -195,7 +208,11 @@ class GenerativeSpinup:
             # Name only (halo_size 0 passes): the AE's own halo applies.
             validate_spatial_mode(str(decode_spatial_mode), 0)
         self.model_dir = pathlib.Path(model_dir)
-        self.template_path = pathlib.Path(template_path)
+        self.template_path = (
+            pathlib.Path(template_path) if template_path is not None else None
+        )
+        self._template_source = template
+        self.allow_unseen_geometry = bool(allow_unseen_geometry)
         self.seed = int(seed)
         self.sample_batch_size = int(sample_batch_size)
         self._requested_num_steps = (
@@ -410,12 +427,16 @@ class GenerativeSpinup:
         from .forward_model import NeuralSurrogateForwardModel
 
         schema = self._ensure_schema()
-        if not self.template_path.exists():
+        if self.template_path is None:
+            assert self._template_source is not None
+            raw = self._template_source
+        elif not self.template_path.exists():
             raise FileNotFoundError(
                 f"generative spin-up template not found at {self.template_path}."
             )
-        with xr.open_dataset(self.template_path) as ds:
-            raw = ds.load()
+        else:
+            with xr.open_dataset(self.template_path) as ds:
+                raw = ds.load()
         snap = NeuralSurrogateForwardModel._to_regular_grid(raw)
         if "time" in snap.dims:
             snap = snap.isel(time=-1)
@@ -424,7 +445,7 @@ class GenerativeSpinup:
 
         if self.geometry_var not in snap.data_vars:
             raise ValueError(
-                f"template {self.template_path} carries no '{self.geometry_var}' "
+                f"template {self._template_name} carries no '{self.geometry_var}' "
                 "variable. The generative spin-up needs an explicit obstacle "
                 "mask; obstacles are never inferred from zero velocities."
             )
@@ -432,7 +453,7 @@ class GenerativeSpinup:
         missing = [v for v in schema["state_vars"] if v not in snap.data_vars]
         if missing:
             raise ValueError(
-                f"template {self.template_path} lacks state variables {missing} "
+                f"template {self._template_name} lacks state variables {missing} "
                 f"(generator state_vars={schema['state_vars']})."
             )
         for name in (*schema["state_vars"], self.geometry_var):
@@ -445,7 +466,9 @@ class GenerativeSpinup:
         # grid mismatch before attempting geometry identity. Current artifacts
         # select a mask+grid pair below.
         supported = schema.get("supported_geometries") or []
-        if not any(entry.get("grid") is not None for entry in supported):
+        if not self.allow_unseen_geometry and not any(
+            entry.get("grid") is not None for entry in supported
+        ):
             self._check_grid(snap, schema)
         blanking = np.asarray(snap[self.geometry_var].values, dtype=np.float64)
         if not np.all(np.isin(blanking, (0.0, 1.0))):
@@ -458,8 +481,10 @@ class GenerativeSpinup:
         # Select the pair together: the same voxel mask can legitimately occur
         # on two domains with different spacing/bounds.  Legacy single-grid
         # artifacts have no per-entry grid and continue to use schema.grid.
+        # None: an accepted unseen geometry, whose spacing is already checked.
         matched_grid = self._check_supported_geometry(snap, fluid, schema)
-        self._check_grid(snap, schema, grid=matched_grid)
+        if matched_grid is not None:
+            self._check_grid(snap, schema, grid=matched_grid)
 
         # Keep only what the generated snapshot must carry: the state variables
         # (overwritten per member) and the mask. Any other template variable
@@ -540,9 +565,16 @@ class GenerativeSpinup:
                 f"template {error}; it does not match the generator's trained grid."
             )
 
+    @property
+    def _template_name(self) -> str:
+        """How errors refer to the template (a file, or the in-memory one)."""
+        if self.template_path is not None:
+            return str(self.template_path)
+        return "(built from the surrogate's grid)"
+
     def _check_supported_geometry(
         self, snap: xr.Dataset, fluid: np.ndarray, schema: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> Optional[dict[str, Any]]:
         """The template geometry must be one the generator was trained on.
 
         Unseen geometries need a held-out evaluation before they can be
@@ -550,6 +582,11 @@ class GenerativeSpinup:
         rejected here rather than sampled blindly. Identity is the full
         :func:`geometry_fingerprint` -- shape and fluid-cell count alone are
         satisfied by any relocation of the same obstacles.
+
+        With ``allow_unseen_geometry`` such a mask/grid is accepted instead
+        (warning once; the template is loaded once) after a check that its
+        cell spacing is the generator's, and ``None`` is returned: there is
+        no trained grid whose shape and bounds it must match.
         """
         supported = schema.get("supported_geometries") or []
         shape = tuple(int(s) for s in fluid.shape)
@@ -584,20 +621,53 @@ class GenerativeSpinup:
                 if error is None:
                     return grid
                 failures.append(error)
-            raise ValueError(
-                f"template {self.template_path} carries a supported geometry "
+            reason = (
+                f"template {self._template_name} carries a supported geometry "
                 "mask, but its physical grid does not match any grid trained "
                 f"with that mask: {failures}."
             )
-        if mask_matches:
+        elif mask_matches:
             return dict(schema["grid"])
-        raise ValueError(
-            f"template {self.template_path} carries a geometry (shape={shape}, "
-            f"fluid_cells={fluid_cells}, mask_sha256={fingerprint}) the generator "
-            f"was not trained on; supported_geometries = {supported}. Unseen "
-            "geometries -- including a relocation of the same obstacles -- need "
-            "a held-out evaluation before deployment."
+        else:
+            reason = (
+                f"template {self._template_name} carries a geometry (shape="
+                f"{shape}, fluid_cells={fluid_cells}, mask_sha256={fingerprint}) "
+                "the generator was not trained on; supported_geometries = "
+                f"{supported}. Unseen geometries -- including a relocation of "
+                "the same obstacles -- need a held-out evaluation before "
+                "deployment (or set allow_unseen_geometry)."
+            )
+        if not self.allow_unseen_geometry:
+            raise ValueError(reason)
+        self._check_spacing(snap, schema)
+        warnings.warn(
+            "allow_unseen_geometry: sampling the generator on a geometry/grid "
+            f"outside its supported_geometries (shape={shape}, "
+            f"fluid_cells={fluid_cells}); the initial state is out of "
+            "distribution.",
+            RuntimeWarning,
+            stacklevel=2,
         )
+        return None
+
+    def _check_spacing(self, snap: xr.Dataset, schema: dict[str, Any]) -> None:
+        """Cell spacing only (any shape and bounds) vs the artifact's grid."""
+        dims = schema["coordinate_order"]
+        trained = schema["grid"]
+        missing = [f"d{d}" for d in dims if trained.get(f"d{d}") is None]
+        if missing:
+            raise ValueError(
+                f"generator grid in {self.model_dir} states no spacing {missing}; "
+                "an unseen geometry needs it to be checked."
+            )
+        grid = {f"n{d}": int(snap.sizes[d]) for d in dims}
+        grid.update({f"d{d}": trained[f"d{d}"] for d in dims})
+        error = self._grid_error(snap, schema, grid)
+        if error is not None:
+            raise ValueError(
+                f"template {error}; an unseen geometry must use the generator's "
+                "cell spacing."
+            )
 
     # -- public properties -------------------------------------------------
 
@@ -642,7 +712,7 @@ class GenerativeSpinup:
         schema = self._ensure_schema()
         return (
             f"GenerativeSpinup(model_dir={self.model_dir}, "
-            f"template={self.template_path}, Hp={schema['param_history_steps']}, "
+            f"template={self._template_name}, Hp={schema['param_history_steps']}, "
             f"param_vars={list(schema['param_vars'])}, "
             f"state_vars={list(schema['state_vars'])}, grid={self.grid_shape}, "
             f"seed={self.seed}, sample_batch_size={self.sample_batch_size}, "

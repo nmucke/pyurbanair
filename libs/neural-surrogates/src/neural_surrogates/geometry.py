@@ -48,6 +48,12 @@ def stl_to_fluid_mask(
             dims and coordinates define the target grid. Its dimension names
             are mapped to physical axes by first letter.
 
+    A watertight mesh is classified cell by cell with ``mesh.contains``. City
+    meshes usually are not watertight (open-bottomed extruded buildings), and
+    there the inside test is unreliable, so a non-watertight mesh goes through
+    :func:`evaluation.turbulence.stl_solid_mask` instead: vertical rays, as
+    pylbm and PALM voxelise, and the mask the metrics and the viewer use.
+
     Returns:
         A float array shaped like ``template_var`` with ``1`` for fluid
         cells and ``0`` for cells whose centre falls inside the geometry.
@@ -59,6 +65,13 @@ def stl_to_fluid_mask(
     coords = [np.asarray(template_var.coords[d].values, dtype=float) for d in dims]
 
     mesh = trimesh.load(str(stl_path), force="mesh")
+    if not mesh.is_watertight:
+        from evaluation.turbulence import stl_solid_mask
+
+        by_axis = dict(zip(axes, coords))
+        solid = stl_solid_mask(stl_path, by_axis["z"], by_axis["y"], by_axis["x"])
+        perm = [("z", "y", "x").index(a) for a in axes]
+        return (~np.transpose(solid, perm)).astype(np.float32)
 
     # Cell-centre coordinates for every grid point, in template dim order.
     grids = np.meshgrid(*coords, indexing="ij")
