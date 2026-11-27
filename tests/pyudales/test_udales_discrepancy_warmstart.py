@@ -88,6 +88,11 @@ def test_all_ranks_receive_local_flow_global_halos_and_same_clock(
             np.testing.assert_array_equal(
                 actual[-1, 1:7, :4], state[name].values[:, :, ((rank + 1) * 4) % 8].T
             )
+            # The top face: the lid for w (zero, or the restart leaks through
+            # it), a copy of the level below for the others.
+            np.testing.assert_array_equal(
+                actual[:, :, 4], 0.0 if name == "w" else actual[:, :, 3]
+            )
     assert [path.read_bytes() for path in templates] == before
 
 
