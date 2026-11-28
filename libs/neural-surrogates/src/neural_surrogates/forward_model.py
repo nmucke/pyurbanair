@@ -164,6 +164,8 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         rollout_batch_size: Optional[int] = None,
         amp_dtype: Optional[str] = None,
         generative_spinup: Optional[dict[str, Any]] = None,
+        inlet_turbulence: Optional[dict[str, Any]] = None,
+        periodic_y: bool = False,
     ) -> None:
         """Initialise the surrogate.
 
@@ -246,6 +248,19 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 is consumed by the caller). Required
                 when ``spinup_source == "generative"`` and ignored otherwise,
                 so every other mode is unaffected by its presence.
+            inlet_turbulence: uDALES' digital-filter inlet turbulence on every
+                predicted step, built from the run's own grid and inflow
+                (:meth:`InletTurbulence.from_inflow`), as the evaluation
+                scripts' top-level block does from a corpus. Keys: ``enabled``,
+                ``mode`` (``add`` | ``replace``), ``apply`` (``output``: the
+                forced step is stored and fed back; ``input``: only fed back),
+                ``ramp_width``, ``seed`` (member ``i`` draws its own stream,
+                seeded by ``(seed, i)``), ``profile`` (the mean inflow profile;
+                a ``vertical_inflow_exponent`` param overrides its alpha) and
+                the filter's ``intensity``, ``length_scale_{x,y,z}`` and
+                ``time_step``. ``None`` or ``enabled: false``: off.
+            periodic_y: Make the network y-periodic at inference
+                (:func:`neural_surrogates.periodic.make_periodic_y`).
         """
         super().__init__(results_dir=results_dir)
 
@@ -374,6 +389,11 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self._load_weights(weights_path, allow_uninitialized_weights)
         self.model = self.model.to(device=self.device, dtype=self.torch_dtype)
         self.model.eval()
+        if periodic_y:
+            from .periodic import make_periodic_y
+
+            self.model = make_periodic_y(self.model)
+        self.inlet_turbulence = self._resolve_inlet_turbulence(inlet_turbulence)
 
         # How many past frames the network consumes per step (H). H == 1 is the
         # classic one-step surrogate: the rollout then behaves exactly as before.
@@ -837,6 +857,100 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         schedule = np.stack(columns, axis=-1)
         return torch.from_numpy(schedule).to(device=self.device, dtype=self.torch_dtype)
 
+    # -- inference-time inlet turbulence -------------------------------------
+
+    _INLET_KEYS = ("mode", "apply", "ramp_width", "seed", "profile")
+
+    def _resolve_inlet_turbulence(
+        self, config: Optional[dict[str, Any]]
+    ) -> Optional[dict[str, Any]]:
+        """The validated ``inlet_turbulence`` block, or ``None`` when it is off.
+        The filter keys are merged over uDALES' defaults (unknown ones warn)."""
+        from pyudales.utils.inlet_turbulence_utils import (
+            is_inlet_turbulence_enabled,
+            resolve_inlet_turbulence_config,
+        )
+
+        config = dict(config) if config else None
+        if not is_inlet_turbulence_enabled(config):
+            return None
+        assert config is not None
+        if self.state_vars != ("u", "v", "w"):
+            raise ValueError(
+                "inlet_turbulence needs state_vars ('u', 'v', 'w'), got "
+                f"{self.state_vars}"
+            )
+        resolved = {
+            "mode": config.get("mode", "add"),
+            "apply": config.get("apply", "output"),
+            "ramp_width": int(config.get("ramp_width", 4)),
+            "seed": int(config.get("seed") or 0),
+            "profile": config.get("profile"),
+        }
+        if resolved["apply"] not in ("output", "input"):
+            raise ValueError(
+                f"inlet_turbulence.apply must be 'output' or 'input', got "
+                f"{resolved['apply']!r}"
+            )
+        filter_keys = {k: v for k, v in config.items() if k not in self._INLET_KEYS}
+        resolved["filter"] = resolve_inlet_turbulence_config(filter_keys)
+        return resolved
+
+    def _build_inlet(
+        self,
+        geometry: torch.Tensor,
+        template: xr.Dataset,
+        params: Optional[xr.Dataset],
+        n_internal: int,
+        member: int,
+    ) -> Any:
+        """Member ``member``'s :class:`InletTurbulence` over the ``n_internal``
+        steps: frame ``k`` is the state after ``k`` steps, on a solver clock
+        that starts the rollout at ``spinup_time``."""
+        from pyudales.utils.inlet_turbulence_utils import resolve_inflow_schedule
+
+        from pyurbanair.utils.digital_filter import derive_seed
+
+        from .inlet_turbulence import InletTurbulence
+
+        cfg = self.inlet_turbulence
+        assert cfg is not None
+        if params is None:
+            raise ValueError("inlet_turbulence needs the member's params.")
+        var = template[self.state_vars[0]]
+        dims = tuple(d for d in var.dims if d != "time")
+        if dims != ("z", "y", "x"):
+            raise ValueError(
+                f"inlet_turbulence needs a (z, y, x) state, got dims {dims}"
+            )
+        z, y, x = (np.asarray(template[d].values, dtype=float) for d in dims)
+        profile = dict(cfg["profile"]) if cfg["profile"] else None
+        if "vertical_inflow_exponent" in params:  # the member's own alpha
+            alpha = float(np.asarray(params["vertical_inflow_exponent"]).ravel()[0])
+            profile = {"type": "power_law", **(profile or {}), "alpha": alpha}
+        knot_times, knot_angle, knot_speed = resolve_inflow_schedule(
+            params, self.spinup_time, self.simulation_time
+        )
+        dt = self.trained_output_frequency
+        return InletTurbulence.from_inflow(
+            fluid=geometry.cpu().numpy() > 0.5,
+            z=z,
+            y=y,
+            x=x,
+            frame_times=self.spinup_time + dt * np.arange(n_internal + 1),
+            interval=dt,
+            knot_times=knot_times,
+            knot_angle=knot_angle,
+            knot_speed=knot_speed,
+            end_time=self.spinup_time + dt * n_internal,
+            turb=cfg["filter"],
+            profile_config=profile,
+            seed=derive_seed(f"{cfg['seed']}_{member}"),
+            mode=cfg["mode"],
+            ramp_width=cfg["ramp_width"],
+            label=f"member {member}",
+        )
+
     # -- the rollout -------------------------------------------------------
 
     @staticmethod
@@ -1090,7 +1204,9 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
             for start in range(0, len(templates), chunk):
                 stop = start + chunk
                 outputs.extend(
-                    self._rollout_chunk(templates[start:stop], params[start:stop])
+                    self._rollout_chunk(
+                        templates[start:stop], params[start:stop], start
+                    )
                 )
             return outputs
         return self._rollout_chunk(templates, params)
@@ -1099,11 +1215,14 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         self,
         templates: Sequence[xr.Dataset],
         params: Sequence[Optional[xr.Dataset]],
+        first_member: int = 0,
     ) -> list[xr.Dataset]:
         """Roll a single batch (one chunk) of members forward through the net.
 
         Carries the batched forward pass that :meth:`rollout_batched` splits the
         ensemble across; see that method for the batching rationale.
+        ``first_member`` is the chunk's first member index (it seeds each
+        member's inlet turbulence).
         """
         n_internal, emit_steps = self._output_schedule()
         emit_at = {step: pos for pos, step in enumerate(emit_steps)}
@@ -1137,6 +1256,19 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
         ):
             geom_features = self.model._sdf_features(geom)
 
+        inlets = None
+        if self.inlet_turbulence is not None:
+            inlets = [
+                self._build_inlet(
+                    geom[b], templates[b], params[b], n_internal, first_member + b
+                )
+                for b in range(n_members)
+            ]
+        store_unforced = (
+            self.inlet_turbulence is not None
+            and self.inlet_turbulence["apply"] == "input"
+        )
+
         # Per member, per emitted frame: (n_members, n_emit, C, *grid).
         member_frames: list[list[Optional[np.ndarray]]] = [
             [None] * len(emit_steps) for _ in range(n_members)
@@ -1156,6 +1288,16 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                         pred = self.model(current, param_k, geom, geom_features)
                 if self.amp_dtype is not None:
                     pred = pred.to(self.torch_dtype)
+                stored = pred
+                if inlets is not None:
+                    forced = torch.cat(
+                        [
+                            inlet(pred[b : b + 1], k + 1)
+                            for b, inlet in enumerate(inlets)
+                        ]
+                    )
+                    stored = pred if store_unforced else forced
+                    pred = forced
                 # Shift the history window: drop the oldest frame, append the
                 # prediction. H == 1 degenerates to the historic wholesale
                 # replacement (same tensor, same op order).
@@ -1166,7 +1308,7 @@ class NeuralSurrogateForwardModel(BaseForwardModel):
                 )
                 pos = emit_at.get(k + 1)
                 if pos is not None:
-                    step_np = pred.cpu().numpy()
+                    step_np = stored.cpu().numpy()
                     for b in range(n_members):
                         member_frames[b][pos] = step_np[b]
 

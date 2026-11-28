@@ -140,21 +140,14 @@ class InletTurbulence:
             mode, ramp_width: As in :class:`InletTurbulence`.
         """
         from omegaconf import OmegaConf
-        from pyudales.utils.inflow_utils import angle_to_velocity
         from pyudales.utils.inlet_turbulence_utils import (
-            driver_time_grid,
             is_inlet_turbulence_enabled,
             resolve_inflow_schedule,
             resolve_inlet_turbulence_config,
         )
-        from pyudales.utils.vertical_profile import build_profile_shape
 
         from pyurbanair.dynamic_parameters.ar2_relaxation import build_knot_times
-        from pyurbanair.utils.digital_filter import (
-            CROSS_COMPONENT_ANISOTROPY,
-            derive_seed,
-            filtered_fluctuations,
-        )
+        from pyurbanair.utils.digital_filter import derive_seed
 
         if tuple(data.state_vars) != ("u", "v", "w"):
             raise ValueError(
@@ -227,12 +220,7 @@ class InletTurbulence:
             if seed is not None
             else int(attrs.get("inlet_turbulence_start_record", 0))
         )
-        n_frames, nz, ny = len(stamps), len(zt), len(yt)
-        dz, dy, dx = zt[1] - zt[0], yt[1] - yt[0], xt[1] - xt[0]
-        if not all(np.allclose(np.diff(c), d) for c, d in ((zt, dz), (yt, dy))):
-            raise ValueError("InletTurbulence needs a uniform z and y grid.")
-        zsize = nz * dz
-        heights = (np.arange(nz) + 0.5) * dz  # solver zt (and zm below)
+        n_frames = len(stamps)
 
         # The corpus' own inflow parameters, whatever the model was trained on.
         param_path = data.root / "param" / data.split / data._state_files[sample].name
@@ -250,8 +238,6 @@ class InletTurbulence:
                 **(profile_config or {}),
                 "alpha": alpha,
             }
-        shape_t = build_profile_shape(profile_config, heights, zsize)
-        shape_m = build_profile_shape(profile_config, np.arange(nz + 1) * dz, zsize)
 
         # The solver interpolated the sampler's knots, not this per-frame
         # series (which is those knots interpolated onto the frame stamps):
@@ -277,20 +263,12 @@ class InletTurbulence:
             schedule, spinup, simulation_time
         )
 
-        # Records spanning the frames' solver times; the AR(1) coefficient
-        # takes the mean speed over the solver's WHOLE record grid.
-        time_step = float(turb["time_step"])
-        frame_times = spinup + output_frequency * (np.arange(n_frames) + 1)
-        first = int(np.floor(frame_times[0] / time_step + 1e-9))
-        last = int(np.ceil(frame_times[-1] / time_step - 1e-9)) + 1
-        record_times = np.arange(first, last + 1) * time_step
-        all_times = driver_time_grid(spinup + simulation_time, time_step, CASE_DTMAX)
         if seed is not None:
-            seed = derive_seed(f"{seed}_{data.split}_{sample}")
+            stream_seed = derive_seed(f"{seed}_{data.split}_{sample}")
         elif not archived:
-            seed = int(attrs["inlet_turbulence_seed"])
+            stream_seed = int(attrs["inlet_turbulence_seed"])
         elif turb["seed"] is not None:
-            seed = int(turb["seed"])
+            stream_seed = int(turb["seed"])
         else:  # as apply_inlet_turbulence: the member's experiment name
             expnr = OmegaConf.select(cfg, "model.forward_model.experiment_name")
             if expnr is None:
@@ -298,7 +276,96 @@ class InletTurbulence:
                     f"{config_path} has no model.forward_model.experiment_name, "
                     "which seeded the truth's realization."
                 )
-            seed = derive_seed(str(expnr))
+            stream_seed = derive_seed(str(expnr))
+        return cls.from_inflow(
+            fluid=data.geometry_for(sample).numpy() > 0,
+            z=zt,
+            y=yt,
+            x=xt,
+            frame_times=spinup + output_frequency * (np.arange(n_frames) + 1),
+            interval=output_frequency,
+            knot_times=knot_times,
+            knot_angle=knot_angle,
+            knot_speed=knot_speed,
+            end_time=spinup + simulation_time,
+            turb=turb,
+            profile_config=profile_config,
+            seed=stream_seed,
+            start_record=start_record,
+            mode=mode,
+            ramp_width=ramp_width,
+            label=data._state_files[sample].name,
+        )
+
+    @classmethod
+    def from_inflow(
+        cls,
+        *,
+        fluid: np.ndarray,
+        z: np.ndarray,
+        y: np.ndarray,
+        x: np.ndarray,
+        frame_times: np.ndarray,
+        interval: float,
+        knot_times: np.ndarray,
+        knot_angle: np.ndarray,
+        knot_speed: np.ndarray,
+        end_time: float,
+        turb: dict[str, Any],
+        profile_config: dict[str, Any] | None,
+        seed: int,
+        start_record: int = 0,
+        mode: str = "add",
+        ramp_width: int = 4,
+        label: str = "inlet turbulence",
+    ) -> "InletTurbulence":
+        """The forcing of a run given directly by its grid and inflow, with no
+        corpus behind it (what :meth:`from_dataset` builds after reading one).
+
+        Args:
+            fluid: ``(nz, ny, nx)`` bool fluid mask.
+            z, y, x: Cell-centre coordinates (z from the ground, uniform z, y).
+            frame_times: ``(T,)`` solver time of every frame; frame 0 is the
+                initial state (never forced), frame ``t`` the prediction made
+                over ``(frame_times[t] - interval, frame_times[t]]``.
+            interval: Seconds between frames.
+            knot_times, knot_angle, knot_speed: The inflow schedule on the
+                solver clock (``pyudales`` ``resolve_inflow_schedule``).
+            end_time: The solver's run time (spin-up + simulation): its record
+                grid sets the AR(1) coefficient, as in uDALES.
+            turb: Resolved ``inlet_turbulence`` settings (``intensity``,
+                ``length_scale_{x,y,z}``, ``time_step``).
+            profile_config: Mean inflow profile (``build_profile_shape``).
+            seed: Seed of the fluctuation stream.
+            start_record: Global driver record the stream starts at.
+            mode, ramp_width: As in :class:`InletTurbulence`.
+            label: Names the run in the no-free-column warning.
+        """
+        from pyudales.utils.inflow_utils import angle_to_velocity
+        from pyudales.utils.inlet_turbulence_utils import driver_time_grid
+        from pyudales.utils.vertical_profile import build_profile_shape
+
+        from pyurbanair.utils.digital_filter import (
+            CROSS_COMPONENT_ANISOTROPY,
+            filtered_fluctuations,
+        )
+
+        nz, ny = len(z), len(y)
+        dz, dy, dx = z[1] - z[0], y[1] - y[0], x[1] - x[0]
+        if not all(np.allclose(np.diff(c), d) for c, d in ((z, dz), (y, dy))):
+            raise ValueError("InletTurbulence needs a uniform z and y grid.")
+        zsize = nz * dz
+        heights = (np.arange(nz) + 0.5) * dz  # solver zt (and zm below)
+        shape_t = build_profile_shape(profile_config, heights, zsize)
+        shape_m = build_profile_shape(profile_config, np.arange(nz + 1) * dz, zsize)
+
+        # Records spanning the frames' solver times; the AR(1) coefficient
+        # takes the mean speed over the solver's WHOLE record grid.
+        time_step = float(turb["time_step"])
+        first = int(np.floor(frame_times[0] / time_step + 1e-9))
+        last = int(np.ceil(frame_times[-1] / time_step - 1e-9)) + 1
+        record_times = np.arange(first, last + 1) * time_step
+        all_times = driver_time_grid(end_time, time_step, CASE_DTMAX)
         fluct = filtered_fluctuations(
             seed=seed,
             start_index=start_record + first,
@@ -330,10 +397,9 @@ class InletTurbulence:
 
         # Building-free columns: upstream of the first column holding a solid
         # cell (levels that are solid everywhere, a ground layer, don't count).
-        fluid = data.geometry_for(sample).numpy() > 0
         solid = ~fluid[fluid.any(axis=(1, 2))]
         built = solid.any(axis=(0, 1))
-        n_free = int(np.argmax(built)) if built.any() else len(xt)
+        n_free = int(np.argmax(built)) if built.any() else len(x)
         distance = (np.arange(n_free) + 0.5) * dx  # cell centre - inlet face
 
         # Frame t holds, at distance d, the inflow that entered d / U_adv(z)
@@ -346,12 +412,12 @@ class InletTurbulence:
         )
         advection = np.maximum(u_ref[:, None] * shape_t, MIN_ADVECTION_SPEED)
         lag = distance / advection[:, :, None]  # (T, nz, n_free)
-        reached = lag < output_frequency
+        reached = lag < interval
         reached[0] = False
         n_cols = int(reached.any(axis=(0, 1)).sum())
         if n_cols == 0:
             warnings.warn(
-                f"{data._state_files[sample].name}: no building-free column next "
+                f"{label}: no building-free column next "
                 "to the inlet, so no inlet turbulence is added.",
                 stacklevel=2,
             )

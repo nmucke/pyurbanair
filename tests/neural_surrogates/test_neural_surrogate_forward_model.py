@@ -849,3 +849,84 @@ def test_training_and_inference_params_agree(tmp_path) -> None:
     window = knots.assign_coords(time=knots.time - times[t])  # frame t at time 0
     schedule = model._param_schedule(window, K)
     np.testing.assert_allclose(schedule.cpu().numpy(), item["params_n"].numpy())
+
+
+def _inlet(**overrides) -> dict:
+    return {
+        "enabled": True,
+        "mode": "replace",
+        "apply": "output",
+        "ramp_width": 1,
+        "seed": 0,
+        "length_scale_x": 2.0,
+        "length_scale_y": 1.0,
+        "length_scale_z": 1.0,
+        **overrides,
+    }
+
+
+def _rollout(model: NeuralSurrogateForwardModel, n_members: int = 1) -> list:
+    torch.manual_seed(0)
+    return model.rollout_batched(
+        [_regular_snapshot(0)] * n_members, [_member_params(3.0)] * n_members
+    )
+
+
+def _same_net(**overrides) -> NeuralSurrogateForwardModel:
+    torch.manual_seed(0)
+    return _make_model(**overrides)
+
+
+def test_inlet_turbulence_off_is_a_no_op() -> None:
+    base = _rollout(_same_net())[0]
+    off = _rollout(_same_net(inlet_turbulence={"enabled": False}))[0]
+    for v in STATE_VARS:
+        np.testing.assert_array_equal(off[v].values, base[v].values)
+
+
+def test_inlet_turbulence_forces_only_the_inlet_strip() -> None:
+    """The first predicted frame changes in the columns its new inflow reached
+    (3 m/s over a 1 s step: the first 3 of the 1 m columns) and nowhere else."""
+    base = _rollout(_same_net())[0]
+    forced = _rollout(_same_net(inlet_turbulence=_inlet()))[0]
+    for v in STATE_VARS:
+        first, ref = forced[v].values[0], base[v].values[0]
+        assert not np.allclose(first[..., :3], ref[..., :3])
+        np.testing.assert_array_equal(first[..., 3:], ref[..., 3:])
+
+
+def test_inlet_turbulence_apply_input_stores_the_unforced_step() -> None:
+    """apply: input feeds the forced step back but stores the model's own."""
+    base = _rollout(_same_net())[0]
+    fed = _rollout(_same_net(inlet_turbulence=_inlet(apply="input")))[0]
+    for v in STATE_VARS:
+        np.testing.assert_array_equal(fed[v].values[0], base[v].values[0])
+        assert not np.allclose(fed[v].values[1], base[v].values[1])
+
+
+def test_inlet_turbulence_differs_per_member() -> None:
+    """Each member draws its own stream (seeded by seed and member index), so
+    identical members diverge at the inlet only."""
+    a, b = _rollout(_same_net(inlet_turbulence=_inlet()), n_members=2)
+    assert not np.allclose(a["u"].values[0, ..., :3], b["u"].values[0, ..., :3])
+    np.testing.assert_array_equal(a["u"].values[0, ..., 3:], b["u"].values[0, ..., 3:])
+
+
+def test_inlet_turbulence_rejects_unknown_apply() -> None:
+    with pytest.raises(ValueError, match="apply"):
+        _make_model(inlet_turbulence=_inlet(apply="both"))
+
+
+def test_periodic_y_patches_the_network() -> None:
+    """periodic_y makes the network y-shift-equivariant (make_periodic_y), for
+    shifts aligned with its downsampling."""
+    model = _same_net(periodic_y=True)
+    assert model.model.periodic_y is True
+    snap = _regular_snapshot(0)
+    rolled = snap.roll(y=4, roll_coords=False)
+    params = [_member_params(3.0)]
+    out = model.rollout_batched([snap], params)[0]
+    out_rolled = model.rollout_batched([rolled], params)[0]
+    np.testing.assert_allclose(
+        out_rolled["u"].values, np.roll(out["u"].values, 4, axis=2), atol=1e-5
+    )
