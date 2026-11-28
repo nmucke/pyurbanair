@@ -47,6 +47,14 @@ forward_model:
   # grid. null = full precision (dtype) throughout.
   amp_dtype: null
 
+  # Inference-time inlet turbulence: uDALES' digital-filter inflow forcing on
+  # every predicted step, built from this run's grid and inflow (see
+  # neural_surrogate_generative.yaml for the block). null = off.
+  inlet_turbulence: null
+  # Make the network y-periodic at inference (circular y padding,
+  # neural_surrogates.periodic.make_periodic_y).
+  periodic_y: false
+
   # Optional: voxelise this geometry for the network's geometry channel. When
   # null the fluid mask falls back to the non-zero-state convention used by
   # TransitionDataset.

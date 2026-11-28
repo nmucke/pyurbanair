@@ -27,6 +27,25 @@ forward_model:
     ny: 176
     nz: 32
     bounds: [[-64.0, 640.0], [-64.0, 640.0], [0.0, 128.0]]
+  # The stepper's training domain is y-periodic; true pads y circularly
+  # (global spatial mode: ny a multiple of 16).
+  periodic_y: false
+  # uDALES' inlet turbulence on every step (InletTurbulence.from_inflow);
+  # mode replace swaps it in for the model's own fluctuations at the inlet,
+  # apply output stores the forced frames. The filter settings are the
+  # default stepper corpus' (pyudales_realistic), not flow.inlet_turbulence.
+  inlet_turbulence:
+    enabled: false
+    mode: replace
+    apply: output
+    ramp_width: 4
+    seed: 0
+    profile: ${flow.profile}
+    intensity: 0.15
+    length_scale_x: 48.0
+    length_scale_y: 24.0
+    length_scale_z: 24.0
+    time_step: 0.5
   spinup_source: generative
   generative_spinup:
     model_dir: ${...generator_dir}

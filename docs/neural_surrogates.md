@@ -1013,10 +1013,12 @@ positions; both were measured harmless on `dft_b`. SDF features passed in by a
 caller are used as given, so compute them with the patched model (its
 `_sdf_features`) or `sdf_features(..., periodic_y=True)`, not from a dataset. The patch costs about 5 %
 per step on `dft_b` (0.238 -> 0.251 s/step on an RTX 3090, 10 warm steps). It
-is applied by these two evaluation scripts only: not in training, not in
+is applied by these two evaluation scripts and by `NeuralSurrogateForwardModel`
+(`model.forward_model.periodic_y`, see "New geometries"): not in training, not in
 `evaluate_autoencoder.py` / `evaluate_latent_generator.py` (single-frame
 reconstructions and generated fields, where the rollout seam does not arise;
-the latent generator raises anyway), and not in `NeuralSurrogateForwardModel`.
+the latent generator raises anyway, so a generative cold start stays
+non-periodic).
 
 ---
 
@@ -1154,8 +1156,24 @@ data states raises). The `domain` is the crop
 window in the STL's frame at 4 m spacing (any extent; the corpus was 128 m
 high);
 `time.output_frequency` must be ≥ 5 s (a coarser one is emitted at the nearest
-step) and `time.spinup_time` is unused. The case's other keys (`case_dir`,
-sensors) are not read. `workflows/surrogate_forward_workflow.sh` runs it and
+step) and `time.spinup_time` only places the rollout on the inlet
+turbulence's clock. The case's other keys (`case_dir`,
+sensors) are not read. Leave flat ground around the buildings, as the corpus
+had (64 m on every side, `geometry.*_padding` in
+`configs/surrogate/generate_data.yaml`): the inlet turbulence is only put on
+the building-free columns at the inflow face.
+
+Two inference-time options of the evaluation scripts are available here too,
+off by default: `model.forward_model.periodic_y=true` (§ "Inference-time
+y-periodicity"; `ny` a multiple of 16 for the default global-mode stepper) and
+`model.forward_model.inlet_turbulence.enabled=true` (§ "Inference-time inlet
+turbulence"; the block defaults to `mode: replace`, `apply: output` and the
+default stepper corpus' digital filter, 48/24/24 m length scales, not
+`flow.inlet_turbulence`). With no corpus to replay, the forcing is built by
+`InletTurbulence.from_inflow` from the run's grid, geometry and inflow params
+(a `vertical_inflow_exponent` param sets the profile's alpha): a fresh stream
+per member, seeded by `(seed, member index)`, on a clock that starts the
+rollout at `time.spinup_time`. `workflows/surrogate_forward_workflow.sh` runs it and
 draws the `forward_workflow.sh` figures and viewer:
 
 ```bash
@@ -1165,6 +1183,10 @@ bash workflows/surrogate_forward_workflow.sh \
     domain.nx=176 domain.ny=176 domain.nz=32 \
     'domain.bounds=[[0,704],[0,704],[0,128]]'
 ```
+
+On Snellius, `job_scripts/snellius/surrogate_forward_workflow_gpu.slurm` runs
+it on one H100 with the same overrides. The HTML viewer refuses frames over
+8M cells, so on a city-scale grid the workflow stops after the figures.
 
 ### Extending
 
